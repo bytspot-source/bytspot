@@ -85,7 +85,7 @@ jobs:
 
   push-image:
     needs: build-test-scan
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false

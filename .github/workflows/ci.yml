@@ -1,10 +1,4 @@
-name: Install API deps
-        working-directory: services/api
-        continue-on-error: true
-        run: npm install --no-audit --no-fund --loglevel=errorname: Run API unit tests
-        working-directory: services/api
-        continue-on-error: true
-        run: npm test --silentname: CI/CD
+name: CI/CD
 
 on:
   pull_request:

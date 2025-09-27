@@ -58,19 +58,35 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
       - name: Configure Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
+      - id: push
+        name: Build & push API image
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-api:${{ github.sha }}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           docker build -t "$IMAGE" -f services/api/Dockerfile .
+          docker push "$IMAGE"
+
+  push-dashboard-image:
     needs: build-test-scan
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     outputs:
       image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v2
       - name: Configure Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
+      - id: push
+        name: Build & push Dashboard image
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-dashboard:${{ github.sha }}"
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
@@ -104,8 +120,8 @@ jobs:
     steps:
       - uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v2
       - name: Discover API URL
         id: discover
@@ -172,19 +188,3 @@ jobs:
             --allow-unauthenticated \
             --max-instances 50 \
             --set-env-vars=ENV=production,GIT_SHA=${{ github.sha }},API_URL=${{ steps.discover.outputs.api_url }}
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
-      - id: push
-        name: Build & push Dashboard image
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-          docker push "$IMAGE"
-
-  push-dashboard-image:
-          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-api:${{ github.sha }}"
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
-      - id: push
-        name: Build & push API image
-        run: |
-

@@ -3,6 +3,13 @@ name: Docs Pages
 on:
   push:
     branches: [ main, master ]
+    paths:
+      - 'docs/**'
+      - '.github/pages/**'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/pages/**'
   workflow_dispatch:
 
 permissions:

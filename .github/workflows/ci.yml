@@ -1,14 +1,6 @@
 name: CI/CD
 
 on:
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'nonexistent-path/**'
-  push:
-    branches: [ main ]
-    paths:
-      - 'nonexistent-path/**'
   workflow_dispatch:
 
 permissions:

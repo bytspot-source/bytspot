@@ -1,0 +1,64 @@
+name: EAS Build (Staging)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-android:
+    if: ${{ secrets.ORG_EXPO_TOKEN != '' || secrets.EXPO_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Export analytics env (staging)
+        run: |
+          echo "EXPO_PUBLIC_ANALYTICS_PROVIDER=posthog" >> $GITHUB_ENV
+          if [ -n "${{ secrets.POSTHOG_KEY_STAGING }}" ]; then echo "EXPO_PUBLIC_POSTHOG_KEY=${{ secrets.POSTHOG_KEY_STAGING }}" >> $GITHUB_ENV; fi
+          if [ -n "${{ secrets.POSTHOG_HOST_STAGING }}" ]; then echo "EXPO_PUBLIC_POSTHOG_HOST=${{ secrets.POSTHOG_HOST_STAGING }}" >> $GITHUB_ENV; fi
+      - name: Set EAS token
+        run: echo "EAS_TOKEN=${{ secrets.ORG_EXPO_TOKEN != '' && secrets.ORG_EXPO_TOKEN || secrets.EXPO_TOKEN }}" >> $GITHUB_ENV
+      - name: EAS CLI auth
+        run: npx -y eas-cli@latest whoami || npx -y eas-cli@latest login --token "$EAS_TOKEN"
+      - name: EAS Android staging build
+        run: npx -y eas-cli@latest build --platform android --profile staging --non-interactive
+
+  build-ios:
+    if: ${{ secrets.ORG_EXPO_TOKEN != '' || secrets.EXPO_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Export analytics env (staging)
+        run: |
+          echo "EXPO_PUBLIC_ANALYTICS_PROVIDER=posthog" >> $GITHUB_ENV
+          if [ -n "${{ secrets.POSTHOG_KEY_STAGING }}" ]; then echo "EXPO_PUBLIC_POSTHOG_KEY=${{ secrets.POSTHOG_KEY_STAGING }}" >> $GITHUB_ENV; fi
+          if [ -n "${{ secrets.POSTHOG_HOST_STAGING }}" ]; then echo "EXPO_PUBLIC_POSTHOG_HOST=${{ secrets.POSTHOG_HOST_STAGING }}" >> $GITHUB_ENV; fi
+      - name: Set EAS token
+        run: echo "EAS_TOKEN=${{ secrets.ORG_EXPO_TOKEN != '' && secrets.ORG_EXPO_TOKEN || secrets.EXPO_TOKEN }}" >> $GITHUB_ENV
+      - name: EAS CLI auth
+        run: npx -y eas-cli@latest whoami || npx -y eas-cli@latest login --token "$EAS_TOKEN"
+      - name: EAS iOS staging build
+        run: npx -y eas-cli@latest build --platform ios --profile staging --non-interactive
+

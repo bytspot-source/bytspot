@@ -1,0 +1,161 @@
+name: BFF Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-bff:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/gateway-bff
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: |
+            services/gateway-bff/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Run tests
+        env:
+          NODE_ENV: test
+        run: npm test --silent
+
+
+  lint-bff:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/gateway-bff
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: |
+            services/gateway-bff/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Run ESLint
+        run: npm run lint --silent
+
+  openapi-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Validate with Redocly CLI
+        run: npx -y @redocly/cli@latest lint "services/gateway-bff/openapi/bff-valet.yaml" "services/gateway-bff/openapi/upstream-valet.yaml"
+      - name: Validate with swagger-cli (extra)
+        run: |
+          npx -y swagger-cli@4.0.4 validate services/gateway-bff/openapi/bff-valet.yaml
+          npx -y swagger-cli@4.0.4 validate services/gateway-bff/openapi/upstream-valet.yaml
+
+  openapi-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build Redoc HTML
+        run: |
+          npx -y redoc-cli@0.13.21 bundle services/gateway-bff/openapi/bff-valet.yaml -o bff-valet.html
+          npx -y redoc-cli@0.13.21 bundle services/gateway-bff/openapi/upstream-valet.yaml -o upstream-valet.html
+      - name: Build docs index HTML
+        run: |
+          cat > docs-index.html << 'HTML'
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8" />
+              <title>API Docs Index</title>
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px;line-height:1.5} a{display:block;margin:6px 0}</style>
+            </head>
+            <body>
+              <h1>API Docs</h1>
+              <h2>Redoc</h2>
+              <a href="/docs/bff-valet">/docs/bff-valet</a>
+              <a href="/docs/upstream-valet">/docs/upstream-valet</a>
+              <h2>Swagger UI</h2>
+              <a href="/swagger/bff-valet">/swagger/bff-valet</a>
+              <a href="/swagger/upstream-valet">/swagger/upstream-valet</a>
+              <h2>Specs</h2>
+              <a href="/openapi/bff-valet.yaml">/openapi/bff-valet.yaml</a>
+              <a href="/openapi/upstream-valet.yaml">/openapi/upstream-valet.yaml</a>
+            </body>
+          </html>
+          HTML
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-docs
+          path: |
+            bff-valet.html
+            upstream-valet.html
+            docs-index.html
+          retention-days: 7
+
+
+  openapi-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies (BFF)
+        working-directory: services/gateway-bff
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Start BFF and smoke check docs endpoints
+        working-directory: services/gateway-bff
+        env:
+          PORT: '3000'
+          AUTH_SERVICE_URL: 'http://127.0.0.1:5999'
+          VENUE_SERVICE_URL: 'http://127.0.0.1:5999'
+          PARKING_SERVICE_URL: 'http://127.0.0.1:5999'
+          VALET_SERVICE_URL: 'http://127.0.0.1:5999'
+        run: |
+          set -euo pipefail
+          node server.js &
+          SERVER_PID=$!
+          trap 'kill ${SERVER_PID} || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          echo "Server is up"
+          curl -fS http://localhost:3000/docs/bff-valet >/dev/null
+          curl -fS http://localhost:3000/docs/upstream-valet >/dev/null
+          curl -fS http://localhost:3000/swagger/bff-valet >/dev/null
+          curl -fS http://localhost:3000/swagger/upstream-valet >/dev/null
+          echo "All docs endpoints responded successfully"

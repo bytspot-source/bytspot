@@ -1,0 +1,1 @@
+// This component is no longer needed - Map navigation is now handled by the footer

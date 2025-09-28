@@ -1,0 +1,66 @@
+name: Docs Pages
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build docs site
+        run: |
+          mkdir -p dist
+          npx -y redoc-cli@0.13.21 bundle services/gateway-bff/openapi/bff-valet.yaml -o dist/bff-valet.html
+          npx -y redoc-cli@0.13.21 bundle services/gateway-bff/openapi/upstream-valet.yaml -o dist/upstream-valet.html
+          cat > dist/index.html << 'HTML'
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8" />
+              <title>MatchSpot API Docs</title>
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px;line-height:1.5} a{display:block;margin:6px 0}</style>
+            </head>
+            <body>
+              <h1>MatchSpot API Docs</h1>
+              <p>Generated from OpenAPI specs in services/gateway-bff/openapi.</p>
+              <h2>Redoc Bundles</h2>
+              <a href="./bff-valet.html">bff-valet.html</a>
+              <a href="./upstream-valet.html">upstream-valet.html</a>
+              <hr />
+              <p>Developer docs: see <a href="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/README.md">docs/README.md</a>.</p>
+            </body>
+          </html>
+          HTML
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+

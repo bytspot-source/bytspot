@@ -1,0 +1,209 @@
+openapi: 3.0.3
+info:
+  title: Gateway BFF — Valet API
+  version: 0.1.0
+  description: |
+    Public valet endpoints exposed by the Gateway BFF.
+    These forward to the upstream Valet Service and emit real-time events to clients.
+servers:
+  - url: http://localhost:3001
+    description: Local BFF
+
+tags:
+  - name: valet
+    description: Valet flows via the BFF
+
+paths:
+  /api/valet/intake:
+    post:
+      tags: [valet]
+      summary: Create a valet intake ticket
+      description: |
+        Validates payload and forwards to the upstream Valet Service `/valet/intake`.
+        On success, emits `valet:task` with `{ id, status: 'intake', ... }`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntakeRequest'
+            examples:
+              basic:
+                value:
+                  userId: u_123
+                  vehicle: { make: Tesla, model: 'Model 3' }
+                  services: [basic_wash]
+      responses:
+        '201':
+          description: Intake created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeResponse'
+        '400':
+          description: Invalid payload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/valet/vehicles/{id}/status:
+    patch:
+      tags: [valet]
+      summary: Update a valet vehicle status
+      description: |
+        Validates status and forwards to the upstream Valet Service
+        `/valet/vehicles/{id}/status`. On success, emits `valet:task` with `{ id, status }`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusUpdateRequest'
+            examples:
+              ready: { value: { status: ready } }
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+        '400':
+          description: Invalid status value
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/payments/session:
+    get:
+      tags: [valet]
+      summary: Retrieve Stripe Checkout Session details
+      description: |
+        Returns a subset of Stripe Checkout Session fields for analytics enrichment.
+        Requires BFF to be configured with STRIPE_SECRET_KEY. Safe, read-only.
+      parameters:
+        - in: query
+          name: id
+          required: true
+          schema: { type: string }
+          description: Stripe Checkout Session id (e.g., cs_test_123)
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentSession'
+              examples:
+                card_success:
+                  value:
+                    id: cs_test_123
+                    amount_total: 1800
+                    currency: usd
+                    payment_status: paid
+                    mode: payment
+                    payment_method: card_visa
+                    payment_method_types: [card]
+        '400':
+          description: Missing or invalid id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                missing_id:
+                  value: { error: 'id required' }
+        '500':
+          description: Stripe not configured or lookup failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                not_configured:
+                  value: { error: 'stripe not configured' }
+
+components:
+  schemas:
+    Vehicle:
+      type: object
+      properties:
+        make: { type: string, example: Tesla }
+        model: { type: string, example: 'Model 3' }
+        color: { type: string, example: Blue }
+        plate: { type: string, example: '8ABC123' }
+      required: [make, model]
+      additionalProperties: true
+
+    ServiceCode:
+      type: string
+      enum: [basic_wash, full_detail, ev_charging]
+
+    Status:
+      type: string
+      description: Vehicle processing status
+      enum: [intake, parked, service_in_progress, ready, retrieved]
+
+    IntakeRequest:
+      type: object
+      properties:
+        userId: { type: string }
+        vehicle: { $ref: '#/components/schemas/Vehicle' }
+        services:
+          type: array
+          items: { $ref: '#/components/schemas/ServiceCode' }
+        photos:
+          type: array
+          items: { type: string, format: uri }
+          maxItems: 10
+      required: [userId, vehicle]
+      additionalProperties: true
+
+    IntakeResponse:
+      type: object
+      properties:
+        id: { type: string, example: t_123 }
+        status: { $ref: '#/components/schemas/Status' }
+        userId: { type: string }
+        vehicle: { $ref: '#/components/schemas/Vehicle' }
+      required: [id, status]
+      additionalProperties: true
+
+    StatusUpdateRequest:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/Status' }
+      required: [status]
+
+    StatusUpdateResponse:
+      type: object
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+      required: [id, status]
+      additionalProperties: true
+
+    PaymentSession:
+      type: object
+      properties:
+        id: { type: string, example: cs_test_123 }
+        amount_total: { type: integer, example: 1800, description: Total amount in smallest currency unit }
+        currency: { type: string, example: usd }
+        payment_status: { type: string, example: paid }
+        mode: { type: string, example: payment }
+        payment_method: { type: string, example: card_visa }
+        payment_method_types:
+          type: array
+          items: { type: string }
+      required: [id]
+      additionalProperties: true
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+

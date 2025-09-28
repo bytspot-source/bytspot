@@ -1,0 +1,99 @@
+name: EAS Release (Production)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    if: ${{ secrets.ORG_EXPO_TOKEN != '' || secrets.EXPO_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Export analytics env (production)
+        run: |
+          echo "EXPO_PUBLIC_ANALYTICS_PROVIDER=posthog" >> $GITHUB_ENV
+          if [ -n "${{ secrets.POSTHOG_KEY_PRODUCTION }}" ]; then echo "EXPO_PUBLIC_POSTHOG_KEY=${{ secrets.POSTHOG_KEY_PRODUCTION }}" >> $GITHUB_ENV; fi
+          if [ -n "${{ secrets.POSTHOG_HOST_PRODUCTION }}" ]; then echo "EXPO_PUBLIC_POSTHOG_HOST=${{ secrets.POSTHOG_HOST_PRODUCTION }}" >> $GITHUB_ENV; fi
+      - name: Set EAS token
+        run: echo "EAS_TOKEN=${{ secrets.ORG_EXPO_TOKEN != '' && secrets.ORG_EXPO_TOKEN || secrets.EXPO_TOKEN }}" >> $GITHUB_ENV
+      - name: EAS login
+        run: npx -y eas-cli@latest whoami || npx -y eas-cli@latest login --token "$EAS_TOKEN"
+      - name: Build Android (production)
+        run: npx -y eas-cli@latest build --platform android --profile production --non-interactive
+
+  build-ios:
+    if: ${{ secrets.ORG_EXPO_TOKEN != '' || secrets.EXPO_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Export analytics env (production)
+        run: |
+          echo "EXPO_PUBLIC_ANALYTICS_PROVIDER=posthog" >> $GITHUB_ENV
+          if [ -n "${{ secrets.POSTHOG_KEY_PRODUCTION }}" ]; then echo "EXPO_PUBLIC_POSTHOG_KEY=${{ secrets.POSTHOG_KEY_PRODUCTION }}" >> $GITHUB_ENV; fi
+          if [ -n "${{ secrets.POSTHOG_HOST_PRODUCTION }}" ]; then echo "EXPO_PUBLIC_POSTHOG_HOST=${{ secrets.POSTHOG_HOST_PRODUCTION }}" >> $GITHUB_ENV; fi
+      - name: Set EAS token
+        run: echo "EAS_TOKEN=${{ secrets.ORG_EXPO_TOKEN != '' && secrets.ORG_EXPO_TOKEN || secrets.EXPO_TOKEN }}" >> $GITHUB_ENV
+      - name: EAS login
+        run: npx -y eas-cli@latest whoami || npx -y eas-cli@latest login --token "$EAS_TOKEN"
+      - name: Build iOS (production)
+        run: npx -y eas-cli@latest build --platform ios --profile production --non-interactive
+
+  submit-android:
+    needs: build-android
+    if: ${{ secrets.ORG_EXPO_TOKEN != '' || secrets.EXPO_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Set EAS token
+        run: echo "EAS_TOKEN=${{ secrets.ORG_EXPO_TOKEN != '' && secrets.ORG_EXPO_TOKEN || secrets.EXPO_TOKEN }}" >> $GITHUB_ENV
+      - name: EAS login
+        run: npx -y eas-cli@latest whoami || npx -y eas-cli@latest login --token "$EAS_TOKEN"
+      - name: Submit Android to Play (production)
+        run: npx -y eas-cli@latest submit --platform android --profile production --non-interactive
+
+  submit-ios:
+    needs: build-ios
+    if: ${{ secrets.ORG_EXPO_TOKEN != '' || secrets.EXPO_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Set EAS token
+        run: echo "EAS_TOKEN=${{ secrets.ORG_EXPO_TOKEN != '' && secrets.ORG_EXPO_TOKEN || secrets.EXPO_TOKEN }}" >> $GITHUB_ENV
+      - name: EAS login
+        run: npx -y eas-cli@latest whoami || npx -y eas-cli@latest login --token "$EAS_TOKEN"
+      - name: Submit iOS to App Store Connect (production)
+        run: npx -y eas-cli@latest submit --platform ios --profile production --non-interactive
+

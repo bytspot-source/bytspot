@@ -1,0 +1,79 @@
+openapi: 3.0.3
+info:
+  title: Bytspot Ingestion Service API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        '200': { description: Ready }
+  /ingest/batch:
+    post:
+      summary: Ingest batched device features and metrics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceBatch'
+      responses:
+        '202': { description: Accepted }
+        '400': { description: Bad Request }
+        '401': { description: Unauthorized }
+        '422': { description: Unprocessable Entity }
+components:
+  schemas:
+    DeviceBatch:
+      type: object
+      required: [batches]
+      properties:
+        batches:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchItem'
+    BatchItem:
+      type: object
+      required: [batch_id, anon_user_id, device_ts_start, device_ts_end, geohash7]
+      properties:
+        batch_id: { type: string }
+        anon_user_id: { type: string }
+        device_ts_start: { type: string, format: date-time }
+        device_ts_end: { type: string, format: date-time }
+        geohash7: { type: string }
+        motion_stats:
+          type: object
+          properties:
+            steps: { type: integer, minimum: 0 }
+            variance: { type: number }
+            stationary_ratio: { type: number, minimum: 0, maximum: 1 }
+        audio_features:
+          type: object
+          properties:
+            mfcc_hist: { type: array, items: { type: number } }
+            loudness_bins: { type: array, items: { type: number } }
+            snr_bucket: { type: integer, minimum: 0 }
+        triage_state:
+          type: object
+          properties:
+            fsm_path: { type: string }
+            active_seconds: { type: integer, minimum: 0 }
+            sampling_profile_id: { type: string }
+        device_metrics:
+          type: object
+          properties:
+            battery_level: { type: integer, minimum: 0, maximum: 100 }
+            radio_wakeups: { type: integer, minimum: 0 }
+        consent_keys:
+          type: array
+          items: { type: string }
+        app_version: { type: string }
+        platform: { type: string, enum: [ios, android] }
+

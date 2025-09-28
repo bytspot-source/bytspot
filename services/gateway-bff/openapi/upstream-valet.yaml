@@ -1,0 +1,155 @@
+openapi: 3.0.3
+info:
+  title: Valet Service API (Upstream)
+  version: 0.1.0
+  description: Core valet endpoints consumed by the BFF.
+servers:
+  - url: http://localhost:8096
+    description: Local valet service
+
+tags:
+  - name: valet
+
+paths:
+  /valet/intake:
+    post:
+      tags: [valet]
+      summary: Create valet intake ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntakeRequest' }
+            examples:
+              basic:
+                value:
+                  userId: u_123
+                  vehicle: { make: Tesla, model: 'Model 3' }
+                  services: [basic_wash]
+      responses:
+        '201':
+          description: Intake created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IntakeResponse' }
+        '400':
+          description: Invalid payload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /valet/vehicles/{id}/status:
+    patch:
+      tags: [valet]
+      summary: Update valet status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusUpdateRequest' }
+            examples: { ready: { value: { status: ready } } }
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusUpdateResponse' }
+        '400':
+          description: Invalid status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /valet/tickets/{id}/paid:
+    post:
+      tags: [valet]
+      summary: Mark a ticket paid
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Payment marked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarkPaidResponse' }
+        '204': { description: Payment marked (no body) }
+
+components:
+  schemas:
+    Vehicle:
+      type: object
+      properties:
+        make: { type: string }
+        model: { type: string }
+        color: { type: string }
+        plate: { type: string }
+      required: [make, model]
+      additionalProperties: true
+
+    ServiceCode:
+      type: string
+      enum: [basic_wash, full_detail, ev_charging]
+
+    Status:
+      type: string
+      enum: [intake, parked, service_in_progress, ready, retrieved]
+
+    IntakeRequest:
+      type: object
+      properties:
+        userId: { type: string }
+        vehicle: { $ref: '#/components/schemas/Vehicle' }
+        services:
+          type: array
+          items: { $ref: '#/components/schemas/ServiceCode' }
+        photos:
+          type: array
+          items: { type: string, format: uri }
+          maxItems: 10
+      required: [userId, vehicle]
+      additionalProperties: true
+
+    IntakeResponse:
+      type: object
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+        userId: { type: string }
+        vehicle: { $ref: '#/components/schemas/Vehicle' }
+      required: [id, status]
+      additionalProperties: true
+
+    StatusUpdateRequest:
+      type: object
+      properties:
+        status: { $ref: '#/components/schemas/Status' }
+      required: [status]
+
+    StatusUpdateResponse:
+      type: object
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+      required: [id, status]
+      additionalProperties: true
+
+    MarkPaidResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+      additionalProperties: true
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+

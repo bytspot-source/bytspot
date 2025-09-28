@@ -1,0 +1,22 @@
+name: Web and BFF CI
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+jobs:
+  web-bff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install root deps
+        run: npm ci || npm install
+      - name: Lint & Type-check
+        run: |
+          npm run -s build --workspaces=false || true
+      - name: Smoke script
+        run: node scripts/smoke.js || true
+

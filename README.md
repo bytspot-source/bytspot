@@ -1,17 +1,22 @@
+# Bytspot Location Discovery App
 
-  # MatchSpot Location Discovery App
+Production-ready location discovery platform with venue matching, parking solutions, and mobile experience.
 
-  This is a code bundle for MatchSpot Location Discovery App. The original project is available at https://www.figma.com/design/rigZa1HarTCiu5b8H71PqS/MatchSpot-Location-Discovery-App.
+## 🚀 Quick Start
 
-  ## Running the code
+### Development
+```bash
+npm install
+npm run dev:stack
+```
 
-  Run `npm i` to install the dependencies.
+### Production Deployment
+- **Frontend**: Static deployment on Render
+- **Backend**: Microservices on Render
+- **Database**: PostgreSQL on Render
+- **Mobile**: Expo build for iOS/Android
 
-  Run `npm run dev` to start the development server.
-
-
-## Documentation
-
-- Docs overview: ./docs/README.md
-- CI Artifacts: GitHub Actions workflow "BFF Tests" uploads an artifact named `openapi-docs` on each push/PR (contains Redoc HTML and a docs index).
-- GitHub Pages (if enabled): https://<your_org>.github.io/<your_repo>/ (served by `.github/workflows/docs-pages.yml`).
+## 🏗️ Architecture
+- **Monorepo** with Go microservices, Node.js BFF, React web app, React Native mobile
+- **Services**: auth-service, venue-service, gateway-bff
+- **APIs**: OpenAPI-first with runtime validation

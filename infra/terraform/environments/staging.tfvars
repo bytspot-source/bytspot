@@ -8,6 +8,17 @@ environment = "stg"
 
 db_ha = false
 
+# Real Bytspot Microservices Configuration
+jwt_secret = "stg_jwt_secret_change_me"
+
+# Enable Redis for microservices
+enable_memorystore = true
+
+# Microservices image configuration (will be updated by CI/CD)
+auth_service_image = "us-west1-docker.pkg.dev/my-projectbytspot-25971/bytspot-stg-images/bytspot-auth-service:stg"
+venue_service_image = "us-west1-docker.pkg.dev/my-projectbytspot-25971/bytspot-stg-images/bytspot-venue-service:stg"
+gateway_bff_image = "us-west1-docker.pkg.dev/my-projectbytspot-25971/bytspot-stg-images/bytspot-gateway-bff:stg"
+
 # Enable GitHub OIDC/WIF for CI/CD
 create_wif = false
 wif_pool_project_number = "908800993713"
@@ -28,3 +39,16 @@ serverless_connector_max_instances = 10
 
 # Optional override to avoid name reservation issues
 serverless_connector_name = "bytspot-stg-connector-1"
+
+# Domain configuration options for staging (uncomment and configure as needed)
+# Option 1: Direct Cloud Run domain mapping for dashboard
+# enable_domain_mapping_dashboard = true
+# dashboard_domain = "app-stg.bytspot.com"
+
+# Option 2: Load balancer with custom domain for API
+# enable_lb_api = true
+# api_domain = "api-stg.bytspot.com"
+
+# Example staging setup:
+# enable_domain_mapping_dashboard = true
+# dashboard_domain = "app-stg.bytspot.com"

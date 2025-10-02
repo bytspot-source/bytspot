@@ -14,14 +14,41 @@ variable "environment" {
 # Default to a public hello image so infra applies before first app build
 variable "api_image" {
   type        = string
-  description = "Container image for bytspot-api"
+  description = "Container image for bytspot-api (legacy - will be removed)"
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
 
 variable "dashboard_image" {
   type        = string
-  description = "Container image for bytspot-dashboard"
+  description = "Container image for bytspot-dashboard (React frontend)"
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
+}
+
+# Real Bytspot Microservices Images
+variable "auth_service_image" {
+  type        = string
+  description = "Container image for auth-service (Go)"
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+}
+
+variable "venue_service_image" {
+  type        = string
+  description = "Container image for venue-service (Go)"
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+}
+
+variable "gateway_bff_image" {
+  type        = string
+  description = "Container image for gateway-bff (Node.js)"
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+}
+
+# JWT Secret for authentication
+variable "jwt_secret" {
+  type        = string
+  description = "JWT secret for authentication services"
+  default     = "dev_secret_change_me_in_production"
+  sensitive   = true
 }
 
 variable "db_tier" {

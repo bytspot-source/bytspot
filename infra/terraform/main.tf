@@ -150,6 +150,19 @@ resource "google_secret_manager_secret_version" "stripe_v" {
   secret_data = "sk_test_xxx"
 }
 
+# JWT Secret for authentication services
+resource "google_secret_manager_secret" "jwt_secret" {
+  secret_id = "${local.name}-jwt-secret"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "jwt_secret_v" {
+  secret      = google_secret_manager_secret.jwt_secret.id
+  secret_data = var.jwt_secret
+}
+
 # Firestore (optional)
 resource "google_firestore_database" "default" {
   count       = var.enable_firestore ? 1 : 0
@@ -171,9 +184,11 @@ resource "google_redis_instance" "cache" {
 # Pub/Sub
 resource "google_pubsub_topic" "events" { name = "${local.name}-events" }
 
-# Cloud Run services
-resource "google_cloud_run_v2_service" "api" {
-  name     = "${local.name}-api"
+# Cloud Run services - Real Bytspot Microservices
+
+# Auth Service (Go) - JWT Authentication
+resource "google_cloud_run_v2_service" "auth_service" {
+  name     = "${local.name}-auth-service"
   location = var.region
   template {
     service_account = google_service_account.api_sa.email
@@ -189,35 +204,55 @@ resource "google_cloud_run_v2_service" "api" {
       max_instance_count = var.max_instances_api
     }
 
-    # Mount Cloud SQL Unix socket at /cloudsql for DATABASE_URL host path
+    # Mount Cloud SQL Unix socket for auth service
     volumes {
       name = "cloudsql"
       cloud_sql_instance { instances = [google_sql_database_instance.pg.connection_name] }
     }
     containers {
-      image = var.api_image
+      image = var.auth_service_image
       resources { cpu_idle = true }
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"
       }
       env {
+        name  = "PORT"
+        value = "8080"
+      }
+      env {
         name  = "DATABASE_URL"
-        value = "postgres://app:${random_password.db.result}@/${google_sql_database.appdb.name}?host=/cloudsql/${google_sql_database_instance.pg.connection_name}"
+        value = "postgresql://app:${random_password.db.result}@/${google_sql_database.appdb.name}?host=/cloudsql/${google_sql_database_instance.pg.connection_name}"
+      }
+      env {
+        name  = "JWT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.jwt_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_memorystore ? [1] : []
+        content {
+          name  = "REDIS_URL"
+          value = "redis://${google_redis_instance.cache[0].host}:${google_redis_instance.cache[0].port}"
+        }
       }
       readiness_probe {
-        http_get { path = "/health" }
+        http_get { path = "/healthz" }
         period_seconds    = 10
         failure_threshold = 3
       }
       liveness_probe {
-        http_get { path = "/health" }
+        http_get { path = "/healthz" }
         period_seconds    = 10
         failure_threshold = 3
       }
     }
   }
-  ingress = var.enable_lb_api ? "INGRESS_TRAFFIC_INTERNAL_AND_LB" : "INGRESS_TRAFFIC_ALL"
+  ingress = "INGRESS_TRAFFIC_ALL"
 
   lifecycle {
     ignore_changes = [
@@ -227,6 +262,107 @@ resource "google_cloud_run_v2_service" "api" {
   }
 }
 
+# Venue Service (Go) - Venue Discovery
+resource "google_cloud_run_v2_service" "venue_service" {
+  name     = "${local.name}-venue-service"
+  location = var.region
+  template {
+    service_account = google_service_account.api_sa.email
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 10
+    }
+    containers {
+      image = var.venue_service_image
+      resources { cpu_idle = true }
+      env {
+        name  = "PORT"
+        value = "8080"
+      }
+      readiness_probe {
+        http_get { path = "/healthz" }
+        period_seconds    = 10
+        failure_threshold = 3
+      }
+      liveness_probe {
+        http_get { path = "/healthz" }
+        period_seconds    = 10
+        failure_threshold = 3
+      }
+    }
+  }
+  ingress = "INGRESS_TRAFFIC_ALL"
+  lifecycle {
+    ignore_changes = [
+      template[0].containers[0].image,
+      template[0].containers[0].env,
+    ]
+  }
+}
+
+# Gateway BFF (Node.js) - API Gateway & Backend for Frontend
+resource "google_cloud_run_v2_service" "gateway_bff" {
+  name     = "${local.name}-gateway-bff"
+  location = var.region
+  template {
+    service_account = google_service_account.api_sa.email
+    scaling {
+      min_instance_count = 1
+      max_instance_count = var.max_instances_api
+    }
+    containers {
+      image = var.gateway_bff_image
+      resources { cpu_idle = true }
+      env {
+        name  = "PORT"
+        value = "8080"
+      }
+      env {
+        name  = "AUTH_SERVICE_URL"
+        value = "https://${google_cloud_run_v2_service.auth_service.uri}"
+      }
+      env {
+        name  = "VENUE_SERVICE_URL"
+        value = "https://${google_cloud_run_v2_service.venue_service.uri}"
+      }
+      env {
+        name  = "JWT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.jwt_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_memorystore ? [1] : []
+        content {
+          name  = "REDIS_URL"
+          value = "redis://${google_redis_instance.cache[0].host}:${google_redis_instance.cache[0].port}"
+        }
+      }
+      readiness_probe {
+        http_get { path = "/healthz" }
+        period_seconds    = 10
+        failure_threshold = 3
+      }
+      liveness_probe {
+        http_get { path = "/healthz" }
+        period_seconds    = 10
+        failure_threshold = 3
+      }
+    }
+  }
+  ingress = var.enable_lb_api ? "INGRESS_TRAFFIC_INTERNAL_AND_LB" : "INGRESS_TRAFFIC_ALL"
+  lifecycle {
+    ignore_changes = [
+      template[0].containers[0].image,
+      template[0].containers[0].env,
+    ]
+  }
+}
+
+# Frontend Dashboard (React/Vite)
 resource "google_cloud_run_v2_service" "dashboard" {
   name     = "${local.name}-dashboard"
   location = var.region
@@ -234,6 +370,10 @@ resource "google_cloud_run_v2_service" "dashboard" {
     scaling { min_instance_count = 0 }
     containers {
       image = var.dashboard_image
+      env {
+        name  = "VITE_API_URL"
+        value = "https://${google_cloud_run_v2_service.gateway_bff.uri}"
+      }
       readiness_probe {
         http_get { path = "/" }
         period_seconds    = 10
@@ -255,6 +395,13 @@ resource "google_cloud_run_v2_service" "dashboard" {
   }
 }
 
+
+# IAM - Secret Manager access for JWT secret
+resource "google_secret_manager_secret_iam_member" "jwt_secret_access" {
+  secret_id = google_secret_manager_secret.jwt_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.api_sa.email}"
+}
 
 # Make dashboard publicly invokable; keep API authenticated
 resource "google_cloud_run_v2_service_iam_member" "dashboard_public" {

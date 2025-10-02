@@ -1,0 +1,103 @@
+name: Build and Deploy (production)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # required for Workload Identity Federation
+  contents: read
+  packages: write
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-east1
+  AR_REPO: bytspot-prod-images
+  API_SERVICE: bytspot-prod-api
+  DASH_SERVICE: bytspot-prod-dashboard
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud via WIF
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # Build and push Auth Service (Go)
+      - name: Build and Push Auth Service image
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-auth-service
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:prod" -f services/auth-service/Dockerfile .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:prod"
+
+      # Build and push Venue Service (Go)
+      - name: Build and Push Venue Service image
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-venue-service
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:prod" -f services/venue-service/Dockerfile .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:prod"
+
+      # Build and push Gateway BFF (Node.js)
+      - name: Build and Push Gateway BFF image
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-gateway-bff
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:prod" -f services/gateway-bff/Dockerfile .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:prod"
+
+      # Build and push Dashboard (React)
+      - name: Build and Push Dashboard image
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-dashboard
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:prod" -f services/dashboard/Dockerfile .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:prod"
+
+      # Deploy Auth Service
+      - name: Deploy Auth Service to Cloud Run
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-auth-service:prod
+          gcloud run services update bytspot-prod-auth-service \
+            --region=${{ env.REGION }} \
+            --image="$IMAGE"
+
+      # Deploy Venue Service
+      - name: Deploy Venue Service to Cloud Run
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-venue-service:prod
+          gcloud run services update bytspot-prod-venue-service \
+            --region=${{ env.REGION }} \
+            --image="$IMAGE"
+
+      # Deploy Gateway BFF
+      - name: Deploy Gateway BFF to Cloud Run
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-gateway-bff:prod
+          gcloud run services update bytspot-prod-gateway-bff \
+            --region=${{ env.REGION }} \
+            --image="$IMAGE"
+
+      # Deploy Dashboard
+      - name: Deploy Dashboard to Cloud Run
+        run: |
+          IMAGE=${{ env.REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-dashboard:prod
+          gcloud run services update bytspot-prod-dashboard \
+            --region=${{ env.REGION }} \
+            --image="$IMAGE"
+

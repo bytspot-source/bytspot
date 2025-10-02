@@ -1,6 +1,6 @@
 {
-      "name": "MatchSpot Location Discovery App",
-      "version": "0.1.0",
+      "name": "BytSpot Location Discovery App",
+      "version": "1.0.0",
       "private": true,
       "dependencies": {
             "@radix-ui/react-accordion": "^1.2.3",

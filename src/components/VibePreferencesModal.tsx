@@ -1,1 +1,0 @@
-// This file has been removed - VibePreferencesModal feature was removed

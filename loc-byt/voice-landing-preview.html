@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bytspot – Splash ➜ Voice Landing Preview</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .glass { background: rgba(255,255,255,0.06); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.12); }
+    .grad-text { background: linear-gradient(45deg,#00BFFF,#FF00FF,#FF4500); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+    .pulse { box-shadow: 0 0 0 rgba(0,191,255,.5); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(0,191,255,.5)} 70%{box-shadow:0 0 0 12px rgba(0,191,255,0)} 100%{box-shadow:0 0 0 0 rgba(0,191,255,0)} }
+
+    /* Splash: brand shift + orbit + particles */
+    .brand-shift { background: linear-gradient(90deg,#00BFFF,#FF00FF,#FF4500,#008080); background-size: 300% 300%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: brandShift 6s ease-in-out infinite; }
+    @keyframes brandShift { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+    .orbit { position:absolute; inset:0; border-radius:9999px; animation: spin 12s linear infinite; }
+    .orbit-slow { animation-duration: 18s; }
+    @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    .particle { position:absolute; width:6px; height:6px; border-radius:9999px; opacity:.35; filter: blur(1px); }
+    .progress-outer { height:8px; border-radius:9999px; background:rgba(255,255,255,.12); overflow:hidden; }
+    .progress-inner { height:100%; width:0%; background: linear-gradient(90deg,#00BFFF,#FF00FF,#00BFFF); background-size:200% 100%; animation: barShimmer 1.2s linear infinite; border-radius:inherit; }
+    @keyframes barShimmer { 0%{background-position:0% 0} 100%{background-position:200% 0} }
+
+    .mobile-shell { border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(to bottom right, #0a0a0a, #121212, #1a1a1a); }
+    .safe-top { padding-top: env(safe-area-inset-top); }
+    .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-[#0a0a0a] via-[#121212] to-[#1a1a1a] text-white">
+  <div class="w-full min-h-screen flex items-center justify-center p-2">
+    <div class="mobile-shell relative w-[390px] h-[844px] rounded-[28px] overflow-hidden shadow-2xl">
+
+  <!-- Splash (three-stage) -->
+  <div id="splash" class="absolute inset-0">
+    <div class="absolute inset-0">
+      <!-- ambient particles -->
+      <span class="particle" style="top:12%;left:20%;background:#00BFFF"></span>
+      <span class="particle" style="top:35%;left:80%;background:#FF00FF"></span>
+      <span class="particle" style="top:70%;left:15%;background:#008080"></span>
+      <span class="particle" style="top:82%;left:65%;background:#FF4500"></span>
+    </div>
+
+    <div class="h-full w-full flex items-center justify-center">
+        <!-- Ambient brand glows -->
+        <div class="absolute -z-10 -top-10 -left-16 w-[320px] h-[320px] rounded-full" style="background:#00BFFF; filter:blur(80px); opacity:.15;"></div>
+        <div class="absolute -z-10 -bottom-10 -right-14 w-[300px] h-[300px] rounded-full" style="background:#FF00FF; filter:blur(90px); opacity:.12;"></div>
+
+      <div class="relative w-[280px] h-[280px]">
+        <!-- Logo stage -->
+        <div id="stageLogo" class="absolute inset-0 flex flex-col items-center justify-center">
+          <div class="relative w-40 h-40">
+            <div class="absolute inset-0 rounded-full bg-white/5 backdrop-blur-md border border-white/10"></div>
+            <div class="orbit">
+              <div class="absolute -top-1 left-1/2 -translate-x-1/2 text-cyan-400">
+                <!-- map-pin icon -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10z"/><circle cx="12" cy="11" r="2"/></svg>
+              </div>
+              <div class="absolute top-1/2 -left-1 -translate-y-1/2 text-fuchsia-400">
+                <!-- search icon -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              </div>
+              <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 text-emerald-400">
+                <!-- users icon -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4h-8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              </div>
+              <div class="absolute top-1/2 -right-1 -translate-y-1/2 text-orange-400">
+                <!-- navigation icon -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 21 3 13 21 11 13 3 11"/></svg>
+              </div>
+            </div>
+            <div class="orbit orbit-slow">
+              <div class="absolute top-0 left-1/2 -translate-x-1/2 text-white/30">•</div>
+              <div class="absolute bottom-0 left-1/2 -translate-x-1/2 text-white/30">•</div>
+            </div>
+          </div>
+          <div class="mt-4 text-4xl font-extrabold brand-shift">Bytspot</div>
+        </div>
+
+        <!-- Tagline stage -->
+        <div id="stageTag" class="absolute inset-0 hidden items-center justify-center">
+          <div class="text-center">
+            <div class="text-2xl font-semibold">Urban Discovery Reimagined</div>
+            <div class="text-white/70 mt-1">Powered by AI</div>
+          </div>
+        </div>
+
+        <!-- Loading stage -->
+        <div id="stageLoad" class="absolute inset-0 hidden">
+          <div class="flex flex-col items-center justify-center h-full">
+            <div class="grid grid-cols-3 gap-3 mb-4 text-sm text-white/80">
+              <div class="px-3 py-2 rounded-lg bg-white/5 flex items-center gap-2">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10z"/><circle cx="12" cy="11" r="2"/></svg>
+                <span>Map</span>
+              </div>
+              <div class="px-3 py-2 rounded-lg bg-white/5 flex items-center gap-2">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <span>Search</span>
+              </div>
+              <div class="px-3 py-2 rounded-lg bg-white/5 flex items-center gap-2">
+                <!-- simple building for Venues -->
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M7 7V4h10v3"/><path d="M7 12h.01M12 12h.01M17 12h.01"/></svg>
+                <span>Venues</span>
+              </div>
+              <div class="px-3 py-2 rounded-lg bg-white/5 flex items-center gap-2">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 21 3 13 21 11 13 3 11"/></svg>
+                <span>Directions</span>
+              </div>
+              <div class="px-3 py-2 rounded-lg bg-white/5 flex items-center gap-2">
+                <!-- sun icon for Weather -->
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+                <span>Weather</span>
+
+              </div>
+              <div class="px-3 py-2 rounded-lg bg-white/5 flex items-center gap-2">
+                <!-- users icon -->
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4h-8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span>Users</span>
+              </div>
+            </div>
+            <div class="w-56 progress-outer">
+              <div id="progressBar" class="progress-inner"></div>
+            </div>
+            <div id="loadCaption" class="text-xs text-white/70 mt-2">Preparing securing session…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="absolute bottom-3 inset-x-0 text-center text-[11px] text-white/50">
+      v0.1 • © Bytspot
+    </div>
+  </div>
+
+  <!-- Landing -->
+  <div id="landing" class="absolute inset-0 hidden flex flex-col">
+    <!-- Top Nav -->
+    <div class="px-4 py-3 border-b border-white/10 bg-black/40 backdrop-blur-sm safe-top">
+      <div class="max-w-3xl mx-auto flex items-center justify-center gap-2 text-xs text-white/80">
+        <span id="weatherIcon" class="text-white/80">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </span>
+        <span id="weatherText">72°F • Clear</span>
+        <span class="text-white/40">•</span>
+        <span id="usersText">1,248 nearby</span>
+        <span class="text-white/40">•</span>
+        <span id="locationText" class="text-white/70">Near you</span>
+      </div>
+    </div>
+    <!-- Brand Nav (shown after first visit) -->
+    <div id="brandNav" class="px-4 py-4 border-b border-white/10 hidden">
+      <div class="max-w-3xl mx-auto flex items-center justify-between">
+        <div class="text-2xl font-bold grad-text">Bytspot</div>
+        <div class="flex items-center gap-4 text-sm">
+          <button id="signInBtn" class="px-3 py-2 rounded-lg hover:bg-white/10">Sign In</button>
+          <button id="becomeHostBtn" class="px-3 py-2 rounded-lg hover:bg-white/10">Become a Host</button>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- Hero Search with Mic -->
+    <div id="scrollArea" class="px-4 py-6 overflow-y-auto flex-1">
+      <div class="text-center mb-8">
+        <h1 class="text-5xl font-extrabold mb-2 grad-text">Bytspot</h1>
+        <p class="text-white/80 text-base">Discover. Park. Experience</p>
+        <div id="newUserBar" class="mt-2 hidden text-sm text-white/80">
+          <div class="flex items-center justify-center gap-6">
+            <button id="heroSignIn" class="hover:text-white/100">Sign In</button>
+            <span class="text-white/40">•</span>
+            <button id="heroBecomeHost" class="hover:text-white/100">Become a Host</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Search pill redesigned -->
+      <div class="relative max-w-2xl mx-auto drop-shadow-[0_0_24px_rgba(56,189,248,0.25)]">
+        <div class="relative rounded-[28px] p-[2px] bg-gradient-to-br from-indigo-500/20 via-cyan-500/20 to-fuchsia-500/20">
+          <div class="relative rounded-[26px] bg-slate-900/60 backdrop-blur-md ring-1 ring-white/10 shadow-[inset_0_1px_3px_rgba(0,0,0,0.35)]">
+            <!-- left search icon -->
+            <div class="absolute left-4 top-1/2 -translate-y-1/2 text-white/60">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </div>
+            <input id="searchInput" type="text" placeholder="Search places, parking, valet…" class="w-full bg-transparent text-white/90 rounded-[26px] pl-12 pr-12 py-4 placeholder-white/60 outline-none" />
+            <!-- right mic + timer -->
+            <div class="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+              <button id="micBtn" class="rounded-full p-2 text-white bg-gradient-to-r from-[#A855F7] to-[#D946EF] hover:opacity-90 shadow-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+              </button>
+              <span id="recTimer" class="hidden text-xs text-white/80">0:00</span>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Actions (colored headings + subtitles) -->
+      <div class="max-w-2xl mx-auto mt-5">
+        <div class="text-white/80 font-semibold mb-2">Quick Actions</div>
+        <div class="grid grid-cols-2 gap-3">
+          <button aria-label="Find parking" data-action="find-parking" class="group glass rounded-2xl text-left p-4 transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)] active:scale-95">
+            <div class="text-sm text-white/60">Near destination</div>
+            <div class="text-cyan-400 text-lg font-bold">Find Parking</div>
+          </button>
+          <button aria-label="Book valet" data-action="book-valet" class="group glass rounded-2xl text-left p-4 transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)] active:scale-95">
+            <div class="text-sm text-white/60">Premium service</div>
+            <div class="text-fuchsia-400 text-lg font-bold">Book Valet</div>
+          </button>
+          <button aria-label="Find venues" data-action="find-venture" class="group glass rounded-2xl text-left p-4 transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)] active:scale-95">
+            <div class="text-sm text-white/60">Personalized</div>
+            <div class="text-orange-400 text-lg font-bold">Find Venues</div>
+          </button>
+          <button aria-label="Get directions" data-action="get-directions" class="group glass rounded-2xl text-left p-4 transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)] active:scale-95">
+            <div class="text-sm text-white/60">Optimized route</div>
+            <div class="text-emerald-400 text-lg font-bold">Get Directions</div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Featured Locations (cards) -->
+      <div class="max-w-2xl mx-auto mt-8">
+        <div class="text-sm text-white/70 mb-3">Featured Locations</div>
+        <div class="space-y-3">
+          <div class="group glass rounded-2xl p-4 flex items-center justify-between transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)]">
+            <div>
+              <div class="text-white font-medium">Downtown Plaza</div>
+              <div class="text-white/60 text-sm">0.3 mi away • 24 spots</div>
+            </div>
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-r from-[#A855F7] to-[#D946EF] flex items-center justify-center transition-transform group-hover:scale-105">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10z"/><circle cx="12" cy="11" r="2"/></svg>
+            </div>
+          </div>
+          <div class="group glass rounded-2xl p-4 flex items-center justify-between transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)]">
+            <div>
+              <div class="text-white font-medium">Central Station</div>
+              <div class="text-white/60 text-sm">0.5 mi away • 18 spots</div>
+            </div>
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-r from-[#22d3ee] to-[#0ea5e9] flex items-center justify-center transition-transform group-hover:scale-105">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10z"/><circle cx="12" cy="11" r="2"/></svg>
+            </div>
+          </div>
+          <div class="group glass rounded-2xl p-4 flex items-center justify-between transition-all hover:bg-white/8 hover:shadow-[0_12px_40px_rgba(168,85,247,0.15)]">
+            <div>
+              <div class="text-white font-medium">Bay Area Mall</div>
+              <div class="text-white/60 text-sm">0.8 mi away • 42 spots</div>
+            </div>
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-r from-[#10b981] to-[#34d399] flex items-center justify-center transition-transform group-hover:scale-105">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10z"/><circle cx="12" cy="11" r="2"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+
+
+      <!-- Sections (anchors only, no visible tiles) -->
+      <section id="discoverSec" class="mt-10"></section>
+      <section id="mapSec" class="mt-10"></section>
+      <section id="conciergeSec" class="mt-10"></section>
+      <section id="insiderSec" class="mt-10"></section>
+      <section id="profileSec" class="mt-10 mb-28"></section>
+
+    </div>
+
+    <!-- Bottom Tab Bar -->
+    <div class="absolute bottom-0 left-0 right-0 border-t border-white/10 bg-black/40 backdrop-blur-sm safe-bottom">
+      <div class="grid grid-cols-5 text-[11px] text-white/80">
+        <button id="tabDiscover" class="py-3 flex flex-col items-center gap-1 w-full">
+          <span>🏠</span><span>Discover</span>
+        </button>
+        <button id="tabMap" class="py-3 flex flex-col items-center gap-1 w-full">
+          <span>🗺️</span><span>Map</span>
+        </button>
+        <button id="tabInsider" class="py-3 flex flex-col items-center gap-1 w-full">
+          <span>⭐</span><span>Insider</span>
+        </button>
+        <button id="tabConcierge" class="py-3 flex flex-col items-center gap-1 w-full">
+          <span>🤖</span><span>Concierge</span>
+        </button>
+        <button id="tabProfile" class="py-3 flex flex-col items-center gap-1 w-full">
+
+
+          <span>👤</span><span>Profile</span>
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  </div>
+</div>
+
+
+  <script>
+    // Three-stage splash -> landing (dynamic total, captions)
+    const seenSplash = localStorage.getItem('bytspot_seen_splash') === 'true';
+    const TOTAL = seenSplash ? 4500 : 6000;
+    const STAGE1 = Math.max(600, Math.round(TOTAL * 0.28));
+    const STAGE2 = Math.max(600, Math.round(TOTAL * 0.22));
+    const STAGE3 = Math.max(1200, TOTAL - STAGE1 - STAGE2);
+
+    const stageLogo = document.getElementById('stageLogo');
+    const stageTag = document.getElementById('stageTag');
+    const stageLoad = document.getElementById('stageLoad');
+    const progressBar = document.getElementById('progressBar');
+    const loadCaption = document.getElementById('loadCaption');
+    const captions = ['securing session','tuning interface','loading maps','prepping concierge'];
+
+    setTimeout(()=>{
+      // to tagline
+      stageLogo.classList.add('hidden');
+      stageTag.classList.remove('hidden');
+
+      setTimeout(()=>{
+        // to loading
+        stageTag.classList.add('hidden');
+        stageLoad.classList.remove('hidden');
+
+        // start rotating captions
+        let c = 0; loadCaption.textContent = `Preparing ${captions[c]}…`;
+        const capIv = setInterval(()=>{ c = (c+1) % captions.length; loadCaption.textContent = `Preparing ${captions[c]}…`; }, 800);
+
+        // eased progress
+        const start = Date.now();
+        const intv = setInterval(()=>{
+          const elapsed = Date.now() - start;
+          const ratio = Math.min(1, elapsed / STAGE3);
+          const eased = 1 - Math.pow(1 - ratio, 3);
+          const pct = Math.round(eased*100);
+          progressBar.style.width = pct + '%';
+          if (ratio >= 1){ clearInterval(intv); clearInterval(capIv);
+            localStorage.setItem('bytspot_seen_splash','true');
+            document.getElementById('splash').classList.add('hidden');
+            document.getElementById('landing').classList.remove('hidden');
+          }
+        }, 50);
+      }, STAGE2);
+    }, STAGE1);
+
+    const supportedCatalog = ['parking','valet','restaurant','bar','cafe','coffee','event','museum','theater','club','ev','charging','gas','hotel'];
+    function curateCount(q){ const t=(q||'').toLowerCase(); return supportedCatalog.filter(c=>t.includes(c)).length; }
+
+    const input = document.getElementById('searchInput');
+    const conciergeCard = document.getElementById('conciergeCard');
+    const conciergeTitle = document.getElementById('conciergeTitle');
+    const conciergeSubtitle = document.getElementById('conciergeSubtitle');
+    const conciergePanel = document.getElementById('conciergePanel');
+    const conciergeMsg = document.getElementById('conciergeMsg');
+
+    function showConciergePrompt(text){
+      const q = (text||'').trim();
+      if(!q){ conciergeCard.classList.add('hidden'); return; }
+      const count = curateCount(q);
+      conciergeTitle.textContent = `Concierge found ${count} match${count===1?'':'es'}`;
+      conciergeSubtitle.textContent = `“${q}” • Ask Concierge to curate`;
+      conciergeCard.classList.remove('hidden');
+    }
+
+
+    // Quick actions (chips)
+    document.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.getAttribute('data-action');
+        if(!action) return;
+
+        if(action === 'find-parking') {
+
+    // Show new-user hero row on first visit; brand nav only after first visit
+    (function initNewUserBar(){
+      try{
+        const seen = localStorage.getItem('bytspot_seen_splash') === 'true';
+        const bar = document.getElementById('newUserBar');
+        const brandNav = document.getElementById('brandNav');
+        if(bar){ bar.style.display = seen ? 'none' : 'block'; }
+        if(brandNav){ brandNav.style.display = seen ? 'block' : 'none'; }
+        // Hero buttons
+        const heroSign = document.getElementById('heroSignIn');
+        const heroHost = document.getElementById('heroBecomeHost');
+        if(heroSign) heroSign.addEventListener('click',()=>alert('Sign In (Preview)'));
+        if(heroHost) heroHost.addEventListener('click',()=>alert('Become a Host (Preview)'));
+        // Brand nav buttons (for returning users)
+        const navSign = document.getElementById('signInBtn');
+        const navHost = document.getElementById('becomeHostBtn');
+        if(navSign) navSign.addEventListener('click',()=>alert('Sign In (Preview)'));
+        if(navHost) navHost.addEventListener('click',()=>alert('Become a Host (Preview)'));
+      }catch(_){ /* noop */ }
+    })();
+
+          input.value = 'parking'; goto('mapSec');
+        } else if(action === 'book-valet') {
+          input.value = 'valet booking'; goto('conciergeSec');
+        } else if(action === 'find-venture') {
+          input.value = 'venture'; goto('discoverSec');
+        } else if(action === 'get-directions') {
+          input.value = 'directions'; goto('mapSec');
+        }
+      });
+    });
+
+    // Bottom tabs scrolling
+    const scrollArea = document.getElementById('scrollArea');
+    function goto(id){
+      const el = document.getElementById(id);
+      if(el && scrollArea){ scrollArea.scrollTo({ top: el.offsetTop - scrollArea.offsetTop, behavior: 'smooth' }); }
+    }
+    document.getElementById('tabDiscover')?.addEventListener('click', ()=> goto('discoverSec'));
+    document.getElementById('tabMap')?.addEventListener('click', ()=> goto('mapSec'));
+    document.getElementById('tabInsider')?.addEventListener('click', ()=> goto('insiderSec'));
+    document.getElementById('tabConcierge')?.addEventListener('click', ()=> goto('conciergeSec'));
+    document.getElementById('tabProfile')?.addEventListener('click', ()=> goto('profileSec'));
+
+    // Listening pulse + timer
+    const recTimer = document.getElementById('recTimer');
+    let t0 = 0; let tInt = null;
+    function startTimer(){
+      t0 = Date.now();
+      if(recTimer){ recTimer.classList.remove('hidden'); recTimer.textContent = '0:00'; }
+      tInt = setInterval(()=>{
+        const s = Math.max(0, Math.floor((Date.now()-t0)/1000));
+        const mm = Math.floor(s/60).toString();
+        const ss = (s%60).toString().padStart(2,'0');
+        if(recTimer) recTimer.textContent = `${mm}:${ss}`;
+      }, 200);
+      micBtn.classList.add('pulse');
+    }
+    function stopTimer(){
+      if(tInt) { clearInterval(tInt); tInt = null; }
+      if(recTimer){ recTimer.classList.add('hidden'); }
+      micBtn.classList.remove('pulse');
+    }
+
+
+    // Voice (Web Speech API with fallback)
+    const micBtn = document.getElementById('micBtn');
+    micBtn.addEventListener('click', ()=>{
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if(SR){
+        const rec = new SR();
+        rec.lang = 'en-US';
+        rec.interimResults = false;
+        rec.maxAlternatives = 1;
+        rec.onstart = ()=>{ startTimer(); };
+        rec.onend = ()=>{ stopTimer(); };
+        rec.onresult = (e)=>{
+          const text = e.results?.[0]?.[0]?.transcript || '';
+          input.value = text;
+        };
+        try { rec.start(); } catch(e) { console.warn(e); }
+      } else {
+        const text = prompt('Voice not supported here. Type your request:');
+        if(text){ input.value = text; }
+      }
+    });
+    // Weather, location, users pills
+    (function initStatusPills(){
+      const weatherText = document.getElementById('weatherText');
+      const weatherIcon = document.getElementById('weatherIcon');
+      const locationText = document.getElementById('locationText');
+      const usersText = document.getElementById('usersText');
+      if(!weatherText || !weatherIcon || !locationText || !usersText) return;
+
+      // Nearby users (mock realistic)
+      const base = 850 + Math.floor(Math.random()*900);
+      usersText.textContent = base.toLocaleString() + ' nearby';
+
+      function setIcon(kind){
+        const icons = {
+          sun: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+          cloud: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 0 0 0-9 5.5 5.5 0 0 0-10.7 1"/><path d="M5 19h12.5"/></svg>',
+          rain: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 17a4.5 4.5 0 0 0 0-9 5.5 5.5 0 0 0-10.7 1"/><path d="M8 19v2M12 19v2M16 19v2"/></svg>',
+          snow: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M4 6l16 12"/><path d="M20 6L4 18"/></svg>',
+          storm:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 17a4.5 4.5 0 0 0 0-9 5.5 5.5 0 0 0-10.7 1"/><path d="M13 11l-2 4h3l-2 4"/></svg>'
+        };
+        weatherIcon.innerHTML = icons[kind] || icons.sun;
+      }
+
+      function weatherKindFromCode(code){
+        if(code===0) return 'sun';
+        if([1,2,3,45,48].includes(code)) return 'cloud';
+        if([51,53,55,56,57,61,63,65,80,81,82].includes(code)) return 'rain';
+        if([71,73,75,85,86].includes(code)) return 'snow';
+        if([95,96,99].includes(code)) return 'storm';
+        return 'sun';
+      }
+
+      function fallback(){ setIcon('sun'); weatherText.textContent='72\u00b0F \u2022 Clear'; }
+
+      // Try geolocation + open-meteo + reverse geocode
+      if(!navigator.geolocation){ fallback(); return; }
+      navigator.geolocation.getCurrentPosition(async (pos)=>{
+        try{
+          const {latitude:lat, longitude:lon} = pos.coords;
+          // Weather
+          const wxRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`);
+          if(wxRes.ok){
+            const wx = await wxRes.json();
+            const cw = wx.current_weather;
+            const tempF = Math.round((cw.temperature * 9/5) + 32);
+            const kind = weatherKindFromCode(cw.weathercode);
+            setIcon(kind);
+            weatherText.textContent = `${tempF}\u00b0F \u2022 ${kind.replace(/^[a-z]/, m=>m.toUpperCase())}`;
+          } else { fallback(); }
+          // Reverse geocode
+          try{
+            const locRes = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`);
+            if(locRes.ok){
+              const loc = await locRes.json();
+              const city = loc.city || loc.locality || loc.principalSubdivision || 'Near you';
+              locationText.textContent = city;
+            }
+          } catch(_){ /* ignore */ }
+        }catch(_){ fallback(); }
+      }, ()=> fallback(), {enableHighAccuracy:true, timeout:5000});
+    })();
+
+
+    // Sign-in (simulated prompt)
+    document.getElementById('signInBtn').addEventListener('click', ()=>{
+      alert('Auth prompt: Phone/SMS, Apple, or Social. (Preview)');
+
+
+    });
+  </script>
+</body>
+
+</html>
+

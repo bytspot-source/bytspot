@@ -1,0 +1,85 @@
+openapi: 3.0.3
+info:
+  title: Bytspot Mobile OTA API
+  version: 0.1.0
+servers:
+  - url: https://api.bytspot.example.com
+paths:
+  /ml/model/concierge/manifest:
+    get:
+      summary: Get model manifest for on-device Concierge/Vibe
+      parameters:
+        - in: query
+          name: platform
+          schema: { type: string, enum: [ios, android] }
+          required: true
+        - in: query
+          name: arch
+          schema: { type: string, enum: [arm64, x86_64] }
+          required: true
+        - in: query
+          name: app_version
+          schema: { type: string }
+          required: true
+      responses:
+        '200':
+          description: Manifest
+          headers:
+            ETag: { description: Entity tag for caching, schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileModelManifest'
+        '304': { description: Not Modified }
+        '403': { description: Not authorized or cohort not eligible }
+  /ml/model/concierge/download:
+    get:
+      summary: Download model (full or delta)
+      parameters:
+        - in: query
+          name: version
+          schema: { type: string }
+          required: true
+        - in: query
+          name: delta_from
+          schema: { type: string }
+          required: false
+      responses:
+        '302': { description: Signed URL redirect }
+        '404': { description: Version not found }
+  /ml/metrics:
+    post:
+      summary: Report OTA metrics from device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileOtaMetric'
+      responses:
+        '202': { description: Accepted }
+components:
+  schemas:
+    MobileModelManifest:
+      $ref: '../schemas/ota/mobile_model_manifest.schema.json'
+    MobileOtaMetric:
+      type: object
+      required: [device_id, app_version, model_version, event, ts]
+      properties:
+        device_id: { type: string }
+        app_version: { type: string }
+        model_version: { type: string }
+        event: { type: string, enum: [check, download_start, download_ok, verify_ok, apply_ok, rollback, failure] }
+        reason: { type: string }
+        battery_level: { type: integer, minimum: 0, maximum: 100 }
+        wifi: { type: boolean }
+        ts: { type: string, format: date-time }
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+

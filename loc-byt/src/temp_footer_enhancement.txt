@@ -1,0 +1,138 @@
+        {/* Enhanced Footer Navigation */}
+        <AnimatePresence>
+          {showFooter && (
+            <motion.nav
+              initial={{ y: 100, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 100, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 300, damping: 30 }}
+              className="fixed bottom-0 left-0 right-0 z-50 footer-navigation"
+              style={{
+                background: 'linear-gradient(135deg, rgba(18, 18, 18, 0.95) 0%, rgba(0, 191, 255, 0.1) 50%, rgba(255, 0, 255, 0.1) 100%)',
+                backdropFilter: 'blur(20px) saturate(180%)',
+                borderTop: '1px solid rgba(255, 255, 255, 0.1)',
+                paddingBottom: 'max(16px, env(safe-area-inset-bottom))',
+              }}
+              role="navigation"
+              aria-label="Main navigation"
+            >
+              <div className="px-4 pt-4">
+                <div className="flex items-center justify-between max-w-md mx-auto">
+                  {/* Back */}
+                  <motion.button
+                    onClick={() => {
+                      trackEvent('navigation_back', { from: 'swipe_interface' });
+                      onBack();
+                    }}
+                    className="footer-navigation flex flex-col items-center space-y-1 p-2 rounded-xl hover:bg-white/5 transition-colors interactive-button touch-target"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Go back to discovery"
+                    disabled={isLoading}
+                  >
+                    <ArrowLeft className="w-6 h-6 text-white/70" />
+                    <span className="text-white/70 text-xs">Back</span>
+                  </motion.button>
+
+                  {/* Map */}
+                  <motion.button
+                    onClick={() => {
+                      trackEvent('navigation_map', { from: 'swipe_interface' });
+                      if (!userData.permissions?.location) {
+                        onError({
+                          type: 'permission',
+                          message: 'Location permission required for map view',
+                          timestamp: new Date(),
+                          recoverable: true,
+                          action: 'Grant Permission'
+                        });
+                        return;
+                      }
+                      onOpenMap();
+                    }}
+                    className="footer-navigation flex flex-col items-center space-y-1 p-2 rounded-xl hover:bg-white/5 transition-colors interactive-button touch-target"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Open map view"
+                    disabled={isLoading || !connectivity.isOnline}
+                  >
+                    <Map className={`w-6 h-6 ${!userData.permissions?.location ? 'text-white/40' : 'text-white/70'}`} />
+                    <span className={`text-xs ${!userData.permissions?.location ? 'text-white/40' : 'text-white/70'}`}>
+                      Map
+                    </span>
+                  </motion.button>
+
+                  {/* Insider */}
+                  <motion.button
+                    onClick={() => {
+                      trackEvent('navigation_insider', { from: 'swipe_interface' });
+                      setCurrentView('insider');
+                      setShowFooter(false);
+                    }}
+                    className="footer-navigation flex flex-col items-center space-y-1 p-2 rounded-xl hover:bg-white/5 transition-colors interactive-button touch-target"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Open insider analytics"
+                    disabled={isLoading}
+                  >
+                    <BarChart3 className="w-6 h-6 text-white/70" />
+                    <span className="text-white/70 text-xs">Insider</span>
+                  </motion.button>
+
+                  {/* Concierge */}
+                  <motion.button
+                    onClick={() => {
+                      trackEvent('navigation_concierge', { from: 'swipe_interface' });
+                      setCurrentView('concierge');
+                      setShowFooter(false);
+                    }}
+                    className="footer-navigation flex flex-col items-center space-y-1 p-2 rounded-xl hover:bg-white/5 transition-colors interactive-button touch-target"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Open Bytspot concierge"
+                    disabled={isLoading || !connectivity.isOnline}
+                  >
+                    <MessageCircle className={`w-6 h-6 ${!connectivity.isOnline ? 'text-white/40' : 'text-white/70'}`} />
+                    <span className={`text-xs ${!connectivity.isOnline ? 'text-white/40' : 'text-white/70'}`}>
+                      Concierge
+                    </span>
+                  </motion.button>
+
+                  {/* Profile */}
+                  <motion.button
+                    onClick={() => {
+                      trackEvent('navigation_profile', { from: 'swipe_interface' });
+                      onOpenProfile();
+                    }}
+                    className="footer-navigation flex flex-col items-center space-y-1 p-2 rounded-xl hover:bg-white/5 transition-colors interactive-button touch-target relative"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    aria-label="Open user profile"
+                    disabled={isLoading}
+                  >
+                    <UserCircle className="w-6 h-6 text-white/70" />
+                    <span className="text-white/70 text-xs">Profile</span>
+                    {userData.bytspotPoints && userData.bytspotPoints > 100 && (
+                      <motion.div
+                        initial={{ scale: 0 }}
+                        animate={{ scale: 1 }}
+                        className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-400 rounded-full"
+                      />
+                    )}
+                  </motion.button>
+                </div>
+                
+                {/* Connection Status Indicator */}
+                {!connectivity.isOnline && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex items-center justify-center mt-2 text-orange-400 text-xs"
+                  >
+                    <span>Offline mode • Limited functionality</span>
+                  </motion.div>
+                )}
+              </div>
+            </motion.nav>
+          )}
+        </AnimatePresence>

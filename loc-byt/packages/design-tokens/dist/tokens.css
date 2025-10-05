@@ -1,2 +1,112 @@
+/* Bytspot iOS Mobile UI Design Tokens */
+/* Generated fallback tokens for mobile-first experience */
+
 :root {
+  /* === Brand Colors === */
+  --color-brand-blue: #00BFFF;
+  --color-brand-magenta: #FF00FF;
+  --color-brand-orange: #FF4500;
+  --color-brand-teal: #008080;
+  --color-brand-purple: #A855F7;
+
+  /* === iOS System Colors === */
+  --color-background-primary: #000000;
+  --color-background-secondary: #1C1C1E;
+  --color-background-tertiary: #2C2C2E;
+  --color-background-elevated: #1C1C1E;
+
+  --color-surface-glass: rgba(255, 255, 255, 0.05);
+  --color-surface-glass-border: rgba(255, 255, 255, 0.15);
+
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: rgba(255, 255, 255, 0.6);
+  --color-text-tertiary: rgba(255, 255, 255, 0.4);
+
+  /* === iOS Spacing (4pt/8pt grid) === */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --spacing-2xl: 48px;
+
+  /* === iOS Typography (SF Pro) === */
+  --font-family-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+
+  --font-size-xs: 12px;
+  --font-size-sm: 14px;
+  --font-size-base: 16px;
+  --font-size-lg: 18px;
+  --font-size-xl: 20px;
+  --font-size-2xl: 24px;
+  --font-size-3xl: 32px;
+  --font-size-4xl: 40px;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --line-height-tight: 1.2;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* === iOS Border Radius (Continuous Corners) === */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-full: 9999px;
+
+  /* === iOS Shadows === */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.5);
+
+  /* === Glassmorphism === */
+  --glass-blur: 12px;
+  --glass-opacity: 0.05;
+  --glass-border-opacity: 0.15;
+
+  /* === iOS Touch Targets === */
+  --touch-target-min: 44px;
+
+  /* === iOS Animation (Spring Physics) === */
+  --spring-stiffness: 320;
+  --spring-damping: 30;
+  --spring-mass: 0.8;
+
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* === Z-Index Layers === */
+  --z-base: 0;
+  --z-dropdown: 1000;
+  --z-sticky: 1100;
+  --z-fixed: 1200;
+  --z-modal-backdrop: 1300;
+  --z-modal: 1400;
+  --z-popover: 1500;
+  --z-tooltip: 1600;
+  --z-notification: 1700;
+}
+
+/* iOS Dark Mode Adjustments */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background-primary: #000000;
+    --color-background-secondary: #1C1C1E;
+    --color-background-tertiary: #2C2C2E;
+  }
+}
+
+/* iOS Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-fast: 0ms;
+    --transition-base: 0ms;
+    --transition-slow: 0ms;
+  }
 }

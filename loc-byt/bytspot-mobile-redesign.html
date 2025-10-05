@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Bytspot - Mobile App Redesign</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        'bytspot-blue': '#00BFFF',
+                        'bytspot-magenta': '#FF00FF',
+                        'bytspot-orange': '#FF4500',
+                        'bytspot-teal': '#008080',
+                        'bytspot-purple': '#8A2BE2',
+                        'bytspot-green': '#00FF7F'
+                    },
+                    fontFamily: {
+                        'sf': ['-apple-system', 'BlinkMacSystemFont', 'SF Pro Display', 'Segoe UI', 'Roboto', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        * {
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent;
+            overscroll-behavior: none;
+            background: linear-gradient(135deg, #0c0c0c 0%, #1a1a2e 25%, #16213e 50%, #0f3460 75%, #533483 100%);
+        }
+        
+        .mobile-container {
+            max-width: 390px;
+            margin: 0 auto;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+            background: linear-gradient(135deg, rgba(12,12,12,0.95) 0%, rgba(26,26,46,0.95) 25%, rgba(22,33,62,0.95) 50%, rgba(15,52,96,0.95) 75%, rgba(83,52,131,0.95) 100%);
+            backdrop-filter: blur(20px);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* HEADER SECTION */
+        .header-section {
+            background: rgba(0, 0, 0, 0.9);
+            backdrop-filter: blur(40px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 1rem 1.5rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .weather-live-indicator {
+            display: inline-flex;
+            align-items: center;
+            background: linear-gradient(45deg, #FF0000, #FF4500);
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: white;
+            animation: livePulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes livePulse {
+            0%, 100% { box-shadow: 0 0 10px rgba(255, 0, 0, 0.5); }
+            50% { box-shadow: 0 0 20px rgba(255, 0, 0, 0.8); }
+        }
+        
+        /* MAIN CONTENT SECTION */
+        .main-content {
+            flex: 1;
+            padding: 1.5rem;
+            overflow-y: auto;
+            position: relative;
+        }
+        
+        .glass-ultra {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(40px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+        
+        .section-card {
+            background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%);
+            backdrop-filter: blur(30px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            border-radius: 1.5rem;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: all 0.3s ease;
+        }
+        
+        .section-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.4);
+        }
+        
+        /* FOOTER NAVIGATION */
+        .footer-nav {
+            background: rgba(0, 0, 0, 0.95);
+            backdrop-filter: blur(40px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 0.75rem 0;
+            position: sticky;
+            bottom: 0;
+            z-index: 100;
+        }
+        
+        .nav-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 0.5rem;
+            border-radius: 1rem;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            min-height: 60px;
+        }
+        
+        .nav-item.active {
+            background: linear-gradient(135deg, rgba(0, 191, 255, 0.2), rgba(0, 191, 255, 0.1));
+            transform: translateY(-2px);
+        }
+        
+        .nav-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }
+        
+        .nav-icon {
+            width: 24px;
+            height: 24px;
+            margin-bottom: 0.25rem;
+            transition: all 0.3s ease;
+        }
+        
+        .nav-item.active .nav-icon {
+            color: #00BFFF;
+            transform: scale(1.1);
+        }
+        
+        .nav-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.7);
+            transition: all 0.3s ease;
+        }
+        
+        .nav-item.active .nav-label {
+            color: #00BFFF;
+        }
+        
+        /* CONTENT SECTIONS */
+        .content-section {
+            display: none;
+        }
+        
+        .content-section.active {
+            display: block;
+            animation: fadeInUp 0.5s ease-out;
+        }
+        
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .gradient-text {
+            background: linear-gradient(45deg, #00BFFF, #FF00FF, #FF4500);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .feature-card {
+            background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05));
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 1rem;
+            padding: 1rem;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+        
+        .feature-card:hover {
+            transform: scale(1.05);
+            border-color: rgba(0, 191, 255, 0.3);
+        }
+        
+        .floating-particles {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            overflow: hidden;
+        }
+        
+        .particle {
+            position: absolute;
+            background: radial-gradient(circle, rgba(0,191,255,0.6) 0%, transparent 70%);
+            border-radius: 50%;
+            animation: float 6s ease-in-out infinite;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0px) rotate(0deg); opacity: 0.7; }
+            50% { transform: translateY(-20px) rotate(180deg); opacity: 1; }
+        }
+        
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(1.2); }
+        }
+        
+        .haptic-feedback {
+            transition: all 0.1s ease;
+        }
+        
+        .haptic-feedback:active {
+            transform: scale(0.95);
+            filter: brightness(1.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="mobile-container">
+        <!-- Floating Particles Background -->
+        <div class="floating-particles">
+            <div class="particle" style="width: 4px; height: 4px; top: 20%; left: 10%; animation-delay: 0s;"></div>
+            <div class="particle" style="width: 6px; height: 6px; top: 60%; left: 80%; animation-delay: 1s;"></div>
+            <div class="particle" style="width: 3px; height: 3px; top: 40%; left: 30%; animation-delay: 2s;"></div>
+            <div class="particle" style="width: 5px; height: 5px; top: 80%; left: 60%; animation-delay: 3s;"></div>
+        </div>
+
+        <!-- HEADER SECTION -->
+        <header class="header-section">
+            <div class="flex items-center justify-between">
+                <!-- Live Weather -->
+                <div class="flex items-center space-x-3">
+                    <div class="weather-live-indicator">
+                        <span>LIVE</span>
+                    </div>
+                    <div class="flex items-center space-x-2 text-white">
+                        <svg class="w-5 h-5 text-blue-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.002 4.002 0 003 15z"></path>
+                        </svg>
+                        <span class="font-bold">66°</span>
+                        <span class="text-white/70 text-sm">feels 68°</span>
+                    </div>
+                </div>
+                
+                <!-- Active Users & Location -->
+                <div class="flex items-center space-x-3">
+                    <div class="status-indicator">
+                        <div class="status-dot bg-bytspot-green"></div>
+                        <span class="text-bytspot-blue font-bold" id="activeUsers">846</span>
+                    </div>
+                    <div class="text-white/70 text-sm font-medium">Midtown</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN CONTENT SECTION -->
+        <main class="main-content">
+            <!-- DISCOVER SECTION -->
+            <div class="content-section active" id="discover-section">
+                <div class="section-card">
+                    <h2 class="text-2xl font-bold gradient-text mb-4">AI Discovery Engine</h2>
+                    <p class="text-white/80 mb-6">Neural network finds perfect matches for your urban adventures</p>
+
+                    <div class="feature-grid">
+                        <div class="feature-card haptic-feedback">
+                            <div class="w-12 h-12 bg-gradient-to-br from-bytspot-blue to-bytspot-teal rounded-xl flex items-center justify-center mx-auto mb-3">
+                                <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                                </svg>
+                            </div>
+                            <h3 class="text-sm font-bold text-white mb-1">Smart Parking</h3>
+                            <p class="text-xs text-white/60">127 spots available</p>
+                        </div>
+
+                        <div class="feature-card haptic-feedback">
+                            <div class="w-12 h-12 bg-gradient-to-br from-bytspot-magenta to-bytspot-purple rounded-xl flex items-center justify-center mx-auto mb-3">
+                                <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path>
+                                </svg>
+                            </div>
+                            <h3 class="text-sm font-bold text-white mb-1">Venues</h3>
+                            <p class="text-xs text-white/60">89% match score</p>
+                        </div>
+
+                        <div class="feature-card haptic-feedback">
+                            <div class="w-12 h-12 bg-gradient-to-br from-bytspot-orange to-red-500 rounded-xl flex items-center justify-center mx-auto mb-3">
+                                <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                                </svg>
+                            </div>
+                            <h3 class="text-sm font-bold text-white mb-1">Valet Service</h3>
+                            <p class="text-xs text-white/60">3min ETA</p>
+                        </div>
+
+                        <div class="feature-card haptic-feedback">
+                            <div class="w-12 h-12 bg-gradient-to-br from-bytspot-green to-green-400 rounded-xl flex items-center justify-center mx-auto mb-3">
+                                <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg>
+                            </div>
+                            <h3 class="text-sm font-bold text-white mb-1">Quick Match</h3>
+                            <p class="text-xs text-white/60">AI powered</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section-card">
+                    <h3 class="text-lg font-bold text-white mb-3">Recent Discoveries</h3>
+                    <div class="space-y-3">
+                        <div class="flex items-center space-x-3 p-3 rounded-xl bg-white/5">
+                            <div class="w-10 h-10 bg-bytspot-blue rounded-lg flex items-center justify-center">
+                                <span class="text-white font-bold text-sm">P</span>
+                            </div>
+                            <div class="flex-1">
+                                <h4 class="text-white font-medium text-sm">Premium Parking</h4>
+                                <p class="text-white/60 text-xs">Downtown • $4.50/hr</p>
+                            </div>
+                            <div class="text-bytspot-green text-xs font-bold">Available</div>
+                        </div>
+
+                        <div class="flex items-center space-x-3 p-3 rounded-xl bg-white/5">
+                            <div class="w-10 h-10 bg-bytspot-magenta rounded-lg flex items-center justify-center">
+                                <span class="text-white font-bold text-sm">R</span>
+                            </div>
+                            <div class="flex-1">
+                                <h4 class="text-white font-medium text-sm">Rooftop Lounge</h4>
+                                <p class="text-white/60 text-xs">Midtown • 4.8★</p>
+                            </div>
+                            <div class="text-bytspot-orange text-xs font-bold">Trending</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- MAP SECTION -->
+            <div class="content-section" id="map-section">
+                <div class="section-card">
+                    <h2 class="text-2xl font-bold gradient-text mb-4">Live Map View</h2>
+                    <div class="bg-gradient-to-br from-gray-800 to-gray-900 rounded-xl h-64 flex items-center justify-center mb-4">
+                        <div class="text-center">
+                            <svg class="w-16 h-16 text-bytspot-blue mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m-6 3l6-3"></path>
+                            </svg>
+                            <p class="text-white/70">Interactive Map Loading...</p>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between">
+                        <div class="text-center">
+                            <div class="text-lg font-bold text-bytspot-blue">127</div>
+                            <div class="text-xs text-white/60">Parking Spots</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-lg font-bold text-bytspot-magenta">43</div>
+                            <div class="text-xs text-white/60">Venues</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-lg font-bold text-bytspot-orange">12</div>
+                            <div class="text-xs text-white/60">Valet Services</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- INSIDER SECTION -->
+            <div class="content-section" id="insider-section">
+                <div class="section-card">
+                    <h2 class="text-2xl font-bold gradient-text mb-4">Insider Access</h2>
+                    <p class="text-white/80 mb-6">Exclusive experiences and hidden gems</p>
+
+                    <div class="space-y-4">
+                        <div class="bg-gradient-to-r from-bytspot-purple/20 to-bytspot-magenta/20 rounded-xl p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h3 class="text-white font-bold">VIP Member</h3>
+                                <div class="bg-gradient-to-r from-bytspot-orange to-red-500 px-3 py-1 rounded-full">
+                                    <span class="text-white text-xs font-bold">PLATINUM</span>
+                                </div>
+                            </div>
+                            <p class="text-white/70 text-sm mb-3">Access to exclusive venues and priority booking</p>
+                            <div class="flex items-center space-x-4">
+                                <div class="text-center">
+                                    <div class="text-lg font-bold text-bytspot-green">15%</div>
+                                    <div class="text-xs text-white/60">Discount</div>
+                                </div>
+                                <div class="text-center">
+                                    <div class="text-lg font-bold text-bytspot-blue">24/7</div>
+                                    <div class="text-xs text-white/60">Concierge</div>
+                                </div>
+                                <div class="text-center">
+                                    <div class="text-lg font-bold text-bytspot-orange">∞</div>
+                                    <div class="text-xs text-white/60">Priority</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white/5 rounded-xl p-4">
+                            <h3 class="text-white font-bold mb-2">Exclusive Events</h3>
+                            <div class="space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-white/80 text-sm">Rooftop Jazz Night</span>
+                                    <span class="text-bytspot-green text-xs">Tonight</span>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-white/80 text-sm">Private Wine Tasting</span>
+                                    <span class="text-bytspot-orange text-xs">Tomorrow</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CONCIERGE SECTION -->
+            <div class="content-section" id="concierge-section">
+                <div class="section-card">
+                    <h2 class="text-2xl font-bold gradient-text mb-4">AI Concierge</h2>
+                    <p class="text-white/80 mb-6">Your personal urban assistant</p>
+
+                    <div class="bg-gradient-to-br from-bytspot-blue/10 to-bytspot-magenta/10 rounded-xl p-4 mb-4">
+                        <div class="flex items-center space-x-3 mb-3">
+                            <div class="w-10 h-10 bg-gradient-to-br from-bytspot-blue to-bytspot-magenta rounded-full flex items-center justify-center">
+                                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                                </svg>
+                            </div>
+                            <div>
+                                <h3 class="text-white font-bold">Neural Assistant</h3>
+                                <p class="text-white/60 text-sm">Online • Ready to help</p>
+                            </div>
+                        </div>
+
+                        <div class="bg-white/10 rounded-lg p-3 mb-3">
+                            <p class="text-white/90 text-sm">"I found 3 perfect parking spots near your destination. Would you like me to reserve the premium spot with valet service?"</p>
+                        </div>
+
+                        <div class="flex space-x-2">
+                            <button class="flex-1 bg-bytspot-blue/20 border border-bytspot-blue/30 rounded-lg py-2 px-3 text-bytspot-blue text-sm font-medium haptic-feedback">
+                                Yes, Reserve
+                            </button>
+                            <button class="flex-1 bg-white/10 border border-white/20 rounded-lg py-2 px-3 text-white/70 text-sm font-medium haptic-feedback">
+                                Show Options
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="space-y-3">
+                        <h3 class="text-white font-bold">Quick Actions</h3>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button class="bg-white/5 rounded-lg p-3 text-left haptic-feedback">
+                                <div class="text-bytspot-blue text-sm font-bold mb-1">Find Parking</div>
+                                <div class="text-white/60 text-xs">Near destination</div>
+                            </button>
+                            <button class="bg-white/5 rounded-lg p-3 text-left haptic-feedback">
+                                <div class="text-bytspot-magenta text-sm font-bold mb-1">Book Valet</div>
+                                <div class="text-white/60 text-xs">Premium service</div>
+                            </button>
+                            <button class="bg-white/5 rounded-lg p-3 text-left haptic-feedback">
+                                <div class="text-bytspot-orange text-sm font-bold mb-1">Find Venues</div>
+                                <div class="text-white/60 text-xs">Personalized</div>
+                            </button>
+                            <button class="bg-white/5 rounded-lg p-3 text-left haptic-feedback">
+                                <div class="text-bytspot-green text-sm font-bold mb-1">Get Directions</div>
+                                <div class="text-white/60 text-xs">Optimized route</div>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PROFILE SECTION -->
+            <div class="content-section" id="profile-section">
+                <div class="section-card">
+                    <div class="flex items-center space-x-4 mb-6">
+                        <div class="w-16 h-16 bg-gradient-to-br from-bytspot-blue to-bytspot-magenta rounded-full flex items-center justify-center">
+                            <span class="text-white font-bold text-xl">JD</span>
+                        </div>
+                        <div>
+                            <h2 class="text-xl font-bold text-white">John Doe</h2>
+                            <p class="text-white/60">Platinum Member</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-3 gap-4 mb-6">
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-bytspot-blue">1,247</div>
+                            <div class="text-xs text-white/60">Points</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-bytspot-magenta">89</div>
+                            <div class="text-xs text-white/60">Visits</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-bytspot-orange">4.9</div>
+                            <div class="text-xs text-white/60">Rating</div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-3">
+                        <button class="w-full bg-white/5 rounded-lg p-3 flex items-center justify-between haptic-feedback">
+                            <div class="flex items-center space-x-3">
+                                <svg class="w-5 h-5 text-bytspot-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                </svg>
+                                <span class="text-white font-medium">Account Settings</span>
+                            </div>
+                            <svg class="w-5 h-5 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                            </svg>
+                        </button>
+
+                        <button class="w-full bg-white/5 rounded-lg p-3 flex items-center justify-between haptic-feedback">
+                            <div class="flex items-center space-x-3">
+                                <svg class="w-5 h-5 text-bytspot-magenta" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1"></path>
+                                </svg>
+                                <span class="text-white font-medium">Payment Methods</span>
+                            </div>
+                            <svg class="w-5 h-5 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                            </svg>
+                        </button>
+
+                        <button class="w-full bg-white/5 rounded-lg p-3 flex items-center justify-between haptic-feedback">
+                            <div class="flex items-center space-x-3">
+                                <svg class="w-5 h-5 text-bytspot-orange" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                <span class="text-white font-medium">Preferences</span>
+                            </div>
+                            <svg class="w-5 h-5 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- FOOTER NAVIGATION (5-Section) -->
+        <footer class="footer-nav">
+            <div class="flex items-center justify-around px-2">
+                <!-- Discover -->
+                <div class="nav-item active haptic-feedback" data-section="discover">
+                    <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                    </svg>
+                    <span class="nav-label">Discover</span>
+                </div>
+
+                <!-- Map -->
+                <div class="nav-item haptic-feedback" data-section="map">
+                    <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m-6 3l6-3"></path>
+                    </svg>
+                    <span class="nav-label">Map</span>
+                </div>
+
+                <!-- Insider -->
+                <div class="nav-item haptic-feedback" data-section="insider">
+                    <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"></path>
+                    </svg>
+                    <span class="nav-label">Insider</span>
+                </div>
+
+                <!-- Concierge -->
+                <div class="nav-item haptic-feedback" data-section="concierge">
+                    <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                    </svg>
+                    <span class="nav-label">Concierge</span>
+                </div>
+
+                <!-- Profile -->
+                <div class="nav-item haptic-feedback" data-section="profile">
+                    <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                    </svg>
+                    <span class="nav-label">Profile</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        class BytspotMobileApp {
+            constructor() {
+                this.currentSection = 'discover';
+                this.activeUsers = 846;
+                this.init();
+            }
+
+            init() {
+                this.setupNavigation();
+                this.setupAnimations();
+                this.setupHapticFeedback();
+                this.startRealTimeUpdates();
+                this.createParticleEffects();
+            }
+
+            setupNavigation() {
+                const navItems = document.querySelectorAll('.nav-item');
+                const sections = document.querySelectorAll('.content-section');
+
+                navItems.forEach(item => {
+                    item.addEventListener('click', () => {
+                        const targetSection = item.dataset.section;
+                        this.switchSection(targetSection);
+                        this.triggerHapticFeedback('light');
+                    });
+                });
+            }
+
+            switchSection(sectionName) {
+                // Remove active class from all nav items and sections
+                document.querySelectorAll('.nav-item').forEach(item => {
+                    item.classList.remove('active');
+                });
+                document.querySelectorAll('.content-section').forEach(section => {
+                    section.classList.remove('active');
+                });
+
+                // Add active class to selected nav item and section
+                document.querySelector(`[data-section="${sectionName}"]`).classList.add('active');
+                document.getElementById(`${sectionName}-section`).classList.add('active');
+
+                this.currentSection = sectionName;
+
+                // Animate section transition
+                gsap.fromTo(`#${sectionName}-section`,
+                    { opacity: 0, y: 20 },
+                    { opacity: 1, y: 0, duration: 0.5, ease: 'power2.out' }
+                );
+
+                // Update header based on section
+                this.updateHeaderForSection(sectionName);
+            }
+
+            updateHeaderForSection(sectionName) {
+                // You can customize header behavior per section here
+                console.log(`Switched to ${sectionName} section`);
+            }
+
+            setupAnimations() {
+                // Entrance animations
+                gsap.from('.header-section', { y: -50, opacity: 0, duration: 0.8, ease: 'back.out(1.7)' });
+                gsap.from('.section-card', { y: 50, opacity: 0, duration: 0.6, stagger: 0.1, ease: 'power2.out', delay: 0.3 });
+                gsap.from('.footer-nav', { y: 100, opacity: 0, duration: 0.8, ease: 'back.out(1.7)', delay: 0.5 });
+
+                // Continuous animations
+                gsap.to('.weather-live-indicator', {
+                    boxShadow: '0 0 20px rgba(255, 0, 0, 0.8)',
+                    duration: 2,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'power2.inOut'
+                });
+
+                // Floating particles
+                gsap.to('.particle', {
+                    y: -20,
+                    rotation: 180,
+                    duration: 6,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'power2.inOut',
+                    stagger: 1
+                });
+            }
+
+            setupHapticFeedback() {
+                const hapticElements = document.querySelectorAll('.haptic-feedback');
+
+                hapticElements.forEach(element => {
+                    element.addEventListener('click', () => {
+                        this.triggerHapticFeedback('light');
+
+                        // Visual feedback
+                        gsap.to(element, {
+                            scale: 0.95,
+                            duration: 0.1,
+                            yoyo: true,
+                            repeat: 1,
+                            ease: 'power2.inOut'
+                        });
+                    });
+                });
+            }
+
+            startRealTimeUpdates() {
+                // Update active users count
+                setInterval(() => {
+                    this.activeUsers += Math.floor(Math.random() * 10) - 5;
+                    this.activeUsers = Math.max(800, Math.min(900, this.activeUsers));
+
+                    const activeUsersElement = document.getElementById('activeUsers');
+                    activeUsersElement.textContent = this.activeUsers;
+
+                    // Animate the update
+                    gsap.fromTo(activeUsersElement,
+                        { scale: 1.2, color: '#00BFFF' },
+                        { scale: 1, color: '#00BFFF', duration: 0.5 }
+                    );
+                }, 5000);
+
+                // Pulse status indicators
+                setInterval(() => {
+                    gsap.to('.status-dot', {
+                        scale: 1.3,
+                        duration: 0.3,
+                        yoyo: true,
+                        repeat: 1,
+                        ease: 'power2.inOut',
+                        stagger: 0.1
+                    });
+                }, 3000);
+            }
+
+            createParticleEffects() {
+                // Add more dynamic particles
+                const particleContainer = document.querySelector('.floating-particles');
+
+                setInterval(() => {
+                    const particle = document.createElement('div');
+                    particle.className = 'particle';
+                    particle.style.width = Math.random() * 4 + 2 + 'px';
+                    particle.style.height = particle.style.width;
+                    particle.style.left = Math.random() * 100 + '%';
+                    particle.style.top = '100%';
+                    particle.style.background = `radial-gradient(circle, ${this.getRandomColor()} 0%, transparent 70%)`;
+
+                    particleContainer.appendChild(particle);
+
+                    // Animate particle
+                    gsap.to(particle, {
+                        y: -window.innerHeight - 50,
+                        x: Math.random() * 100 - 50,
+                        opacity: 0,
+                        duration: Math.random() * 5 + 3,
+                        ease: 'power2.out',
+                        onComplete: () => particle.remove()
+                    });
+                }, 2000);
+            }
+
+            getRandomColor() {
+                const colors = [
+                    'rgba(0, 191, 255, 0.6)',
+                    'rgba(255, 0, 255, 0.6)',
+                    'rgba(255, 69, 0, 0.6)',
+                    'rgba(0, 255, 127, 0.6)',
+                    'rgba(138, 43, 226, 0.6)'
+                ];
+                return colors[Math.floor(Math.random() * colors.length)];
+            }
+
+            triggerHapticFeedback(intensity) {
+                if ('vibrate' in navigator) {
+                    switch(intensity) {
+                        case 'light': navigator.vibrate(10); break;
+                        case 'medium': navigator.vibrate(50); break;
+                        case 'heavy': navigator.vibrate([100, 50, 100]); break;
+                    }
+                }
+            }
+
+            showNotification(message) {
+                const notification = document.createElement('div');
+                notification.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-90 text-white px-6 py-3 rounded-2xl z-50 backdrop-blur-sm';
+                notification.textContent = message;
+                document.body.appendChild(notification);
+
+                gsap.fromTo(notification,
+                    { y: -50, opacity: 0 },
+                    { y: 0, opacity: 1, duration: 0.5, ease: 'back.out(1.7)' }
+                );
+
+                setTimeout(() => {
+                    gsap.to(notification, {
+                        y: -50,
+                        opacity: 0,
+                        duration: 0.3,
+                        onComplete: () => notification.remove()
+                    });
+                }, 3000);
+            }
+        }
+
+        // Initialize the app when DOM is loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            const app = new BytspotMobileApp();
+
+            // Welcome message
+            setTimeout(() => {
+                app.showNotification('🚀 Welcome to Bytspot Neural Network!');
+            }, 1500);
+        });
+
+        // Prevent context menu and text selection for native app feel
+        document.addEventListener('contextmenu', e => e.preventDefault());
+        document.addEventListener('selectstart', e => e.preventDefault());
+    </script>
+</body>
+</html>

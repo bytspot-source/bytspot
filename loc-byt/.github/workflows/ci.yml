@@ -1,0 +1,199 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGION: us-west1
+  AR_REPO: bytspot-stg-images
+  SERVICE_NAME: bytspot-stg-auth-service
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+      - name: Build image (local)
+        run: |
+          docker build -t auth-service:ci -f services/auth-service/Dockerfile . || echo "No auth-service Dockerfile yet"
+      - name: File scan (Trivy)
+        run: trivy fs --exit-code 0 --severity HIGH,CRITICAL .
+      - name: Image scan (Trivy)
+        run: trivy image --exit-code 0 auth-service:ci || true
+
+  push-image:
+    needs: build-test-scan
+    if: (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
+        secrets.WORKLOAD_IDENTITY_PROVIDER != '' &&
+        secrets.DEPLOYER_SERVICE_ACCOUNT != '' &&
+        secrets.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-22.04
+    outputs:
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Auth to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Configure Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
+      - id: push
+        name: Build & push API image
+        run: |
+          IMAGE_URL="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-auth-service:${{ github.sha }}"
+          echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+          docker build -t "$IMAGE_URL" -f services/auth-service/Dockerfile .
+          docker push "$IMAGE_URL"
+
+  deploy-staging:
+    needs: push-image
+    if: secrets.WORKLOAD_IDENTITY_PROVIDER != '' &&
+        secrets.DEPLOYER_SERVICE_ACCOUNT != '' &&
+        secrets.GCP_PROJECT_ID != '' &&
+        secrets.RUNTIME_SERVICE_ACCOUNT_STG != '' &&
+        secrets.STAGING_DATABASE_URL != ''
+    concurrency:
+      group: loc-byt-${{ env.SERVICE_NAME }}-stg
+      cancel-in-progress: true
+    runs-on: ubuntu-22.04
+    environment: staging
+    steps:
+      - name: Auth to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Deploy to Cloud Run (staging)
+        id: deploy_staging
+        run: |
+          IMAGE_URL="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-auth-service:${{ needs.push-image.outputs.sha }}"
+          EXTRA_CSQL=""
+          if [ -n "${{ secrets.CLOUDSQL_INSTANCE_STG }}" ]; then EXTRA_CSQL="--add-cloudsql-instances ${{ secrets.CLOUDSQL_INSTANCE_STG }}"; fi
+          for i in 1 2 3; do
+            SERVICE_URL=$(gcloud run deploy ${{ env.SERVICE_NAME }} \
+              --image "$IMAGE_URL" \
+              --region ${{ env.REGION }} \
+              --platform managed \
+              --allow-unauthenticated \
+              --max-instances 2 \
+              --service-account="${{ secrets.RUNTIME_SERVICE_ACCOUNT_STG }}" \
+              $EXTRA_CSQL \
+              --set-env-vars=ENV=staging,GIT_SHA=${{ needs.push-image.outputs.sha }},DATABASE_URL=${{ secrets.STAGING_DATABASE_URL }} \
+              --format='value(status.url)') && break || {
+                echo "Deploy attempt $i failed; retrying in 5s...";
+                sleep 5;
+              }
+          done
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+      - name: Health Check (staging) and rollback on failure
+        run: |
+          set -euo pipefail
+          URL="${{ steps.deploy_staging.outputs.service_url }}"
+          echo "Checking $URL/health"
+          for i in 1 2 3; do
+            if curl -fsS --max-time 5 "$URL/health" || curl -fsS --max-time 5 "$URL/healthz"; then
+              echo "Health OK"
+              exit 0
+            fi
+            echo "Health attempt $i failed; retrying..."
+            sleep 5
+          done
+          echo "Health check failed; attempting rollback."
+          PREV=$(gcloud run revisions list --service ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format='value(metadata.name)' --sort-by="~metadata.creationTimestamp" | sed -n '2p')
+          if [ -n "$PREV" ]; then
+            gcloud run services update-traffic ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --to-revisions "$PREV=100"
+          else
+            echo "No previous revision to roll back to."
+          fi
+          exit 1
+
+
+  deploy-production:
+    if: github.event_name == 'workflow_dispatch' &&
+        secrets.WORKLOAD_IDENTITY_PROVIDER != '' &&
+        secrets.PRODUCTION_DEPLOYER_SERVICE_ACCOUNT != '' &&
+        secrets.GCP_PROJECT_ID != '' &&
+        secrets.RUNTIME_SERVICE_ACCOUNT_PROD != '' &&
+        secrets.PRODUCTION_DATABASE_URL != ''
+    needs: push-image
+    concurrency:
+      group: loc-byt-bytspot-prod-auth-service-prod
+      cancel-in-progress: true
+    runs-on: ubuntu-22.04
+    environment:
+      name: production
+      url: https://api.bytspot.com
+    steps:
+      - name: Auth to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.PRODUCTION_DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Promote image and deploy (manual)
+        id: deploy_production
+        run: |
+          IMAGE_URL="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/bytspot-auth-service:${{ needs.push-image.outputs.sha }}"
+          EXTRA_CSQL=""
+          if [ -n "${{ secrets.CLOUDSQL_INSTANCE_PROD }}" ]; then EXTRA_CSQL="--add-cloudsql-instances ${{ secrets.CLOUDSQL_INSTANCE_PROD }}"; fi
+          for i in 1 2 3; do
+            SERVICE_URL=$(gcloud run deploy bytspot-prod-auth-service \
+              --image "$IMAGE_URL" \
+              --region ${{ env.REGION }} \
+              --platform managed \
+              --allow-unauthenticated \
+              --max-instances 5 \
+              --service-account="${{ secrets.RUNTIME_SERVICE_ACCOUNT_PROD }}" \
+              $EXTRA_CSQL \
+              --set-env-vars=ENV=production,GIT_SHA=${{ needs.push-image.outputs.sha }},DATABASE_URL='${{ secrets.PRODUCTION_DATABASE_URL }}' \
+              --format='value(status.url)') && break || {
+                echo "Deploy attempt $i failed; retrying in 5s...";
+                sleep 5;
+              }
+          done
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+      - name: Health Check (production) and rollback on failure
+        run: |
+          set -euo pipefail
+          URL="${{ steps.deploy_production.outputs.service_url }}"
+          echo "Checking $URL/health"
+          for i in 1 2 3; do
+            if curl -fsS --max-time 5 "$URL/health" || curl -fsS --max-time 5 "$URL/healthz"; then
+              echo "Health OK"
+              exit 0
+            fi
+            echo "Health attempt $i failed; retrying..."
+            sleep 5
+          done
+          echo "Health check failed; attempting rollback."
+          PREV=$(gcloud run revisions list --service bytspot-prod-auth-service --region ${{ env.REGION }} --format='value(metadata.name)' --sort-by="~metadata.creationTimestamp" | sed -n '2p')
+          if [ -n "$PREV" ]; then
+            gcloud run services update-traffic bytspot-prod-auth-service --region ${{ env.REGION }} --to-revisions "$PREV=100"
+          else
+            echo "No previous revision to roll back to."
+          fi
+          exit 1

@@ -1,0 +1,79 @@
+openapi: 3.0.3
+info:
+  title: Bytspot Venue API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8092
+paths:
+  /venues/discover:
+    get:
+      summary: Discover venues near a location
+      parameters:
+        - in: query
+          name: lat
+          schema: { type: number }
+          required: true
+        - in: query
+          name: lon
+          schema: { type: number }
+          required: true
+        - in: query
+          name: radius
+          schema: { type: number, default: 1000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Venue'
+  /venues/{id}:
+    get:
+      summary: Get venue by ID
+      parameters:
+        - in: path
+          name: id
+          schema: { type: string }
+          required: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Venue'
+        '404': { description: Not Found }
+  /venues/{id}/like:
+    post:
+      summary: Like a venue
+      parameters:
+        - in: path
+          name: id
+          schema: { type: string }
+          required: true
+      security:
+        - bearerAuth: []
+      responses:
+        '204': { description: No Content }
+        '401': { description: Unauthorized }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Venue:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        subtitle: { type: string }
+        rating: { type: number }
+        distance: { type: string }
+        price: { type: string }

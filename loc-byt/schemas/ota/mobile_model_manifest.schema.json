@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bytspot.ai/schemas/ota/mobile_model_manifest.schema.json",
+  "title": "Mobile Model Manifest",
+  "type": "object",
+  "required": ["model_name", "version", "min_app_version", "urls", "sha256", "size", "rollout_phase"],
+  "properties": {
+    "model_name": {"type": "string", "enum": ["concierge", "vibe"]},
+    "version": {"type": "string"},
+    "platform": {"type": "string", "enum": ["ios", "android"]},
+    "arch": {"type": "string", "enum": ["arm64", "x86_64"]},
+    "cohort": {"type": "string"},
+    "min_app_version": {"type": "string"},
+    "urls": {
+      "type": "object",
+      "properties": {
+        "full": {"type": "string", "format": "uri"},
+        "delta_from": {"type": "string"},
+        "delta_url": {"type": "string", "format": "uri"}
+      },
+      "required": ["full"]
+    },
+    "sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+    "size": {"type": "integer", "minimum": 1},
+    "rollout_phase": {"type": "string", "enum": ["canary", "ramp", "full", "paused"]},
+    "kill_switch": {"type": "boolean"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "etag": {"type": "string"}
+  }
+}
+

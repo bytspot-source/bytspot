@@ -1,0 +1,21 @@
+
+  <!DOCTYPE html>
+  <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Bytspot</title>
+    </head>
+
+    <body>
+      <div id="root"></div>
+      <script type="module">
+        const path = window.location.pathname;
+        if (path.startsWith('/admin')) {
+          import('/src/admin/AdminMain.tsx');
+        } else {
+          import('/src/main.tsx');
+        }
+      </script>
+    </body>
+  </html>

@@ -1,0 +1,274 @@
+name: CI/CD
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGION: us-west1
+  AR_REPO: bytspot-stg-images
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: auth-service
+            image: auth-service
+            run: bytspot-stg-auth
+            run_prod: bytspot-prod-auth
+          - dir: gateway-bff
+            image: gateway-bff
+            run: bytspot-stg-gateway
+            run_prod: bytspot-prod-gateway
+          - dir: ingestion-service
+            image: ingestion-service
+            run: bytspot-stg-ingestion
+            run_prod: bytspot-prod-ingestion
+          - dir: model-orchestrator
+            image: model-orchestrator
+            run: bytspot-stg-model-orchestrator
+            run_prod: bytspot-prod-model-orchestrator
+          - dir: ota-service
+            image: ota-service
+            run: bytspot-stg-ota
+            run_prod: bytspot-prod-ota
+          - dir: parking-service
+            image: parking-service
+            run: bytspot-stg-parking
+            run_prod: bytspot-prod-parking
+          - dir: valet-service
+            image: valet-service
+            run: bytspot-stg-valet
+            run_prod: bytspot-prod-valet
+          - dir: venue-service
+            image: venue-service
+            run: bytspot-stg-venue
+            run_prod: bytspot-prod-venue
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        if: ${{ hashFiles(format('services/{0}/package.json', matrix.dir)) != '' }}
+        working-directory: services/${{ matrix.dir }}
+        continue-on-error: true
+        run: npm ci --no-audit --no-fund
+      - name: Run unit tests
+        if: ${{ hashFiles(format('services/{0}/package.json', matrix.dir)) != '' }}
+        working-directory: services/${{ matrix.dir }}
+        continue-on-error: true
+        run: npm test --silent
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+      - name: Build image (local)
+        run: |
+          docker build -t "${{ matrix.image }}:ci" -f "services/${{ matrix.dir }}/Dockerfile" . || echo "No Dockerfile yet"
+      - name: File scan (Trivy)
+        run: trivy fs --exit-code 0 --severity HIGH,CRITICAL .
+      - name: Image scan (Trivy)
+        run: trivy image --exit-code 0 "${{ matrix.image }}:ci" || true
+
+  push-image:
+    needs: build-test-scan
+    if: github.repository == 'bytspot-source/bytspot' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: auth-service
+            image: auth-service
+            run: bytspot-stg-auth
+            run_prod: bytspot-prod-auth
+          - dir: gateway-bff
+            image: gateway-bff
+            run: bytspot-stg-gateway
+            run_prod: bytspot-prod-gateway
+          - dir: ingestion-service
+            image: ingestion-service
+            run: bytspot-stg-ingestion
+            run_prod: bytspot-prod-ingestion
+          - dir: model-orchestrator
+            image: model-orchestrator
+            run: bytspot-stg-model-orchestrator
+            run_prod: bytspot-prod-model-orchestrator
+          - dir: ota-service
+            image: ota-service
+            run: bytspot-stg-ota
+            run_prod: bytspot-prod-ota
+          - dir: parking-service
+            image: parking-service
+            run: bytspot-stg-parking
+            run_prod: bytspot-prod-parking
+          - dir: valet-service
+            image: valet-service
+            run: bytspot-stg-valet
+            run_prod: bytspot-prod-valet
+          - dir: venue-service
+            image: venue-service
+            run: bytspot-stg-venue
+            run_prod: bytspot-prod-venue
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Auth to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Configure Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
+      - id: push
+        name: Build & push image
+        run: |
+          SERVICE_DIR="services/${{ matrix.dir }}"
+          if [ -f "$SERVICE_DIR/Dockerfile" ]; then
+            IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/${{ matrix.image }}:${{ github.sha }}"
+            echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+            echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+            docker build -t "$IMAGE" -f "$SERVICE_DIR/Dockerfile" .
+            docker push "$IMAGE"
+          else
+            echo "No Dockerfile at $SERVICE_DIR/Dockerfile; skipping."
+            echo "image=" >> "$GITHUB_OUTPUT"
+          fi
+
+
+  deploy-staging:
+    needs: push-image
+    if: github.repository == 'bytspot-source/bytspot' && needs.push-image.outputs.image != ''
+    runs-on: ubuntu-22.04
+    environment:
+      name: staging
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: auth-service
+            image: auth-service
+            run: bytspot-stg-auth
+            run_prod: bytspot-prod-auth
+          - dir: gateway-bff
+            image: gateway-bff
+            run: bytspot-stg-gateway
+            run_prod: bytspot-prod-gateway
+          - dir: ingestion-service
+            image: ingestion-service
+            run: bytspot-stg-ingestion
+            run_prod: bytspot-prod-ingestion
+          - dir: model-orchestrator
+            image: model-orchestrator
+            run: bytspot-stg-model-orchestrator
+            run_prod: bytspot-prod-model-orchestrator
+          - dir: ota-service
+            image: ota-service
+            run: bytspot-stg-ota
+            run_prod: bytspot-prod-ota
+          - dir: parking-service
+            image: parking-service
+            run: bytspot-stg-parking
+            run_prod: bytspot-prod-parking
+          - dir: valet-service
+            image: valet-service
+            run: bytspot-stg-valet
+            run_prod: bytspot-prod-valet
+          - dir: venue-service
+            image: venue-service
+            run: bytspot-stg-venue
+            run_prod: bytspot-prod-venue
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy to Cloud Run (staging)
+        run: |
+          if ! gcloud run services describe ${{ matrix.run }} --region ${{ env.REGION }} >/dev/null 2>&1; then
+            echo "Cloud Run service '${{ matrix.run }}' not found in region ${{ env.REGION }}"
+            exit 1
+          fi
+          gcloud run deploy ${{ matrix.run }} \
+            --image "${{ needs.push-image.outputs.image }}" \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --max-instances 50 \
+            --set-env-vars=ENV=staging,GIT_SHA=${{ github.sha }}
+
+
+  deploy-production:
+    if: github.repository == 'bytspot-source/bytspot' && github.event_name == 'workflow_dispatch' && needs.push-image.outputs.image != ''
+    needs: push-image
+    runs-on: ubuntu-22.04
+    environment:
+      name: production
+      url: https://api.bytspot.com
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: auth-service
+            image: auth-service
+            run: bytspot-stg-auth
+            run_prod: bytspot-prod-auth
+          - dir: gateway-bff
+            image: gateway-bff
+            run: bytspot-stg-gateway
+            run_prod: bytspot-prod-gateway
+          - dir: ingestion-service
+            image: ingestion-service
+            run: bytspot-stg-ingestion
+            run_prod: bytspot-prod-ingestion
+          - dir: model-orchestrator
+            image: model-orchestrator
+            run: bytspot-stg-model-orchestrator
+            run_prod: bytspot-prod-model-orchestrator
+          - dir: ota-service
+            image: ota-service
+            run: bytspot-stg-ota
+            run_prod: bytspot-prod-ota
+          - dir: parking-service
+            image: parking-service
+            run: bytspot-stg-parking
+            run_prod: bytspot-prod-parking
+          - dir: valet-service
+            image: valet-service
+            run: bytspot-stg-valet
+            run_prod: bytspot-prod-valet
+          - dir: venue-service
+            image: venue-service
+            run: bytspot-stg-venue
+            run_prod: bytspot-prod-venue
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Promote image and deploy (manual)
+        run: |
+          if ! gcloud run services describe ${{ matrix.run_prod }} --region ${{ env.REGION }} >/dev/null 2>&1; then
+            echo "Cloud Run service '${{ matrix.run_prod }}' not found in region ${{ env.REGION }}"
+            exit 1
+          fi
+          gcloud run deploy ${{ matrix.run_prod }} \
+            --image "${{ needs.push-image.outputs.image }}" \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --max-instances 200 \
+            --set-env-vars=ENV=production,GIT_SHA=${{ github.sha }}

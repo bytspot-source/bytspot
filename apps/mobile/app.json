@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "MatchSpot Mobile",
+    "slug": "matchspot-mobile",
+    "scheme": "matchspot",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": { "image": "./assets/splash.png", "resizeMode": "contain", "backgroundColor": "#000000" },
+    "ios": { "bundleIdentifier": "ai.bytspot.matchspot", "supportsTablet": true },
+    "android": { "package": "ai.bytspot.matchspot", "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#000000" } },
+    "plugins": [
+      ["expo-secure-store"],
+      ["expo-constants"],
+      ["expo-location"],
+      ["expo-task-manager"],
+      ["sentry-expo"]
+    ],
+    "extra": {
+      "eas": { "projectId": "local-dev" },
+      "BFF_URL": "http://localhost:3001",
+      "GEOfence_ENABLED": false
+    }
+  }
+}
+

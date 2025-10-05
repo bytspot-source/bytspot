@@ -1,0 +1,152 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=bytspot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    environment:
+      - PORT=8090
+      - JWT_SECRET=dev_secret_change_me
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/bytspot?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  venue-service:
+    build:
+      context: .
+      dockerfile: services/venue-service/Dockerfile
+    environment:
+      - PORT=8092
+    ports:
+      - "8092:8092"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: services/ingestion-service/Dockerfile
+    environment:
+      - PORT=8080
+      - SERVICE_NAME=ingestion-service
+      - VERSION=0.1.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+      - neo4j
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  model-orchestrator:
+    build:
+      context: .
+      dockerfile: services/model-orchestrator/Dockerfile
+    environment:
+      - PORT=8081
+      - SERVICE_NAME=model-orchestrator
+      - VERSION=0.1.0
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ota-service:
+    build:
+      context: .
+      dockerfile: services/ota-service/Dockerfile
+    environment:
+      - PORT=8082
+      - SERVICE_NAME=ota-service
+      - VERSION=0.1.0
+    ports:
+      - "8082:8082"
+    depends_on:
+      - redis
+      - neo4j
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  neo4j:
+    image: neo4j:5.19
+    environment:
+      - NEO4J_AUTH=neo4j/test1234
+      - NEO4J_PLUGINS=["apoc"]
+    ports:
+      - "7474:7474" # HTTP UI
+      - "7687:7687" # Bolt
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "test1234", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  gateway-bff:
+    build:
+      context: services/gateway-bff
+      dockerfile: Dockerfile
+    environment:
+      - PORT=3000
+      - AUTH_SERVICE_URL=http://auth-service:8090
+      - VENUE_SERVICE_URL=http://venue-service:8092
+      - JWT_SECRET=dev_secret_change_me
+    ports:
+      - "3000:3000"
+    depends_on:
+      - auth-service
+      - venue-service
+
+volumes:
+  neo4j_data:
+  pg_data:

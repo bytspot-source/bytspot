@@ -1,0 +1,21 @@
+{
+  "cli": { "version": ">= 4.0.0" },
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview"
+    },
+    "staging": {
+      "distribution": "internal",
+      "channel": "staging"
+    },
+    "production": {
+      "distribution": "store",
+      "channel": "production"
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
+

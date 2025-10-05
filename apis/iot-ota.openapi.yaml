@@ -1,0 +1,62 @@
+openapi: 3.0.3
+info:
+  title: Bytspot IoT OTA API
+  version: 0.1.0
+servers:
+  - url: https://api.bytspot.example.com
+paths:
+  /iot/manifest:
+    get:
+      summary: Get manifest for signage device
+      responses:
+        '200':
+          description: Manifest
+          headers:
+            ETag: { description: Entity tag, schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IoTDeviceManifest'
+        '304': { description: Not Modified }
+        '401': { description: Unauthorized }
+  /iot/telemetry:
+    post:
+      summary: Post device telemetry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IoTTelemetry'
+      responses:
+        '202': { description: Accepted }
+  /iot/rollout:
+    post:
+      summary: Create or update rollout plan (admin)
+      responses:
+        '201': { description: Created }
+        '403': { description: Forbidden }
+components:
+  schemas:
+    IoTDeviceManifest:
+      $ref: '../schemas/ota/iot_device_manifest.schema.json'
+    IoTTelemetry:
+      type: object
+      required: [device_id, ts]
+      properties:
+        device_id: { type: string }
+        current_firmware: { type: string }
+        current_content: { type: string }
+        boot_slot: { type: string, enum: [A, B] }
+        last_update_status: { type: string }
+        last_boot_ok: { type: boolean }
+        temp: { type: number }
+        signal_strength: { type: number }
+        ts: { type: string, format: date-time }
+security:
+  - mTLS: []
+components:
+  securitySchemes:
+    mTLS:
+      type: mutualTLS
+

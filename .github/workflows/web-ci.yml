@@ -1,0 +1,58 @@
+name: Web App CI
+
+on:
+  push:
+    branches: [ main, ci/scoped-triggers-bytspot ]
+    paths:
+      - 'loc-byt/**'
+      - 'packages/design-tokens/**'
+      - '.github/workflows/web-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'loc-byt/**'
+      - 'packages/design-tokens/**'
+  workflow_dispatch:
+
+jobs:
+  web-build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: loc-byt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: loc-byt/package-lock.json
+      
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      
+      - name: Sync design tokens from Figma (optional)
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.FIGMA_TOKEN }}" ] && [ -n "${{ secrets.FIGMA_FILE_KEY }}" ]; then
+            echo "🎨 Syncing Figma design tokens..."
+            FIGMA_TOKEN='${{ secrets.FIGMA_TOKEN }}' FIGMA_FILE_KEY='${{ secrets.FIGMA_FILE_KEY }}' npm run tokens:sync
+            echo "✅ Figma tokens synced successfully"
+          else
+            echo "⚠️  FIGMA_TOKEN/FIGMA_FILE_KEY not set; using existing tokens"
+            npm run tokens:build
+          fi
+      
+      - name: Build web app
+        run: npm run build
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: loc-byt/build/
+          retention-days: 7
+

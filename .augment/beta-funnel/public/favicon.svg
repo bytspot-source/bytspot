@@ -1,14 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
   <defs>
-    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#a855f7"/>
-      <stop offset="100%" stop-color="#22d3ee"/>
+    <!-- Outer ring: Cyan → Purple → Cyan -->
+    <linearGradient id="gradient-outer-ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00BFFF"/>
+      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#00BFFF"/>
     </linearGradient>
+    <!-- Middle ring: Purple → Pink -->
+    <linearGradient id="gradient-middle" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#D946EF"/>
+    </linearGradient>
+    <!-- Hexagon fill: Purple → Pink → Magenta -->
+    <linearGradient id="gradient-hexagon" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="50%" stop-color="#D946EF"/>
+      <stop offset="100%" stop-color="#FF00FF"/>
+    </linearGradient>
+    <!-- Hexagon border: Cyan → Magenta -->
+    <linearGradient id="gradient-hex-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00BFFF"/>
+      <stop offset="100%" stop-color="#FF00FF"/>
+    </linearGradient>
+    <!-- Center dot: Cyan radial -->
+    <radialGradient id="gradient-center-dot" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00BFFF"/>
+      <stop offset="100%" stop-color="#0099CC"/>
+    </radialGradient>
+    <!-- Center glow -->
+    <radialGradient id="gradient-center-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00BFFF" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#00BFFF" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <rect width="32" height="32" rx="8" fill="url(#g)"/>
-  <circle cx="16" cy="14" r="5" fill="none" stroke="#fff" stroke-width="2"/>
-  <circle cx="16" cy="14" r="1.5" fill="#fff"/>
-  <path d="M16 19 L16 24" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
-  <path d="M13 22 L19 22" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  <!-- Outer ring -->
+  <circle cx="60" cy="60" r="48" fill="none" stroke="url(#gradient-outer-ring)" stroke-width="3"/>
+  <!-- Middle ring -->
+  <circle cx="60" cy="60" r="38" fill="none" stroke="url(#gradient-middle)" stroke-width="2" opacity="0.4"/>
+  <!-- Hexagon fill -->
+  <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="url(#gradient-hexagon)"/>
+  <!-- Hexagon border -->
+  <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="none" stroke="url(#gradient-hex-border)" stroke-width="1.5"/>
+  <!-- Center glow -->
+  <circle cx="60" cy="60" r="12" fill="url(#gradient-center-glow)"/>
+  <!-- Center dot -->
+  <circle cx="60" cy="60" r="8" fill="url(#gradient-center-dot)"/>
 </svg>
 

@@ -66,7 +66,7 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
       </div>
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md relative z-10 flex flex-col gap-8">
         {!isSuccess ? (<>
-          <HeaderSection standalone={standalone} />
+          <HeaderSection />
           <ProductMockCard />
           <SignupForm email={email} setEmail={setEmail} isSubmitting={isSubmitting} spotsLeft={spotsLeft} isDarkMode={isDarkMode} onSubmit={handleSubmit} />
         </>) : (
@@ -78,7 +78,7 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
   </>);
 }
 
-function HeaderSection({ standalone }: { standalone: boolean }) {
+function HeaderSection() {
   return (
     <div className="text-center space-y-4">
       <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 backdrop-blur-md border border-white/20 shadow-lg">

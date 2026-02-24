@@ -197,7 +197,7 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
         <h2 className="text-2xl font-bold text-white">{alreadySignedUp ? "You're already on the list!" : "You're on the list."}</h2>
         <p className="text-white/70">Keep an eye on your inbox.<br />We'll notify you when your spot is ready.</p>
       </div>
-      <div className="pt-4"><div className="text-sm font-medium text-purple-400 bg-purple-400/10 py-2 px-4 rounded-lg inline-block">{onComplete ? 'Entering Bytspot Preview...' : "We'll be in touch soon."}</div></div>
+      <div className="pt-4"><div className="text-sm font-medium text-purple-400 bg-purple-400/10 py-2 px-4 rounded-lg inline-block">{onComplete ? 'Entering Bytspot Preview...' : "Midtown Beta goes live soon. We're testing live line data this weekend."}</div></div>
       {standalone && !onComplete && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="pt-2">
           <p className="text-[12px] text-white/40 mb-3">Share with friends in Midtown</p>

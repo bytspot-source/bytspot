@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Bytspot QR Flyer — Print Me</title>
+  <style>
+    @page { size: A5 portrait; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000; color: #fff;
+      font-family: -apple-system, SF Pro Display, system-ui, sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; padding: 24px;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    }
+    .flyer {
+      width: 100%; max-width: 420px;
+      display: flex; flex-direction: column; align-items: center;
+      gap: 28px; padding: 48px 32px;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 24px;
+      background: linear-gradient(135deg, #1a0533 0%, #000 50%, #0a1628 100%);
+    }
+    .wordmark {
+      font-size: 36px; font-weight: 800; letter-spacing: -0.02em;
+      background: linear-gradient(90deg, #00BFFF, #A855F7, #FF00FF);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .tagline {
+      font-size: 28px; font-weight: 700; text-align: center;
+      line-height: 1.2; letter-spacing: -0.01em;
+    }
+    .tagline em {
+      font-style: normal;
+      background: linear-gradient(90deg, #a855f7, #22d3ee);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .subtitle {
+      font-size: 14px; color: rgba(255,255,255,0.6);
+      text-align: center; line-height: 1.5; max-width: 300px;
+    }
+    .features {
+      display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;
+    }
+    .feature {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: rgba(255,255,255,0.5);
+    }
+    .dot-red { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+    .dot-cyan { width: 8px; height: 8px; border-radius: 50%; background: #22d3ee; }
+    .dot-purple { width: 8px; height: 8px; border-radius: 50%; background: #a855f7; }
+    .qr-container {
+      background: #fff; border-radius: 16px; padding: 16px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .qr-container img { width: 180px; height: 180px; display: block; }
+    .cta {
+      font-size: 18px; font-weight: 700; text-align: center;
+      background: linear-gradient(90deg, #a855f7, #22d3ee);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .url {
+      font-size: 13px; color: rgba(255,255,255,0.35);
+      letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 999px;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      font-size: 10px; color: rgba(255,255,255,0.4);
+      text-transform: uppercase; letter-spacing: 0.1em;
+    }
+    .print-btn {
+      position: fixed; bottom: 24px; right: 24px;
+      padding: 12px 24px; border-radius: 12px; border: none;
+      background: linear-gradient(90deg, #a855f7, #22d3ee);
+      color: #fff; font-weight: 700; font-size: 15px;
+      cursor: pointer; z-index: 100;
+    }
+    .print-btn:hover { opacity: 0.9; }
+    @media print { .print-btn { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="flyer">
+    <p class="wordmark">Bytspot</p>
+    <h1 class="tagline">Know <em>Before</em> You Go.</h1>
+    <p class="subtitle">Live crowd levels, parking availability, and ride options for Atlanta Midtown venues — all in one app.</p>
+    <div class="features">
+      <span class="feature"><span class="dot-red"></span>Live Crowds</span>
+      <span class="feature"><span class="dot-cyan"></span>Open Parking</span>
+      <span class="feature"><span class="dot-purple"></span>Ride ETAs</span>
+    </div>
+    <div class="qr-container">
+      <img src="/qr-code.svg" alt="Scan to join Bytspot beta" />
+    </div>
+    <p class="cta">Scan to Get Early Access</p>
+    <p class="url">bytspot.com</p>
+    <span class="badge">Free for first 100 Midtown users</span>
+  </div>
+  <button class="print-btn" onclick="window.print()">🖨️ Print Flyer</button>
+</body>
+</html>
+

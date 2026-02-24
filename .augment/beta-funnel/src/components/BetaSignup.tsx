@@ -201,9 +201,10 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
       {standalone && !onComplete && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="pt-2">
           <p className="text-[12px] text-white/40 mb-3">Share with friends in Midtown</p>
-          <div className="flex items-center justify-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-3">
             <button onClick={() => { const t = encodeURIComponent("I just got early access to Bytspot — live crowd levels, parking & ride options for Atlanta Midtown venues. Get yours:"); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }} className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors flex items-center gap-1.5">Share on X<ExternalLink className="w-3 h-3" /></button>
             <button onClick={() => { navigator.clipboard.writeText(window.location.href); toast.success('Link copied!'); }} className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors">Copy Link</button>
+            <button onClick={() => window.open('/flyer.html', '_blank')} className="min-h-[44px] px-5 py-2.5 rounded-lg bg-gradient-to-r from-purple-500/20 to-cyan-500/20 border border-purple-500/30 text-white/80 text-[13px] hover:from-purple-500/30 hover:to-cyan-500/30 active:from-purple-500/40 active:to-cyan-500/40 transition-colors flex items-center gap-1.5">🖨️ Print QR Flyer</button>
           </div>
         </motion.div>
       )}

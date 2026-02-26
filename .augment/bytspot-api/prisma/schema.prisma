@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users ───────────────────────────────────────────
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String?
+  ref       String?  // signup source: "qr", "tiktok", "organic"
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+// ─── Venues ──────────────────────────────────────────
+model Venue {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  address     String
+  lat         Float
+  lng         Float
+  category    String   // "bar", "restaurant", "club", "park", "market"
+  imageUrl    String?  @map("image_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  crowdLevels CrowdLevel[]
+  parking     ParkingSpot[]
+
+  @@map("venues")
+}
+
+// ─── Crowd Levels (time-series) ──────────────────────
+model CrowdLevel {
+  id        String   @id @default(cuid())
+  venueId   String   @map("venue_id")
+  level     Int      // 1=chill, 2=moderate, 3=busy, 4=packed
+  label     String   // "Chill", "Active", "Busy", "Packed"
+  waitMins  Int?     @map("wait_mins")
+  source    String   @default("manual") // "manual", "sensor", "user_report"
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@index([venueId, recordedAt(sort: Desc)])
+  @@map("crowd_levels")
+}
+
+// ─── Parking ─────────────────────────────────────────
+model ParkingSpot {
+  id          String   @id @default(cuid())
+  venueId     String   @map("venue_id")
+  name        String   // "Lot A", "Street — 10th St"
+  type        String   // "lot", "garage", "street"
+  totalSpots  Int      @map("total_spots")
+  available   Int
+  pricePerHr  Float?   @map("price_per_hr")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@index([venueId])
+  @@map("parking_spots")
+}

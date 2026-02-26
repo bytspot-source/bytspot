@@ -3,106 +3,145 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Bytspot QR Flyer — Print Me</title>
+  <title>Bytspot — Awareness Flyer</title>
   <style>
-    @page { size: A5 portrait; margin: 0; }
+    @page { size: A4 portrait; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       background: #000; color: #fff;
-      font-family: -apple-system, SF Pro Display, system-ui, sans-serif;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; padding: 24px;
+      font-family: -apple-system, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
       -webkit-print-color-adjust: exact; print-color-adjust: exact;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; padding: 0;
     }
     .flyer {
-      width: 100%; max-width: 420px;
+      width: 210mm; min-height: 297mm;
+      background: linear-gradient(160deg, #0d0221 0%, #000000 40%, #020a18 100%);
       display: flex; flex-direction: column; align-items: center;
-      gap: 28px; padding: 48px 32px;
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 24px;
-      background: linear-gradient(135deg, #1a0533 0%, #000 50%, #0a1628 100%);
+      padding: 44px 40px 36px; position: relative; overflow: hidden;
     }
-    .wordmark {
-      font-size: 36px; font-weight: 800; letter-spacing: -0.02em;
+    .flyer::before {
+      content: ''; position: absolute; top: -80px; left: -60px;
+      width: 320px; height: 320px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(168,85,247,0.25) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .flyer::after {
+      content: ''; position: absolute; bottom: -60px; right: -40px;
+      width: 280px; height: 280px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(0,191,255,0.2) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .z { position: relative; z-index: 1; width: 100%; display: flex; flex-direction: column; align-items: center; }
+    .logo { width: 64px; height: 64px; margin-bottom: 12px; }
+    .wm {
+      font-size: 42px; font-weight: 800; letter-spacing: -0.03em;
       background: linear-gradient(90deg, #00BFFF, #A855F7, #FF00FF);
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
+      background-clip: text; margin-bottom: 6px;
     }
-    .tagline {
-      font-size: 28px; font-weight: 700; text-align: center;
-      line-height: 1.2; letter-spacing: -0.01em;
-    }
-    .tagline em {
-      font-style: normal;
-      background: linear-gradient(90deg, #a855f7, #22d3ee);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    .subtitle {
-      font-size: 14px; color: rgba(255,255,255,0.6);
-      text-align: center; line-height: 1.5; max-width: 300px;
-    }
-    .features {
-      display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;
-    }
-    .feature {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 12px; color: rgba(255,255,255,0.5);
-    }
-    .dot-red { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
-    .dot-cyan { width: 8px; height: 8px; border-radius: 50%; background: #22d3ee; }
-    .dot-purple { width: 8px; height: 8px; border-radius: 50%; background: #a855f7; }
-    .qr-container {
-      background: #fff; border-radius: 16px; padding: 16px;
-      display: flex; align-items: center; justify-content: center;
-    }
-    .qr-container img { width: 180px; height: 180px; display: block; }
-    .cta {
-      font-size: 18px; font-weight: 700; text-align: center;
-      background: linear-gradient(90deg, #a855f7, #22d3ee);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    .url {
-      font-size: 13px; color: rgba(255,255,255,0.35);
-      letter-spacing: 0.05em; text-transform: uppercase;
-    }
-    .badge {
+    .lb {
       display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 12px; border-radius: 999px;
-      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
-      font-size: 10px; color: rgba(255,255,255,0.4);
-      text-transform: uppercase; letter-spacing: 0.1em;
+      padding: 5px 14px; border-radius: 999px;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+      font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.7);
+      text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 28px;
     }
-    .print-btn {
-      position: fixed; bottom: 24px; right: 24px;
-      padding: 12px 24px; border-radius: 12px; border: none;
-      background: linear-gradient(90deg, #a855f7, #22d3ee);
-      color: #fff; font-weight: 700; font-size: 15px;
-      cursor: pointer; z-index: 100;
+    h1 {
+      font-size: 38px; font-weight: 800; text-align: center;
+      line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 14px;
     }
-    .print-btn:hover { opacity: 0.9; }
-    @media print { .print-btn { display: none; } }
+    h1 em {
+      font-style: normal;
+      background: linear-gradient(90deg, #A855F7, #22d3ee);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .aw {
+      font-size: 15px; color: rgba(255,255,255,0.6); text-align: center;
+      line-height: 1.65; max-width: 420px; margin-bottom: 32px;
+    }
+    .aw strong { color: rgba(255,255,255,0.85); }
+    .dv { width: 60px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, #A855F7, #22d3ee); margin-bottom: 32px; }
+    .fs { display: flex; gap: 16px; margin-bottom: 36px; width: 100%; max-width: 480px; }
+    .fc {
+      flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px 12px;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; text-align: center;
+    }
+    .fi { width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; }
+    .ir { background: rgba(239,68,68,0.15); } .ic { background: rgba(34,211,238,0.15); } .ip { background: rgba(168,85,247,0.15); }
+    .ft { font-size: 13px; font-weight: 700; color: #fff; }
+    .fd { font-size: 11px; color: rgba(255,255,255,0.45); line-height: 1.4; }
+    .hw { margin-bottom: 32px; text-align: center; width: 100%; max-width: 420px; }
+    .hl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.15em; color: rgba(255,255,255,0.3); margin-bottom: 16px; }
+    .ss { display: flex; justify-content: center; gap: 32px; }
+    .sp { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .sn { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, #A855F7, #22d3ee); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; color: #fff; }
+    .st { font-size: 11px; color: rgba(255,255,255,0.55); font-weight: 500; }
+    .qs {
+      display: flex; align-items: center; gap: 28px;
+      background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px; padding: 24px 32px; margin-bottom: 24px; max-width: 420px; width: 100%;
+    }
+    .qb { background: #fff; border-radius: 12px; padding: 10px; flex-shrink: 0; }
+    .qb img { width: 120px; height: 120px; display: block; }
+    .qt { display: flex; flex-direction: column; gap: 6px; }
+    .qc { font-size: 20px; font-weight: 800; line-height: 1.2; background: linear-gradient(90deg, #A855F7, #22d3ee); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .qd { font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.5; }
+    .fo { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: auto; padding-top: 16px; }
+    .ur { font-size: 16px; font-weight: 700; letter-spacing: 0.04em; background: linear-gradient(90deg, #00BFFF, #A855F7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .pl { font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 0.1em; }
+    .cr { font-size: 9px; color: rgba(255,255,255,0.15); }
+    .pb { position: fixed; bottom: 24px; right: 24px; padding: 14px 28px; border-radius: 14px; border: none; background: linear-gradient(90deg, #A855F7, #22d3ee); color: #fff; font-weight: 700; font-size: 15px; cursor: pointer; z-index: 100; box-shadow: 0 4px 24px rgba(168,85,247,0.3); }
+    .pb:hover { opacity: 0.9; } @media print { .pb { display: none !important; } }
   </style>
 </head>
 <body>
-  <div class="flyer">
-    <p class="wordmark">Bytspot</p>
-    <h1 class="tagline">Know <em>Before</em> You Go.</h1>
-    <p class="subtitle">Live crowd levels, parking availability, and ride options for Atlanta Midtown venues — all in one app.</p>
-    <div class="features">
-      <span class="feature"><span class="dot-red"></span>Live Crowds</span>
-      <span class="feature"><span class="dot-cyan"></span>Open Parking</span>
-      <span class="feature"><span class="dot-purple"></span>Ride ETAs</span>
+  <div class="flyer"><div class="z">
+    <!-- Brand logo (inline SVG) -->
+    <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+      <defs>
+        <linearGradient id="a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="50%" stop-color="#A855F7"/><stop offset="100%" stop-color="#00BFFF"/></linearGradient>
+        <linearGradient id="b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="100%" stop-color="#D946EF"/></linearGradient>
+        <linearGradient id="c" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="50%" stop-color="#D946EF"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+        <linearGradient id="d" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+        <radialGradient id="e" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#0099CC"/></radialGradient>
+        <radialGradient id="f" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00BFFF" stop-opacity="0.35"/><stop offset="100%" stop-color="#00BFFF" stop-opacity="0"/></radialGradient>
+      </defs>
+      <circle cx="60" cy="60" r="48" fill="none" stroke="url(#a)" stroke-width="3"/>
+      <circle cx="60" cy="60" r="38" fill="none" stroke="url(#b)" stroke-width="2" opacity="0.4"/>
+      <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="url(#c)"/>
+      <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="none" stroke="url(#d)" stroke-width="1.5"/>
+      <circle cx="60" cy="60" r="12" fill="url(#f)"/><circle cx="60" cy="60" r="8" fill="url(#e)"/>
+    </svg>
+    <p class="wm">Bytspot</p>
+    <span class="lb">📍 Atlanta Beta &bull; Midtown</span>
+    <h1>Know <em>Before</em><br/>You Go.</h1>
+    <p class="aw">Tired of showing up to packed venues, circling for parking, or paying surge prices? <strong>Bytspot gives you real-time intel on Atlanta Midtown spots</strong> — so you always make the right call before you leave.</p>
+    <div class="dv"></div>
+    <div class="fs">
+      <div class="fc"><div class="fi ir">🔴</div><span class="ft">Live Crowd Levels</span><span class="fd">See how busy a venue is right now — chill, active, or packed.</span></div>
+      <div class="fc"><div class="fi ic">🅿️</div><span class="ft">Open Parking</span><span class="fd">Find available spots nearby before you drive there.</span></div>
+      <div class="fc"><div class="fi ip">🚗</div><span class="ft">Ride ETAs &amp; Prices</span><span class="fd">Compare Uber &amp; Lyft wait times and surge pricing.</span></div>
     </div>
-    <div class="qr-container">
-      <img src="/qr-code.svg" alt="Scan to join Bytspot beta" />
+    <div class="hw">
+      <p class="hl">How It Works</p>
+      <div class="ss">
+        <div class="sp"><span class="sn">1</span><span class="st">Open Bytspot</span></div>
+        <div class="sp"><span class="sn">2</span><span class="st">Pick a venue</span></div>
+        <div class="sp"><span class="sn">3</span><span class="st">See live data</span></div>
+        <div class="sp"><span class="sn">4</span><span class="st">Go with confidence</span></div>
+      </div>
     </div>
-    <p class="cta">Scan to Get Early Access</p>
-    <p class="url">bytspot.com</p>
-    <span class="badge">Free for first 100 Midtown users</span>
-  </div>
-  <button class="print-btn" onclick="window.print()">🖨️ Print Flyer</button>
+    <div class="qs">
+      <div class="qb"><img src="/qr-code.svg" alt="Scan to join Bytspot beta"/></div>
+      <div class="qt"><p class="qc">Scan to Get<br/>Early Access</p><p class="qd">Free for the first 100 Midtown users. Be the first to know before you go.</p></div>
+    </div>
+    <div class="fo">
+      <p class="ur">bytspot.com</p>
+      <span class="pl">📱 Coming to iOS &amp; Android</span>
+      <p class="cr">&copy; 2026 Bytspot &bull; Atlanta, GA</p>
+    </div>
+  </div></div>
+  <button class="pb" onclick="window.print()">🖨️ Print Flyer</button>
 </body>
 </html>
-

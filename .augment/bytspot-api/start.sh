@@ -3,32 +3,48 @@ set -e
 
 cd .augment/bytspot-api
 
-# If the postgis migration was previously rolled back, delete its record so it re-applies
+# Delete the postgis migration record so it re-applies fresh (needed after plan upgrade)
 node -e "
 const { PrismaClient } = require('@prisma/client');
 const db = new PrismaClient();
 db.\$executeRawUnsafe(
-  \"DELETE FROM _prisma_migrations WHERE migration_name = '20260226_add_postgis_pgvector' AND rolled_back_at IS NOT NULL\"
-).then(r => { console.log('Cleaned rolled-back migration record'); db.\$disconnect(); })
+  \"DELETE FROM _prisma_migrations WHERE migration_name = '20260226_add_postgis_pgvector'\"
+).then(r => { console.log('Cleaned postgis migration record — will re-apply'); db.\$disconnect(); })
  .catch(e => { console.log('No migration cleanup needed'); db.\$disconnect(); });
 " || true
 
 # Run all pending migrations
 npx prisma migrate deploy
 
-# Seed database if venues table is empty (first deploy only)
+# Seed database if venues table is empty, or re-populate geo/vector data
 node -e "
 const { PrismaClient } = require('@prisma/client');
 const db = new PrismaClient();
-db.venue.count().then(async c => {
-  if (c === 0) {
-    console.log('No venues found — running seed...');
-    require('child_process').execSync('npx tsx prisma/seed.ts', { stdio: 'inherit' });
-  } else {
-    console.log('Database already seeded (' + c + ' venues)');
-  }
+(async () => {
+  try {
+    const c = await db.venue.count();
+    if (c === 0) {
+      console.log('No venues found — running full seed...');
+      require('child_process').execSync('npx tsx prisma/seed.ts', { stdio: 'inherit' });
+    } else {
+      console.log('Database has ' + c + ' venues');
+      // Try to populate PostGIS geometry if extension is now available
+      try {
+        await db.\$executeRawUnsafe('UPDATE venues SET location = ST_SetSRID(ST_MakePoint(lng, lat), 4326) WHERE location IS NULL AND lat IS NOT NULL');
+        console.log('PostGIS geometry populated');
+      } catch(e) { console.log('PostGIS not available yet: ' + e.message.substring(0, 80)); }
+      // Try to populate pgvector embeddings if extension is now available
+      try {
+        const rows = await db.\$queryRawUnsafe('SELECT slug FROM venues WHERE embedding IS NULL');
+        if (rows.length > 0) {
+          console.log('Populating embeddings for ' + rows.length + ' venues...');
+          require('child_process').execSync('npx tsx prisma/seed.ts', { stdio: 'inherit' });
+        }
+      } catch(e) { console.log('pgvector not available yet: ' + e.message.substring(0, 80)); }
+    }
+  } catch(e) { console.error('Seed check failed:', e.message); }
   await db.\$disconnect();
-}).catch(async e => { console.error('Seed check failed:', e.message); await db.\$disconnect(); });
+})();
 "
 
 # Start the server

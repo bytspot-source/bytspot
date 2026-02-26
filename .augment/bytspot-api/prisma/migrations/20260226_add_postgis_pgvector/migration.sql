@@ -1,22 +1,27 @@
--- Enable PostGIS for geospatial queries (ST_DWithin, ST_Distance, etc.)
-CREATE EXTENSION IF NOT EXISTS postgis;
+-- PostGIS + pgvector extensions (defensive: skips gracefully if not available)
+-- Render free-tier Postgres may not support these extensions.
+-- When you upgrade to a paid plan, re-run this migration or apply manually.
 
--- Enable pgvector for AI embedding similarity search
-CREATE EXTENSION IF NOT EXISTS vector;
+DO $$
+BEGIN
+  -- Try to enable PostGIS
+  BEGIN
+    CREATE EXTENSION IF NOT EXISTS postgis;
+    ALTER TABLE "venues" ADD COLUMN IF NOT EXISTS "location" geometry(Point, 4326);
+    UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint("lng", "lat"), 4326) WHERE "location" IS NULL;
+    CREATE INDEX IF NOT EXISTS "venues_location_idx" ON "venues" USING GIST ("location");
+    RAISE NOTICE 'PostGIS enabled successfully';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'PostGIS not available: %, skipping geo columns', SQLERRM;
+  END;
 
--- Add geometry column for venue location (SRID 4326 = WGS84 lat/lng)
-ALTER TABLE "venues" ADD COLUMN "location" geometry(Point, 4326);
-
--- Populate location from existing lat/lng columns
-UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint("lng", "lat"), 4326);
-
--- Spatial index for fast radius/bounding-box queries
-CREATE INDEX "venues_location_idx" ON "venues" USING GIST ("location");
-
--- Add vector column for AI embeddings (384 dimensions = sentence-transformers default)
-ALTER TABLE "venues" ADD COLUMN "embedding" vector(384);
-
--- Vector index for cosine similarity search (IVFFlat)
--- Note: IVFFlat requires at least 1 row with a non-null embedding to build.
--- For small datasets (<1000 rows), Postgres will fallback to sequential scan which is fine.
-CREATE INDEX "venues_embedding_idx" ON "venues" USING ivfflat ("embedding" vector_cosine_ops) WITH (lists = 10);
+  -- Try to enable pgvector
+  BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+    ALTER TABLE "venues" ADD COLUMN IF NOT EXISTS "embedding" vector(384);
+    CREATE INDEX IF NOT EXISTS "venues_embedding_idx" ON "venues" USING ivfflat ("embedding" vector_cosine_ops) WITH (lists = 10);
+    RAISE NOTICE 'pgvector enabled successfully';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pgvector not available: %, skipping embedding columns', SQLERRM;
+  END;
+END $$;

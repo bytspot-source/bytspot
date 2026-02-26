@@ -61,7 +61,41 @@ async function main() {
     console.log(`  ✅ ${venue.name} — crowd: ${crowdLabels[level - 1]}, ${numSpots} parking spot(s)`);
   }
 
-  console.log(`\n🎉 Seeded ${venues.length} venues with crowd levels and parking data.`);
+  // ─── PostGIS: populate location geometry from lat/lng ──
+  console.log('\n📍 Populating PostGIS location geometry...');
+  try {
+    await db.$executeRawUnsafe(
+      `UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint("lng", "lat"), 4326) WHERE "location" IS NULL`
+    );
+    console.log('  ✅ Geometry columns populated from lat/lng');
+  } catch (e) {
+    console.log('  ⚠️  PostGIS not available — skipping geometry population (run migration first)');
+  }
+
+  // ─── pgvector: seed placeholder embeddings ──
+  console.log('\n🧠 Seeding placeholder AI embeddings (384-dim)...');
+  try {
+    // Generate a deterministic pseudo-random embedding per venue (seeded by index)
+    for (let i = 0; i < venues.length; i++) {
+      const dims = 384;
+      const vec = Array.from({ length: dims }, (_, j) => {
+        // Simple deterministic pseudo-random based on venue index + dimension
+        const seed = (i * 397 + j * 31) % 1000;
+        return parseFloat(((seed / 1000) * 2 - 1).toFixed(6));
+      });
+      const vecStr = `[${vec.join(',')}]`;
+      await db.$executeRawUnsafe(
+        `UPDATE "venues" SET "embedding" = $1::vector WHERE "slug" = $2`,
+        vecStr,
+        venues[i].slug,
+      );
+    }
+    console.log(`  ✅ Seeded ${venues.length} placeholder embeddings`);
+  } catch (e) {
+    console.log('  ⚠️  pgvector not available — skipping embeddings (run migration first)');
+  }
+
+  console.log(`\n🎉 Seeded ${venues.length} venues with crowd levels, parking, geo, and embeddings.`);
 }
 
 main()

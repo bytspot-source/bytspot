@@ -1,10 +1,12 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis, vector]
 }
 
 // ─── Users ───────────────────────────────────────────
@@ -31,6 +33,13 @@ model Venue {
   category    String   // "bar", "restaurant", "club", "park", "market"
   imageUrl    String?  @map("image_url")
   createdAt   DateTime @default(now()) @map("created_at")
+
+  // PostGIS: geometry(Point, 4326) — populated from lat/lng
+  // Managed via raw SQL; Prisma can't model geometry natively
+  // Column: "location" geometry(Point, 4326)
+
+  // pgvector: 384-dim embedding for AI similarity search
+  // Column: "embedding" vector(384)
 
   crowdLevels CrowdLevel[]
   parking     ParkingSpot[]

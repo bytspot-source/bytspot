@@ -51,6 +51,100 @@ router.get('/venues', async (_req, res) => {
   res.json({ venues });
 });
 
+/** GET /venues/nearby?lat=&lng=&radius= — venues within radius (meters) */
+router.get('/venues/nearby', async (req, res) => {
+  const lat = parseFloat(req.query.lat as string);
+  const lng = parseFloat(req.query.lng as string);
+  const radius = parseInt(req.query.radius as string) || 2000; // default 2km
+
+  if (isNaN(lat) || isNaN(lng)) {
+    res.status(400).json({ error: 'lat and lng query params required' });
+    return;
+  }
+
+  const cacheKey = `venues:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}`;
+  const venues = await cached(cacheKey, 30, async () => {
+    const rows = await db.$queryRawUnsafe<
+      Array<{
+        id: string;
+        name: string;
+        slug: string;
+        address: string;
+        lat: number;
+        lng: number;
+        category: string;
+        image_url: string | null;
+        distance: number;
+      }>
+    >(
+      `SELECT id, name, slug, address, lat, lng, category, image_url,
+              ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
+       FROM venues
+       WHERE location IS NOT NULL
+         AND ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $3)
+       ORDER BY distance ASC`,
+      lng,
+      lat,
+      radius,
+    );
+
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      slug: r.slug,
+      address: r.address,
+      lat: r.lat,
+      lng: r.lng,
+      category: r.category,
+      imageUrl: r.image_url,
+      distanceMeters: Math.round(r.distance),
+    }));
+  });
+
+  res.json({ venues });
+});
+
+/** GET /venues/:slug/similar?limit= — similar venues by AI embedding */
+router.get('/venues/:slug/similar', async (req, res) => {
+  const { slug } = req.params;
+  const limit = Math.min(parseInt(req.query.limit as string) || 5, 20);
+
+  const similar = await cached(`venues:similar:${slug}:${limit}`, 60, async () => {
+    const rows = await db.$queryRawUnsafe<
+      Array<{
+        id: string;
+        name: string;
+        slug: string;
+        category: string;
+        similarity: number;
+      }>
+    >(
+      `SELECT v2.id, v2.name, v2.slug, v2.category,
+              1 - (v1.embedding <=> v2.embedding) as similarity
+       FROM venues v1
+       CROSS JOIN venues v2
+       WHERE v1.slug = $1
+         AND v2.slug != $1
+         AND v1.embedding IS NOT NULL
+         AND v2.embedding IS NOT NULL
+       ORDER BY v1.embedding <=> v2.embedding
+       LIMIT $2`,
+      slug,
+      limit,
+    );
+
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      slug: r.slug,
+      category: r.category,
+      similarity: parseFloat(Number(r.similarity).toFixed(4)),
+    }));
+  });
+
+  res.json({ similar });
+});
+
 /** GET /venues/:slug — single venue detail */
 router.get('/venues/:slug', async (req, res) => {
   const { slug } = req.params;

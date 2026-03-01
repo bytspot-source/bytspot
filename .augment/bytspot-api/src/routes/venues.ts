@@ -190,4 +190,37 @@ router.get('/venues/:slug', async (req, res) => {
   });
 });
 
+/** POST /venues/:id/checkin — user contributes crowd data */
+router.post('/venues/:id/checkin', async (req, res) => {
+  const { id } = req.params;
+
+  const venue = await db.venue.findUnique({ where: { id } });
+  if (!venue) {
+    res.status(404).json({ error: 'Venue not found' });
+    return;
+  }
+
+  // Get latest crowd level to base new reading on
+  const latest = await db.crowdLevel.findFirst({
+    where: { venueId: id },
+    orderBy: { recordedAt: 'desc' },
+  });
+
+  // Nudge level up by 1 (max 4) — checkin signals it's busier
+  const newLevel = Math.min((latest?.level ?? 1) + 1, 4);
+  const labels: Record<number, string> = { 1: 'Chill', 2: 'Active', 3: 'Busy', 4: 'Packed' };
+
+  await db.crowdLevel.create({
+    data: {
+      venueId: id,
+      level: newLevel,
+      label: labels[newLevel],
+      waitMins: newLevel * 5,
+      source: 'user_report',
+    },
+  });
+
+  res.json({ success: true, newCrowdLevel: newLevel });
+});
+
 export default router;

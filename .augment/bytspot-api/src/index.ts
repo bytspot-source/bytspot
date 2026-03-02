@@ -9,6 +9,8 @@ import healthRouter from './routes/health';
 import authRouter from './routes/auth';
 import venuesRouter from './routes/venues';
 import ridesRouter from './routes/rides';
+import pushRouter from './routes/push';
+import paymentsRouter from './routes/payments';
 
 const app = express();
 
@@ -38,6 +40,8 @@ app.use(healthRouter);
 app.use(authRouter);
 app.use(venuesRouter);
 app.use(ridesRouter);
+app.use(pushRouter);
+app.use(paymentsRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

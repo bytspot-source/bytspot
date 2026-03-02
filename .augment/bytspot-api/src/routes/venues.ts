@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
+import { sendPushToAll } from './push';
 
 const router = Router();
 
@@ -285,6 +286,15 @@ router.post('/venues/:id/checkin', async (req, res) => {
   });
 
   const result = { success: true, newCrowdLevel: newLevel };
+
+  // ── Push notification when venue flips to "Packed" ──
+  if (newLevel === 4) {
+    sendPushToAll(
+      `🔴 ${venue.name} is now Packed`,
+      `High crowd at ${venue.name} — plan ahead or find somewhere chill nearby.`,
+      { venueId: id, venueName: venue.name, type: 'packed-alert' },
+    ).catch(() => {}); // non-blocking, fire-and-forget
+  }
 
   // ── Cache result for 24 h so any retries with the same key replay it ──
   if (iKey) {

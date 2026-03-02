@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { db } from '../lib/db';
 import { config } from '../config';
+import { sendWelcomeEmail } from '../lib/email';
 
 const router = Router();
 
@@ -47,6 +48,13 @@ router.post('/auth/signup', async (req, res) => {
   });
 
   const token = signToken(user.id, user.email);
+
+  // Send welcome email (non-blocking — fire and forget)
+  if (user.email) {
+    const firstName = (name || '').split(' ')[0];
+    sendWelcomeEmail(user.email, firstName).catch(() => {});
+  }
+
   res.status(201).json({
     token,
     user: { id: user.id, email: user.email, name: user.name },

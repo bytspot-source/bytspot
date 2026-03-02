@@ -11,6 +11,7 @@ import venuesRouter from './routes/venues';
 import ridesRouter from './routes/rides';
 import pushRouter from './routes/push';
 import paymentsRouter from './routes/payments';
+import adminRouter from './routes/admin';
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.use(venuesRouter);
 app.use(ridesRouter);
 app.use(pushRouter);
 app.use(paymentsRouter);
+app.use(adminRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

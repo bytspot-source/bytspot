@@ -15,4 +15,8 @@ export const config = {
   // Stripe (set STRIPE_SECRET_KEY in Render env vars)
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
   frontendUrl: process.env.FRONTEND_URL || 'https://beta.bytspot.com',
+  // Resend transactional email (set RESEND_API_KEY in Render env vars)
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  // Admin dashboard + invite system (set ADMIN_PASSWORD in Render env vars)
+  adminPassword: process.env.ADMIN_PASSWORD || '',
 } as const;

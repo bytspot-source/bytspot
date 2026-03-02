@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { EventEmitter } from 'events';
 import { db } from '../lib/db';
-import { cached } from '../lib/redis';
+import { cached, getRedis } from '../lib/redis';
 
 const router = Router();
 
@@ -233,9 +233,24 @@ router.get('/venues/crowd/stream', async (req, res) => {
   });
 });
 
-/** POST /venues/:id/checkin — user contributes crowd data */
+/** POST /venues/:id/checkin — user contributes crowd data (idempotent) */
 router.post('/venues/:id/checkin', async (req, res) => {
   const { id } = req.params;
+  const iKey = req.headers['idempotency-key'] as string | undefined;
+
+  // ── Idempotency: replay cached result if we've seen this key before ──
+  if (iKey) {
+    const r = getRedis();
+    if (r) {
+      try {
+        const cached = await r.get(`idem:checkin:${iKey}`);
+        if (cached) {
+          res.json(JSON.parse(cached)); // exact same response, no DB write
+          return;
+        }
+      } catch { /* Redis miss — continue to real handler */ }
+    }
+  }
 
   const venue = await db.venue.findUnique({ where: { id } });
   if (!venue) {
@@ -269,7 +284,15 @@ router.post('/venues/:id/checkin', async (req, res) => {
     crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, recordedAt: new Date().toISOString() },
   });
 
-  res.json({ success: true, newCrowdLevel: newLevel });
+  const result = { success: true, newCrowdLevel: newLevel };
+
+  // ── Cache result for 24 h so any retries with the same key replay it ──
+  if (iKey) {
+    const r = getRedis();
+    if (r) r.set(`idem:checkin:${iKey}`, JSON.stringify(result), 'EX', 86400).catch(() => {});
+  }
+
+  res.json(result);
 });
 
 export default router;

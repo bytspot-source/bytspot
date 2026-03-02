@@ -1,8 +1,13 @@
 import { Router } from 'express';
+import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached } from '../lib/redis';
 
 const router = Router();
+
+// In-memory event emitter for SSE crowd updates
+export const crowdEmitter = new EventEmitter();
+crowdEmitter.setMaxListeners(200); // allow many concurrent SSE clients
 
 /** GET /venues — list all venues with latest crowd level */
 router.get('/venues', async (_req, res) => {
@@ -190,6 +195,44 @@ router.get('/venues/:slug', async (req, res) => {
   });
 });
 
+/** GET /venues/crowd/stream — SSE stream of live crowd updates */
+router.get('/venues/crowd/stream', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx buffering on Render
+  res.flushHeaders();
+
+  // Send initial snapshot so client has data immediately
+  try {
+    const rows = await db.venue.findMany({
+      include: { crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 } },
+      orderBy: { name: 'asc' },
+    });
+    const snapshot = rows.map((v) => ({
+      id: v.id,
+      crowd: v.crowdLevels[0]
+        ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt }
+        : null,
+    }));
+    res.write(`data: ${JSON.stringify({ type: 'snapshot', venues: snapshot })}\n\n`);
+  } catch { /* skip if DB down */ }
+
+  // Push individual crowd updates to this client
+  const onUpdate = (update: object) => {
+    res.write(`data: ${JSON.stringify({ type: 'update', ...update })}\n\n`);
+  };
+  crowdEmitter.on('crowd-update', onUpdate);
+
+  // Heartbeat every 25s to keep connection alive through proxies
+  const heartbeat = setInterval(() => { res.write(': ping\n\n'); }, 25_000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    crowdEmitter.off('crowd-update', onUpdate);
+  });
+});
+
 /** POST /venues/:id/checkin — user contributes crowd data */
 router.post('/venues/:id/checkin', async (req, res) => {
   const { id } = req.params;
@@ -218,6 +261,12 @@ router.post('/venues/:id/checkin', async (req, res) => {
       waitMins: newLevel * 5,
       source: 'user_report',
     },
+  });
+
+  // Broadcast to all SSE clients
+  crowdEmitter.emit('crowd-update', {
+    venueId: id,
+    crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, recordedAt: new Date().toISOString() },
   });
 
   res.json({ success: true, newCrowdLevel: newLevel });

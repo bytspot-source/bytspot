@@ -4,7 +4,6 @@ import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { sendPushToAll } from './push';
 import { sendCrowdAlertEmail } from '../lib/email';
-import { sendCrowdAlertEmail } from '../lib/email';
 
 const router = Router();
 

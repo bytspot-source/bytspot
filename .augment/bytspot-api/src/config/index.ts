@@ -19,4 +19,6 @@ export const config = {
   resendApiKey: process.env.RESEND_API_KEY || '',
   // Admin dashboard + invite system (set ADMIN_PASSWORD in Render env vars)
   adminPassword: process.env.ADMIN_PASSWORD || '',
+  // OpenAI — used by the Concierge AI chat endpoint (set OPENAI_API_KEY in Render env vars)
+  openaiApiKey: process.env.OPENAI_API_KEY || '',
 } as const;

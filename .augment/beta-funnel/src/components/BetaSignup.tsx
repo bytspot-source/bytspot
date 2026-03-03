@@ -189,15 +189,40 @@ function SignupForm({ email, setEmail, isSubmitting, spotsLeft, isDarkMode, onSu
   );
 }
 
+const BETA_APP_URL = 'https://beta.bytspot.com';
+
 function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySignedUp: boolean; onComplete?: () => void; standalone: boolean }) {
+  const handleTryBeta = () => {
+    // Pass the stored email as a URL param so beta app can pre-fill it
+    const email = localStorage.getItem('bytspot_beta_email') || '';
+    const url = email ? `${BETA_APP_URL}?email=${encodeURIComponent(email)}` : BETA_APP_URL;
+    window.open(url, '_blank');
+  };
+
   return (
     <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="text-center space-y-6 bg-white/5 backdrop-blur-xl p-8 rounded-3xl border border-white/10">
       <div className="w-20 h-20 bg-gradient-to-br from-green-400 to-emerald-600 rounded-full mx-auto flex items-center justify-center shadow-lg shadow-green-500/20"><Check className="w-10 h-10 text-white" strokeWidth={3} /></div>
       <div className="space-y-2">
-        <h2 className="text-2xl font-bold text-white">{alreadySignedUp ? "You're already on the list!" : "You're on the list."}</h2>
-        <p className="text-white/70">Keep an eye on your inbox.<br />We'll notify you when your spot is ready.</p>
+        <h2 className="text-2xl font-bold text-white">{alreadySignedUp ? "You're already on the list!" : "You're on the list! 🎉"}</h2>
+        <p className="text-white/70">You've secured your early access spot.<br />The beta app is live — try it now!</p>
       </div>
-      <div className="pt-4"><div className="text-sm font-medium text-purple-400 bg-purple-400/10 py-2 px-4 rounded-lg inline-block">{onComplete ? 'Entering Bytspot Preview...' : "Midtown Beta goes live soon. We're testing live line data this weekend."}</div></div>
+
+      {/* Primary CTA: Try the Beta App */}
+      <motion.button
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.3 }}
+        whileHover={{ scale: 1.03 }}
+        whileTap={{ scale: 0.97 }}
+        onClick={handleTryBeta}
+        className="w-full flex items-center justify-center gap-2 py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 to-cyan-600 text-white font-bold text-lg shadow-lg shadow-purple-500/30"
+      >
+        <span>Try the Beta App</span>
+        <ArrowRight className="w-5 h-5" />
+      </motion.button>
+
+      <div className="pt-1"><div className="text-sm font-medium text-purple-400 bg-purple-400/10 py-2 px-4 rounded-lg inline-block">{onComplete ? 'Entering Bytspot Preview...' : 'Live crowd data • Smart parking • Ride ETAs'}</div></div>
+
       {standalone && !onComplete && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="pt-2">
           <p className="text-[12px] text-white/40 mb-3">Share with friends in Midtown</p>

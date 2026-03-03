@@ -21,4 +21,6 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD || '',
   // OpenAI — used by the Concierge AI chat endpoint (set OPENAI_API_KEY in Render env vars)
   openaiApiKey: process.env.OPENAI_API_KEY || '',
+  // Cron secret — protects the /cron/* endpoints from public access (set CRON_SECRET in Render env vars)
+  cronSecret: process.env.CRON_SECRET || 'dev-cron-secret',
 } as const;

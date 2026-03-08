@@ -19,6 +19,9 @@ model User {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  hostProfile  HostProfile?
+  valetProfile ValetProfile?
+
   @@map("users")
 }
 
@@ -78,4 +81,35 @@ model ParkingSpot {
 
   @@index([venueId])
   @@map("parking_spots")
+}
+
+// ─── Provider Profiles ───────────────────────────────
+model HostProfile {
+  id             String    @id @default(cuid())
+  userId         String    @unique @map("user_id")
+  status         String    @default("draft") // draft | pending | approved | rejected
+  currentStep    Int       @default(1) @map("current_step")
+  onboardingData Json?     @map("onboarding_data")
+  submittedAt    DateTime? @map("submitted_at")
+  approvedAt     DateTime? @map("approved_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("host_profiles")
+}
+
+model ValetProfile {
+  id                  String    @id @default(cuid())
+  userId              String    @unique @map("user_id")
+  status              String    @default("draft") // draft | active | inactive | suspended
+  agreementAcceptedAt DateTime? @map("agreement_accepted_at")
+  profileData         Json?     @map("profile_data")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("valet_profiles")
 }

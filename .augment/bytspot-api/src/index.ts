@@ -15,6 +15,7 @@ import pushRouter from './routes/push';
 import paymentsRouter from './routes/payments';
 import adminRouter from './routes/admin';
 import conciergeRouter from './routes/concierge';
+import providersRouter from './routes/providers';
 
 const app = express();
 
@@ -49,6 +50,7 @@ app.use(pushRouter);
 app.use(paymentsRouter);
 app.use(adminRouter);
 app.use(conciergeRouter);
+app.use(providersRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

@@ -35,14 +35,15 @@ router.get('/health', async (_req, res) => {
 // ─── Public stats for home screen display ────────────────────────────────────
 router.get('/stats', async (_req, res) => {
   try {
-    const [userCount, venueCount] = await Promise.all([
+    const [userCount, venueCount, betaLeadCount] = await Promise.all([
       db.user.count(),
       db.venue.count(),
+      db.betaLead.count(),
     ]);
-    res.json({ userCount, venueCount });
+    res.json({ userCount, venueCount, betaLeadCount });
   } catch {
     // Fallback so the frontend never crashes
-    res.json({ userCount: 246, venueCount: 12 });
+    res.json({ userCount: 246, venueCount: 12, betaLeadCount: 0 });
   }
 });
 

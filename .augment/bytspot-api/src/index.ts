@@ -16,6 +16,7 @@ import paymentsRouter from './routes/payments';
 import adminRouter from './routes/admin';
 import conciergeRouter from './routes/concierge';
 import providersRouter from './routes/providers';
+import betaSignupRouter from './routes/betaSignup';
 
 const app = express();
 
@@ -51,6 +52,7 @@ app.use(paymentsRouter);
 app.use(adminRouter);
 app.use(conciergeRouter);
 app.use(providersRouter);
+app.use(betaSignupRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

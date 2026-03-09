@@ -113,3 +113,16 @@ model ValetProfile {
 
   @@map("valet_profiles")
 }
+
+// ─── Beta Waitlist Leads ─────────────────────────────
+// Pre-registration email capture from bytspot.com funnel.
+// Separate from User so it works before someone creates a password.
+model BetaLead {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?                       // first name — for personalised welcome email
+  source    String?                       // "bytspot.com", "qr", "tiktok", "organic"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("beta_leads")
+}

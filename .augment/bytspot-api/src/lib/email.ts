@@ -55,6 +55,47 @@ export async function sendWelcomeEmail(to: string, firstName: string): Promise<v
   }
 }
 
+/**
+ * Sent immediately when someone joins the waitlist via bytspot.com.
+ * Shorter and warmer than the full welcome email — no password needed.
+ */
+export async function sendBetaLeadEmail(to: string, firstName: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  const name = firstName || 'there';
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: "You're on the list 🎯 — Bytspot Early Access",
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <p style="font-size: 28px; margin: 0 0 12px;">🎯</p>
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Hey ${name}, you're in!</h1>
+          <p style="color: #aaa; font-size: 15px; line-height: 1.6; margin: 0 0 8px;">
+            You've secured your early access spot for Bytspot — Atlanta Midtown's live guide to crowd levels, parking, and ride options.
+          </p>
+          <p style="color: #aaa; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+            The beta is <strong style="color: #fff">live right now.</strong> You don't have to wait — try it today.
+          </p>
+          <a href="https://beta.bytspot.com" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6, #06b6d4); color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
+            Open Bytspot Beta →
+          </a>
+          <p style="color: #555; font-size: 13px; margin-top: 28px; line-height: 1.5;">
+            Know someone in Midtown Atlanta? Forward this — first 100 users get free parking credit. 🚗
+          </p>
+          <p style="color: #444; font-size: 12px; margin-top: 16px;">
+            Questions? Just reply. We read everything.
+          </p>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendBetaLeadEmail failed:', err?.message);
+  }
+}
+
 export async function sendCrowdAlertEmail(to: string, firstName: string, venueName: string, venueSlug: string): Promise<void> {
   const resend = getResend();
   if (!resend) return;

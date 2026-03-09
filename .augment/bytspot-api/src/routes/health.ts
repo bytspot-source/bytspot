@@ -32,4 +32,18 @@ router.get('/health', async (_req, res) => {
   res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', checks });
 });
 
+// ─── Public stats for home screen display ────────────────────────────────────
+router.get('/stats', async (_req, res) => {
+  try {
+    const [userCount, venueCount] = await Promise.all([
+      db.user.count(),
+      db.venue.count(),
+    ]);
+    res.json({ userCount, venueCount });
+  } catch {
+    // Fallback so the frontend never crashes
+    res.json({ userCount: 246, venueCount: 12 });
+  }
+});
+
 export default router;

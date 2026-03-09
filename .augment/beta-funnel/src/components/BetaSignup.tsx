@@ -3,9 +3,9 @@ import { motion } from 'framer-motion';
 import { MapPin, Users, Car, Clock, KeyRound, Mail, ArrowRight, Check, Shield, ExternalLink, Lock, Smartphone, Radio, ParkingCircle } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 
-const BACKEND_PROVIDER: 'formspree' | 'custom' | 'mock' = 'formspree';
+const BACKEND_PROVIDER: 'formspree' | 'custom' | 'mock' = 'custom';
 const FORMSPREE_FORM_ID = 'xqedgrzv';
-const CUSTOM_API_URL = 'https://api.example.com/beta-signup';
+const CUSTOM_API_URL = 'https://bytspot-api.onrender.com/beta-signup';
 
 /** P3: Dynamic spots counter — decrements based on days since launch */
 function getSpotsLeft(): number {
@@ -19,12 +19,12 @@ function getSpotsLeft(): number {
 
 interface BetaSignupProps { isDarkMode?: boolean; onComplete?: () => void; standalone?: boolean; }
 
-async function submitEmail(email: string): Promise<{ ok: boolean; message?: string }> {
+async function submitEmail(email: string, name?: string): Promise<{ ok: boolean; alreadyRegistered?: boolean; message?: string }> {
   switch (BACKEND_PROVIDER) {
     case 'formspree': {
       const res = await fetch(`https://formspree.io/f/${FORMSPREE_FORM_ID}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ email, _subject: 'Bytspot Beta Signup', source: 'beta-funnel' }),
+        body: JSON.stringify({ email, name, _subject: 'Bytspot Beta Signup', source: 'bytspot.com' }),
       });
       if (!res.ok) { const data = await res.json().catch(() => ({})); return { ok: false, message: data?.error || 'Signup failed.' }; }
       return { ok: true };
@@ -32,10 +32,11 @@ async function submitEmail(email: string): Promise<{ ok: boolean; message?: stri
     case 'custom': {
       const res = await fetch(CUSTOM_API_URL, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, timestamp: new Date().toISOString(), source: 'beta-funnel' }),
+        body: JSON.stringify({ email, name, source: 'bytspot.com' }),
       });
-      if (!res.ok) return { ok: false, message: 'Signup failed.' };
-      return { ok: true };
+      if (!res.ok) return { ok: false, message: 'Signup failed. Please try again.' };
+      const data = await res.json().catch(() => ({}));
+      return { ok: true, alreadyRegistered: data?.alreadyRegistered ?? false };
     }
     case 'mock': default: { await new Promise((r) => setTimeout(r, 1500)); return { ok: true }; }
   }
@@ -43,6 +44,7 @@ async function submitEmail(email: string): Promise<{ ok: boolean; message?: stri
 
 export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }: BetaSignupProps) {
   const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const spotsLeft = useMemo(() => getSpotsLeft(), []);
@@ -56,10 +58,17 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast.error('Please enter a valid email'); return; }
     setIsSubmitting(true);
     try {
-      const result = await submitEmail(email);
+      const result = await submitEmail(email, name.trim() || undefined);
       if (result.ok) {
-        setIsSuccess(true); localStorage.setItem('bytspot_beta_signed_up', 'true'); localStorage.setItem('bytspot_beta_email', email);
-        toast.success('Welcome to the Inner Circle!', { description: "You've secured your spot for the Midtown Beta." });
+        setIsSuccess(true);
+        localStorage.setItem('bytspot_beta_signed_up', 'true');
+        localStorage.setItem('bytspot_beta_email', email);
+        if (result.alreadyRegistered) {
+          toast.success("You're already on the list!", { description: 'Check your inbox for the welcome email.' });
+        } else {
+          const firstName = name.split(' ')[0].trim();
+          toast.success(firstName ? `Welcome, ${firstName}! 🎯` : 'Welcome to the Inner Circle!', { description: "You've secured your spot for the Midtown Beta." });
+        }
         if (onComplete) setTimeout(() => onComplete(), 2500);
       } else { toast.error(result.message || 'Something went wrong.'); }
     } catch { toast.error('Network error. Please check your connection.'); }
@@ -78,7 +87,7 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
         {!isSuccess ? (<>
           <HeaderSection />
           <ProductMockCard />
-          <SignupForm email={email} setEmail={setEmail} isSubmitting={isSubmitting} spotsLeft={spotsLeft} isDarkMode={isDarkMode} onSubmit={handleSubmit} />
+          <SignupForm email={email} setEmail={setEmail} name={name} setName={setName} isSubmitting={isSubmitting} spotsLeft={spotsLeft} isDarkMode={isDarkMode} onSubmit={handleSubmit} />
         </>) : (
           <SuccessState alreadySignedUp={alreadySignedUp} onComplete={onComplete} standalone={standalone} />
         )}
@@ -150,17 +159,22 @@ function ProductMockCard() {
   );
 }
 
-function SignupForm({ email, setEmail, isSubmitting, spotsLeft, isDarkMode, onSubmit }: {
-  email: string; setEmail: (v: string) => void; isSubmitting: boolean; spotsLeft: number; isDarkMode: boolean; onSubmit: (e: React.FormEvent) => void;
+function SignupForm({ email, setEmail, name, setName, isSubmitting, spotsLeft, isDarkMode, onSubmit }: {
+  email: string; setEmail: (v: string) => void; name: string; setName: (v: string) => void; isSubmitting: boolean; spotsLeft: number; isDarkMode: boolean; onSubmit: (e: React.FormEvent) => void;
 }) {
   return (
     <form onSubmit={onSubmit} className="space-y-3">
       {/* P1: Social proof counter */}
       <p className="text-center text-[12px] text-white/50 font-medium">Join <span className="text-white/80">300+</span> Midtown locals on the waitlist</p>
       <div className="space-y-3">
+        {/* First name */}
+        <div className={`group relative rounded-xl transition-all duration-300 ${isDarkMode ? 'bg-white/5 border border-white/10 focus-within:bg-white/10 focus-within:border-white/20' : 'bg-white/80 border border-black/10'}`}>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="First name (optional)" className="w-full bg-transparent p-4 text-white placeholder:text-white/30 focus:outline-none text-[16px]" autoComplete="given-name" />
+        </div>
+        {/* Email */}
         <div className={`group relative rounded-xl transition-all duration-300 ${isDarkMode ? 'bg-white/5 border border-white/10 focus-within:bg-white/10 focus-within:border-white/20' : 'bg-white/80 border border-black/10'}`}>
           <div className="absolute left-4 top-1/2 -translate-y-1/2"><Mail className="w-5 h-5 text-white/40 group-focus-within:text-purple-400 transition-colors" /></div>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your email" className="w-full bg-transparent p-4 pl-12 text-white placeholder:text-white/30 focus:outline-none text-[16px]" required />
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Enter your email" className="w-full bg-transparent p-4 pl-12 text-white placeholder:text-white/30 focus:outline-none text-[16px]" required autoComplete="email" />
         </div>
         {/* P2: Privacy reassurance */}
         <div className="flex items-center justify-center gap-1.5">

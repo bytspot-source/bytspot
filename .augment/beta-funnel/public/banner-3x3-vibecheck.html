@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Bytspot — 3×3 Venue Banner (Vibecheck)</title>
+  <style>
+    @page { size: 914mm 914mm; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; color: #fff; font-family: -apple-system,'SF Pro Display','Segoe UI',system-ui,sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .banner { width: 914mm; min-height: 914mm; background: linear-gradient(160deg, #0d0221 0%, #000000 40%, #020a18 100%); display: flex; flex-direction: column; align-items: center; padding: 80px 80px 60px; position: relative; overflow: hidden; }
+    .banner::before { content: ''; position: absolute; top: -100px; left: -80px; width: 600px; height: 600px; border-radius: 50%; background: radial-gradient(circle, rgba(168,85,247,0.28) 0%, transparent 70%); pointer-events: none; }
+    .banner::after { content: ''; position: absolute; bottom: -80px; right: -60px; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(0,191,255,0.22) 0%, transparent 70%); pointer-events: none; }
+    .z { position: relative; z-index: 1; width: 100%; display: flex; flex-direction: column; align-items: center; }
+    .logo { width: 120px; height: 120px; margin-bottom: 20px; }
+    .wm { font-size: 90px; font-weight: 800; letter-spacing: -0.03em; background: linear-gradient(90deg, #00BFFF, #A855F7, #FF00FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px; }
+    .lb { display: inline-flex; align-items: center; gap: 8px; padding: 10px 28px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); font-size: 20px; font-weight: 700; color: rgba(255,255,255,0.7); text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 44px; }
+    h1 { font-size: 96px; font-weight: 800; text-align: center; line-height: 1.1; letter-spacing: -0.02em; margin-bottom: 20px; }
+    h1 em { font-style: normal; background: linear-gradient(90deg, #A855F7, #22d3ee); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .sub { font-size: 30px; color: rgba(255,255,255,0.5); text-align: center; margin-bottom: 52px; line-height: 1.5; }
+    .dv { width: 80px; height: 4px; border-radius: 4px; background: linear-gradient(90deg, #A855F7, #22d3ee); margin-bottom: 52px; }
+    .fs { display: flex; gap: 32px; margin-bottom: 56px; width: 100%; }
+    .fc { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 40px 24px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09); border-radius: 28px; text-align: center; }
+    .fi { width: 80px; height: 80px; border-radius: 20px; display: flex; align-items: center; justify-content: center; font-size: 40px; }
+    .ir { background: rgba(239,68,68,0.15); } .ic { background: rgba(34,211,238,0.15); } .ip { background: rgba(168,85,247,0.15); }
+    .ft { font-size: 28px; font-weight: 800; color: #fff; }
+    .fd { font-size: 20px; color: rgba(255,255,255,0.45); line-height: 1.5; }
+    .hw { margin-bottom: 56px; text-align: center; width: 100%; }
+    .hl { font-size: 20px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.15em; color: rgba(255,255,255,0.3); margin-bottom: 32px; }
+    .ss { display: flex; justify-content: center; gap: 72px; }
+    .sp { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+    .sn { width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, #A855F7, #22d3ee); display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 800; color: #fff; }
+    .st { font-size: 22px; color: rgba(255,255,255,0.6); font-weight: 600; }
+    .qs { display: flex; align-items: center; gap: 64px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09); border-radius: 32px; padding: 52px 72px; margin-bottom: 40px; width: 100%; }
+    .qb { background: #fff; border-radius: 20px; padding: 18px; flex-shrink: 0; }
+    .qb img { width: 240px; height: 240px; display: block; }
+    .qt { display: flex; flex-direction: column; gap: 14px; }
+    .qc { font-size: 52px; font-weight: 800; line-height: 1.15; background: linear-gradient(90deg, #A855F7, #22d3ee); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .qd { font-size: 24px; color: rgba(255,255,255,0.5); line-height: 1.6; }
+    .fo { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: auto; padding-top: 24px; }
+    .ur { font-size: 36px; font-weight: 800; letter-spacing: 0.04em; background: linear-gradient(90deg, #00BFFF, #A855F7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .pl { font-size: 18px; font-weight: 600; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 0.1em; }
+    .cr { font-size: 15px; color: rgba(255,255,255,0.15); }
+    .pb { position: fixed; bottom: 24px; right: 24px; padding: 14px 28px; border-radius: 14px; border: none; background: linear-gradient(90deg, #A855F7, #22d3ee); color: #fff; font-weight: 700; font-size: 15px; cursor: pointer; z-index: 100; box-shadow: 0 4px 24px rgba(168,85,247,0.3); }
+    @media print { .pb { display: none !important; } }
+  </style>
+</head>
+<body>
+  <div class="banner"><div class="z">
+    <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+      <defs>
+        <linearGradient id="a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="50%" stop-color="#A855F7"/><stop offset="100%" stop-color="#00BFFF"/></linearGradient>
+        <linearGradient id="b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="100%" stop-color="#D946EF"/></linearGradient>
+        <linearGradient id="c" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="50%" stop-color="#D946EF"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+        <linearGradient id="d" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+        <radialGradient id="e" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#0099CC"/></radialGradient>
+        <radialGradient id="f" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00BFFF" stop-opacity="0.35"/><stop offset="100%" stop-color="#00BFFF" stop-opacity="0"/></radialGradient>
+      </defs>
+      <circle cx="60" cy="60" r="48" fill="none" stroke="url(#a)" stroke-width="3"/>
+      <circle cx="60" cy="60" r="38" fill="none" stroke="url(#b)" stroke-width="2" opacity="0.4"/>
+      <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="url(#c)"/>
+      <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="none" stroke="url(#d)" stroke-width="1.5"/>
+      <circle cx="60" cy="60" r="12" fill="url(#f)"/><circle cx="60" cy="60" r="8" fill="url(#e)"/>
+    </svg>
+    <p class="wm">Bytspot</p>
+    <span class="lb">📍 Atlanta Beta &bull; Midtown</span>
+    <h1>Vibe Check<br/><em>Before You Go.</em></h1>
+    <p class="sub">Real-time crowd levels, open parking &amp; ride prices — before you leave home.</p>
+    <div class="dv"></div>
+    <div class="fs">
+      <div class="fc"><div class="fi ir">🔴</div><span class="ft">Live Crowd Levels</span><span class="fd">See how busy a venue is right now — chill, active, or packed.</span></div>
+      <div class="fc"><div class="fi ic">🅿️</div><span class="ft">Open Parking</span><span class="fd">Find available spots nearby before you drive there.</span></div>
+      <div class="fc"><div class="fi ip">🚗</div><span class="ft">Ride ETAs &amp; Prices</span><span class="fd">Compare Uber &amp; Lyft wait times and surge pricing.</span></div>
+    </div>
+    <div class="hw">
+      <p class="hl">How It Works</p>
+      <div class="ss">
+        <div class="sp"><span class="sn">1</span><span class="st">Open Bytspot</span></div>
+        <div class="sp"><span class="sn">2</span><span class="st">Pick a venue</span></div>
+        <div class="sp"><span class="sn">3</span><span class="st">See live data</span></div>
+        <div class="sp"><span class="sn">4</span><span class="st">Go with confidence</span></div>
+      </div>
+    </div>
+    <div class="qs">
+      <div class="qb"><img src="https://api.qrserver.com/v1/create-qr-code/?size=480x480&format=svg&color=000000&bgcolor=FFFFFF&data=https://bytspot.com/?ref=vibecheck" alt="Scan to join Bytspot beta"/></div>
+      <div class="qt">
+        <p class="qc">Scan to Get<br/>Early Access</p>
+        <p class="qd">Free for the first 100 Midtown users.<br/>Be the first to know before you go.</p>
+      </div>
+    </div>
+    <div class="fo">
+      <p class="ur">bytspot.com</p>
+      <span class="pl">📱 Coming to iOS &amp; Android</span>
+      <p class="cr">&copy; 2026 Bytspot &bull; Atlanta, GA</p>
+    </div>
+  </div></div>
+  <button class="pb" onclick="window.print()">🖨️ Print Banner</button>
+</body>
+</html>
+

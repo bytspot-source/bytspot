@@ -20,6 +20,9 @@ import betaSignupRouter from './routes/betaSignup';
 
 const app = express();
 
+// Trust Render's load balancer so express-rate-limit and req.ip work correctly
+app.set('trust proxy', 1);
+
 // ─── Global Middleware ───────────────────────────────
 app.use(helmet());
 app.use(

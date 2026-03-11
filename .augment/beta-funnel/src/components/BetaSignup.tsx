@@ -203,7 +203,7 @@ function SignupForm({ email, setEmail, name, setName, isSubmitting, spotsLeft, i
   );
 }
 
-const BETA_APP_URL = 'https://beta.bytspot.com';
+const BETA_APP_URL = 'https://bytspot-beta-app.onrender.com';
 
 function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySignedUp: boolean; onComplete?: () => void; standalone: boolean }) {
   const handleTryBeta = () => {
@@ -218,10 +218,10 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
       <div className="w-20 h-20 bg-gradient-to-br from-green-400 to-emerald-600 rounded-full mx-auto flex items-center justify-center shadow-lg shadow-green-500/20"><Check className="w-10 h-10 text-white" strokeWidth={3} /></div>
       <div className="space-y-2">
         <h2 className="text-2xl font-bold text-white">{alreadySignedUp ? "You're already on the list!" : "You're on the list! 🎉"}</h2>
-        <p className="text-white/70">You've secured your early access spot.<br />The beta app is live — try it now!</p>
+        <p className="text-white/70">Your spot is secured — welcome email on its way.<br />Want to explore right now?</p>
       </div>
 
-      {/* Primary CTA: Try the Beta App */}
+      {/* Primary CTA: Preview the App */}
       <motion.button
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -231,11 +231,18 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
         onClick={handleTryBeta}
         className="w-full flex items-center justify-center gap-2 py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 to-cyan-600 text-white font-bold text-lg shadow-lg shadow-purple-500/30"
       >
-        <span>Try the Beta App</span>
+        <span>🔮 Preview Beta Access</span>
         <ArrowRight className="w-5 h-5" />
       </motion.button>
 
-      <div className="pt-1"><div className="text-sm font-medium text-purple-400 bg-purple-400/10 py-2 px-4 rounded-lg inline-block">{onComplete ? 'Entering Bytspot Preview...' : 'Live crowd data • Smart parking • Ride ETAs'}</div></div>
+      {/* Preview mode badge */}
+      <div className="flex flex-col items-center gap-1.5 pt-1">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10">
+          <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" /></span>
+          <span className="text-[11px] font-semibold text-white/60 uppercase tracking-widest">Limited Preview · Full Launch Coming Soon</span>
+        </div>
+        <p className="text-[11px] text-white/30">{onComplete ? 'Entering Bytspot Preview…' : 'Live crowd data · Smart parking · Ride ETAs'}</p>
+      </div>
 
       {standalone && !onComplete && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="pt-2">

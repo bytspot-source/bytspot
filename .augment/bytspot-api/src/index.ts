@@ -66,7 +66,8 @@ app.use((_req, res) => {
 app.listen(config.port, () => {
   console.log(`\n🟢 Bytspot API running on port ${config.port}`);
   console.log(`   Environment: ${config.nodeEnv}`);
-  console.log(`   Health check: http://localhost:${config.port}/health\n`);
+  console.log(`   Health check: http://localhost:${config.port}/health`);
+  console.log(`   RESEND_API_KEY: ${config.resendApiKey ? '✅ set' : '❌ MISSING — emails will not send'}\n`);
   // Start in-process crowd alert scheduler (every 15 min)
   startCrowdAlertScheduler();
 });

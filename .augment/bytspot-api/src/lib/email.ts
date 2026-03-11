@@ -64,6 +64,7 @@ export async function sendBetaLeadEmail(to: string, firstName: string): Promise<
   if (!resend) return;
 
   const name = firstName || 'there';
+  console.log(`[email] sendBetaLeadEmail → ${to}`);
   try {
     await resend.emails.send({
       from: FROM,
@@ -91,6 +92,7 @@ export async function sendBetaLeadEmail(to: string, firstName: string): Promise<
         </div>
       `,
     });
+    console.log(`[email] ✅ sendBetaLeadEmail delivered to ${to}`);
   } catch (err: any) {
     console.error('[email] sendBetaLeadEmail failed:', err?.message);
   }

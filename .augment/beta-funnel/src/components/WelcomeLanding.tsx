@@ -60,7 +60,8 @@ function VenueCard({ venue }: { venue: Venue }) {
 }
 
 export default function WelcomeLanding() {
-  const params = new URLSearchParams(window.location.search);
+  const hashQuery = window.location.hash.includes('?') ? window.location.hash.split('?')[1] : window.location.search;
+  const params = new URLSearchParams(hashQuery);
   const emailParam = params.get('email') || localStorage.getItem('bytspot_beta_email') || '';
   const storedName = localStorage.getItem('bytspot_beta_name') || '';
   const firstName = storedName || emailParam.split('@')[0].split('.')[0];

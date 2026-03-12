@@ -1,0 +1,48 @@
+services:
+
+  # ─── Beta Funnel: Marketing / Signup / /welcome ───────────────────────────
+  - type: static
+    name: bytspot-beta
+    branch: beta-funnel/deploy
+    rootDir: .augment/beta-funnel
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    staticPublishPath: ./dist
+    pullRequestPreviewsEnabled: false
+    buildFilter:
+      paths:
+        - .augment/beta-funnel/**
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+
+  # ─── API: Express / Prisma / Resend ───────────────────────────────────────
+  - type: web
+    name: bytspot-api
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/index.js
+    pullRequestPreviewsEnabled: false
+    buildFilter:
+      paths:
+        - .augment/bytspot-api/**
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+

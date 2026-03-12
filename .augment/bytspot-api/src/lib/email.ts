@@ -21,9 +21,7 @@ function getResend() {
   return resendClient;
 }
 
-// TODO: Switch back to 'Bytspot <hello@bytspot.com>' once bytspot.com is verified in Resend
-// Resend domain verification: https://resend.com/domains
-const FROM = 'Bytspot <onboarding@resend.dev>';
+const FROM = 'Bytspot <hello@updates.bytspot.com>';
 
 export async function sendWelcomeEmail(to: string, firstName: string): Promise<void> {
   const resend = getResend();

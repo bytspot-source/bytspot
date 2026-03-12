@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { MapPin, Users, Car, Clock, KeyRound, Mail, ArrowRight, Check, Shield, ExternalLink, Lock, Smartphone, Radio, ParkingCircle } from 'lucide-react';
+import { MapPin, Users, Car, Clock, KeyRound, Mail, ArrowRight, Shield, ExternalLink, Lock, Smartphone, Radio, ParkingCircle } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 
 const BACKEND_PROVIDER: 'formspree' | 'custom' | 'mock' = 'custom';
@@ -203,54 +203,61 @@ function SignupForm({ email, setEmail, name, setName, isSubmitting, spotsLeft, i
   );
 }
 
-const BETA_APP_URL = 'https://bytspot-beta-app.onrender.com';
-
 function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySignedUp: boolean; onComplete?: () => void; standalone: boolean }) {
-  const handleTryBeta = () => {
-    // Pass the stored email as a URL param so beta app can pre-fill it
-    const email = localStorage.getItem('bytspot_beta_email') || '';
-    const url = email ? `${BETA_APP_URL}?email=${encodeURIComponent(email)}` : BETA_APP_URL;
-    window.open(url, '_blank');
-  };
+  const storedEmail = localStorage.getItem('bytspot_beta_email') || '';
 
   return (
     <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="text-center space-y-6 bg-white/5 backdrop-blur-xl p-8 rounded-3xl border border-white/10">
-      <div className="w-20 h-20 bg-gradient-to-br from-green-400 to-emerald-600 rounded-full mx-auto flex items-center justify-center shadow-lg shadow-green-500/20"><Check className="w-10 h-10 text-white" strokeWidth={3} /></div>
-      <div className="space-y-2">
-        <h2 className="text-2xl font-bold text-white">{alreadySignedUp ? "You're already on the list!" : "You're on the list! 🎉"}</h2>
-        <p className="text-white/70">Your spot is secured — welcome email on its way.<br />Want to explore right now?</p>
-      </div>
-
-      {/* Primary CTA: Preview the App */}
-      <motion.button
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-        whileHover={{ scale: 1.03 }}
-        whileTap={{ scale: 0.97 }}
-        onClick={handleTryBeta}
-        className="w-full flex items-center justify-center gap-2 py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 to-cyan-600 text-white font-bold text-lg shadow-lg shadow-purple-500/30"
+      {/* Animated inbox icon */}
+      <motion.div
+        initial={{ scale: 0.5, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ type: 'spring', stiffness: 260, damping: 20 }}
+        className="w-20 h-20 bg-gradient-to-br from-purple-500 to-cyan-500 rounded-full mx-auto flex items-center justify-center shadow-lg shadow-purple-500/30"
       >
-        <span>🔮 Preview Beta Access</span>
-        <ArrowRight className="w-5 h-5" />
-      </motion.button>
+        <Mail className="w-10 h-10 text-white" strokeWidth={2} />
+      </motion.div>
 
-      {/* Preview mode badge */}
-      <div className="flex flex-col items-center gap-1.5 pt-1">
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10">
-          <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" /></span>
-          <span className="text-[11px] font-semibold text-white/60 uppercase tracking-widest">Limited Preview · Full Launch Coming Soon</span>
-        </div>
-        <p className="text-[11px] text-white/30">{onComplete ? 'Entering Bytspot Preview…' : 'Live crowd data · Smart parking · Ride ETAs'}</p>
+      <div className="space-y-2">
+        <h2 className="text-2xl font-bold text-white">
+          {alreadySignedUp ? "You're already on the list!" : "Check your email! 📬"}
+        </h2>
+        <p className="text-white/70 leading-relaxed">
+          {alreadySignedUp
+            ? "We sent your early access link when you first signed up. Check your inbox!"
+            : <>We just sent your early access link to{' '}<span className="text-cyan-400 font-semibold">{storedEmail}</span>.<br />Open it to unlock the beta.</>
+          }
+        </p>
       </div>
 
-      {standalone && !onComplete && (
+      {/* Spam helper */}
+      <motion.p
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.4 }}
+        className="text-[12px] text-white/35 flex items-center justify-center gap-1.5"
+      >
+        <span>📁</span>
+        <span>Don't see it? Check your spam folder.</span>
+      </motion.p>
+
+      {/* Share actions — always shown */}
+      {(standalone || !onComplete) && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="pt-2">
           <p className="text-[12px] text-white/40 mb-3">Share with friends in Midtown</p>
           <div className="flex flex-wrap items-center justify-center gap-3">
-            <button onClick={() => { const t = encodeURIComponent("I just got early access to Bytspot — live crowd levels, parking & ride options for Atlanta Midtown venues. Get yours:"); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }} className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors flex items-center gap-1.5">Share on X<ExternalLink className="w-3 h-3" /></button>
-            <button onClick={() => { navigator.clipboard.writeText(window.location.href); toast.success('Link copied!'); }} className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors">Copy Link</button>
-            <button onClick={() => window.open('/flyer.html', '_blank')} className="min-h-[44px] px-5 py-2.5 rounded-lg bg-gradient-to-r from-purple-500/20 to-cyan-500/20 border border-purple-500/30 text-white/80 text-[13px] hover:from-purple-500/30 hover:to-cyan-500/30 active:from-purple-500/40 active:to-cyan-500/40 transition-colors flex items-center gap-1.5">🖨️ Print QR Flyer</button>
+            <button
+              onClick={() => { const t = encodeURIComponent("I just got early access to Bytspot — live crowd levels, parking & ride options for Atlanta Midtown venues. Get yours:"); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }}
+              className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors flex items-center gap-1.5"
+            >Share on X<ExternalLink className="w-3 h-3" /></button>
+            <button
+              onClick={() => { navigator.clipboard.writeText(window.location.href); toast.success('Link copied!'); }}
+              className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors"
+            >Copy Link</button>
+            <button
+              onClick={() => window.open('/flyer.html', '_blank')}
+              className="min-h-[44px] px-5 py-2.5 rounded-lg bg-gradient-to-r from-purple-500/20 to-cyan-500/20 border border-purple-500/30 text-white/80 text-[13px] hover:from-purple-500/30 hover:to-cyan-500/30 active:from-purple-500/40 active:to-cyan-500/40 transition-colors flex items-center gap-1.5"
+            >🖨️ Print QR Flyer</button>
           </div>
         </motion.div>
       )}

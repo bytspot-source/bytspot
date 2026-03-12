@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { MapPin, Users, ArrowRight, Radio, ParkingCircle, Car } from 'lucide-react';
+import { MapPin, ArrowRight, Radio, ParkingCircle, Car } from 'lucide-react';
 
 const API_URL = 'https://bytspot-api.onrender.com';
 const BETA_APP_URL = 'https://bytspot-beta.onrender.com';

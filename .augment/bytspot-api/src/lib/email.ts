@@ -41,8 +41,8 @@ export async function sendWelcomeEmail(to: string, firstName: string): Promise<v
             You're one of the first people to try the beta. Bytspot shows you live crowd levels,
             parking, and rides for Atlanta Midtown — so you always know what's happening before you go.
           </p>
-          <a href="https://beta.bytspot.com" style="display: inline-block; background: #8b5cf6; color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
-            Open Bytspot →
+          <a href="https://bytspot-beta.onrender.com/welcome?email=${encodeURIComponent(to)}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6, #06b6d4); color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
+            Open Bytspot Beta →
           </a>
           <p style="color: #555; font-size: 13px; margin-top: 32px;">
             Questions? Just reply to this email. We read everything.
@@ -116,7 +116,7 @@ export async function sendCrowdAlertEmail(to: string, firstName: string, venueNa
             <strong style="color: #fff">${venueName}</strong>, one of your saved spots, just hit
             <strong style="color: #ef4444">Packed</strong> status. Plan ahead or check nearby alternatives.
           </p>
-          <a href="https://beta.bytspot.com/v/${venueSlug}" style="display: inline-block; background: #ef4444; color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
+          <a href="https://bytspot-beta.onrender.com/welcome?email=${encodeURIComponent(to)}" style="display: inline-block; background: #ef4444; color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
             See ${venueName} →
           </a>
           <p style="color: #555; font-size: 13px; margin-top: 32px;">

@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="794" height="1123" viewBox="0 0 794 1123">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0d0221"/><stop offset="40%" stop-color="#000000"/><stop offset="100%" stop-color="#020a18"/></linearGradient>
+    <radialGradient id="glow1" cx="10%" cy="10%" r="40%"><stop offset="0%" stop-color="#A855F7" stop-opacity="0.25"/><stop offset="100%" stop-color="#A855F7" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glow2" cx="90%" cy="90%" r="40%"><stop offset="0%" stop-color="#00BFFF" stop-opacity="0.2"/><stop offset="100%" stop-color="#00BFFF" stop-opacity="0"/></radialGradient>
+    <linearGradient id="wordmark" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="50%" stop-color="#A855F7"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#A855F7"/><stop offset="100%" stop-color="#22d3ee"/></linearGradient>
+    <linearGradient id="logoA" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="50%" stop-color="#A855F7"/><stop offset="100%" stop-color="#00BFFF"/></linearGradient>
+    <linearGradient id="logoB" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="100%" stop-color="#D946EF"/></linearGradient>
+    <linearGradient id="logoC" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="50%" stop-color="#D946EF"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+    <linearGradient id="logoD" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#FF00FF"/></linearGradient>
+    <radialGradient id="logoE" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#0099CC"/></radialGradient>
+    <linearGradient id="stepGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#A855F7"/><stop offset="100%" stop-color="#22d3ee"/></linearGradient>
+    <linearGradient id="urlGrad" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#00BFFF"/><stop offset="100%" stop-color="#A855F7"/></linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="794" height="1123" fill="url(#bg)"/>
+  <rect width="794" height="1123" fill="url(#glow1)"/>
+  <rect width="794" height="1123" fill="url(#glow2)"/>
+
+  <!-- Brand Logo -->
+  <g transform="translate(365, 60)">
+    <circle cx="32" cy="32" r="25" fill="none" stroke="url(#logoA)" stroke-width="2"/>
+    <circle cx="32" cy="32" r="20" fill="none" stroke="url(#logoB)" stroke-width="1.2" opacity="0.4"/>
+    <path d="M32 16 L46 24 L46 40 L32 48 L18 40 L18 24 Z" fill="url(#logoC)"/>
+    <path d="M32 16 L46 24 L46 40 L32 48 L18 40 L18 24 Z" fill="none" stroke="url(#logoD)" stroke-width="1"/>
+    <circle cx="32" cy="32" r="5" fill="url(#logoE)"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="397" y="155" text-anchor="middle" font-family="-apple-system, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif" font-size="42" font-weight="800" letter-spacing="-1" fill="url(#wordmark)">Bytspot</text>
+
+  <!-- Location Badge -->
+  <rect x="297" y="170" width="200" height="26" rx="13" fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+  <text x="397" y="188" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" font-weight="700" fill="rgba(255,255,255,0.7)" letter-spacing="1.2">📍  ATLANTA BETA • MIDTOWN</text>
+
+  <!-- Headline -->
+  <text x="397" y="250" text-anchor="middle" font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif" font-size="40" font-weight="800" fill="#ffffff" letter-spacing="-0.5">Know</text>
+  <text x="397" y="295" text-anchor="middle" font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif" font-size="40" font-weight="800" fill="url(#accent)" letter-spacing="-0.5">Before</text>
+  <text x="397" y="340" text-anchor="middle" font-family="-apple-system, 'SF Pro Display', system-ui, sans-serif" font-size="40" font-weight="800" fill="#ffffff" letter-spacing="-0.5">You Go.</text>
+
+  <!-- Awareness Copy -->
+  <text x="397" y="380" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="14" fill="rgba(255,255,255,0.6)">Tired of showing up to packed venues, circling for parking,</text>
+  <text x="397" y="400" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="14" fill="rgba(255,255,255,0.6)">or paying surge prices?</text>
+  <text x="397" y="424" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="14" font-weight="700" fill="rgba(255,255,255,0.85)">Bytspot gives you real-time intel on Atlanta Midtown spots</text>
+  <text x="397" y="444" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="14" fill="rgba(255,255,255,0.6)">— so you always make the right call before you leave.</text>
+
+  <!-- Divider -->
+  <rect x="367" y="468" width="60" height="2" rx="1" fill="url(#accent)"/>
+
+  <!-- Feature Cards -->
+  <!-- Card 1: Live Crowd Levels -->
+  <rect x="117" y="494" width="180" height="130" rx="16" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+  <rect x="187" y="510" width="40" height="40" rx="12" fill="rgba(239,68,68,0.15)"/>
+  <text x="207" y="537" text-anchor="middle" font-size="20">🔴</text>
+  <text x="207" y="572" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="700" fill="#ffffff">Live Crowd Levels</text>
+  <text x="207" y="590" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="rgba(255,255,255,0.45)">See how busy a venue is</text>
+  <text x="207" y="605" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="rgba(255,255,255,0.45)">right now — chill, active, or packed.</text>
+
+  <!-- Card 2: Open Parking -->
+  <rect x="307" y="494" width="180" height="130" rx="16" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+  <rect x="377" y="510" width="40" height="40" rx="12" fill="rgba(34,211,238,0.15)"/>
+  <text x="397" y="537" text-anchor="middle" font-size="20">🅿️</text>
+  <text x="397" y="572" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="700" fill="#ffffff">Open Parking</text>
+  <text x="397" y="590" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="rgba(255,255,255,0.45)">Find available spots nearby</text>
+  <text x="397" y="605" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="rgba(255,255,255,0.45)">before you drive there.</text>
+
+  <!-- Card 3: Ride ETAs -->
+  <rect x="497" y="494" width="180" height="130" rx="16" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+  <rect x="567" y="510" width="40" height="40" rx="12" fill="rgba(168,85,247,0.15)"/>
+  <text x="587" y="537" text-anchor="middle" font-size="20">🚗</text>
+  <text x="587" y="572" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="700" fill="#ffffff">Ride ETAs &amp; Prices</text>
+  <text x="587" y="590" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="rgba(255,255,255,0.45)">Compare Uber &amp; Lyft wait</text>
+  <text x="587" y="605" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="rgba(255,255,255,0.45)">times and surge pricing.</text>
+
+  <!-- How It Works Label -->
+  <text x="397" y="668" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" font-weight="700" fill="rgba(255,255,255,0.3)" letter-spacing="1.5">HOW IT WORKS</text>
+
+  <!-- Steps -->
+  <circle cx="237" cy="704" r="14" fill="url(#stepGrad)"/><text x="237" y="709" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="800" fill="#fff">1</text>
+  <text x="237" y="734" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="11" fill="rgba(255,255,255,0.55)" font-weight="500">Open Bytspot</text>
+  <circle cx="347" cy="704" r="14" fill="url(#stepGrad)"/><text x="347" y="709" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="800" fill="#fff">2</text>
+  <text x="347" y="734" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="11" fill="rgba(255,255,255,0.55)" font-weight="500">Pick a venue</text>
+  <circle cx="447" cy="704" r="14" fill="url(#stepGrad)"/><text x="447" y="709" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="800" fill="#fff">3</text>
+  <text x="447" y="734" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="11" fill="rgba(255,255,255,0.55)" font-weight="500">See live data</text>
+  <circle cx="557" cy="704" r="14" fill="url(#stepGrad)"/><text x="557" y="709" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" font-weight="800" fill="#fff">4</text>
+  <text x="557" y="734" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="11" fill="rgba(255,255,255,0.55)" font-weight="500">Go with confidence</text>
+
+  <!-- QR Section Container -->
+  <rect x="187" y="770" width="420" height="160" rx="20" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+  <!-- QR Code (live Render URL) -->
+  <image href="https://api.qrserver.com/v1/create-qr-code/?size=120x120&amp;data=https://bytspot-beta-app.onrender.com" x="210" y="790" width="120" height="120"/>
+  <!-- QR CTA Text -->
+  <text x="355" y="830" font-family="-apple-system, system-ui, sans-serif" font-size="20" font-weight="800" fill="url(#accent)">Scan to Get</text>
+  <text x="355" y="856" font-family="-apple-system, system-ui, sans-serif" font-size="20" font-weight="800" fill="url(#accent)">Early Access</text>
+  <text x="355" y="882" font-family="-apple-system, system-ui, sans-serif" font-size="12" fill="rgba(255,255,255,0.5)">Free for the first 100 Midtown users.</text>
+  <text x="355" y="900" font-family="-apple-system, system-ui, sans-serif" font-size="12" fill="rgba(255,255,255,0.5)">Be the first to know before you go.</text>
+
+  <!-- Tagline -->
+  <text x="397" y="952" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="13" fill="rgba(255,255,255,0.7)">See live crowd levels around Midtown before you go.</text>
+
+  <!-- Footer -->
+  <text x="397" y="980" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="18" font-weight="700" fill="url(#urlGrad)">bytspot.com</text>
+  <text x="397" y="1005" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="10" font-weight="600" fill="rgba(255,255,255,0.3)" letter-spacing="1">📱 COMING TO IOS &amp; ANDROID</text>
+  <text x="397" y="1025" text-anchor="middle" font-family="-apple-system, system-ui, sans-serif" font-size="9" fill="rgba(255,255,255,0.15)">© 2026 Bytspot • Atlanta, GA</text>
+</svg>

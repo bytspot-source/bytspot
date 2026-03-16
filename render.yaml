@@ -10,7 +10,7 @@ services:
     pullRequestPreviewsEnabled: false
     buildFilter:
       paths:
-        - .augment/beta-funnel/**
+        - "**"
     headers:
       - path: /*
         name: Cache-Control
@@ -27,7 +27,7 @@ services:
     pullRequestPreviewsEnabled: false
     buildFilter:
       paths:
-        - .augment/bytspot-api/**
+        - "**"
     envVars:
       - key: NODE_ENV
         value: production

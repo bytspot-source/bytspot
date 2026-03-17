@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a0533"/>
+      <stop offset="50%" stop-color="#000000"/>
+      <stop offset="100%" stop-color="#0a1628"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <circle cx="100" cy="100" r="300" fill="#a855f7" opacity="0.08"/>
+  <circle cx="1100" cy="530" r="250" fill="#22d3ee" opacity="0.06"/>
+  <!-- Icon -->
+  <rect x="540" y="140" width="120" height="120" rx="28" fill="url(#icon)"/>
+  <circle cx="600" cy="190" r="20" fill="none" stroke="#fff" stroke-width="4"/>
+  <circle cx="600" cy="190" r="6" fill="#fff"/>
+  <path d="M600 210 L600 230" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M590 224 L610 224" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+  <!-- Title -->
+  <text x="600" y="330" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="72" font-weight="800" fill="#ffffff">Bytspot</text>
+  <!-- Tagline -->
+  <text x="600" y="400" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="36" font-weight="600">
+    <tspan fill="#ffffff">Know </tspan>
+    <tspan fill="url(#accent)">Before</tspan>
+    <tspan fill="#ffffff"> You Go.</tspan>
+  </text>
+  <!-- Subtitle -->
+  <text x="600" y="460" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="22" fill="#ffffff" opacity="0.6">Live crowd levels, parking &amp; ride options for Atlanta Midtown</text>
+  <!-- CTA badge -->
+  <rect x="440" y="500" width="320" height="50" rx="25" fill="#a855f7" opacity="0.2" stroke="#a855f7" stroke-opacity="0.4" stroke-width="1"/>
+  <text x="600" y="532" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="18" font-weight="600" fill="#d8b4fe">Get Early Access → bytspot.com</text>
+</svg>
+

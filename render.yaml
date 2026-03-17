@@ -16,6 +16,22 @@ services:
         name: Cache-Control
         value: no-cache, no-store, must-revalidate
 
+  # ─── Flyers: Standalone static flyer pages ────────────────────────────────
+  - type: static
+    name: bytspot-flyers
+    branch: main
+    rootDir: .augment/flyers
+    buildCommand: echo "static"
+    staticPublishPath: ./
+    pullRequestPreviewsEnabled: false
+    buildFilter:
+      paths:
+        - "**"
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+
   # ─── API: Express / Prisma / Resend ───────────────────────────────────────
   - type: web
     name: bytspot-api

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <style>
+      /* Light mode: dark backing so logo pops on white tab bars */
+      .bg { fill: #1C1C1E; }
+      .outer-ring { stroke-width: 3; }
+      .middle-ring { stroke-width: 2; opacity: 0.4; }
+      .hex-border { stroke-width: 1.5; }
+      .glow { opacity: 1; }
+      .dot { opacity: 1; }
+
+      /* Dark mode: transparent backing, brighter glow */
+      @media (prefers-color-scheme: dark) {
+        .bg { fill: transparent; }
+        .glow { opacity: 1; }
+        .outer-ring { stroke-width: 3.5; }
+      }
+    </style>
+    <!-- Outer ring: Cyan → Purple → Cyan -->
+    <linearGradient id="gradient-outer-ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00BFFF"/>
+      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#00BFFF"/>
+    </linearGradient>
+    <!-- Middle ring: Purple → Pink -->
+    <linearGradient id="gradient-middle" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#D946EF"/>
+    </linearGradient>
+    <!-- Hexagon fill: Purple → Pink → Magenta -->
+    <linearGradient id="gradient-hexagon" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="50%" stop-color="#D946EF"/>
+      <stop offset="100%" stop-color="#FF00FF"/>
+    </linearGradient>
+    <!-- Hexagon border: Cyan → Magenta -->
+    <linearGradient id="gradient-hex-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00BFFF"/>
+      <stop offset="100%" stop-color="#FF00FF"/>
+    </linearGradient>
+    <!-- Center dot: Cyan radial -->
+    <radialGradient id="gradient-center-dot" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00BFFF"/>
+      <stop offset="100%" stop-color="#0099CC"/>
+    </radialGradient>
+    <!-- Center glow -->
+    <radialGradient id="gradient-center-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00BFFF" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#00BFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- Background: dark in light mode, transparent in dark mode -->
+  <rect class="bg" width="120" height="120" rx="24"/>
+  <!-- Outer ring -->
+  <circle class="outer-ring" cx="60" cy="60" r="48" fill="none" stroke="url(#gradient-outer-ring)"/>
+  <!-- Middle ring -->
+  <circle class="middle-ring" cx="60" cy="60" r="38" fill="none" stroke="url(#gradient-middle)"/>
+  <!-- Hexagon fill -->
+  <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="url(#gradient-hexagon)"/>
+  <!-- Hexagon border -->
+  <path class="hex-border" d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="none" stroke="url(#gradient-hex-border)"/>
+  <!-- Center glow -->
+  <circle class="glow" cx="60" cy="60" r="12" fill="url(#gradient-center-glow)"/>
+  <!-- Center dot -->
+  <circle class="dot" cx="60" cy="60" r="8" fill="url(#gradient-center-dot)"/>
+</svg>
+

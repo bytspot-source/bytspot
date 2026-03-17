@@ -255,7 +255,7 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
               className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors"
             >Copy Link</button>
             <button
-              onClick={() => window.open('/flyer.html', '_blank')}
+              onClick={() => window.open('https://bytspot-flyers.onrender.com/flyer.html', '_blank')}
               className="min-h-[44px] px-5 py-2.5 rounded-lg bg-gradient-to-r from-purple-500/20 to-cyan-500/20 border border-purple-500/30 text-white/80 text-[13px] hover:from-purple-500/30 hover:to-cyan-500/30 active:from-purple-500/40 active:to-cyan-500/40 transition-colors flex items-center gap-1.5"
             >🖨️ Print QR Flyer</button>
           </div>

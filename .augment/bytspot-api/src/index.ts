@@ -2,9 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import * as trpcExpress from '@trpc/server/adapters/express';
 import { config } from './config';
 
-// Routes
+// tRPC
+import { appRouter } from './trpc/router';
+import { createContext } from './trpc/context';
+
+// REST Routes
 import healthRouter from './routes/health';
 import authRouter from './routes/auth';
 import venuesRouter from './routes/venues';
@@ -44,7 +49,16 @@ app.use(
   }),
 );
 
-// ─── Routes ──────────────────────────────────────────
+// ─── tRPC ─────────────────────────────────────────────
+app.use(
+  '/trpc',
+  trpcExpress.createExpressMiddleware({
+    router: appRouter,
+    createContext,
+  }),
+);
+
+// ─── REST Routes (existing — kept alongside tRPC) ─────
 app.use(healthRouter);
 app.use(authRouter);
 app.use(venuesRouter);

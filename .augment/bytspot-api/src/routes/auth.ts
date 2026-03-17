@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { config } from '../config';
 import { sendWelcomeEmail } from '../lib/email';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
@@ -86,6 +87,37 @@ router.post('/auth/login', async (req, res) => {
   res.json({
     token,
     user: { id: user.id, email: user.email, name: user.name },
+  });
+});
+
+/** GET /auth/me — returns current user profile + referral stats */
+router.get('/auth/me', requireAuth, async (req, res) => {
+  const userId = req.user!.userId;
+
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, name: true, ref: true, createdAt: true },
+  });
+
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  // Count how many users signed up with ref = this user's ID
+  const referralCount = await db.user.count({
+    where: { ref: userId },
+  });
+
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      ref: user.ref,
+      createdAt: user.createdAt,
+    },
+    referralCount,
   });
 });
 

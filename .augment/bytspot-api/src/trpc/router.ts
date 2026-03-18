@@ -8,10 +8,11 @@ import { router, publicProcedure, protectedProcedure } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
-import { sendWelcomeEmail } from '../lib/email';
-import { sendPushToAll } from '../routes/push';
+import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
+import { sendPushToAll, getAllSubscriptions, storeSubscription } from '../routes/push';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
+import { runCrowdAlerts } from '../services/crowdAlerts';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -605,6 +606,181 @@ const providersRouter = router({
 });
 
 /**
+ * ── Admin sub-router ────────────────────────────────────
+ */
+const adminRouter = router({
+  /** GET /admin/stats → admin.stats query (admin password required) */
+  stats: publicProcedure
+    .input(z.object({ adminPassword: z.string() }))
+    .query(async ({ input }) => {
+      if (!config.adminPassword || input.adminPassword !== config.adminPassword) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Wrong admin password' });
+      }
+
+      const r = getRedis();
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const [totalUsers, newToday, totalCheckins, topVenues] = await Promise.all([
+        db.user.count(),
+        db.user.count({ where: { createdAt: { gte: today } } }),
+        db.crowdLevel.count(),
+        db.crowdLevel.groupBy({
+          by: ['venueId'],
+          _count: { venueId: true },
+          orderBy: { _count: { venueId: 'desc' } },
+          take: 5,
+        }),
+      ]);
+
+      let pushSubscribers = 0;
+      if (r) {
+        try { pushSubscribers = await r.scard('push:subscriptions'); } catch {}
+      }
+
+      const venueIds = topVenues.map((v) => v.venueId);
+      const venues = await db.venue.findMany({ where: { id: { in: venueIds } }, select: { id: true, name: true } });
+      const nameMap = Object.fromEntries(venues.map((v) => [v.id, v.name]));
+
+      return {
+        totalUsers,
+        newSignupsToday: newToday,
+        totalCheckins,
+        pushSubscribers,
+        topVenues: topVenues.map((v) => ({
+          venueId: v.venueId,
+          name: nameMap[v.venueId] || v.venueId,
+          checkins: v._count.venueId,
+        })),
+        generatedAt: new Date().toISOString(),
+      };
+    }),
+
+  /** POST /admin/generate-invite → admin.generateInvite mutation */
+  generateInvite: publicProcedure
+    .input(z.object({ adminPassword: z.string(), count: z.number().min(1).max(50).default(1) }))
+    .mutation(async ({ input }) => {
+      if (!config.adminPassword || input.adminPassword !== config.adminPassword) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Wrong admin password' });
+      }
+
+      const r = getRedis();
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      const codes: string[] = [];
+
+      for (let i = 0; i < input.count; i++) {
+        let code = 'BYT-';
+        for (let j = 0; j < 6; j++) code += chars[Math.floor(Math.random() * chars.length)];
+        if (r) {
+          await r.set(`invite:${code}`, JSON.stringify({ used: false, createdAt: new Date().toISOString() }), 'EX', 60 * 60 * 24 * 30);
+        }
+        codes.push(code);
+      }
+
+      return { codes, message: `Generated ${codes.length} invite code(s) — valid for 30 days` };
+    }),
+
+  /** POST /admin/validate-invite → admin.validateInvite mutation (public — called during signup) */
+  validateInvite: publicProcedure
+    .input(z.object({ code: z.string() }))
+    .mutation(async ({ input }) => {
+      const code = input.code.toUpperCase().trim();
+      if (!code) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'No code provided' });
+      }
+
+      // If invite system disabled, allow all
+      if (!config.adminPassword) {
+        return { valid: true };
+      }
+
+      const r = getRedis();
+      if (!r) {
+        return { valid: true, warning: 'Redis unavailable — skipping validation' };
+      }
+
+      const raw = await r.get(`invite:${code}`);
+      if (!raw) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Invalid or expired invite code' });
+      }
+
+      const data = JSON.parse(raw);
+      if (data.used) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'Invite code already used' });
+      }
+
+      await r.set(`invite:${code}`, JSON.stringify({ ...data, used: true, usedAt: new Date().toISOString() }), 'KEEPTTL');
+      return { valid: true };
+    }),
+});
+
+/**
+ * ── Push Notifications sub-router ───────────────────────
+ */
+const pushRouter = router({
+  /** GET /push/vapid-public-key → push.vapidPublicKey query */
+  vapidPublicKey: publicProcedure.query(() => {
+    return { key: config.vapidPublicKey };
+  }),
+
+  /** POST /push/subscribe → push.subscribe mutation */
+  subscribe: publicProcedure
+    .input(z.object({ subscription: z.object({ endpoint: z.string() }).passthrough() }))
+    .mutation(async ({ input }) => {
+      await storeSubscription(input.subscription);
+      return { success: true };
+    }),
+});
+
+/**
+ * ── Beta Signup (Lead Capture) sub-router ───────────────
+ */
+const betaSignupRouter = router({
+  /** POST /beta-signup → betaSignup.signup mutation */
+  signup: publicProcedure
+    .input(z.object({
+      email: z.string().email('Invalid email address'),
+      name: z.string().max(100).optional(),
+      source: z.string().max(100).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const { email, name, source } = input;
+
+      const existing = await db.betaLead.findUnique({ where: { email } });
+      if (existing) {
+        return { ok: true, alreadyRegistered: true };
+      }
+
+      await db.betaLead.create({
+        data: { email, name, source: source ?? 'bytspot.com' },
+      });
+
+      // Fire welcome email — non-blocking
+      const firstName = (name ?? '').split(' ')[0].trim();
+      sendBetaLeadEmail(email, firstName).catch(() => {});
+
+      return { ok: true, alreadyRegistered: false };
+    }),
+});
+
+/**
+ * ── Cron sub-router ─────────────────────────────────────
+ */
+const cronRouter = router({
+  /** POST /cron/crowd-alerts → cron.crowdAlerts mutation (protected by cron secret) */
+  crowdAlerts: publicProcedure
+    .input(z.object({ cronSecret: z.string() }))
+    .mutation(async ({ input }) => {
+      if (input.cronSecret !== config.cronSecret) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid cron secret' });
+      }
+
+      const result = await runCrowdAlerts();
+      return { ok: true, ...result };
+    }),
+});
+
+/**
  * ── Root app router ───────────────────────────────────
  * Merge all sub-routers here.
  */
@@ -616,6 +792,10 @@ export const appRouter = router({
   concierge: conciergeRouter,
   payments: paymentsRouter,
   providers: providersRouter,
+  admin: adminRouter,
+  push: pushRouter,
+  betaSignup: betaSignupRouter,
+  cron: cronRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

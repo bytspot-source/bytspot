@@ -12,7 +12,7 @@ webpush.setVapidDetails(config.vapidEmail, config.vapidPublicKey, config.vapidPr
 /** In-memory fallback store when Redis is unavailable */
 const memorySubscriptions: string[] = [];
 
-async function storeSubscription(sub: object): Promise<void> {
+export async function storeSubscription(sub: object): Promise<void> {
   const json = JSON.stringify(sub);
   const r = getRedis();
   if (r) {

@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
-import { router, publicProcedure, protectedProcedure } from './trpc';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
@@ -257,8 +257,9 @@ const venuesRouter = router({
       return { similar };
     }),
 
-  /** POST /venues/:id/checkin → venues.checkin */
-  checkin: publicProcedure
+  /** POST /venues/:id/checkin → venues.checkin (auth required, rate limited) */
+  checkin: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'checkin' }))
     .input(z.object({ venueId: z.string(), idempotencyKey: z.string().optional() }))
     .mutation(async ({ input }) => {
       const { venueId, idempotencyKey } = input;
@@ -398,8 +399,9 @@ STRICT RULES:
 }
 
 const conciergeRouter = router({
-  /** POST /concierge/chat → concierge.chat mutation */
-  chat: publicProcedure
+  /** POST /concierge/chat → concierge.chat mutation (auth required — costs $, rate limited) */
+  chat: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'concierge' }))
     .input(z.object({
       messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })),
       venues: z.array(venueContextSchema).default([]),
@@ -454,8 +456,8 @@ const conciergeRouter = router({
  * ── Payments (Stripe) sub-router ──────────────────────
  */
 const paymentsRouter = router({
-  /** POST /payments/checkout → payments.checkout mutation */
-  checkout: publicProcedure
+  /** POST /payments/checkout → payments.checkout mutation (auth required — handles $$) */
+  checkout: protectedProcedure
     .input(z.object({
       spotId: z.string(),
       spotName: z.string(),
@@ -723,12 +725,24 @@ const pushRouter = router({
     return { key: config.vapidPublicKey };
   }),
 
-  /** POST /push/subscribe → push.subscribe mutation */
+  /** POST /push/subscribe → push.subscribe mutation (web push VAPID) */
   subscribe: publicProcedure
     .input(z.object({ subscription: z.object({ endpoint: z.string() }).passthrough() }))
     .mutation(async ({ input }) => {
       await storeSubscription(input.subscription);
-      return { success: true };
+      return { success: true, type: 'web' as const };
+    }),
+
+  /** POST /push/registerNative → push.registerNative mutation (APNs/FCM tokens from Capacitor) */
+  registerNative: publicProcedure
+    .input(z.object({
+      token: z.string().min(1),
+      platform: z.enum(['ios', 'android']),
+    }))
+    .mutation(async ({ input }) => {
+      const { storeNativeToken } = await import('../routes/push');
+      await storeNativeToken(input.token, input.platform);
+      return { success: true, type: 'native' as const };
     }),
 });
 

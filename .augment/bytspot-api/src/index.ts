@@ -9,19 +9,14 @@ import { config } from './config';
 import { appRouter } from './trpc/router';
 import { createContext } from './trpc/context';
 
-// REST Routes
-import healthRouter from './routes/health';
-import authRouter from './routes/auth';
-import venuesRouter from './routes/venues';
-import ridesRouter from './routes/rides';
-import cronRouter from './routes/cron';
+// REST Routes — only keep endpoints that have no tRPC equivalent or are used externally
+import healthRouter from './routes/health';        // external monitoring / Render health checks
+import cronRouter from './routes/cron';             // external cron trigger (Bearer token auth)
+import pushRouter from './routes/push';             // VAPID public key + subscription endpoint
+import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
+import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
+
 import { startCrowdAlertScheduler } from './services/crowdAlerts';
-import pushRouter from './routes/push';
-import paymentsRouter from './routes/payments';
-import adminRouter from './routes/admin';
-import conciergeRouter from './routes/concierge';
-import providersRouter from './routes/providers';
-import betaSignupRouter from './routes/betaSignup';
 
 const app = express();
 
@@ -38,18 +33,19 @@ app.use(
 );
 app.use(express.json({ limit: '1mb' }));
 
-// Rate limiting: 100 requests per 15 min per IP
+// Global rate limiting: 300 requests per 15 min per IP
+// (tRPC procedures have their own per-endpoint limits for expensive ops)
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 100,
+    max: 300,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many requests, please try again later' },
   }),
 );
 
-// ─── tRPC ─────────────────────────────────────────────
+// ─── tRPC (primary API layer) ─────────────────────────
 app.use(
   '/trpc',
   trpcExpress.createExpressMiddleware({
@@ -58,18 +54,12 @@ app.use(
   }),
 );
 
-// ─── REST Routes (existing — kept alongside tRPC) ─────
+// ─── REST Routes (non-duplicated endpoints only) ──────
 app.use(healthRouter);
-app.use(authRouter);
-app.use(venuesRouter);
-app.use(ridesRouter);
 app.use(cronRouter);
 app.use(pushRouter);
-app.use(paymentsRouter);
-app.use(adminRouter);
-app.use(conciergeRouter);
-app.use(providersRouter);
 app.use(betaSignupRouter);
+app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {
@@ -81,6 +71,7 @@ app.listen(config.port, () => {
   console.log(`\n🟢 Bytspot API running on port ${config.port}`);
   console.log(`   Environment: ${config.nodeEnv}`);
   console.log(`   Health check: http://localhost:${config.port}/health`);
+  console.log(`   VAPID keys: ${config.vapidPublicKey ? '✅ set' : '⚠️  MISSING — web push will not work'}`);
   console.log(`   RESEND_API_KEY: ${config.resendApiKey ? '✅ set' : '❌ MISSING — emails will not send'}\n`);
   // Start in-process crowd alert scheduler (every 15 min)
   startCrowdAlertScheduler();

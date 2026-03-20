@@ -144,7 +144,8 @@ const savedSpotsRouter = router({
   createCollection: protectedProcedure
     .input(z.object({ name: z.string(), description: z.string().optional(), icon: z.string().optional(), color: z.string().optional() }))
     .mutation(async ({ ctx, input }) => {
-      return db.spotCollection.create({ data: { userId: ctx.user.userId, ...input } });
+      const { name, description, icon, color } = input;
+      return db.spotCollection.create({ data: { userId: ctx.user.userId, name, description, icon, color } });
     }),
 
   /** Add a saved spot to a collection */

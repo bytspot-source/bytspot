@@ -17,6 +17,7 @@ import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter } from './eventsRouter';
+import { placesRouter } from './placesRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -829,6 +830,7 @@ export const appRouter = router({
   social: socialRouter,
   reviews: reviewsRouter,
   events: eventsRouter,
+  places: placesRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

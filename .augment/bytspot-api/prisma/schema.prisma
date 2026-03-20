@@ -29,6 +29,7 @@ model User {
   preference     UserPreference?
   followers      Follow[]          @relation("following") // users who follow me
   following      Follow[]          @relation("follower")  // users I follow
+  reviews        Review[]
 
   @@map("users")
 }
@@ -56,6 +57,7 @@ model Venue {
   parking     ParkingSpot[]
   checkIns    CheckIn[]
   savedBy     SavedSpot[]
+  reviews     Review[]
 
   @@map("venues")
 }
@@ -263,4 +265,22 @@ model Follow {
   @@index([followerId])
   @@index([followingId])
   @@map("follows")
+}
+
+// ─── Reviews ─────────────────────────────────────────
+model Review {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  venueId   String   @map("venue_id")
+  stars     Int      // 1-5
+  vibe      Int      // 1-10
+  comment   String   @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, venueId])
+  @@index([venueId, createdAt(sort: Desc)])
+  @@map("reviews")
 }

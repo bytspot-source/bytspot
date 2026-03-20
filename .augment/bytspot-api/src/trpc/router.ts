@@ -15,6 +15,8 @@ import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
+import { reviewsRouter } from './reviewsRouter';
+import { eventsRouter } from './eventsRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -825,6 +827,8 @@ export const appRouter = router({
   cron: cronRouter,
   user: userRouter,
   social: socialRouter,
+  reviews: reviewsRouter,
+  events: eventsRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

@@ -27,6 +27,10 @@ export const config = {
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   // Cron secret — protects the /cron/* endpoints from public access (set CRON_SECRET in Render env vars)
   cronSecret: process.env.CRON_SECRET || (isDev ? 'dev-cron-secret' : ''),
+  // Ticketmaster Discovery API (set TICKETMASTER_API_KEY in Render env vars)
+  ticketmasterApiKey: process.env.TICKETMASTER_API_KEY || '',
+  // Google Places API (set GOOGLE_PLACES_API_KEY in Render env vars)
+  googlePlacesApiKey: process.env.GOOGLE_PLACES_API_KEY || '',
   // APNs — Apple Push Notification service for native iOS tokens
   apnsKeyId: process.env.APNS_KEY_ID || '',
   apnsTeamId: process.env.APNS_TEAM_ID || '',

@@ -288,3 +288,147 @@ describe('cron', () => {
     expect(result.ok).toBe(true);
   });
 });
+
+
+// ──────────────────────────────────────────────────────────
+// User — Points
+// ──────────────────────────────────────────────────────────
+describe('user.points', () => {
+  it('rejects unauthenticated calls', async () => {
+    const caller = createPublicCaller();
+    await expect(caller.user.points.get()).rejects.toThrow(TRPCError);
+  });
+
+  it('returns zero points for new user', async () => {
+    (db.pointTransaction.findMany as any).mockResolvedValueOnce([]);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.points.get();
+    expect(result.total).toBe(0);
+    expect(result.lifetime).toBe(0);
+    expect(result.tier).toBe('bronze');
+  });
+
+  it('calculates tier from lifetime points', async () => {
+    (db.pointTransaction.findMany as any).mockResolvedValueOnce([
+      { id: '1', type: 'earn', amount: 2500, createdAt: new Date() },
+    ]);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.points.get();
+    expect(result.lifetime).toBe(2500);
+    expect(result.tier).toBe('gold');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// User — Achievements
+// ──────────────────────────────────────────────────────────
+describe('user.achievements', () => {
+  it('returns all achievements with unlock status', async () => {
+    (db.userAchievement.findMany as any).mockResolvedValueOnce([
+      { achievementId: 'first_checkin', unlockedAt: new Date() },
+    ]);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.achievements.list();
+    expect(result.length).toBeGreaterThan(0);
+    const first = result.find((a: any) => a.id === 'first_checkin');
+    expect(first?.unlocked).toBe(true);
+    const explorer = result.find((a: any) => a.id === 'checkin_25');
+    expect(explorer?.unlocked).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// User — Check-in History
+// ──────────────────────────────────────────────────────────
+describe('user.checkins', () => {
+  it('returns empty list for new user', async () => {
+    (db.checkIn.findMany as any).mockResolvedValueOnce([]);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.checkins.list({});
+    expect(result.items).toEqual([]);
+  });
+
+  it('returns count', async () => {
+    (db.checkIn.count as any).mockResolvedValueOnce(5);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.checkins.count();
+    expect(result).toBe(5);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// User — Saved Spots
+// ──────────────────────────────────────────────────────────
+describe('user.savedSpots', () => {
+  it('saves a venue', async () => {
+    (db.savedSpot.upsert as any).mockResolvedValueOnce({ id: 'ss-1', venueId: 'v1' });
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.savedSpots.save({ venueId: 'v1' });
+    expect(result.id).toBe('ss-1');
+  });
+
+  it('removes a saved spot', async () => {
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.savedSpots.remove({ venueId: 'v1' });
+    expect(result.success).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// User — Preferences
+// ──────────────────────────────────────────────────────────
+describe('user.preferences', () => {
+  it('returns defaults for new user', async () => {
+    (db.userPreference.findUnique as any).mockResolvedValueOnce(null);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.preferences.get();
+    expect(result.interests).toEqual([]);
+    expect(result.vibes).toEqual([]);
+  });
+
+  it('updates preferences', async () => {
+    (db.userPreference.upsert as any).mockResolvedValueOnce({ interests: ['nightlife'], vibes: ['chill'] });
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.preferences.update({ interests: ['nightlife'], vibes: ['chill'] });
+    expect(result.interests).toContain('nightlife');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Social
+// ──────────────────────────────────────────────────────────
+describe('social', () => {
+  it('rejects following yourself', async () => {
+    const caller = createAuthenticatedCaller('user-1');
+    await expect(caller.social.follow({ userId: 'user-1' })).rejects.toThrow('Cannot follow yourself');
+  });
+
+  it('follows a user', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce({ id: 'user-2', name: 'Bob' });
+    (db.follow.upsert as any).mockResolvedValueOnce({ id: 'f-1' });
+    const caller = createAuthenticatedCaller('user-1');
+    const result = await caller.social.follow({ userId: 'user-2' });
+    expect(result.success).toBe(true);
+  });
+
+  it('unfollows a user', async () => {
+    const caller = createAuthenticatedCaller();
+    const result = await caller.social.unfollow({ userId: 'user-2' });
+    expect(result.success).toBe(true);
+  });
+
+  it('returns empty leaderboard', async () => {
+    (db.pointTransaction.groupBy as any).mockResolvedValueOnce([]);
+    (db.user.findMany as any).mockResolvedValueOnce([]);
+    const caller = createPublicCaller();
+    const result = await caller.social.leaderboard({});
+    expect(result).toEqual([]);
+  });
+
+  it('returns empty feed when not following anyone', async () => {
+    (db.follow.findMany as any).mockResolvedValueOnce([]);
+    const caller = createAuthenticatedCaller();
+    const result = await caller.social.feed({});
+    expect(result.items).toEqual([]);
+  });
+});

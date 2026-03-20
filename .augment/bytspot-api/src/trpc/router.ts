@@ -13,6 +13,8 @@ import { sendPushToAll, getAllSubscriptions, storeSubscription } from '../routes
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
+import { userRouter } from './userRouter';
+import { socialRouter } from './socialRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -261,7 +263,7 @@ const venuesRouter = router({
   checkin: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'checkin' }))
     .input(z.object({ venueId: z.string(), idempotencyKey: z.string().optional() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const { venueId, idempotencyKey } = input;
 
       // Idempotency check
@@ -270,7 +272,7 @@ const venuesRouter = router({
         if (r) {
           try {
             const hit = await r.get(`idem:checkin:${idempotencyKey}`);
-            if (hit) return JSON.parse(hit) as { success: boolean; newCrowdLevel: number };
+            if (hit) return JSON.parse(hit) as { success: boolean; newCrowdLevel: number; pointsEarned: number };
           } catch { /* continue */ }
         }
       }
@@ -286,11 +288,22 @@ const venuesRouter = router({
         data: { venueId, level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report' },
       });
 
+      // ── Phase 1: Record per-user check-in + award points ──
+      const pointsEarned = 10;
+      await Promise.all([
+        db.checkIn.create({
+          data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned },
+        }),
+        db.pointTransaction.create({
+          data: { userId: ctx.user.userId, type: 'earn', amount: pointsEarned, description: `Checked in at ${venue.name}`, category: 'checkin' },
+        }),
+      ]).catch(() => { /* non-blocking — don't fail the checkin if points fail */ });
+
       crowdEmitter.emit('crowd-update', {
         venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, recordedAt: new Date().toISOString() },
       });
 
-      const result = { success: true, newCrowdLevel: newLevel };
+      const result = { success: true, newCrowdLevel: newLevel, pointsEarned };
 
       if (newLevel === 4) {
         sendPushToAll(`🔴 ${venue.name} is now Packed`, `High crowd at ${venue.name} — plan ahead.`, { venueId, venueName: venue.name, type: 'packed-alert' }).catch(() => {});
@@ -810,6 +823,8 @@ export const appRouter = router({
   push: pushRouter,
   betaSignup: betaSignupRouter,
   cron: cronRouter,
+  user: userRouter,
+  social: socialRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

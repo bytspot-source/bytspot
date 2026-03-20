@@ -19,8 +19,16 @@ model User {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  hostProfile  HostProfile?
-  valetProfile ValetProfile?
+  hostProfile    HostProfile?
+  valetProfile   ValetProfile?
+  checkIns       CheckIn[]
+  savedSpots     SavedSpot[]
+  collections    SpotCollection[]
+  pointTxns      PointTransaction[]
+  achievements   UserAchievement[]
+  preference     UserPreference?
+  followers      Follow[]          @relation("following") // users who follow me
+  following      Follow[]          @relation("follower")  // users I follow
 
   @@map("users")
 }
@@ -46,6 +54,8 @@ model Venue {
 
   crowdLevels CrowdLevel[]
   parking     ParkingSpot[]
+  checkIns    CheckIn[]
+  savedBy     SavedSpot[]
 
   @@map("venues")
 }
@@ -125,4 +135,132 @@ model BetaLead {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("beta_leads")
+}
+
+// ─── Check-In History (per-user) ──────────────────────
+model CheckIn {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  venueId       String   @map("venue_id")
+  crowdLevel    Int      @map("crowd_level")
+  crowdLabel    String   @map("crowd_label")
+  pointsEarned  Int      @default(10) @map("points_earned")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([venueId])
+  @@map("check_ins")
+}
+
+// ─── Saved Spots ──────────────────────────────────────
+model SavedSpot {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  venueId   String   @map("venue_id")
+  notes     String?
+  tags      String[] @default([])
+  savedAt   DateTime @default(now()) @map("saved_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  items SpotCollectionItem[]
+
+  @@unique([userId, venueId])
+  @@index([userId])
+  @@map("saved_spots")
+}
+
+// ─── Spot Collections ─────────────────────────────────
+model SpotCollection {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  name        String
+  description String?
+  icon        String?
+  color       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items SpotCollectionItem[]
+
+  @@index([userId])
+  @@map("spot_collections")
+}
+
+model SpotCollectionItem {
+  id           String @id @default(cuid())
+  collectionId String @map("collection_id")
+  savedSpotId  String @map("saved_spot_id")
+
+  collection SpotCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  savedSpot  SavedSpot      @relation(fields: [savedSpotId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, savedSpotId])
+  @@map("spot_collection_items")
+}
+
+// ─── Points Ledger ────────────────────────────────────
+model PointTransaction {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  type        String   // "earn", "spend", "bonus"
+  amount      Int
+  description String
+  category    String   // "checkin", "achievement", "referral", "review", "streak"
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("point_transactions")
+}
+
+// ─── Achievements ─────────────────────────────────────
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  achievementId String   @map("achievement_id") // e.g. "first_checkin", "night_owl_10"
+  unlockedAt    DateTime @default(now()) @map("unlocked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, achievementId])
+  @@index([userId])
+  @@map("user_achievements")
+}
+
+// ─── User Preferences ─────────────────────────────────
+model UserPreference {
+  id        String   @id @default(cuid())
+  userId    String   @unique @map("user_id")
+  interests String[] @default([])
+  vibes     String[] @default([])
+  cuisines  String[] @default([])
+  parking   Json?    // { covered, evCharging, security }
+  behavior  Json?    // { categoryClicks, lastLocations, visitCounts }
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+// ─── Social: Follow Graph ─────────────────────────────
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String   @map("follower_id")
+  followingId String   @map("following_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  follower  User @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
 }

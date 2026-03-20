@@ -40,6 +40,42 @@ vi.mock('../lib/db', () => {
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    checkIn: {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ id: 'ci-1' }),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    savedSpot: {
+      findMany: vi.fn().mockResolvedValue([]),
+      upsert: vi.fn().mockResolvedValue({ id: 'ss-1' }),
+      deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    spotCollection: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn().mockResolvedValue({ id: 'col-1', name: 'Favorites' }),
+    },
+    spotCollectionItem: {
+      upsert: vi.fn().mockResolvedValue({ id: 'sci-1' }),
+    },
+    pointTransaction: {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ id: 'pt-1' }),
+      groupBy: vi.fn().mockResolvedValue([]),
+    },
+    userAchievement: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    userPreference: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn().mockResolvedValue({ id: 'up-1' }),
+    },
+    follow: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn().mockResolvedValue({ id: 'f-1' }),
+      deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
   };
   return { db: mockDb };
 });

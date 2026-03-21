@@ -129,5 +129,29 @@ export const socialRouter = router({
       });
       return { following: !!row };
     }),
+
+  /** Recent check-ins at a specific venue (public — no auth required) */
+  venueCheckins: publicProcedure
+    .input(z.object({ venueId: z.string(), limit: z.number().min(1).max(30).optional().default(10) }))
+    .query(async ({ input }) => {
+      const checkins = await db.checkIn.findMany({
+        where: { venueId: input.venueId },
+        include: {
+          user: { select: { id: true, name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: input.limit,
+      });
+      return {
+        items: checkins.map((c) => ({
+          id: c.id,
+          userId: c.user.id,
+          userName: c.user.name ?? 'Anonymous',
+          crowdLevel: c.crowdLevel,
+          crowdLabel: c.crowdLabel,
+          timestamp: c.createdAt.toISOString(),
+        })),
+      };
+    }),
 });
 

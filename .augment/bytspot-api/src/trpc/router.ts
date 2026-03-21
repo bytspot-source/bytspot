@@ -16,8 +16,8 @@ import { runCrowdAlerts } from '../services/crowdAlerts';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
-import { eventsRouter } from './eventsRouter';
-import { placesRouter } from './placesRouter';
+import { eventsRouter, mapTmEvent } from './eventsRouter';
+import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -383,7 +383,72 @@ const quizAnswersSchema = z.object({
   group: z.string().optional(),
 }).optional();
 
-function buildSystemPrompt(venues: z.infer<typeof venueContextSchema>[], quiz?: z.infer<typeof quizAnswersSchema>): string {
+// ─── RAG: Fetch live context from Google Places + Ticketmaster ───
+interface LiveContext {
+  nearbyPlaces: MappedPlace[];
+  events: Array<{ id: string; title: string; venue: string; date: string; time: string; category: string; price: string }>;
+}
+
+const TM_BASE = 'https://app.ticketmaster.com/discovery/v2';
+
+async function fetchLiveContext(): Promise<LiveContext> {
+  const result: LiveContext = { nearbyPlaces: [], events: [] };
+
+  // Fetch nearby places (Midtown ATL center: 33.7756, -84.3963)
+  const placesPromise = config.googlePlacesApiKey
+    ? cached('concierge:places', 600, async () => {
+        try {
+          const body = {
+            locationRestriction: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 3000 } },
+            maxResultCount: 15, rankPreference: 'DISTANCE',
+          };
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, GP_SEARCH_FIELDS);
+          return (data.places ?? []).map(mapPlace);
+        } catch (err: any) {
+          console.error('[concierge-rag] Places fetch failed:', err?.message);
+          return [];
+        }
+      })
+    : Promise.resolve([]);
+
+  // Fetch tonight's events from Ticketmaster
+  const eventsPromise = config.ticketmasterApiKey
+    ? cached('concierge:events', 900, async () => {
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          const params = new URLSearchParams({
+            apikey: config.ticketmasterApiKey,
+            city: 'Atlanta', stateCode: 'GA', size: '10',
+            sort: 'date,asc', startDateTime: `${today}T00:00:00Z`,
+          });
+          const res = await fetch(`${TM_BASE}/events.json?${params}`, { signal: AbortSignal.timeout(8000) });
+          if (!res.ok) return [];
+          const data = (await res.json()) as { _embedded?: { events?: any[] } };
+          return (data._embedded?.events ?? []).map(mapTmEvent);
+        } catch (err: any) {
+          console.error('[concierge-rag] Events fetch failed:', err?.message);
+          return [];
+        }
+      })
+    : Promise.resolve([]);
+
+  const [places, events] = await Promise.all([placesPromise, eventsPromise]);
+  result.nearbyPlaces = places ?? [];
+  result.events = events ?? [];
+  return result;
+}
+
+function buildSystemPrompt(
+  venues: z.infer<typeof venueContextSchema>[],
+  quiz?: z.infer<typeof quizAnswersSchema>,
+  liveCtx?: LiveContext,
+): string {
+  // Merge frontend venues with server-side places (deduplicate by name)
+  const venueNames = new Set(venues.map(v => v.name.toLowerCase()));
+  const enrichedPlaces = (liveCtx?.nearbyPlaces ?? [])
+    .filter(p => !venueNames.has(p.name.toLowerCase()))
+    .map(p => `  • [gp:${p.placeId}] ${p.name} | ${p.primaryType ?? 'venue'} | Rating: ${p.rating ?? 'N/A'}⭐ | ${p.address}`);
+
   const venueList = venues
     .map(v => {
       const crowd = v.crowd
@@ -393,25 +458,35 @@ function buildSystemPrompt(venues: z.infer<typeof venueContextSchema>[], quiz?: 
     })
     .join('\n');
 
+  const placesList = enrichedPlaces.length > 0 ? '\n' + enrichedPlaces.join('\n') : '';
+
+  const eventsList = (liveCtx?.events ?? []).length > 0
+    ? '\n\nTONIGHT\'S EVENTS IN ATLANTA:\n' + (liveCtx?.events ?? []).map(e =>
+        `  🎫 [evt:${e.id}] ${e.title} @ ${e.venue} | ${e.date} ${e.time} | ${e.price}`
+      ).join('\n')
+    : '';
+
   const userCtx = quiz
     ? `\nUser preferences from onboarding: vibe=${quiz.vibe ?? 'any'}, walk=${quiz.walk ?? 'any'}, group=${quiz.group ?? 'any'}`
     : '';
 
-  return `You are the Bytspot Concierge — a sharp, friendly Atlanta Midtown expert powered by live crowd data.${userCtx}
+  return `You are the Bytspot Concierge — a sharp, friendly Atlanta Midtown expert powered by live crowd data AND tonight's events.${userCtx}
 
 LIVE venue data right now in Midtown Atlanta:
-${venueList || '  (no venue data available — suggest checking back shortly)'}
+${venueList || '  (no venue data available)'}${placesList}${eventsList}
 
 STRICT RULES:
-1. Only recommend venues from the live list above. Never invent venue names.
+1. Only recommend venues/events from the live lists above. Never invent names.
 2. Keep replies conversational, confident, 2-4 sentences. Use 1-2 emojis naturally.
-3. Always mention the crowd level when recommending (e.g. "it's pretty quiet right now").
-4. For parking or ride questions, mention the Map and Discover tabs in the Bytspot app.
-5. You MUST respond with valid JSON only — no markdown, no extra text outside the JSON:
-   {"reply": "your message here", "venueIds": ["id1", "id2"]}
-6. Include 1-3 venue IDs in venueIds only when making venue recommendations. Use empty array otherwise.
-7. If nothing matches well, suggest the closest alternative and be honest about why.
-8. You know Atlanta Midtown inside out — be confident and local.`;
+3. Always mention the crowd level when recommending venues (e.g. "it's pretty quiet right now").
+4. When users ask about events or "what's happening tonight", recommend from the events list.
+5. For "Plan My Night" requests, suggest a multi-stop itinerary: dinner → drinks/event → late-night spot.
+6. For parking or ride questions, mention the Map and Discover tabs in the Bytspot app.
+7. You MUST respond with valid JSON only — no markdown, no extra text outside the JSON:
+   {"reply": "your message here", "venueIds": ["id1", "id2"], "eventIds": ["evt:id1"]}
+8. Include 1-3 venue IDs in venueIds when making venue recommendations. Include event IDs in eventIds when suggesting events. Use empty arrays otherwise.
+9. If nothing matches well, suggest the closest alternative and be honest about why.
+10. You know Atlanta Midtown inside out — be confident and local.`;
 }
 
 const conciergeRouter = router({
@@ -435,31 +510,41 @@ const conciergeRouter = router({
       }
 
       try {
+        // RAG: Fetch live places + events in parallel with OpenAI call setup
+        const liveCtx = await fetchLiveContext();
+
         const openai = getOpenAI();
         const completion = await openai.chat.completions.create({
           model: 'gpt-4o-mini',
           messages: [
-            { role: 'system' as const, content: buildSystemPrompt(venues, quizAnswers) },
+            { role: 'system' as const, content: buildSystemPrompt(venues, quizAnswers, liveCtx) },
             ...messages.slice(-10).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
           ],
-          max_tokens: 300,
+          max_tokens: 500,
           temperature: 0.75,
           response_format: { type: 'json_object' },
         });
 
         const raw = completion.choices[0]?.message?.content
-          ?? '{"reply":"Sorry, I had trouble responding. Try again!","venueIds":[]}';
+          ?? '{"reply":"Sorry, I had trouble responding. Try again!","venueIds":[],"eventIds":[]}';
 
-        let parsed: { reply: string; venueIds: string[] };
+        let parsed: { reply: string; venueIds: string[]; eventIds?: string[] };
         try {
           parsed = JSON.parse(raw);
         } catch {
-          parsed = { reply: raw, venueIds: [] };
+          parsed = { reply: raw, venueIds: [], eventIds: [] };
         }
 
         return {
           reply: parsed.reply ?? 'Let me find something great for you...',
           venueIds: Array.isArray(parsed.venueIds) ? parsed.venueIds : [],
+          eventIds: Array.isArray(parsed.eventIds) ? parsed.eventIds : [],
+          // Send enriched context back so frontend can render cards
+          liveEvents: liveCtx.events.slice(0, 5),
+          livePlaces: liveCtx.nearbyPlaces.slice(0, 8).map(p => ({
+            placeId: p.placeId, name: p.name, address: p.address,
+            rating: p.rating, primaryType: p.primaryType, photoUrls: p.photoUrls.slice(0, 1),
+          })),
         };
       } catch (err: any) {
         console.error('[Concierge] OpenAI error:', err?.message);

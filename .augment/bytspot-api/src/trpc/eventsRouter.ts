@@ -22,7 +22,7 @@ interface TmEvent {
   _embedded?: { venues?: Array<{ name: string; city?: { name: string }; address?: { line1: string } }> };
 }
 
-function mapTmEvent(e: TmEvent) {
+export function mapTmEvent(e: TmEvent) {
   const venue = e._embedded?.venues?.[0];
   const img = e.images?.find((i) => i.ratio === '16_9' && i.width >= 500) ?? e.images?.[0];
   const price = e.priceRanges?.[0];

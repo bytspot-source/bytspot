@@ -10,7 +10,7 @@ import { config } from '../config';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
 
-const SEARCH_FIELDS = [
+export const SEARCH_FIELDS = [
   'places.id', 'places.displayName', 'places.formattedAddress', 'places.location',
   'places.rating', 'places.userRatingCount', 'places.priceLevel', 'places.types',
   'places.photos', 'places.currentOpeningHours', 'places.primaryType', 'places.websiteUri',
@@ -31,7 +31,7 @@ export interface MappedPlace {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapPlace(p: any): MappedPlace {
+export function mapPlace(p: any): MappedPlace {
   const photos: string[] = (p.photos ?? []).slice(0, 4).map((ph: any) =>
     `${GP_BASE}/${ph.name}/media?maxWidthPx=800&key=${config.googlePlacesApiKey}`,
   );
@@ -46,7 +46,7 @@ function mapPlace(p: any): MappedPlace {
   };
 }
 
-async function gpPost<T>(path: string, body: object, fieldMask: string): Promise<T> {
+export async function gpPost<T>(path: string, body: object, fieldMask: string): Promise<T> {
   const res = await fetch(`${GP_BASE}${path}`, {
     method: 'POST',
     headers: {

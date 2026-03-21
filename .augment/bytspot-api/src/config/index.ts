@@ -18,6 +18,8 @@ export const config = {
   vapidEmail: process.env.VAPID_EMAIL || 'mailto:bytspotapp@gmail.com',
   // Stripe (set STRIPE_SECRET_KEY in Render env vars)
   stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
+  stripePremiumPriceId: process.env.STRIPE_PREMIUM_PRICE_ID || '',
   frontendUrl: process.env.FRONTEND_URL || 'https://beta.bytspot.com',
   // Resend transactional email (set RESEND_API_KEY in Render env vars)
   resendApiKey: process.env.RESEND_API_KEY || '',

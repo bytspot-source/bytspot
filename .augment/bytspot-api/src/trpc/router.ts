@@ -498,7 +498,7 @@ const conciergeRouter = router({
       venues: z.array(venueContextSchema).default([]),
       quizAnswers: quizAnswersSchema,
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const { messages, venues, quizAnswers } = input;
 
       if (messages.length === 0) {
@@ -508,6 +508,10 @@ const conciergeRouter = router({
       if (!config.openaiApiKey) {
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'AI concierge not configured' });
       }
+
+      // Check premium status for enhanced limits
+      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { isPremium: true } });
+      const isPremium = user?.isPremium ?? false;
 
       try {
         // RAG: Fetch live places + events in parallel with OpenAI call setup
@@ -520,7 +524,7 @@ const conciergeRouter = router({
             { role: 'system' as const, content: buildSystemPrompt(venues, quizAnswers, liveCtx) },
             ...messages.slice(-10).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
           ],
-          max_tokens: 500,
+          max_tokens: isPremium ? 800 : 500,
           temperature: 0.75,
           response_format: { type: 'json_object' },
         });
@@ -606,6 +610,128 @@ const paymentsRouter = router({
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Stripe error';
         console.error('[payments] Stripe error:', msg);
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: msg });
+      }
+    }),
+});
+
+/**
+ * ── Subscription (Bytspot Premium) sub-router ────────
+ */
+const subscriptionRouter = router({
+  /** POST /subscription/createCheckout → creates Stripe Checkout for premium subscription */
+  createCheckout: protectedProcedure.mutation(async ({ ctx }) => {
+    if (!config.stripeSecretKey) {
+      return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
+    }
+    const stripe = new Stripe(config.stripeSecretKey);
+    const userId = ctx.user.userId;
+
+    // Get or create Stripe customer
+    let user = await db.user.findUnique({ where: { id: userId }, select: { stripeCustomerId: true, email: true, isPremium: true } });
+    if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+    if (user.isPremium) return { url: null as string | null, demoMode: false, message: 'Already premium' };
+
+    let customerId = user.stripeCustomerId;
+    if (!customerId) {
+      const customer = await stripe.customers.create({ email: user.email, metadata: { userId } });
+      customerId = customer.id;
+      await db.user.update({ where: { id: userId }, data: { stripeCustomerId: customerId } });
+    }
+
+    try {
+      const session = await stripe.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        mode: 'subscription',
+        line_items: [{
+          price: config.stripePremiumPriceId || undefined,
+          ...(!config.stripePremiumPriceId ? {
+            price_data: {
+              currency: 'usd',
+              unit_amount: 999, // $9.99/month
+              recurring: { interval: 'month' as const },
+              product_data: { name: 'Bytspot Premium', description: 'Ad-free experience, priority concierge, exclusive badge' },
+            },
+          } : {}),
+          quantity: 1,
+        }],
+        metadata: { userId },
+        success_url: `${config.frontendUrl}/premium/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${config.frontendUrl}/premium/cancelled`,
+      });
+      return { url: session.url };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Stripe error';
+      console.error('[subscription] Stripe error:', msg);
+      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: msg });
+    }
+  }),
+
+  /** GET /subscription/status → returns current user's premium status */
+  status: protectedProcedure.query(async ({ ctx }) => {
+    const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { isPremium: true } });
+    return { isPremium: user?.isPremium ?? false };
+  }),
+
+  /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
+  webhook: publicProcedure
+    .input(z.object({ type: z.string(), data: z.any() }))
+    .mutation(async ({ input }) => {
+      const { type, data } = input;
+      if (type === 'checkout.session.completed') {
+        const userId = data?.object?.metadata?.userId;
+        if (userId && data?.object?.mode === 'subscription') {
+          await db.user.update({ where: { id: userId }, data: { isPremium: true } });
+          console.log(`[subscription] User ${userId} upgraded to Premium`);
+        }
+      } else if (type === 'customer.subscription.deleted') {
+        const customerId = data?.object?.customer;
+        if (customerId) {
+          await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: { isPremium: false } });
+          console.log(`[subscription] Customer ${customerId} subscription cancelled`);
+        }
+      }
+      return { received: true };
+    }),
+});
+
+/**
+ * ── Tips (Valet Tipping) sub-router ─────────────────
+ */
+const tipsRouter = router({
+  /** POST /tips/createTip → creates a Stripe PaymentIntent for a valet tip */
+  createTip: protectedProcedure
+    .input(z.object({ valetId: z.string(), amount: z.number().min(1).max(100) }))
+    .mutation(async ({ ctx, input }) => {
+      if (!config.stripeSecretKey) {
+        return { clientSecret: null as string | null, demoMode: true, message: 'Stripe not configured' };
+      }
+      const stripe = new Stripe(config.stripeSecretKey);
+      const { valetId, amount } = input;
+
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(amount * 100),
+          currency: 'usd',
+          metadata: { fromUserId: ctx.user.userId, toValetId: valetId },
+          description: `Valet tip from ${ctx.user.email}`,
+        });
+
+        // Record the tip in the database
+        await db.tip.create({
+          data: {
+            fromUserId: ctx.user.userId,
+            toValetId: valetId,
+            amount,
+            stripePaymentIntentId: paymentIntent.id,
+          },
+        });
+
+        return { clientSecret: paymentIntent.client_secret };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Stripe error';
+        console.error('[tips] Stripe error:', msg);
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: msg });
       }
     }),
@@ -906,6 +1032,8 @@ export const appRouter = router({
   rides: ridesRouter,
   concierge: conciergeRouter,
   payments: paymentsRouter,
+  subscription: subscriptionRouter,
+  tips: tipsRouter,
   providers: providersRouter,
   admin: adminRouter,
   push: pushRouter,

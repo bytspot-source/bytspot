@@ -373,7 +373,7 @@ const venueContextSchema = z.object({
   id: z.string(),
   name: z.string(),
   category: z.string(),
-  crowd: z.object({ level: z.number(), label: z.string(), waitMins: z.number().optional() }).optional(),
+  crowd: z.object({ level: z.number(), label: z.string(), waitMins: z.number().nullable().optional() }).optional(),
   address: z.string().optional(),
 });
 

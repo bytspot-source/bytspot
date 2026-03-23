@@ -4,7 +4,7 @@
  */
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import { router, publicProcedure, protectedProcedure } from './trpc';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 
 export const reviewsRouter = router({
@@ -58,6 +58,7 @@ export const reviewsRouter = router({
 
   /** Add or update a review (one per user per venue) */
   add: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'reviews:add' }))
     .input(z.object({
       venueId: z.string(),
       stars: z.number().int().min(1).max(5),

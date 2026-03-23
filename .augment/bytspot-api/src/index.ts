@@ -66,13 +66,29 @@ app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// ─── Startup config validation ───────────────────────
+if (!config.isDev) {
+  const critical: Array<[string, string]> = [
+    [config.jwtSecret, 'JWT_SECRET'],
+    [config.databaseUrl, 'DATABASE_URL'],
+  ];
+  for (const [val, name] of critical) {
+    if (!val) {
+      console.error(`❌ FATAL: ${name} is not set in production — aborting`);
+      process.exit(1);
+    }
+  }
+}
+
 // ─── Start ───────────────────────────────────────────
 app.listen(config.port, () => {
   console.log(`\n🟢 Bytspot API running on port ${config.port}`);
   console.log(`   Environment: ${config.nodeEnv}`);
   console.log(`   Health check: http://localhost:${config.port}/health`);
   console.log(`   VAPID keys: ${config.vapidPublicKey ? '✅ set' : '⚠️  MISSING — web push will not work'}`);
-  console.log(`   RESEND_API_KEY: ${config.resendApiKey ? '✅ set' : '❌ MISSING — emails will not send'}\n`);
+  console.log(`   RESEND_API_KEY: ${config.resendApiKey ? '✅ set' : '❌ MISSING — emails will not send'}`);
+  console.log(`   OpenAI: ${config.openaiApiKey ? '✅ set' : '⚠️  MISSING — concierge will not work'}`);
+  console.log(`   Stripe: ${config.stripeSecretKey ? '✅ set' : '⚠️  MISSING — payments in demo mode'}\n`);
   // Start in-process crowd alert scheduler (every 15 min)
   startCrowdAlertScheduler();
 });

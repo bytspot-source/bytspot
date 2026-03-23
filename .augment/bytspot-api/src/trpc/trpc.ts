@@ -28,9 +28,26 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
 
 /**
  * Simple in-memory rate limiter for tRPC procedures.
- * Uses a sliding-window counter per key (userId or 'anon').
+ * Uses a fixed-window counter per key (userId or 'anon').
+ * Includes periodic cleanup to prevent memory leaks from stale buckets.
  */
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+// Cleanup stale buckets every 5 minutes to prevent unbounded memory growth
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) {
+      rateBuckets.delete(key);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`[rate-limit] Cleaned ${cleaned} stale bucket(s), ${rateBuckets.size} active`);
+  }
+}, CLEANUP_INTERVAL_MS).unref(); // .unref() so this timer doesn't prevent graceful shutdown
 
 export function rateLimitMiddleware(opts: { windowMs: number; max: number; label: string }) {
   return t.middleware(async ({ ctx, next }) => {

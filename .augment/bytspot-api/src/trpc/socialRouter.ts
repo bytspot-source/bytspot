@@ -3,13 +3,14 @@
  */
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import { router, protectedProcedure, publicProcedure } from './trpc';
+import { router, protectedProcedure, publicProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 
 export const socialRouter = router({
   /** Follow a user */
   follow: protectedProcedure
-    .input(z.object({ userId: z.string() }))
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:follow' }))
+    .input(z.object({ userId: z.string().max(100) }))
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.userId === input.userId) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Cannot follow yourself' });
@@ -28,7 +29,8 @@ export const socialRouter = router({
 
   /** Unfollow a user */
   unfollow: protectedProcedure
-    .input(z.object({ userId: z.string() }))
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:unfollow' }))
+    .input(z.object({ userId: z.string().max(100) }))
     .mutation(async ({ ctx, input }) => {
       await db.follow.deleteMany({
         where: { followerId: ctx.user.userId, followingId: input.userId },

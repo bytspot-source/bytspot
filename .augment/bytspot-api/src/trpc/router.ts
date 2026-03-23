@@ -77,11 +77,12 @@ const healthRouter = router({
 const authRouter = router({
   /** POST /auth/signup → auth.signup mutation */
   signup: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'auth:signup' }))
     .input(z.object({
-      email: z.string().email(),
-      password: z.string().min(8, 'Password must be at least 8 characters'),
-      name: z.string().optional(),
-      ref: z.string().optional(),
+      email: z.string().email().max(255),
+      password: z.string().min(8, 'Password must be at least 8 characters').max(128),
+      name: z.string().max(100).optional(),
+      ref: z.string().max(100).optional(),
     }))
     .mutation(async ({ input }) => {
       const { email, password, name, ref } = input;
@@ -109,9 +110,10 @@ const authRouter = router({
 
   /** POST /auth/login → auth.login mutation */
   login: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:login' }))
     .input(z.object({
-      email: z.string().email(),
-      password: z.string(),
+      email: z.string().email().max(255),
+      password: z.string().min(1).max(128),
     }))
     .mutation(async ({ input }) => {
       const { email, password } = input;
@@ -563,12 +565,13 @@ const conciergeRouter = router({
 const paymentsRouter = router({
   /** POST /payments/checkout → payments.checkout mutation (auth required — handles $$) */
   checkout: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'payments:checkout' }))
     .input(z.object({
-      spotId: z.string(),
-      spotName: z.string(),
-      address: z.string(),
-      duration: z.number(),
-      totalCost: z.number(),
+      spotId: z.string().max(100),
+      spotName: z.string().max(200),
+      address: z.string().max(500),
+      duration: z.number().min(0.5).max(24),
+      totalCost: z.number().min(0.01).max(10000),
     }))
     .mutation(async ({ input }) => {
       if (!config.stripeSecretKey) {
@@ -620,7 +623,9 @@ const paymentsRouter = router({
  */
 const subscriptionRouter = router({
   /** POST /subscription/createCheckout → creates Stripe Checkout for premium subscription */
-  createCheckout: protectedProcedure.mutation(async ({ ctx }) => {
+  createCheckout: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'subscription:checkout' }))
+    .mutation(async ({ ctx }) => {
     if (!config.stripeSecretKey) {
       return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
     }
@@ -676,7 +681,17 @@ const subscriptionRouter = router({
 
   /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
   webhook: publicProcedure
-    .input(z.object({ type: z.string(), data: z.any() }))
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 50, label: 'subscription:webhook' }))
+    .input(z.object({
+      type: z.string().max(100),
+      data: z.object({
+        object: z.object({
+          metadata: z.object({ userId: z.string().max(100).optional() }).optional(),
+          mode: z.string().max(50).optional(),
+          customer: z.string().max(100).optional(),
+        }).passthrough().optional(),
+      }).passthrough(),
+    }))
     .mutation(async ({ input }) => {
       const { type, data } = input;
       if (type === 'checkout.session.completed') {
@@ -702,7 +717,8 @@ const subscriptionRouter = router({
 const tipsRouter = router({
   /** POST /tips/createTip → creates a Stripe PaymentIntent for a valet tip */
   createTip: protectedProcedure
-    .input(z.object({ valetId: z.string(), amount: z.number().min(1).max(100) }))
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'tips:createTip' }))
+    .input(z.object({ valetId: z.string().max(100), amount: z.number().min(1).max(100) }))
     .mutation(async ({ ctx, input }) => {
       if (!config.stripeSecretKey) {
         return { clientSecret: null as string | null, demoMode: true, message: 'Stripe not configured' };
@@ -979,8 +995,9 @@ const pushRouter = router({
 const betaSignupRouter = router({
   /** POST /beta-signup → betaSignup.signup mutation */
   signup: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'beta:signup' }))
     .input(z.object({
-      email: z.string().email('Invalid email address'),
+      email: z.string().email('Invalid email address').max(255),
       name: z.string().max(100).optional(),
       source: z.string().max(100).optional(),
     }))

@@ -432,3 +432,63 @@ describe('social', () => {
     expect(result.items).toEqual([]);
   });
 });
+
+
+// ──────────────────────────────────────────────────────────
+// Rate Limiting
+// ──────────────────────────────────────────────────────────
+describe('rate limiting', () => {
+  it('allows requests under the limit', async () => {
+    const caller = createPublicCaller();
+    // rides.get has a rate limit — should work for a few calls
+    const result = await caller.rides.get({ lat: 33.78, lng: -84.38 });
+    expect(result.providers).toHaveLength(2);
+  });
+
+  it('concierge rejects unauthenticated calls before rate limit applies', async () => {
+    const caller = createPublicCaller();
+    await expect(
+      caller.concierge.ask({ message: 'test' }),
+    ).rejects.toThrow(TRPCError);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Input validation
+// ──────────────────────────────────────────────────────────
+describe('input validation', () => {
+  it('auth.signup rejects empty email', async () => {
+    const caller = createPublicCaller();
+    await expect(
+      caller.auth.signup({ email: '', password: 'password123' }),
+    ).rejects.toThrow();
+  });
+
+  it('auth.signup rejects short password', async () => {
+    const caller = createPublicCaller();
+    await expect(
+      caller.auth.signup({ email: 'test@test.com', password: '12' }),
+    ).rejects.toThrow();
+  });
+
+  it('venues.checkin rejects empty venueId', async () => {
+    const caller = createAuthenticatedCaller();
+    await expect(
+      caller.venues.checkin({ venueId: '' }),
+    ).rejects.toThrow();
+  });
+
+  it('rides.get rejects non-numeric coordinates', async () => {
+    const caller = createPublicCaller();
+    await expect(
+      caller.rides.get({ lat: 'abc' as any, lng: -84.38 }),
+    ).rejects.toThrow();
+  });
+
+  it('betaSignup rejects malformed email', async () => {
+    const caller = createPublicCaller();
+    await expect(
+      caller.betaSignup.signup({ email: 'not-valid' }),
+    ).rejects.toThrow();
+  });
+});

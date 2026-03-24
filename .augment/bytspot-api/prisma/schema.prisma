@@ -19,7 +19,8 @@ model User {
   profileImage String? @map("profile_image")
   address   String?
   birthday  String?
-  vehicles  Json?    // JSON array of saved vehicles
+  vehicles          Json?    // JSON array of saved vehicles
+  notificationPrefs Json?    @map("notification_prefs") // push/email/sms preference toggles
   ref       String?  // signup source: "qr", "tiktok", "organic"
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

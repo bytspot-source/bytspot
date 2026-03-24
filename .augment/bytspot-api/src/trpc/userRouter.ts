@@ -307,6 +307,56 @@ const vehiclesRouter = router({
     }),
 });
 
+// ─── Notification Preferences sub-router ────────────────────────────
+const notificationPrefsSchema = z.object({
+  push: z.object({
+    reservations: z.boolean(),
+    promotions: z.boolean(),
+    reminders: z.boolean(),
+    insider: z.boolean(),
+    nearby: z.boolean(),
+  }),
+  email: z.object({
+    reservations: z.boolean(),
+    promotions: z.boolean(),
+    newsletter: z.boolean(),
+    receipts: z.boolean(),
+  }),
+  sms: z.object({
+    reservations: z.boolean(),
+    reminders: z.boolean(),
+    emergencies: z.boolean(),
+  }),
+});
+
+const DEFAULT_NOTIFICATION_PREFS = {
+  push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false },
+  email: { reservations: true, promotions: false, newsletter: true, receipts: true },
+  sms: { reservations: true, reminders: true, emergencies: true },
+};
+
+const notificationsRouter = router({
+  /** Get user's notification preferences */
+  getPrefs: protectedProcedure.query(async ({ ctx }) => {
+    const user = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { notificationPrefs: true },
+    });
+    return (user?.notificationPrefs as typeof DEFAULT_NOTIFICATION_PREFS) ?? DEFAULT_NOTIFICATION_PREFS;
+  }),
+
+  /** Update user's notification preferences */
+  updatePrefs: protectedProcedure
+    .input(notificationPrefsSchema)
+    .mutation(async ({ ctx, input }) => {
+      await db.user.update({
+        where: { id: ctx.user.userId },
+        data: { notificationPrefs: input as any },
+      });
+      return { success: true };
+    }),
+});
+
 // ─── Compose user router ────────────────────────────────────────────
 export const userRouter = router({
   points: pointsRouter,
@@ -316,5 +366,6 @@ export const userRouter = router({
   preferences: preferencesRouter,
   profile: profileRouter,
   vehicles: vehiclesRouter,
+  notifications: notificationsRouter,
 });
 

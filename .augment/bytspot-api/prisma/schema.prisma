@@ -15,6 +15,11 @@ model User {
   email     String   @unique
   password  String
   name      String?
+  phone     String?
+  profileImage String? @map("profile_image")
+  address   String?
+  birthday  String?
+  vehicles  Json?    // JSON array of saved vehicles
   ref       String?  // signup source: "qr", "tiktok", "organic"
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

@@ -215,6 +215,98 @@ const preferencesRouter = router({
     }),
 });
 
+// ─── Profile sub-router ─────────────────────────────────────────────
+const profileRouter = router({
+  /** Get user profile (personal info) */
+  get: protectedProcedure.query(async ({ ctx }) => {
+    const user = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { id: true, email: true, name: true, phone: true, profileImage: true, address: true, birthday: true, createdAt: true },
+    });
+    if (!user) throw new (await import('@trpc/server')).TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+    return user;
+  }),
+
+  /** Update user profile */
+  update: protectedProcedure
+    .input(z.object({
+      name: z.string().max(100).optional(),
+      phone: z.string().max(20).optional(),
+      address: z.string().max(200).optional(),
+      birthday: z.string().max(20).optional(),
+      profileImage: z.string().max(500_000).optional(), // base64 data URL can be large
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.user.update({
+        where: { id: ctx.user.userId },
+        data: input,
+        select: { id: true, email: true, name: true, phone: true, profileImage: true, address: true, birthday: true },
+      });
+      return user;
+    }),
+});
+
+// ─── Vehicles sub-router ────────────────────────────────────────────
+const vehicleSchema = z.object({
+  id: z.string(),
+  type: z.enum(['sedan', 'suv', 'truck', 'ev', 'motorcycle']),
+  make: z.string().max(50),
+  model: z.string().max(50),
+  year: z.number().int().min(1900).max(2100),
+  color: z.string().max(30),
+  licensePlate: z.string().max(15),
+  photo: z.string().optional(),
+  vin: z.string().max(17).optional(),
+  transmissionType: z.enum(['automatic', 'manual', 'ev']),
+  trunkCategory: z.enum(['full', 'compact', 'frunk_only', 'none']),
+});
+
+const vehiclesRouter = router({
+  /** List user's saved vehicles */
+  list: protectedProcedure.query(async ({ ctx }) => {
+    const user = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { vehicles: true },
+    });
+    return (user?.vehicles as any[]) ?? [];
+  }),
+
+  /** Add a vehicle */
+  add: protectedProcedure
+    .input(vehicleSchema.omit({ id: true }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
+      const vehicles = (user?.vehicles as any[]) ?? [];
+      const newVehicle = { id: `v_${Date.now()}`, ...input };
+      vehicles.push(newVehicle);
+      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
+      return newVehicle;
+    }),
+
+  /** Update a vehicle */
+  update: protectedProcedure
+    .input(vehicleSchema)
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
+      const vehicles = (user?.vehicles as any[]) ?? [];
+      const idx = vehicles.findIndex((v: any) => v.id === input.id);
+      if (idx === -1) throw new (await import('@trpc/server')).TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
+      vehicles[idx] = input;
+      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
+      return input;
+    }),
+
+  /** Remove a vehicle */
+  remove: protectedProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
+      const vehicles = ((user?.vehicles as any[]) ?? []).filter((v: any) => v.id !== input.id);
+      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
+      return { success: true };
+    }),
+});
+
 // ─── Compose user router ────────────────────────────────────────────
 export const userRouter = router({
   points: pointsRouter,
@@ -222,5 +314,7 @@ export const userRouter = router({
   checkins: checkinsRouter,
   savedSpots: savedSpotsRouter,
   preferences: preferencesRouter,
+  profile: profileRouter,
+  vehicles: vehiclesRouter,
 });
 

@@ -7,6 +7,15 @@ const BETA_APP_URL = 'https://bytspot-beta.onrender.com';
 
 interface Venue { id: string; name: string; crowdLevel: string; parkingAvailable: number; }
 
+/** Fallback venues shown when API is cold-starting or unreachable */
+const FALLBACK_VENUES: Venue[] = [
+  { id: 'f1', name: 'Ponce City Market', crowdLevel: 'Active', parkingAvailable: 45 },
+  { id: 'f2', name: 'Colony Square', crowdLevel: 'Chill', parkingAvailable: 22 },
+  { id: 'f3', name: 'Krog Street Market', crowdLevel: 'Active', parkingAvailable: 12 },
+  { id: 'f4', name: 'The Painted Pin', crowdLevel: 'Packed', parkingAvailable: 5 },
+  { id: 'f5', name: 'Piedmont Park', crowdLevel: 'Chill', parkingAvailable: 60 },
+];
+
 const CROWD_COLOR: Record<string, string> = {
   Chill: 'text-emerald-400',
   Active: 'text-orange-400',
@@ -73,20 +82,32 @@ export default function WelcomeLanding() {
 
   useEffect(() => {
     const controller = new AbortController();
+    // Timeout after 6s — Render free tier cold starts take ~30s, don't leave users waiting
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 6000);
+
     fetch(`${API_URL}/venues`, { signal: controller.signal })
       .then(r => r.json())
       .then((data: any[]) => {
+        clearTimeout(timeout);
         const mapped = data.slice(0, 5).map(v => ({
           id: v.id,
           name: v.name,
           crowdLevel: v.crowdLevel ?? 'Active',
           parkingAvailable: v.parkingAvailable ?? 0,
         }));
-        setVenues(mapped);
+        setVenues(mapped.length > 0 ? mapped : FALLBACK_VENUES);
         setLoading(false);
       })
-      .catch(() => { setError(true); setLoading(false); });
-    return () => controller.abort();
+      .catch(() => {
+        clearTimeout(timeout);
+        // Use fallback venues instead of showing error
+        setVenues(FALLBACK_VENUES);
+        setError(false);
+        setLoading(false);
+      });
+    return () => { clearTimeout(timeout); controller.abort(); };
   }, []);
 
   return (
@@ -132,11 +153,7 @@ export default function WelcomeLanding() {
 
           {loading && [0, 1, 2].map(i => <VenueCardSkeleton key={i} />)}
 
-          {error && (
-            <div className="rounded-2xl bg-white/5 border border-white/10 p-4 text-center text-white/40 text-[13px]">
-              Crowd data unavailable right now — check back shortly.
-            </div>
-          )}
+          {/* Error state removed — fallback venues always fill in */}
 
           {!loading && !error && venues.map((v, i) => (
             <motion.div key={v.id} transition={{ delay: 0.1 * i }}>

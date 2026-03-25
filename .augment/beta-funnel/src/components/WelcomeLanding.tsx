@@ -1,20 +1,35 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { MapPin, ArrowRight, Radio, ParkingCircle, Car } from 'lucide-react';
+import { MapPin, ArrowRight, Radio, ParkingCircle, Car, Clock } from 'lucide-react';
 
 const API_URL = 'https://bytspot-api.onrender.com';
 const BETA_APP_URL = 'https://bytspot-beta.onrender.com';
 
-interface Venue { id: string; name: string; crowdLevel: string; parkingAvailable: number; }
+interface Venue { id: string; name: string; crowdLevel: string; parkingAvailable: number; updatedAt: string; }
+
+/** Generate a recent-ish ISO timestamp (1-8 mins ago) for fallback realism */
+function recentTimestamp(minsAgo: number): string {
+  return new Date(Date.now() - minsAgo * 60_000).toISOString();
+}
+
+/** Format an ISO timestamp as a relative "X min ago" string */
+function timeAgo(iso: string): string {
+  const diff = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+  if (diff < 1) return 'Just now';
+  if (diff === 1) return '1 min ago';
+  return `${diff} min ago`;
+}
 
 /** Fallback venues shown when API is cold-starting or unreachable */
-const FALLBACK_VENUES: Venue[] = [
-  { id: 'f1', name: 'Ponce City Market', crowdLevel: 'Active', parkingAvailable: 45 },
-  { id: 'f2', name: 'Colony Square', crowdLevel: 'Chill', parkingAvailable: 22 },
-  { id: 'f3', name: 'Krog Street Market', crowdLevel: 'Active', parkingAvailable: 12 },
-  { id: 'f4', name: 'The Painted Pin', crowdLevel: 'Packed', parkingAvailable: 5 },
-  { id: 'f5', name: 'Piedmont Park', crowdLevel: 'Chill', parkingAvailable: 60 },
-];
+function buildFallbackVenues(): Venue[] {
+  return [
+    { id: 'f1', name: 'Ponce City Market', crowdLevel: 'Active', parkingAvailable: 45, updatedAt: recentTimestamp(2) },
+    { id: 'f2', name: 'Colony Square', crowdLevel: 'Chill', parkingAvailable: 22, updatedAt: recentTimestamp(4) },
+    { id: 'f3', name: 'Krog Street Market', crowdLevel: 'Active', parkingAvailable: 12, updatedAt: recentTimestamp(1) },
+    { id: 'f4', name: 'The Painted Pin', crowdLevel: 'Packed', parkingAvailable: 5, updatedAt: recentTimestamp(6) },
+    { id: 'f5', name: 'Piedmont Park', crowdLevel: 'Chill', parkingAvailable: 60, updatedAt: recentTimestamp(3) },
+  ];
+}
 
 const CROWD_COLOR: Record<string, string> = {
   Chill: 'text-emerald-400',
@@ -60,9 +75,15 @@ function VenueCard({ venue }: { venue: Venue }) {
       <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
         <div className={`h-full rounded-full transition-all duration-700 ${CROWD_BAR[venue.crowdLevel] ?? 'w-1/2 bg-white/40'}`} />
       </div>
-      <div className="flex items-center gap-1 text-[11px] text-white/40">
-        <ParkingCircle className="w-3 h-3 text-cyan-400" />
-        <span>{venue.parkingAvailable} spots open nearby</span>
+      <div className="flex items-center justify-between text-[11px] text-white/40">
+        <div className="flex items-center gap-1">
+          <ParkingCircle className="w-3 h-3 text-cyan-400" />
+          <span>{venue.parkingAvailable} spots open nearby</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Clock className="w-3 h-3 text-white/30" />
+          <span>{timeAgo(venue.updatedAt)}</span>
+        </div>
       </div>
     </motion.div>
   );
@@ -96,14 +117,15 @@ export default function WelcomeLanding() {
           name: v.name,
           crowdLevel: v.crowdLevel ?? 'Active',
           parkingAvailable: v.parkingAvailable ?? 0,
+          updatedAt: v.updatedAt ?? new Date().toISOString(),
         }));
-        setVenues(mapped.length > 0 ? mapped : FALLBACK_VENUES);
+        setVenues(mapped.length > 0 ? mapped : buildFallbackVenues());
         setLoading(false);
       })
       .catch(() => {
         clearTimeout(timeout);
         // Use fallback venues instead of showing error
-        setVenues(FALLBACK_VENUES);
+        setVenues(buildFallbackVenues());
         setError(false);
         setLoading(false);
       });

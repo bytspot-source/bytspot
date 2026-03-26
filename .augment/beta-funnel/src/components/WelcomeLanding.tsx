@@ -111,14 +111,14 @@ export default function WelcomeLanding() {
 
     fetch(`${API_URL}/venues`, { signal: controller.signal })
       .then(r => r.json())
-      .then((data: any[]) => {
+      .then((data: { venues: any[] }) => {
         clearTimeout(timeout);
-        const mapped = data.slice(0, 5).map(v => ({
+        const mapped = (data.venues || []).slice(0, 5).map((v: any) => ({
           id: v.id,
           name: v.name,
-          crowdLevel: v.crowdLevel ?? 'Active',
-          parkingAvailable: v.parkingAvailable ?? 0,
-          updatedAt: v.updatedAt ?? new Date().toISOString(),
+          crowdLevel: v.crowd?.label ?? 'Active',
+          parkingAvailable: v.parking?.totalAvailable ?? 0,
+          updatedAt: v.crowd?.recordedAt ?? new Date().toISOString(),
         }));
         setVenues(mapped.length > 0 ? mapped : buildFallbackVenues());
         setLoading(false);
@@ -132,6 +132,50 @@ export default function WelcomeLanding() {
       });
     return () => { clearTimeout(timeout); controller.abort(); };
   }, []);
+
+  // ── SSE: real-time crowd updates ──────────────────────────
+  useEffect(() => {
+    // Only connect once we have venues loaded (either real or fallback)
+    if (loading || venues.length === 0) return;
+
+    const es = new EventSource(`${API_URL}/venues/crowd/stream`);
+
+    es.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'snapshot') {
+          // Merge snapshot crowd data into existing venues
+          setVenues(prev => prev.map(v => {
+            const match = (msg.venues as any[]).find((s: any) => s.id === v.id);
+            if (match?.crowd) {
+              return {
+                ...v,
+                crowdLevel: match.crowd.label ?? v.crowdLevel,
+                updatedAt: match.crowd.recordedAt ?? v.updatedAt,
+              };
+            }
+            return v;
+          }));
+        }
+
+        if (msg.type === 'update' && msg.venueId && msg.crowd) {
+          // Apply single venue crowd update
+          setVenues(prev => prev.map(v =>
+            v.id === msg.venueId
+              ? { ...v, crowdLevel: msg.crowd.label ?? v.crowdLevel, updatedAt: msg.crowd.recordedAt ?? new Date().toISOString() }
+              : v
+          ));
+        }
+      } catch { /* ignore malformed SSE data */ }
+    };
+
+    es.onerror = () => {
+      // SSE will auto-reconnect; no action needed
+    };
+
+    return () => { es.close(); };
+  }, [loading, venues.length]);
 
   return (
     <div className="min-h-screen bg-[#0d0d0d] text-white relative overflow-hidden flex flex-col items-center justify-start px-6 py-12">

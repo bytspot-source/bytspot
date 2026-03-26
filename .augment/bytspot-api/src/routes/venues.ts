@@ -39,7 +39,10 @@ router.get('/venues', async (_req, res) => {
             level: v.crowdLevels[0].level,
             label: v.crowdLevels[0].label,
             waitMins: v.crowdLevels[0].waitMins,
-            recordedAt: v.crowdLevels[0].recordedAt,
+            // Ensure recordedAt is always a valid ISO string (Prisma returns Date objects)
+            recordedAt: v.crowdLevels[0].recordedAt instanceof Date
+              ? v.crowdLevels[0].recordedAt.toISOString()
+              : String(v.crowdLevels[0].recordedAt),
           }
         : null,
       parking: {
@@ -214,7 +217,7 @@ router.get('/venues/crowd/stream', async (req, res) => {
     const snapshot = rows.map((v) => ({
       id: v.id,
       crowd: v.crowdLevels[0]
-        ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt }
+        ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
         : null,
     }));
     res.write(`data: ${JSON.stringify({ type: 'snapshot', venues: snapshot })}\n\n`);

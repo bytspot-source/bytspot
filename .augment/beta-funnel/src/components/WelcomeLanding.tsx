@@ -13,12 +13,36 @@ function recentTimestamp(minsAgo: number): string {
   return new Date(Date.now() - minsAgo * 60_000).toISOString();
 }
 
-/** Format an ISO timestamp as a relative "X min ago" string */
-function timeAgo(iso: string): string {
-  const diff = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
-  if (diff < 1) return 'Just now';
-  if (diff === 1) return '1 min ago';
-  return `${diff} min ago`;
+/** Format an ISO timestamp as a relative "X ago" string */
+function timeAgo(iso: string | number): string {
+  let date = new Date(iso);
+
+  // Handle numeric seconds timestamps too
+  if (Number.isNaN(date.getTime()) && typeof iso === 'number') {
+    date = new Date(iso * 1000);
+  }
+
+  // Debug: warn on invalid / unparseable dates so bad API data is easy to spot
+  if (Number.isNaN(date.getTime())) {
+    console.warn('[timeAgo] Invalid date received:', iso);
+    return 'Unknown';
+  }
+
+  const diffMinutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60_000));
+  if (diffMinutes < 1) return 'Just now';
+  if (diffMinutes === 1) return '1 min ago';
+  if (diffMinutes < 60) return `${diffMinutes} min ago`;
+
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours === 1) return '1 hr ago';
+  if (diffHours < 24) return `${diffHours} hrs ago`;
+
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays === 1) return '1 day ago';
+  if (diffDays < 7) return `${diffDays} days ago`;
+
+  const diffWeeks = Math.floor(diffDays / 7);
+  return diffWeeks <= 1 ? '1 wk ago' : `${diffWeeks} wks ago`;
 }
 
 /** Fallback venues shown when API is cold-starting or unreachable */

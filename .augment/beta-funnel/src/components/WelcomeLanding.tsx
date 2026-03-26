@@ -35,11 +35,13 @@ function buildFallbackVenues(): Venue[] {
 const CROWD_COLOR: Record<string, string> = {
   Chill: 'text-emerald-400',
   Active: 'text-orange-400',
+  Busy: 'text-amber-400',
   Packed: 'text-red-400',
 };
 const CROWD_BAR: Record<string, string> = {
   Chill: 'w-1/4 bg-emerald-500',
-  Active: 'w-2/3 bg-orange-500',
+  Active: 'w-2/4 bg-orange-500',
+  Busy: 'w-3/4 bg-amber-500',
   Packed: 'w-full bg-red-500',
 };
 

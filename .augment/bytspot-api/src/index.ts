@@ -20,8 +20,8 @@ import { startCrowdAlertScheduler } from './services/crowdAlerts';
 
 const app = express();
 
-// Trust Render's load balancer so express-rate-limit and req.ip work correctly
-app.set('trust proxy', 1);
+// Trust Cloudflare → Render LB (2 proxy hops) so express-rate-limit and req.ip see real client IPs
+app.set('trust proxy', 2);
 
 // ─── Global Middleware ───────────────────────────────
 app.use(helmet());

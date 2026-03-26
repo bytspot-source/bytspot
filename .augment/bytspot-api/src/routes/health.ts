@@ -1,6 +1,18 @@
 import { Router } from 'express';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+// Read version once at module load (works in both dev and compiled dist/)
+const pkgVersion = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
+    return pkg.version as string;
+  } catch {
+    return 'unknown';
+  }
+})();
 
 const router = Router();
 
@@ -29,7 +41,7 @@ router.get('/health', async (_req, res) => {
   }
 
   const healthy = checks.postgres === 'ok';
-  res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', checks });
+  res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', version: pkgVersion, checks });
 });
 
 // ─── Public stats for home screen display ────────────────────────────────────

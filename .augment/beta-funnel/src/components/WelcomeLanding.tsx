@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { MapPin, ArrowRight, Radio, ParkingCircle, Car, Clock } from 'lucide-react';
 
+/* Auto-deploy verification: 2026-03-26 */
 const API_URL = 'https://bytspot-api.onrender.com';
 const BETA_APP_URL = 'https://bytspot-beta.onrender.com';
 

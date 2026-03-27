@@ -18,6 +18,7 @@
 import { db } from '../lib/db';
 import { crowdEmitter } from '../routes/venues';
 import { cached, getRedis } from '../lib/redis';
+import { runCrowdAlerts } from './crowdAlerts';
 
 const LABELS: Record<number, string> = { 1: 'Chill', 2: 'Active', 3: 'Busy', 4: 'Packed' };
 
@@ -113,6 +114,16 @@ export async function runCrowdSimulation(): Promise<SimulationResult> {
   }
 
   console.log(`[crowd-sim] Generated ${inserts.length} crowd updates (ET hour=${etHour}, day=${etDay})`);
+
+  // Chain crowd alerts immediately after new data is written so transitions are detected
+  try {
+    const alertResult = await runCrowdAlerts();
+    if (alertResult.alertsSent > 0) {
+      console.log(`[crowd-sim] Triggered ${alertResult.alertsSent} crowd alerts`);
+    }
+  } catch (err: any) {
+    console.error('[crowd-sim] crowd alerts failed:', err?.message);
+  }
 
   return { venuesUpdated: inserts.length, simulatedAt: now.toISOString() };
 }

@@ -179,7 +179,7 @@ const venuesRouter = router({
         id: v.id, name: v.name, slug: v.slug, address: v.address,
         lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
         crowd: v.crowdLevels[0]
-          ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt }
+          ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
           : null,
         parking: {
           totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
@@ -234,7 +234,12 @@ const venuesRouter = router({
       return {
         id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
-        crowd: { current: venue.crowdLevels[0] || null, history: venue.crowdLevels },
+        crowd: {
+          current: venue.crowdLevels[0]
+            ? { ...venue.crowdLevels[0], recordedAt: venue.crowdLevels[0].recordedAt instanceof Date ? venue.crowdLevels[0].recordedAt.toISOString() : String(venue.crowdLevels[0].recordedAt) }
+            : null,
+          history: venue.crowdLevels.map((cl) => ({ ...cl, recordedAt: cl.recordedAt instanceof Date ? cl.recordedAt.toISOString() : String(cl.recordedAt) })),
+        },
         parking: venue.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
       };
     }),

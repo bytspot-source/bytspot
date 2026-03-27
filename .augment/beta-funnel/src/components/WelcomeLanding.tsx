@@ -159,48 +159,62 @@ export default function WelcomeLanding() {
     return () => { clearTimeout(timeout); controller.abort(); };
   }, []);
 
-  // ── SSE: real-time crowd updates ──────────────────────────
+  // ── SSE: real-time crowd updates with exponential backoff ──
   useEffect(() => {
-    // Only connect once we have venues loaded (either real or fallback)
     if (loading || venues.length === 0) return;
 
-    const es = new EventSource(`${API_URL}/venues/crowd/stream`);
+    let es: EventSource | null = null;
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null;
+    let retryCount = 0;
+    let disposed = false;
+    const MAX_RETRIES = 8; // caps at ~2 min between retries
+    const BASE_DELAY = 1000; // 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s
 
-    es.onmessage = (event) => {
+    function handleMessage(event: MessageEvent) {
       try {
         const msg = JSON.parse(event.data);
-
         if (msg.type === 'snapshot') {
-          // Merge snapshot crowd data into existing venues
           setVenues(prev => prev.map(v => {
             const match = (msg.venues as any[]).find((s: any) => s.id === v.id);
             if (match?.crowd) {
-              return {
-                ...v,
-                crowdLevel: match.crowd.label ?? v.crowdLevel,
-                updatedAt: match.crowd.recordedAt ?? v.updatedAt,
-              };
+              return { ...v, crowdLevel: match.crowd.label ?? v.crowdLevel, updatedAt: match.crowd.recordedAt ?? v.updatedAt };
             }
             return v;
           }));
         }
-
         if (msg.type === 'update' && msg.venueId && msg.crowd) {
-          // Apply single venue crowd update
           setVenues(prev => prev.map(v =>
             v.id === msg.venueId
               ? { ...v, crowdLevel: msg.crowd.label ?? v.crowdLevel, updatedAt: msg.crowd.recordedAt ?? new Date().toISOString() }
               : v
           ));
         }
+        // Successful message → reset retry counter
+        retryCount = 0;
       } catch { /* ignore malformed SSE data */ }
-    };
+    }
 
-    es.onerror = () => {
-      // SSE will auto-reconnect; no action needed
-    };
+    function connect() {
+      if (disposed) return;
+      es = new EventSource(`${API_URL}/venues/crowd/stream`);
+      es.onmessage = handleMessage;
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        if (disposed || retryCount >= MAX_RETRIES) return;
+        const delay = Math.min(BASE_DELAY * Math.pow(2, retryCount), 128_000);
+        retryCount++;
+        retryTimeout = setTimeout(connect, delay);
+      };
+    }
 
-    return () => { es.close(); };
+    connect();
+
+    return () => {
+      disposed = true;
+      es?.close();
+      if (retryTimeout) clearTimeout(retryTimeout);
+    };
   }, [loading, venues.length]);
 
   return (

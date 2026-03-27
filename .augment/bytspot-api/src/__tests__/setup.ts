@@ -103,16 +103,21 @@ vi.mock('../config', () => ({
     vapidPrivateKey: 'test-vapid-private',
     vapidEmail: 'mailto:test@test.com',
     stripeSecretKey: '',
+    stripeWebhookSecret: '',
+    stripePremiumPriceId: '',
     frontendUrl: 'http://localhost:3000',
     resendApiKey: '',
     adminPassword: 'test-admin-pass',
     openaiApiKey: '',
     cronSecret: 'test-cron-secret',
+    ticketmasterApiKey: '',
+    googlePlacesApiKey: '',
     apnsKeyId: '',
     apnsTeamId: '',
     apnsKeyPath: '',
     apnsBundleId: 'com.bytspot.app',
   },
+  printConfigDiagnostics: vi.fn(),
 }));
 
 // ── Mock email ────────────────────────────────────────────

@@ -1,41 +1,116 @@
+import { z } from 'zod';
+
 const isDev = (process.env.NODE_ENV || 'development') === 'development';
 
+/**
+ * Env var schema — parsed and validated at import time.
+ *
+ * Categories:
+ *   CRITICAL  — server MUST NOT start without these in production
+ *   IMPORTANT — features degrade without these (push, email, payments)
+ *   OPTIONAL  — nice-to-have integrations
+ */
+const envSchema = z.object({
+  // ── CRITICAL ──────────────────────────────────────────
+  PORT:           z.string().default('4000'),
+  NODE_ENV:       z.string().default('development'),
+  DATABASE_URL:   z.string().min(1, 'DATABASE_URL is required'),
+  JWT_SECRET:     z.string().min(1, 'JWT_SECRET is required'),
+  JWT_EXPIRES_IN: z.string().default('7d'),
+  CORS_ORIGINS:   z.string().default('http://localhost:3000'),
+
+  // ── IMPORTANT (degraded features without) ─────────────
+  REDIS_URL:              z.string().default(''),
+  VAPID_PUBLIC_KEY:       z.string().default(''),
+  VAPID_PRIVATE_KEY:      z.string().default(''),
+  VAPID_EMAIL:            z.string().default('mailto:bytspotapp@gmail.com'),
+  RESEND_API_KEY:         z.string().default(''),
+  STRIPE_SECRET_KEY:      z.string().default(''),
+  STRIPE_WEBHOOK_SECRET:  z.string().default(''),
+  STRIPE_PREMIUM_PRICE_ID:z.string().default(''),
+  ADMIN_PASSWORD:         z.string().default(''),
+  CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
+
+  // ── OPTIONAL (integrations) ───────────────────────────
+  FRONTEND_URL:           z.string().default('https://beta.bytspot.com'),
+  OPENAI_API_KEY:         z.string().default(''),
+  TICKETMASTER_API_KEY:   z.string().default(''),
+  GOOGLE_PLACES_API_KEY:  z.string().default(''),
+  APNS_KEY_ID:            z.string().default(''),
+  APNS_TEAM_ID:           z.string().default(''),
+  APNS_KEY_PATH:          z.string().default(''),
+  APNS_BUNDLE_ID:         z.string().default('com.bytspot.app'),
+});
+
+// In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
+const devOverrides: Partial<Record<string, string>> = isDev
+  ? {
+      DATABASE_URL: process.env.DATABASE_URL || 'postgresql://localhost:5432/bytspot_dev',
+      JWT_SECRET: process.env.JWT_SECRET || 'dev-secret-change-me',
+    }
+  : {};
+
+const parseResult = envSchema.safeParse({ ...process.env, ...devOverrides });
+
+if (!parseResult.success) {
+  const formatted = parseResult.error.issues
+    .map((i) => `  ❌ ${i.path.join('.')}: ${i.message}`)
+    .join('\n');
+  console.error(`\n╔══════════════════════════════════════════════╗`);
+  console.error(`║  FATAL: Environment variable validation failed  ║`);
+  console.error(`╚══════════════════════════════════════════════╝\n`);
+  console.error(formatted);
+  console.error(`\nSet these in your .env file or Render dashboard.\n`);
+  process.exit(1);
+}
+
+const env = parseResult.data;
+
 export const config = {
-  port: parseInt(process.env.PORT || '4000', 10),
-  nodeEnv: process.env.NODE_ENV || 'development',
+  port: parseInt(env.PORT, 10),
+  nodeEnv: env.NODE_ENV,
   isDev,
-  databaseUrl: process.env.DATABASE_URL || '',
-  redisUrl: process.env.REDIS_URL || '',
-  // JWT — MUST be set via env in production
-  jwtSecret: process.env.JWT_SECRET || (isDev ? 'dev-secret-change-me' : ''),
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000')
-    .split(',')
-    .map((s) => s.trim()),
-  // VAPID keys — MUST be set via env in production (generate with: npx web-push generate-vapid-keys)
-  vapidPublicKey: process.env.VAPID_PUBLIC_KEY || '',
-  vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || '',
-  vapidEmail: process.env.VAPID_EMAIL || 'mailto:bytspotapp@gmail.com',
-  // Stripe (set STRIPE_SECRET_KEY in Render env vars)
-  stripeSecretKey: process.env.STRIPE_SECRET_KEY || '',
-  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
-  stripePremiumPriceId: process.env.STRIPE_PREMIUM_PRICE_ID || '',
-  frontendUrl: process.env.FRONTEND_URL || 'https://beta.bytspot.com',
-  // Resend transactional email (set RESEND_API_KEY in Render env vars)
-  resendApiKey: process.env.RESEND_API_KEY || '',
-  // Admin dashboard + invite system (set ADMIN_PASSWORD in Render env vars)
-  adminPassword: process.env.ADMIN_PASSWORD || '',
-  // OpenAI — used by the Concierge AI chat endpoint (set OPENAI_API_KEY in Render env vars)
-  openaiApiKey: process.env.OPENAI_API_KEY || '',
-  // Cron secret — protects the /cron/* endpoints from public access (set CRON_SECRET in Render env vars)
-  cronSecret: process.env.CRON_SECRET || (isDev ? 'dev-cron-secret' : ''),
-  // Ticketmaster Discovery API (set TICKETMASTER_API_KEY in Render env vars)
-  ticketmasterApiKey: process.env.TICKETMASTER_API_KEY || '',
-  // Google Places API (set GOOGLE_PLACES_API_KEY in Render env vars)
-  googlePlacesApiKey: process.env.GOOGLE_PLACES_API_KEY || '',
-  // APNs — Apple Push Notification service for native iOS tokens
-  apnsKeyId: process.env.APNS_KEY_ID || '',
-  apnsTeamId: process.env.APNS_TEAM_ID || '',
-  apnsKeyPath: process.env.APNS_KEY_PATH || '',
-  apnsBundleId: process.env.APNS_BUNDLE_ID || 'com.bytspot.app',
+  databaseUrl: env.DATABASE_URL,
+  redisUrl: env.REDIS_URL,
+  jwtSecret: env.JWT_SECRET,
+  jwtExpiresIn: env.JWT_EXPIRES_IN,
+  corsOrigins: env.CORS_ORIGINS.split(',').map((s) => s.trim()),
+  vapidPublicKey: env.VAPID_PUBLIC_KEY,
+  vapidPrivateKey: env.VAPID_PRIVATE_KEY,
+  vapidEmail: env.VAPID_EMAIL,
+  stripeSecretKey: env.STRIPE_SECRET_KEY,
+  stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
+  stripePremiumPriceId: env.STRIPE_PREMIUM_PRICE_ID,
+  frontendUrl: env.FRONTEND_URL,
+  resendApiKey: env.RESEND_API_KEY,
+  adminPassword: env.ADMIN_PASSWORD,
+  openaiApiKey: env.OPENAI_API_KEY,
+  cronSecret: env.CRON_SECRET,
+  ticketmasterApiKey: env.TICKETMASTER_API_KEY,
+  googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY,
+  apnsKeyId: env.APNS_KEY_ID,
+  apnsTeamId: env.APNS_TEAM_ID,
+  apnsKeyPath: env.APNS_KEY_PATH,
+  apnsBundleId: env.APNS_BUNDLE_ID,
 } as const;
+
+/**
+ * Prints a startup diagnostic table showing which optional services are configured.
+ * Called from index.ts after server starts listening.
+ */
+export function printConfigDiagnostics(): void {
+  const check = (val: string, label: string, impact: string) =>
+    console.log(`   ${val ? '✅' : '⚠️ '} ${label}${val ? '' : ` — ${impact}`}`);
+
+  console.log('   ── Service Configuration ──');
+  check(config.vapidPublicKey && config.vapidPrivateKey ? 'ok' : '', 'VAPID keys', 'web push will not work');
+  check(config.resendApiKey, 'Resend (email)', 'transactional emails will not send');
+  check(config.stripeSecretKey, 'Stripe', 'payments in demo mode');
+  check(config.openaiApiKey, 'OpenAI', 'concierge AI will not work');
+  check(config.redisUrl, 'Redis', 'caching disabled, using in-memory fallback');
+  check(config.cronSecret, 'Cron secret', 'cron endpoints unprotected');
+  check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
+  check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
+  check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
+  console.log('');
+}

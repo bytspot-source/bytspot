@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as trpcExpress from '@trpc/server/adapters/express';
-import { config } from './config';
+import { config, printConfigDiagnostics } from './config';
 
 // tRPC
 import { appRouter } from './trpc/router';
@@ -66,29 +66,14 @@ app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// ─── Startup config validation ───────────────────────
-if (!config.isDev) {
-  const critical: Array<[string, string]> = [
-    [config.jwtSecret, 'JWT_SECRET'],
-    [config.databaseUrl, 'DATABASE_URL'],
-  ];
-  for (const [val, name] of critical) {
-    if (!val) {
-      console.error(`❌ FATAL: ${name} is not set in production — aborting`);
-      process.exit(1);
-    }
-  }
-}
-
 // ─── Start ───────────────────────────────────────────
+// Critical env vars (DATABASE_URL, JWT_SECRET) are validated by Zod in config/index.ts
+// — the server won't even reach this point if they're missing in production.
 app.listen(config.port, () => {
   console.log(`\n🟢 Bytspot API running on port ${config.port}`);
   console.log(`   Environment: ${config.nodeEnv}`);
   console.log(`   Health check: http://localhost:${config.port}/health`);
-  console.log(`   VAPID keys: ${config.vapidPublicKey ? '✅ set' : '⚠️  MISSING — web push will not work'}`);
-  console.log(`   RESEND_API_KEY: ${config.resendApiKey ? '✅ set' : '❌ MISSING — emails will not send'}`);
-  console.log(`   OpenAI: ${config.openaiApiKey ? '✅ set' : '⚠️  MISSING — concierge will not work'}`);
-  console.log(`   Stripe: ${config.stripeSecretKey ? '✅ set' : '⚠️  MISSING — payments in demo mode'}\n`);
+  printConfigDiagnostics();
   // Start in-process crowd simulation (fresh data every 15 min)
   // Crowd alerts are chained — they run automatically after each simulation
   startCrowdSimulator();

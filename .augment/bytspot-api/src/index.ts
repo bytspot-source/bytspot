@@ -17,6 +17,7 @@ import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (exter
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 
 import { startCrowdAlertScheduler } from './services/crowdAlerts';
+import { startCrowdSimulator } from './services/crowdSimulator';
 
 const app = express();
 
@@ -89,6 +90,8 @@ app.listen(config.port, () => {
   console.log(`   RESEND_API_KEY: ${config.resendApiKey ? '✅ set' : '❌ MISSING — emails will not send'}`);
   console.log(`   OpenAI: ${config.openaiApiKey ? '✅ set' : '⚠️  MISSING — concierge will not work'}`);
   console.log(`   Stripe: ${config.stripeSecretKey ? '✅ set' : '⚠️  MISSING — payments in demo mode'}\n`);
+  // Start in-process crowd simulation (fresh data every 15 min)
+  startCrowdSimulator();
   // Start in-process crowd alert scheduler (every 15 min)
   startCrowdAlertScheduler();
 });

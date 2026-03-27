@@ -13,6 +13,7 @@ import { sendPushToAll, getAllSubscriptions, storeSubscription } from '../routes
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
+import { runCrowdSimulation } from '../services/crowdSimulator';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -1039,6 +1040,18 @@ const cronRouter = router({
       }
 
       const result = await runCrowdAlerts();
+      return { ok: true, ...result };
+    }),
+
+  /** POST /cron/crowd-sim → cron.crowdSim mutation (protected by cron secret) */
+  crowdSim: publicProcedure
+    .input(z.object({ cronSecret: z.string() }))
+    .mutation(async ({ input }) => {
+      if (input.cronSecret !== config.cronSecret) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid cron secret' });
+      }
+
+      const result = await runCrowdSimulation();
       return { ok: true, ...result };
     }),
 });

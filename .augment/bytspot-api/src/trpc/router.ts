@@ -872,7 +872,7 @@ const adminRouter = router({
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      const [totalUsers, newToday, totalCheckins, topVenues] = await Promise.all([
+      const [totalUsers, newToday, totalCheckins, topVenues, betaLeadCount, recentBetaLeads] = await Promise.all([
         db.user.count(),
         db.user.count({ where: { createdAt: { gte: today } } }),
         db.crowdLevel.count(),
@@ -881,6 +881,12 @@ const adminRouter = router({
           _count: { venueId: true },
           orderBy: { _count: { venueId: 'desc' } },
           take: 5,
+        }),
+        db.betaLead.count(),
+        db.betaLead.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          select: { email: true, name: true, source: true, createdAt: true },
         }),
       ]);
 
@@ -898,6 +904,13 @@ const adminRouter = router({
         newSignupsToday: newToday,
         totalCheckins,
         pushSubscribers,
+        betaLeadCount,
+        betaLeads: recentBetaLeads.map((l) => ({
+          email: l.email,
+          name: l.name,
+          source: l.source,
+          createdAt: l.createdAt.toISOString(),
+        })),
         topVenues: topVenues.map((v) => ({
           venueId: v.venueId,
           name: nameMap[v.venueId] || v.venueId,

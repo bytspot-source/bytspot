@@ -54,6 +54,9 @@ model Venue {
   lng         Float
   category    String   // "bar", "restaurant", "club", "park", "market"
   imageUrl    String?  @map("image_url")
+  entryType   String   @default("free") @map("entry_type") // "free" or "paid"
+  entryPrice  String?  @map("entry_price") // e.g. "$15", "$25–$50"
+  ticketUrl   String?  @map("ticket_url") // external purchase link
   createdAt   DateTime @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng

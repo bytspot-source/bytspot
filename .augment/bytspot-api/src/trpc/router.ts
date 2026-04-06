@@ -166,30 +166,38 @@ const authRouter = router({
  * ── Venues sub-router ───────────────────────────────────
  */
 const venuesRouter = router({
-  /** GET /venues → venues.list */
-  list: publicProcedure.query(async () => {
-    const venues = await cached('venues:all', 30, async () => {
-      const rows = await db.venue.findMany({
-        include: {
-          crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 },
-          parking: true,
-        },
-        orderBy: { name: 'asc' },
+  /** GET /venues → venues.list — optional entryType filter */
+  list: publicProcedure
+    .input(z.object({ entryType: z.enum(['free', 'paid']).optional() }).optional())
+    .query(async ({ input }) => {
+      const entryFilter = input?.entryType;
+      const cacheKey = entryFilter ? `venues:all:${entryFilter}` : 'venues:all';
+      const venues = await cached(cacheKey, 30, async () => {
+        const rows = await db.venue.findMany({
+          where: entryFilter ? { entryType: entryFilter } : undefined,
+          include: {
+            crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 },
+            parking: true,
+          },
+          orderBy: { name: 'asc' },
+        });
+        return rows.map((v) => ({
+          id: v.id, name: v.name, slug: v.slug, address: v.address,
+          lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
+          entryType: (v.entryType ?? 'free') as 'free' | 'paid',
+          entryPrice: v.entryPrice ?? null,
+          ticketUrl: v.ticketUrl ?? null,
+          crowd: v.crowdLevels[0]
+            ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
+            : null,
+          parking: {
+            totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
+            spots: v.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
+          },
+        }));
       });
-      return rows.map((v) => ({
-        id: v.id, name: v.name, slug: v.slug, address: v.address,
-        lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
-        crowd: v.crowdLevels[0]
-          ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
-          : null,
-        parking: {
-          totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
-          spots: v.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
-        },
-      }));
-    });
-    return { venues };
-  }),
+      return { venues };
+    }),
 
   /** GET /venues/nearby → venues.nearby */
   nearby: publicProcedure
@@ -235,6 +243,9 @@ const venuesRouter = router({
       return {
         id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
+        entryType: (venue.entryType ?? 'free') as 'free' | 'paid',
+        entryPrice: venue.entryPrice ?? null,
+        ticketUrl: venue.ticketUrl ?? null,
         crowd: {
           current: venue.crowdLevels[0]
             ? { ...venue.crowdLevels[0], recordedAt: venue.crowdLevels[0].recordedAt instanceof Date ? venue.crowdLevels[0].recordedAt.toISOString() : String(venue.crowdLevels[0].recordedAt) }

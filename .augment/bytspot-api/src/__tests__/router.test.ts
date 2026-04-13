@@ -121,6 +121,7 @@ describe('venues', () => {
       {
         id: 'v1', name: 'Test Bar', slug: 'test-bar', address: '123 Main St',
         lat: 33.78, lng: -84.38, category: 'bar', imageUrl: null,
+        entryType: 'paid', entryPrice: '$22', ticketUrl: 'https://tickets.test/bar',
         crowdLevels: [{ level: 2, label: 'Active', waitMins: 10, recordedAt: new Date() }],
         parking: [{ name: 'Lot A', type: 'lot', available: 5, totalSpots: 20, pricePerHr: 5 }],
       },
@@ -132,6 +133,26 @@ describe('venues', () => {
     expect(result.venues[0].name).toBe('Test Bar');
     expect(result.venues[0].crowd?.label).toBe('Active');
     expect(result.venues[0].parking.totalAvailable).toBe(5);
+    expect(result.venues[0].entryType).toBe('paid');
+    expect(result.venues[0].entryPrice).toBe('$22');
+    expect(result.venues[0].ticketUrl).toBe('https://tickets.test/bar');
+  });
+
+  it('venues.getBySlug returns ticketing fields for paid venues', async () => {
+    (db.venue.findUnique as any).mockResolvedValueOnce({
+      id: 'v1', name: 'Test Bar', slug: 'test-bar', address: '123 Main St',
+      lat: 33.78, lng: -84.38, category: 'bar', imageUrl: null,
+      entryType: 'paid', entryPrice: '$22', ticketUrl: 'https://tickets.test/bar',
+      crowdLevels: [{ level: 2, label: 'Active', waitMins: 10, recordedAt: new Date() }],
+      parking: [{ name: 'Lot A', type: 'lot', available: 5, totalSpots: 20, pricePerHr: 5 }],
+    });
+
+    const caller = createPublicCaller();
+    const result = await caller.venues.getBySlug({ slug: 'test-bar' });
+    expect(result.entryType).toBe('paid');
+    expect(result.entryPrice).toBe('$22');
+    expect(result.ticketUrl).toBe('https://tickets.test/bar');
+    expect(result.crowd.current?.label).toBe('Active');
   });
 
   it('venues.getBySlug returns 404 for missing venue', async () => {

@@ -2,7 +2,19 @@ import { PrismaClient } from '@prisma/client';
 
 const db = new PrismaClient();
 
-const venues = [
+type SeedVenue = {
+  name: string;
+  slug: string;
+  address: string;
+  lat: number;
+  lng: number;
+  category: string;
+  entryType?: 'free' | 'paid';
+  entryPrice?: string | null;
+  ticketUrl?: string | null;
+};
+
+const venues: SeedVenue[] = [
   { name: 'Ponce City Market', slug: 'ponce-city-market', address: '675 Ponce De Leon Ave NE', lat: 33.7726, lng: -84.3655, category: 'market' },
   { name: 'Colony Square', slug: 'colony-square', address: '1197 Peachtree St NE', lat: 33.7878, lng: -84.3832, category: 'market' },
   { name: 'Piedmont Park', slug: 'piedmont-park', address: '400 Park Dr NE', lat: 33.7879, lng: -84.3733, category: 'park' },
@@ -10,10 +22,16 @@ const venues = [
   { name: 'Livingston', slug: 'livingston', address: '659 Peachtree St NE', lat: 33.7714, lng: -84.3847, category: 'restaurant' },
   { name: 'Lyla Lila', slug: 'lyla-lila', address: '972 Brady Ave NW', lat: 33.7812, lng: -84.4098, category: 'restaurant' },
   { name: 'MBar', slug: 'mbar', address: '1199 Peachtree St NE', lat: 33.7880, lng: -84.3834, category: 'bar' },
-  { name: 'Tongue & Groove', slug: 'tongue-and-groove', address: '565 Main St NE', lat: 33.7690, lng: -84.3680, category: 'club' },
+  {
+    name: 'Tongue & Groove', slug: 'tongue-and-groove', address: '565 Main St NE', lat: 33.7690, lng: -84.3680, category: 'club',
+    entryType: 'paid', entryPrice: 'From $20', ticketUrl: 'https://www.tandgonline.com/',
+  },
   { name: 'Fado Irish Pub', slug: 'fado-irish-pub', address: '273 Buckhead Ave NE', lat: 33.8395, lng: -84.3680, category: 'bar' },
   { name: 'Krog Street Market', slug: 'krog-street-market', address: '99 Krog St NE', lat: 33.7570, lng: -84.3630, category: 'market' },
-  { name: 'The Painted Pin', slug: 'the-painted-pin', address: '737 Miami Cir NE', lat: 33.8160, lng: -84.3620, category: 'bar' },
+  {
+    name: 'The Painted Pin', slug: 'the-painted-pin', address: '737 Miami Cir NE', lat: 33.8160, lng: -84.3620, category: 'bar',
+    entryType: 'paid', entryPrice: '$20+', ticketUrl: 'https://www.thepaintedpin.com/',
+  },
   { name: 'Ladybird Grove & Mess Hall', slug: 'ladybird-grove', address: '684 John Wesley Dobbs Ave NE', lat: 33.7630, lng: -84.3710, category: 'restaurant' },
 ];
 
@@ -25,7 +43,16 @@ async function main() {
   for (const v of venues) {
     const venue = await db.venue.upsert({
       where: { slug: v.slug },
-      update: { name: v.name, address: v.address, lat: v.lat, lng: v.lng, category: v.category },
+      update: {
+        name: v.name,
+        address: v.address,
+        lat: v.lat,
+        lng: v.lng,
+        category: v.category,
+        entryType: v.entryType ?? 'free',
+        entryPrice: v.entryPrice ?? null,
+        ticketUrl: v.ticketUrl ?? null,
+      },
       create: v,
     });
 
@@ -58,7 +85,10 @@ async function main() {
       });
     }
 
-    console.log(`  ✅ ${venue.name} — crowd: ${crowdLabels[level - 1]}, ${numSpots} parking spot(s)`);
+    const ticketingLabel = (v.entryType ?? 'free') === 'paid'
+      ? `, paid entry ${v.entryPrice ?? ''}${v.ticketUrl ? ' · ticket link set' : ''}`
+      : '';
+    console.log(`  ✅ ${venue.name} — crowd: ${crowdLabels[level - 1]}, ${numSpots} parking spot(s)${ticketingLabel}`);
   }
 
   // ─── PostGIS: populate location geometry from lat/lng ──

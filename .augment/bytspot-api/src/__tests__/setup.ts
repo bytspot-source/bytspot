@@ -27,6 +27,8 @@ vi.mock('../lib/db', () => {
       groupBy: vi.fn().mockResolvedValue([]),
     },
     betaLead: {
+      count: vi.fn().mockResolvedValue(0),
+      findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn(),
       create: vi.fn(),
     },

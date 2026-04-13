@@ -34,6 +34,9 @@ router.get('/venues', async (_req, res) => {
       lng: v.lng,
       category: v.category,
       imageUrl: v.imageUrl,
+      entryType: v.entryType ?? 'free',
+      entryPrice: v.entryPrice ?? null,
+      ticketUrl: v.ticketUrl ?? null,
       crowd: v.crowdLevels[0]
         ? {
             level: v.crowdLevels[0].level,
@@ -186,6 +189,9 @@ router.get('/venues/:slug', async (req, res) => {
     lng: venue.lng,
     category: venue.category,
     imageUrl: venue.imageUrl,
+    entryType: venue.entryType ?? 'free',
+    entryPrice: venue.entryPrice ?? null,
+    ticketUrl: venue.ticketUrl ?? null,
     crowd: {
       current: venue.crowdLevels[0] || null,
       history: venue.crowdLevels,

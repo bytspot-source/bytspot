@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseCorsOrigins } from './cors';
 
 const isDev = (process.env.NODE_ENV || 'development') === 'development';
 
@@ -74,7 +75,7 @@ export const config = {
   redisUrl: env.REDIS_URL,
   jwtSecret: env.JWT_SECRET,
   jwtExpiresIn: env.JWT_EXPIRES_IN,
-  corsOrigins: env.CORS_ORIGINS.split(',').map((s) => s.trim()),
+  corsOrigins: parseCorsOrigins(env.CORS_ORIGINS, env.FRONTEND_URL),
   vapidPublicKey: env.VAPID_PUBLIC_KEY,
   vapidPrivateKey: env.VAPID_PRIVATE_KEY,
   vapidEmail: env.VAPID_EMAIL,

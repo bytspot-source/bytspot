@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as trpcExpress from '@trpc/server/adapters/express';
 import { config, printConfigDiagnostics } from './config';
+import { isAllowedCorsOrigin } from './config/cors';
 
 // tRPC
 import { appRouter } from './trpc/router';
@@ -27,7 +28,13 @@ app.set('trust proxy', 2);
 app.use(helmet());
 app.use(
   cors({
-    origin: config.corsOrigins,
+    origin(origin, callback) {
+      if (isAllowedCorsOrigin(origin, config.corsOrigins)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`Origin ${origin ?? 'unknown'} not allowed by CORS`));
+    },
     credentials: true,
   }),
 );

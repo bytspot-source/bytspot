@@ -5,9 +5,12 @@ describe('CORS helpers', () => {
   it('includes local preview and Capacitor origins by default', () => {
     const origins = parseCorsOrigins('https://bytspot.com', 'https://beta.bytspot.com');
 
+    expect(origins).toContain('http://localhost:3000');
+    expect(origins).toContain('http://127.0.0.1:3000');
     expect(origins).toContain('http://127.0.0.1:4173');
     expect(origins).toContain('http://localhost:4173');
     expect(origins).toContain('capacitor://localhost');
+    expect(origins).toContain('https://bytspot-beta-app.onrender.com');
     expect(origins).toContain('https://bytspot.com');
     expect(origins).toContain('https://beta.bytspot.com');
   });

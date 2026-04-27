@@ -1,11 +1,13 @@
 const DEFAULT_CORS_ORIGINS = [
   'http://localhost:3000',
+  'http://127.0.0.1:3000',
   'http://localhost:4173',
   'http://127.0.0.1:4173',
   'http://localhost',
   'http://127.0.0.1',
   'capacitor://localhost',
   'ionic://localhost',
+  'https://bytspot-beta-app.onrender.com',
 ];
 
 export function parseCorsOrigins(rawOrigins: string, frontendUrl?: string): string[] {

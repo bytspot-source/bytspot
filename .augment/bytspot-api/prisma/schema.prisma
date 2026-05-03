@@ -42,8 +42,37 @@ model User {
   following      Follow[]          @relation("follower")  // users I follow
   reviews        Review[]
   tipsGiven      Tip[]             @relation("tipFrom")
+  accessPasses   AccessPass[]
+  vendors        Vendor[]
+  bookings       Booking[]
+  complianceLogs ComplianceLog[]
 
   @@map("users")
+}
+
+model AccessPass {
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  productId       String   @map("product_id")
+  productType     String   @map("product_type")
+  title           String
+  subtitle        String?
+  location        String
+  priceLabel      String   @map("price_label")
+  accessLabel     String   @map("access_label")
+  orderNumber     String   @map("order_number")
+  status          String   @default("confirmed")
+  ticketUrl       String?  @map("ticket_url")
+  source          String   @default("app")
+  stripeSessionId String?  @unique @map("stripe_session_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, productType, productId])
+  @@map("access_passes")
 }
 
 // ─── Venues ──────────────────────────────────────────
@@ -222,17 +251,24 @@ model SpotCollectionItem {
 
 // ─── Points Ledger ────────────────────────────────────
 model PointTransaction {
-  id          String   @id @default(cuid())
-  userId      String   @map("user_id")
-  type        String   // "earn", "spend", "bonus"
-  amount      Int
-  description String
-  category    String   // "checkin", "achievement", "referral", "review", "streak"
-  createdAt   DateTime @default(now()) @map("created_at")
+  id                    String   @id @default(cuid())
+  userId                String   @map("user_id")
+  type                  String   // "earn", "spend", "bonus", "SUBSCRIPTION_CREDIT", "MARKETPLACE_CREDIT", "MARKETPLACE_CREDIT_REVERSAL"
+  amount                Int
+  description           String
+  category              String   // "checkin", "achievement", "referral", "review", "streak", "subscription"
+  entity                Entity   @default(BYTSPOT_INC)
+  stripeSessionId       String?  @unique @map("stripe_session_id")
+  stripePaymentIntentId String?  @unique @map("stripe_payment_intent_id")
+  stripeRefundId        String?  @unique @map("stripe_refund_id")
+  stripeDisputeId       String?  @unique @map("stripe_dispute_id")
+  createdAt             DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([category, createdAt(sort: Desc)])
+  @@index([entity, category, createdAt(sort: Desc)])
   @@map("point_transactions")
 }
 
@@ -315,4 +351,201 @@ model Tip {
   @@index([fromUserId])
   @@index([toValetId])
   @@map("tips")
+}
+
+// ─── Corporate Entities (multi-tenancy discriminator) ────
+// Locked per the Bytspot corporate structure. Rows tagged with the
+// subsidiary that owns them for intercompany accounting and audit.
+enum Entity {
+  BYTSPOT_HOLDINGS
+  BYTSPOT_INC
+  VENDOR_SERVICES
+  EXPERIENCES
+  PROPERTY_REIT
+  FOUNDATION
+}
+
+// ─── Hardware Patches (NTAG424 DNA physical tags) ────────
+// Each row represents one physical NFC tag. SDM/SUN keys are stored
+// as opaque KMS references — never raw AES material at rest.
+model HardwarePatch {
+  id            String   @id @default(cuid())
+  uid           String   @unique                  // 7-byte NTAG UID (hex)
+  tagType       String   @default("NTAG424_DNA") @map("tag_type")
+  sdmKeyRef     String?  @map("sdm_key_ref")      // GCP KMS key reference
+  readCounter   Int      @default(0) @map("read_counter") // last observed SDM counter
+  label         String?
+  status        String   @default("unbound")      // unbound | bound | retired
+  entity        Entity   @default(BYTSPOT_INC)
+  bindingType   String?  @map("binding_type")     // "vendor" | "service" | "venue"
+  bindingId     String?  @map("binding_id")
+  confirmedAt   DateTime? @map("confirmed_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  services      VendorService[]
+
+  @@index([status])
+  @@index([bindingType, bindingId])
+  @@map("hardware_patches")
+}
+
+// ─── Vendors (cottage industry / VIP service providers) ──
+model Vendor {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id")
+  entity            Entity   @default(VENDOR_SERVICES)
+  displayName       String   @map("display_name")
+  legalName         String?  @map("legal_name")
+  stripeAccountId   String?  @unique @map("stripe_account_id")
+  onboardingStatus  String   @default("pending") @map("onboarding_status") // pending | active | suspended
+  commissionBps     Int      @default(800) @map("commission_bps")          // 800 = 8%
+  metadata          Json?
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  services VendorService[]
+  bookings Booking[]
+
+  @@index([userId])
+  @@index([entity])
+  @@map("vendors")
+}
+
+// ─── Vendor Services (bookable products / appointments) ──
+model VendorService {
+  id           String   @id @default(cuid())
+  vendorId     String   @map("vendor_id")
+  title        String
+  description  String?
+  priceCents   Int      @map("price_cents")
+  currency     String   @default("USD")
+  durationMins Int?     @map("duration_mins")
+  status       String   @default("draft") // draft | active | archived
+  patchId      String?  @map("patch_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  vendor   Vendor         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  patch    HardwarePatch? @relation(fields: [patchId], references: [id], onDelete: SetNull)
+  bookings Booking[]
+
+  @@index([vendorId, status])
+  @@index([patchId])
+  @@map("vendor_services")
+}
+
+// ─── Bookings (completed purchases / reservations) ───────
+model Booking {
+  id                    String    @id @default(cuid())
+  serviceId             String    @map("service_id")
+  vendorId              String    @map("vendor_id")
+  userId                String    @map("user_id")
+  entity                Entity    @default(VENDOR_SERVICES)
+  status                String    @default("pending") // pending | paid | confirmed | completed | canceled | refunded | disputed
+  priceCents            Int       @map("price_cents")
+  platformFeeCents      Int       @default(0) @map("platform_fee_cents")
+  currency              String    @default("USD")
+  stripeSessionId       String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  stripeTransferDestination String? @map("stripe_transfer_destination")
+  ictJti                String?   @unique @map("ict_jti")  // JWT ID of the signed Immutable Compliance Token
+  scheduledFor          DateTime? @map("scheduled_for")
+  completedAt           DateTime? @map("completed_at")
+  metadata              Json?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  service VendorService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  vendor  Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([vendorId, status])
+  @@index([serviceId])
+  @@index([entity, status])
+  @@map("bookings")
+}
+
+// ─── Liability Vault Records (WORM audit trail) ──────────
+// Authoritative evidence is GCS Object Lock; IPFS CID is a public
+// cryptographic manifest of the sha256 for tamper-evidence.
+model LiabilityRecord {
+  id             String    @id @default(cuid())
+  resourceType   String    @map("resource_type")   // "booking" | "tap" | "vendor" | ...
+  resourceId     String    @map("resource_id")
+  sha256         String    @unique                  // hex-encoded content hash
+  gcsObjectPath  String?   @map("gcs_object_path")  // gs://bucket/path
+  gcsGeneration  BigInt?   @map("gcs_generation")
+  ipfsCid        String?   @map("ipfs_cid")
+  lockedUntil    DateTime? @map("locked_until")
+  entity         Entity    @default(BYTSPOT_INC)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([resourceType, resourceId])
+  @@index([entity, createdAt(sort: Desc)])
+  @@map("liability_records")
+}
+
+// ─── Compliance Logs (Sovereign Shield audit trail) ──────
+model ComplianceLog {
+  id             String   @id @default(cuid())
+  userId         String?  @map("user_id")
+  entity         Entity   @default(BYTSPOT_INC)
+  procedure      String                                   // tRPC path, e.g. "patch.verifyTap"
+  frameworks     String[] @default([])                    // ["NIST_AI_RMF_1_0", "EO_14365"]
+  policyContext  Json?    @map("policy_context")
+  stateFlags     String[] @default([]) @map("state_flags") // ["GA_BH1", "CA_SB53"]
+  outcome        String   @default("allow")                // allow | deny | flag
+  reason         String?
+  requestIp      String?  @map("request_ip")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([procedure, createdAt(sort: Desc)])
+  @@index([entity, createdAt(sort: Desc)])
+  @@map("compliance_logs")
+}
+
+// ─── Audit Log (NIST PR.PT-1) ────────────────────────────
+// Append-only record of patch verification attempts. Matches the
+// VirtualPatchAuditEvent shape emitted by the client audit sink.
+model AuditLog {
+  id        String   @id @default(cuid())
+  at        DateTime                                     // event timestamp from client
+  outcome   String                                       // success | failure | revoked | consent_denied
+  method    String                                       // scan method (nfc | qr | ...)
+  vendorId  String?  @map("vendor_id")
+  patchId   String?  @map("patch_id")
+  uid       String?
+  tokenJti  String?  @map("token_jti")
+  venueId   String?  @map("venue_id")
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")  // server receive time
+
+  @@index([vendorId, at(sort: Desc)])
+  @@index([patchId, at(sort: Desc)])
+  @@index([outcome, at(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ─── Revoked Patches (NIST RS.MI-1) ──────────────────────
+// Source of truth for the client revocation cache. A row here means the
+// patchId is blocked from successful verification regardless of token state.
+model RevokedPatch {
+  id        String   @id @default(cuid())
+  patchId   String   @map("patch_id")
+  vendorId  String?  @map("vendor_id")                   // null = platform-wide revocation
+  reason    String?
+  revokedBy String?  @map("revoked_by")                  // operator userId
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([patchId, vendorId])
+  @@index([vendorId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("revoked_patches")
 }

@@ -3,13 +3,20 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
 
+export interface Context {
+  user: AuthPayload | null;
+  req?: trpcExpress.CreateExpressContextOptions['req'];
+  res?: trpcExpress.CreateExpressContextOptions['res'];
+}
+
 /**
  * Creates the tRPC context from the Express request.
  * Extracts JWT auth if present (optional — procedures decide whether to require it).
  */
 export async function createContext({
   req,
-}: trpcExpress.CreateExpressContextOptions) {
+  res,
+}: trpcExpress.CreateExpressContextOptions): Promise<Context> {
   let user: AuthPayload | null = null;
 
   const header = req.headers.authorization;
@@ -22,8 +29,5 @@ export async function createContext({
     }
   }
 
-  return { user };
+  return { user, req, res };
 }
-
-export type Context = Awaited<ReturnType<typeof createContext>>;
-

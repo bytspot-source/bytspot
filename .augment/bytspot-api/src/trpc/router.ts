@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
+import { Entity, type Prisma } from '@prisma/client';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
@@ -12,6 +13,16 @@ import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
 import { sendPushToAll, getAllSubscriptions, storeSubscription } from '../routes/push';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
+import {
+  hasVenueTicketingColumns,
+  mapPublicVenueDetail,
+  mapPublicVenueSummary,
+  publicVenueCheckinSelect,
+  publicVenueDetailSelect,
+  publicVenueDetailSelectWithTicketing,
+  publicVenueListSelect,
+  publicVenueListSelectWithTicketing,
+} from '../lib/venuePublic';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { userRouter } from './userRouter';
@@ -19,6 +30,68 @@ import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
+import { patchRouter } from './patchRouter';
+import { bookingRouter } from './bookingRouter';
+import { vendorRouter } from './vendorRouter';
+import { auditRouter } from './auditRouter';
+
+const venueHardwarePatchSelect = {
+  id: true,
+  bindingId: true,
+  tagType: true,
+  label: true,
+  readCounter: true,
+  confirmedAt: true,
+  updatedAt: true,
+} as const;
+
+type VenueHardwarePatchRow = {
+  id: string;
+  bindingId: string | null;
+  tagType: string;
+  label: string | null;
+  readCounter: number;
+  confirmedAt: Date | null;
+  updatedAt: Date;
+};
+
+function mapVenueHardwarePatch(patch: VenueHardwarePatchRow) {
+  return {
+    id: patch.id,
+    tagType: patch.tagType,
+    label: patch.label,
+    readCounter: patch.readCounter,
+    confirmedAt: patch.confirmedAt?.toISOString() ?? null,
+    updatedAt: patch.updatedAt.toISOString(),
+    verifiedVenue: true,
+  };
+}
+
+async function attachVenueHardwarePatches<T extends { id: string }>(venues: T[]): Promise<Array<T & { hardwarePatch: ReturnType<typeof mapVenueHardwarePatch> | null }>> {
+  if (!venues.length) return venues.map((venue) => ({ ...venue, hardwarePatch: null }));
+
+  const venueIds = venues.map((venue) => venue.id);
+  const patches = await db.hardwarePatch.findMany({
+    where: {
+      status: 'bound',
+      bindingType: 'venue',
+      bindingId: { in: venueIds },
+    },
+    orderBy: [{ confirmedAt: 'desc' }, { updatedAt: 'desc' }],
+    select: venueHardwarePatchSelect,
+  });
+
+  const patchesByVenueId = new Map<string, ReturnType<typeof mapVenueHardwarePatch>>();
+  for (const patch of patches) {
+    if (!patch.bindingId || patchesByVenueId.has(patch.bindingId)) continue;
+    patchesByVenueId.set(patch.bindingId, mapVenueHardwarePatch(patch));
+  }
+
+  return venues.map((venue) => ({
+    ...venue,
+    hardwarePatch: patchesByVenueId.get(venue.id) ?? null,
+  }));
+}
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -173,28 +246,22 @@ const venuesRouter = router({
       const entryFilter = input?.entryType;
       const cacheKey = entryFilter ? `venues:all:${entryFilter}` : 'venues:all';
       const venues = await cached(cacheKey, 30, async () => {
-        const rows = await db.venue.findMany({
-          where: entryFilter ? { entryType: entryFilter } : undefined,
-          include: {
-            crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 },
-            parking: true,
-          },
-          orderBy: { name: 'asc' },
-        });
-        return rows.map((v) => ({
-          id: v.id, name: v.name, slug: v.slug, address: v.address,
-          lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
-          entryType: (v.entryType ?? 'free') as 'free' | 'paid',
-          entryPrice: v.entryPrice ?? null,
-          ticketUrl: v.ticketUrl ?? null,
-          crowd: v.crowdLevels[0]
-            ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
-            : null,
-          parking: {
-            totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
-            spots: v.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
-          },
-        }));
+        const ticketingColumnsAvailable = await hasVenueTicketingColumns();
+        const rows = ticketingColumnsAvailable
+          ? await db.venue.findMany({
+              where: entryFilter ? { entryType: entryFilter } : undefined,
+              select: publicVenueListSelectWithTicketing,
+              orderBy: { name: 'asc' },
+            })
+          : await db.venue.findMany({
+              select: publicVenueListSelect,
+              orderBy: { name: 'asc' },
+            });
+
+        const mapped = await attachVenueHardwarePatches(rows.map(mapPublicVenueSummary));
+        return ticketingColumnsAvailable || !entryFilter
+          ? mapped
+          : mapped.filter((venue) => venue.entryType === entryFilter);
       });
       return { venues };
     }),
@@ -230,30 +297,23 @@ const venuesRouter = router({
   getBySlug: publicProcedure
     .input(z.object({ slug: z.string() }))
     .query(async ({ input }) => {
+      const ticketingColumnsAvailable = await hasVenueTicketingColumns();
       const venue = await cached(`venue:${input.slug}`, 15, async () => {
-        return db.venue.findUnique({
-          where: { slug: input.slug },
-          include: {
-            crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 24 },
-            parking: true,
-          },
-        });
+        const row = await (ticketingColumnsAvailable
+          ? db.venue.findUnique({
+              where: { slug: input.slug },
+              select: publicVenueDetailSelectWithTicketing,
+            })
+          : db.venue.findUnique({
+              where: { slug: input.slug },
+              select: publicVenueDetailSelect,
+            }));
+        if (!row) return null;
+        const [venueWithPatch] = await attachVenueHardwarePatches([mapPublicVenueDetail(row)]);
+        return venueWithPatch;
       });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
-      return {
-        id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
-        lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
-        entryType: (venue.entryType ?? 'free') as 'free' | 'paid',
-        entryPrice: venue.entryPrice ?? null,
-        ticketUrl: venue.ticketUrl ?? null,
-        crowd: {
-          current: venue.crowdLevels[0]
-            ? { ...venue.crowdLevels[0], recordedAt: venue.crowdLevels[0].recordedAt instanceof Date ? venue.crowdLevels[0].recordedAt.toISOString() : String(venue.crowdLevels[0].recordedAt) }
-            : null,
-          history: venue.crowdLevels.map((cl) => ({ ...cl, recordedAt: cl.recordedAt instanceof Date ? cl.recordedAt.toISOString() : String(cl.recordedAt) })),
-        },
-        parking: venue.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
-      };
+      return venue;
     }),
 
   /** GET /venues/:slug/similar → venues.getSimilar */
@@ -299,7 +359,7 @@ const venuesRouter = router({
         }
       }
 
-      const venue = await db.venue.findUnique({ where: { id: venueId } });
+      const venue = await db.venue.findUnique({ where: { id: venueId }, select: publicVenueCheckinSelect });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
 
       const latest = await db.crowdLevel.findFirst({ where: { venueId }, orderBy: { recordedAt: 'desc' } });
@@ -647,6 +707,18 @@ type SubscriptionUserState = {
   isValetPremium?: boolean | null;
 };
 
+type SubscriptionPointTransaction = {
+  type: string;
+  amount: number;
+};
+
+const POINTS_PER_USD = 100;
+const CENTS_PER_USD = 100;
+const SUBSCRIPTION_MIN_UNIT_AMOUNT_CENTS = 50;
+const SUBSCRIPTION_CREDIT_TYPE = 'SUBSCRIPTION_CREDIT';
+const MARKETPLACE_CREDIT_TYPE = 'MARKETPLACE_CREDIT';
+const MARKETPLACE_CREDIT_REVERSAL_TYPE = 'MARKETPLACE_CREDIT_REVERSAL';
+
 const subscriptionPlans: Record<SubscriptionPlan, {
   priceId: string;
   productName: string;
@@ -666,7 +738,7 @@ const subscriptionPlans: Record<SubscriptionPlan, {
   'vendor-premium': {
     priceId: config.stripeVendorPremiumPriceId,
     productName: 'Bytspot Vendor Premium',
-    description: 'AI patch placement, demand windows, and Es = Φ_EM + Φ_E + ΔD + f × λ_sim optimization insights',
+    description: 'AI patch placement, demand-window forecasting, and operational efficiency insights',
     unitAmount: 4900,
     successPath: '/provider?premium=success&plan=vendor-premium&session_id={CHECKOUT_SESSION_ID}',
     cancelPath: '/provider?premium=cancelled&plan=vendor-premium',
@@ -687,6 +759,12 @@ function subscriptionUpdateForPlan(plan: SubscriptionPlan, active: boolean) {
   return { isPremium: active };
 }
 
+function entityForSubscriptionPlan(plan: SubscriptionPlan): Entity {
+  if (plan === 'vendor-premium') return Entity.VENDOR_SERVICES;
+  if (plan === 'valet-premium') return Entity.EXPERIENCES;
+  return Entity.BYTSPOT_INC;
+}
+
 function isSubscriptionPlanActive(user: SubscriptionUserState, plan: SubscriptionPlan): boolean {
   if (plan === 'vendor-premium') return user.isVendorPremium === true;
   if (plan === 'valet-premium') return user.isValetPremium === true;
@@ -700,11 +778,239 @@ function activeSubscriptionPlans(user: SubscriptionUserState): SubscriptionPlan[
     ...(user.isValetPremium ? ['valet-premium' as const] : []),
   ];
 }
+
+function isPointDebit(type: string): boolean {
+  return type === 'spend' || type === SUBSCRIPTION_CREDIT_TYPE;
+}
+
+function getAvailablePoints(txns: SubscriptionPointTransaction[]): number {
+  const earned = txns.filter((txn) => !isPointDebit(txn.type)).reduce((sum, txn) => sum + Math.max(0, txn.amount), 0);
+  const debited = txns.filter((txn) => isPointDebit(txn.type)).reduce((sum, txn) => sum + Math.abs(txn.amount), 0);
+  return Math.max(0, earned - debited);
+}
+
+function pointsToCents(points: number): number {
+  return Math.floor((Math.max(0, points) * CENTS_PER_USD) / POINTS_PER_USD);
+}
+
+function centsToPoints(cents: number): number {
+  return Math.ceil((Math.max(0, cents) * POINTS_PER_USD) / CENTS_PER_USD);
+}
+
+function insiderUpgradeDiscountCents(user: SubscriptionUserState, plan: SubscriptionPlan): number {
+  if (plan !== 'vendor-premium' || user.isPremium !== true) return 0;
+  const planAmount = subscriptionPlans[plan].unitAmount;
+  return Math.min(subscriptionPlans['insider-premium'].unitAmount, Math.max(0, planAmount - SUBSCRIPTION_MIN_UNIT_AMOUNT_CENTS));
+}
+
+function buildSubscriptionOffer(plan: SubscriptionPlan, user: SubscriptionUserState, availablePoints: number, usePoints = false) {
+  const baseUnitAmountCents = subscriptionPlans[plan].unitAmount;
+  const upgradeDiscountCents = insiderUpgradeDiscountCents(user, plan);
+  const maxDiscountableCents = Math.max(0, baseUnitAmountCents - upgradeDiscountCents - SUBSCRIPTION_MIN_UNIT_AMOUNT_CENTS);
+  const maxPointsDiscountCents = Math.min(pointsToCents(availablePoints), maxDiscountableCents);
+  const pointsToRedeem = usePoints ? centsToPoints(maxPointsDiscountCents) : 0;
+  const pointsDiscountCents = usePoints ? maxPointsDiscountCents : 0;
+  const totalDiscountCents = upgradeDiscountCents + pointsDiscountCents;
+  const finalUnitAmountCents = Math.max(SUBSCRIPTION_MIN_UNIT_AMOUNT_CENTS, baseUnitAmountCents - totalDiscountCents);
+
+  return {
+    plan,
+    baseUnitAmountCents,
+    finalUnitAmountCents,
+    upgradeDiscountCents,
+    pointsDiscountCents,
+    maxPointsDiscountCents,
+    pointsToRedeem,
+    totalDiscountCents,
+    pointsPerUsd: POINTS_PER_USD,
+  };
+}
+
+function asWebhookMetadata(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => typeof v === 'string')
+      .map(([k, v]) => [k, v as string]),
+  );
+}
+
+function readPaymentIntentId(object: Record<string, any>): string | null {
+  const paymentIntent = object.payment_intent ?? object.paymentIntent;
+  if (typeof paymentIntent === 'string') return paymentIntent;
+  if (paymentIntent && typeof paymentIntent.id === 'string') return paymentIntent.id;
+  const metadata = asWebhookMetadata(object.metadata);
+  return metadata.stripePaymentIntentId ?? metadata.paymentIntentId ?? null;
+}
+
+function readRefundId(object: Record<string, any>): string | null {
+  if (typeof object.id === 'string' && object.object === 'refund') return object.id;
+  const refund = object.refunds?.data?.[0] ?? object.refund;
+  if (typeof refund === 'string') return refund;
+  if (refund && typeof refund.id === 'string') return refund.id;
+  return typeof object.id === 'string' ? object.id : null;
+}
+
+function mergedMetadata(existing: unknown, patch: Record<string, unknown>) {
+  return {
+    ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing as Record<string, unknown> : {}),
+    ...patch,
+  };
+}
+
+async function restoreMarketplacePointsForBooking(args: {
+  booking: { id: string; userId: string; entity: Entity; metadata: unknown; stripeSessionId: string | null; stripePaymentIntentId: string | null };
+  reason: 'refund' | 'dispute';
+  stripeRefundId?: string | null;
+  stripeDisputeId?: string | null;
+}) {
+  const metadata = mergedMetadata(args.booking.metadata, {});
+  const pointsToRestore = Number.parseInt(String(metadata.pointsToRedeem ?? '0'), 10);
+  const pointsDiscountCents = Number.parseInt(String(metadata.pointsDiscountCents ?? '0'), 10);
+  if (!Number.isFinite(pointsToRestore) || pointsToRestore <= 0) return;
+
+  try {
+    await db.pointTransaction.create({
+      data: {
+        userId: args.booking.userId,
+        type: MARKETPLACE_CREDIT_REVERSAL_TYPE,
+        amount: pointsToRestore,
+        description: `Restored ${pointsToRestore} marketplace points after ${args.reason} for booking ${args.booking.id} ($${(pointsDiscountCents / 100).toFixed(2)})`,
+        category: 'marketplace',
+        entity: args.booking.entity,
+        stripeRefundId: args.stripeRefundId ?? undefined,
+        stripeDisputeId: args.stripeDisputeId ?? undefined,
+      },
+    });
+  } catch (error: any) {
+    if (error?.code !== 'P2002') throw error;
+  }
+}
+
+async function handleMarketplaceRefundEvent(object: Record<string, any>, eventType: string) {
+  if (eventType === 'refund.updated' && object.status && object.status !== 'succeeded') {
+    return { received: true, ignored: true };
+  }
+  const stripePaymentIntentId = readPaymentIntentId(object);
+  if (!stripePaymentIntentId) return { received: true, ignored: true };
+  const booking = await db.booking.findUnique({
+    where: { stripePaymentIntentId },
+    select: { id: true, userId: true, entity: true, status: true, metadata: true, stripeSessionId: true, stripePaymentIntentId: true },
+  });
+  if (!booking) return { received: true, ignored: true };
+
+  const stripeRefundId = readRefundId(object);
+  await db.booking.update({
+    where: { id: booking.id },
+    data: {
+      status: 'refunded',
+      metadata: mergedMetadata(booking.metadata, {
+        refund: {
+          stripeRefundId,
+          stripeChargeId: object.object === 'charge' ? object.id : object.charge ?? null,
+          amountRefunded: object.amount_refunded ?? object.amount ?? null,
+          status: object.status ?? 'succeeded',
+          flow: 'booking.refund',
+          receivedAt: new Date().toISOString(),
+        },
+      }) as Prisma.InputJsonValue,
+    },
+  });
+  await restoreMarketplacePointsForBooking({ booking, reason: 'refund', stripeRefundId });
+  return { received: true, bookingId: booking.id, status: 'refunded' };
+}
+
+async function handleMarketplaceDisputeEvent(object: Record<string, any>, eventType: string) {
+  const stripePaymentIntentId = readPaymentIntentId(object);
+  if (!stripePaymentIntentId) return { received: true, ignored: true };
+  const booking = await db.booking.findUnique({
+    where: { stripePaymentIntentId },
+    select: { id: true, userId: true, entity: true, status: true, metadata: true, stripeSessionId: true, stripePaymentIntentId: true },
+  });
+  if (!booking) return { received: true, ignored: true };
+
+  const stripeDisputeId = typeof object.id === 'string' ? object.id : null;
+  const disputeStatus = typeof object.status === 'string' ? object.status : 'needs_response';
+  const resolvedStatus = eventType === 'charge.dispute.closed'
+    ? (disputeStatus === 'won' ? 'paid' : 'refunded')
+    : 'disputed';
+
+  await db.booking.update({
+    where: { id: booking.id },
+    data: {
+      status: resolvedStatus,
+      metadata: mergedMetadata(booking.metadata, {
+        dispute: {
+          stripeDisputeId,
+          status: disputeStatus,
+          reason: object.reason ?? null,
+          amount: object.amount ?? null,
+          flow: 'booking.dispute',
+          receivedAt: new Date().toISOString(),
+        },
+      }) as Prisma.InputJsonValue,
+    },
+  });
+
+  if (resolvedStatus === 'refunded') {
+    await restoreMarketplacePointsForBooking({ booking, reason: 'dispute', stripeDisputeId });
+  }
+
+  return { received: true, bookingId: booking.id, status: resolvedStatus };
+}
+
+function buildSubscriptionOffers(user: SubscriptionUserState, availablePoints: number) {
+  return {
+    'insider-premium': buildSubscriptionOffer('insider-premium', user, availablePoints, false),
+    'vendor-premium': buildSubscriptionOffer('vendor-premium', user, availablePoints, false),
+    'valet-premium': buildSubscriptionOffer('valet-premium', user, availablePoints, false),
+  };
+}
+
+async function resolveStripeCouponDiscount(stripe: Stripe, couponCode?: string) {
+  const normalizedCode = couponCode?.trim();
+  if (!normalizedCode) return null;
+
+  const promotionCodes = await stripe.promotionCodes.list({ code: normalizedCode, active: true, limit: 1 });
+  const promotionCode = promotionCodes.data[0];
+  if (promotionCode) {
+    const promotionCoupon = (promotionCode as any).coupon;
+    const coupon = typeof promotionCoupon === 'string' ? promotionCoupon : promotionCoupon?.id ?? '';
+    return {
+      discount: { promotion_code: promotionCode.id },
+      couponCode: normalizedCode,
+      stripePromotionCodeId: promotionCode.id,
+      stripeCouponId: coupon,
+    };
+  }
+
+  try {
+    const coupon = await stripe.coupons.retrieve(normalizedCode);
+    if (!coupon.valid) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Coupon code is no longer valid' });
+    return {
+      discount: { coupon: coupon.id },
+      couponCode: normalizedCode,
+      stripeCouponId: coupon.id,
+      stripePromotionCodeId: null,
+    };
+  } catch (error: any) {
+    if (error instanceof TRPCError) throw error;
+    if (error?.statusCode === 404 || error?.code === 'resource_missing') {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Coupon code was not found' });
+    }
+    throw error;
+  }
+}
+
 const subscriptionRouter = router({
   /** POST /subscription/createCheckout → creates Stripe Checkout for premium subscription */
   createCheckout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'subscription:checkout' }))
-    .input(z.object({ plan: subscriptionPlanSchema.optional() }).optional())
+    .input(z.object({
+      plan: subscriptionPlanSchema.optional(),
+      usePoints: z.boolean().optional().default(false),
+      couponCode: z.string().trim().min(1).max(80).optional(),
+    }).optional())
     .mutation(async ({ ctx, input }) => {
     const plan = input?.plan ?? 'insider-premium';
     const planConfig = subscriptionPlans[plan];
@@ -721,6 +1027,12 @@ const subscriptionRouter = router({
     });
     if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
     if (isSubscriptionPlanActive(user, plan)) return { url: null as string | null, demoMode: false, message: 'Already premium', plan };
+    const pointTxns = await db.pointTransaction.findMany({
+      where: { userId },
+      select: { type: true, amount: true },
+    });
+    const availablePoints = getAvailablePoints(pointTxns);
+    const offer = buildSubscriptionOffer(plan, user, availablePoints, input?.usePoints ?? false);
 
     let customerId = user.stripeCustomerId;
     if (!customerId) {
@@ -730,29 +1042,46 @@ const subscriptionRouter = router({
     }
 
     try {
-      const lineItem = planConfig.priceId
+      const couponDiscount = await resolveStripeCouponDiscount(stripe, input?.couponCode);
+      const lineItem = planConfig.priceId && offer.totalDiscountCents === 0
         ? { price: planConfig.priceId, quantity: 1 }
         : {
             price_data: {
               currency: 'usd',
-              unit_amount: planConfig.unitAmount,
+              unit_amount: offer.finalUnitAmountCents,
               recurring: { interval: 'month' as const },
               product_data: { name: planConfig.productName, description: planConfig.description },
             },
             quantity: 1,
           };
+      const metadata = {
+        userId,
+        plan,
+        entity: entityForSubscriptionPlan(plan),
+        flow: 'subscription.checkout',
+        couponCode: couponDiscount?.couponCode ?? '',
+        stripeCouponId: couponDiscount?.stripeCouponId ?? '',
+        stripePromotionCodeId: couponDiscount?.stripePromotionCodeId ?? '',
+        pointsToRedeem: String(offer.pointsToRedeem),
+        pointsDiscountCents: String(offer.pointsDiscountCents),
+        insiderUpgradeDiscountCents: String(offer.upgradeDiscountCents),
+        baseUnitAmountCents: String(offer.baseUnitAmountCents),
+        finalUnitAmountCents: String(offer.finalUnitAmountCents),
+      };
       const session = await stripe.checkout.sessions.create({
         customer: customerId,
         payment_method_types: ['card'],
         mode: 'subscription',
         line_items: [lineItem],
-        metadata: { userId, plan },
-        subscription_data: { metadata: { userId, plan } },
+        ...(couponDiscount ? { discounts: [couponDiscount.discount] } : {}),
+        metadata,
+        subscription_data: { metadata },
         success_url: `${config.frontendUrl}${planConfig.successPath}`,
         cancel_url: `${config.frontendUrl}${planConfig.cancelPath}`,
       });
-      return { url: session.url, plan };
+      return { url: session.url, plan, loyalty: { availablePoints, offer, couponApplied: couponDiscount?.couponCode ?? null } };
     } catch (err: unknown) {
+      if (err instanceof TRPCError) throw err;
       const msg = err instanceof Error ? err.message : 'Stripe error';
       console.error('[subscription] Stripe error:', msg);
       throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: msg });
@@ -761,15 +1090,37 @@ const subscriptionRouter = router({
 
   /** GET /subscription/status → returns current user's premium status */
   status: protectedProcedure.query(async ({ ctx }) => {
-    const user = await db.user.findUnique({
-      where: { id: ctx.user.userId },
-      select: { isPremium: true, isVendorPremium: true, isValetPremium: true },
-    });
+    const [user, pointTxns] = await Promise.all([
+      db.user.findUnique({
+        where: { id: ctx.user.userId },
+        select: { isPremium: true, isVendorPremium: true, isValetPremium: true },
+      }),
+      db.pointTransaction.findMany({
+        where: { userId: ctx.user.userId },
+        select: { type: true, amount: true },
+      }),
+    ]);
+    const subscriptionUser = user ?? {};
+    const availablePoints = getAvailablePoints(pointTxns);
+    const offers = buildSubscriptionOffers(subscriptionUser, availablePoints);
     return {
       isPremium: user?.isPremium ?? false,
       isVendorPremium: user?.isVendorPremium ?? false,
       isValetPremium: user?.isValetPremium ?? false,
-      activePlans: activeSubscriptionPlans(user ?? {}),
+      activePlans: activeSubscriptionPlans(subscriptionUser),
+      availablePoints,
+      eligibleDiscounts: {
+        insiderToVendorPremium: offers['vendor-premium'].upgradeDiscountCents,
+      },
+      loyalty: {
+        availablePoints,
+        pointsPerUsd: POINTS_PER_USD,
+        centsPerPoint: CENTS_PER_USD / POINTS_PER_USD,
+        eligibleDiscounts: {
+          insiderToVendorPremium: offers['vendor-premium'].upgradeDiscountCents,
+        },
+      },
+      subscriptionOffers: offers,
     };
   }),
 
@@ -780,9 +1131,15 @@ const subscriptionRouter = router({
       type: z.string().max(100),
       data: z.object({
         object: z.object({
+          id: z.string().max(120).optional(),
           metadata: z.object({
             userId: z.string().max(100).optional(),
             plan: subscriptionPlanSchema.optional(),
+            entity: z.nativeEnum(Entity).optional(),
+            flow: z.string().max(80).optional(),
+            bookingId: z.string().max(120).optional(),
+            pointsToRedeem: z.string().max(20).optional(),
+            pointsDiscountCents: z.string().max(20).optional(),
           }).optional(),
           mode: z.string().max(50).optional(),
           customer: z.string().max(100).optional(),
@@ -795,9 +1152,78 @@ const subscriptionRouter = router({
         const userId = data?.object?.metadata?.userId;
         const plan = data?.object?.metadata?.plan ?? 'insider-premium';
         if (userId && data?.object?.mode === 'subscription') {
+          const entity = data?.object?.metadata?.entity ?? entityForSubscriptionPlan(plan);
           await db.user.update({ where: { id: userId }, data: subscriptionUpdateForPlan(plan, true) });
+          const pointsToRedeem = Number.parseInt(data?.object?.metadata?.pointsToRedeem ?? '0', 10);
+          const pointsDiscountCents = Number.parseInt(data?.object?.metadata?.pointsDiscountCents ?? '0', 10);
+          const stripeSessionId = data?.object?.id;
+          if (stripeSessionId && Number.isFinite(pointsToRedeem) && pointsToRedeem > 0) {
+            try {
+              await db.pointTransaction.create({
+                data: {
+                  userId,
+                  type: SUBSCRIPTION_CREDIT_TYPE,
+                  amount: pointsToRedeem,
+                  description: `Applied ${pointsToRedeem} points ($${(pointsDiscountCents / 100).toFixed(2)}) to ${plan} subscription checkout ${stripeSessionId}`,
+                  category: 'subscription',
+                  entity,
+                  stripeSessionId,
+                },
+              });
+            } catch (error: any) {
+              if (error?.code !== 'P2002') throw error;
+            }
+          }
           console.log(`[subscription] User ${userId} upgraded to ${plan}`);
+        } else if (data?.object?.mode === 'payment' && data?.object?.metadata?.flow === 'booking.checkout') {
+          const metadata = data.object.metadata;
+          const bookingId = metadata.bookingId;
+          const stripeSessionId = data.object.id;
+          const paymentIntent = (data.object as any).payment_intent;
+          const stripePaymentIntentId = typeof paymentIntent === 'string' ? paymentIntent : paymentIntent?.id ?? null;
+          if (bookingId && stripeSessionId) {
+            await db.booking.update({
+              where: { id: bookingId },
+              data: {
+                status: 'paid',
+                stripeSessionId,
+                stripePaymentIntentId,
+                metadata: {
+                  ...metadata,
+                  stripeSessionId,
+                  stripePaymentIntentId,
+                  paidAt: new Date().toISOString(),
+                  flow: 'booking.checkout.completed',
+                },
+              },
+            });
+
+            const pointsToRedeem = Number.parseInt(metadata.pointsToRedeem ?? '0', 10);
+            const pointsDiscountCents = Number.parseInt(metadata.pointsDiscountCents ?? '0', 10);
+            if (metadata.userId && Number.isFinite(pointsToRedeem) && pointsToRedeem > 0) {
+              try {
+                await db.pointTransaction.create({
+                  data: {
+                    userId: metadata.userId,
+                    type: MARKETPLACE_CREDIT_TYPE,
+                    amount: pointsToRedeem,
+                    description: `Applied ${pointsToRedeem} points ($${(pointsDiscountCents / 100).toFixed(2)}) to marketplace booking ${bookingId} checkout ${stripeSessionId}`,
+                    category: 'marketplace',
+                    entity: metadata.entity ?? Entity.VENDOR_SERVICES,
+                    stripeSessionId,
+                    stripePaymentIntentId,
+                  },
+                });
+              } catch (error: any) {
+                if (error?.code !== 'P2002') throw error;
+              }
+            }
+          }
         }
+      } else if (type === 'charge.refunded' || type === 'refund.updated') {
+        return handleMarketplaceRefundEvent(data.object as Record<string, any>, type);
+      } else if (type === 'charge.dispute.created' || type === 'charge.dispute.closed') {
+        return handleMarketplaceDisputeEvent(data.object as Record<string, any>, type);
       } else if (type === 'customer.subscription.deleted') {
         const userId = data?.object?.metadata?.userId;
         const plan = data?.object?.metadata?.plan ?? 'insider-premium';
@@ -1191,6 +1617,10 @@ export const appRouter = router({
   reviews: reviewsRouter,
   events: eventsRouter,
   places: placesRouter,
+  patch: patchRouter,
+  booking: bookingRouter,
+  vendors: vendorRouter,
+  audit: auditRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

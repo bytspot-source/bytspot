@@ -22,6 +22,29 @@ vi.mock('../lib/db', () => {
       findMany: vi.fn().mockResolvedValue([]),
       count: vi.fn().mockResolvedValue(0),
     },
+    hardwarePatch: {
+      findUnique: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
+    vendor: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
+    vendorService: {
+      findUnique: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn(),
+    },
+    booking: {
+      create: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
     crowdLevel: {
       findFirst: vi.fn(),
       create: vi.fn(),
@@ -79,6 +102,19 @@ vi.mock('../lib/db', () => {
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn().mockResolvedValue({ id: 'f-1' }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    complianceLog: {
+      create: vi.fn().mockResolvedValue({ id: 'cl-1' }),
+    },
+    auditLog: {
+      createMany: vi.fn().mockResolvedValue({ count: 0 }),
+      findMany: vi.fn().mockResolvedValue([]),
+      count: vi.fn().mockResolvedValue(0),
+    },
+    revokedPatch: {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ id: 'rp-1' }),
+      count: vi.fn().mockResolvedValue(0),
     },
   };
   return { db: mockDb };

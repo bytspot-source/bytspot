@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TRPCError } from '@trpc/server';
+import { Entity } from '@prisma/client';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
 
@@ -117,6 +118,11 @@ describe('auth', () => {
 // ──────────────────────────────────────────────────────────
 describe('venues', () => {
   it('venues.list returns venue array', async () => {
+    (db.$queryRawUnsafe as any).mockResolvedValueOnce([
+      { column_name: 'entry_type' },
+      { column_name: 'entry_price' },
+      { column_name: 'ticket_url' },
+    ]);
     (db.venue.findMany as any).mockResolvedValueOnce([
       {
         id: 'v1', name: 'Test Bar', slug: 'test-bar', address: '123 Main St',
@@ -124,6 +130,17 @@ describe('venues', () => {
         entryType: 'paid', entryPrice: '$22', ticketUrl: 'https://tickets.test/bar',
         crowdLevels: [{ level: 2, label: 'Active', waitMins: 10, recordedAt: new Date() }],
         parking: [{ name: 'Lot A', type: 'lot', available: 5, totalSpots: 20, pricePerHr: 5 }],
+      },
+    ]);
+    (db.hardwarePatch.findMany as any).mockResolvedValueOnce([
+      {
+        id: 'patch-v1',
+        bindingId: 'v1',
+        tagType: 'NTAG424_DNA',
+        label: 'Front Door',
+        readCounter: 9,
+        confirmedAt: new Date('2026-04-23T18:00:00.000Z'),
+        updatedAt: new Date('2026-04-23T18:05:00.000Z'),
       },
     ]);
 
@@ -136,9 +153,38 @@ describe('venues', () => {
     expect(result.venues[0].entryType).toBe('paid');
     expect(result.venues[0].entryPrice).toBe('$22');
     expect(result.venues[0].ticketUrl).toBe('https://tickets.test/bar');
+    expect(result.venues[0].hardwarePatch).toEqual(expect.objectContaining({ id: 'patch-v1', verifiedVenue: true }));
+  });
+
+  it('venues.list falls back to legacy-safe fields when ticketing columns are missing', async () => {
+    (db.$queryRawUnsafe as any).mockResolvedValueOnce([]);
+    (db.venue.findMany as any).mockResolvedValueOnce([
+      {
+        id: 'v1', name: 'Legacy Bar', slug: 'legacy-bar', address: '123 Main St',
+        lat: 33.78, lng: -84.38, category: 'bar', imageUrl: null,
+        crowdLevels: [{ level: 1, label: 'Chill', waitMins: 0, recordedAt: new Date() }],
+        parking: [{ name: 'Lot A', type: 'lot', available: 5, totalSpots: 20, pricePerHr: 5 }],
+      },
+    ]);
+
+    const caller = createPublicCaller();
+    const result = await caller.venues.list({ entryType: 'free' });
+
+    expect(result.venues).toHaveLength(1);
+    expect(result.venues[0].entryType).toBe('free');
+    expect(result.venues[0].entryPrice).toBeNull();
+    expect(result.venues[0].ticketUrl).toBeNull();
+
+    const findManyArgs = (db.venue.findMany as any).mock.calls[0][0];
+    expect(findManyArgs.where).toBeUndefined();
   });
 
   it('venues.getBySlug returns ticketing fields for paid venues', async () => {
+    (db.$queryRawUnsafe as any).mockResolvedValueOnce([
+      { column_name: 'entry_type' },
+      { column_name: 'entry_price' },
+      { column_name: 'ticket_url' },
+    ]);
     (db.venue.findUnique as any).mockResolvedValueOnce({
       id: 'v1', name: 'Test Bar', slug: 'test-bar', address: '123 Main St',
       lat: 33.78, lng: -84.38, category: 'bar', imageUrl: null,
@@ -274,6 +320,7 @@ describe('push', () => {
 
 // ──────────────────────────────────────────────────────────
 // Subscription Premium Tiers
+// ──────────────────────────────────────────────────────────
 describe('subscription', () => {
   it('subscription.status returns vendor and valet premium flags', async () => {
     (db.user.findUnique as any).mockResolvedValueOnce({
@@ -291,6 +338,30 @@ describe('subscription', () => {
     expect(result.activePlans).toEqual(['vendor-premium']);
   });
 
+  it('subscription.status returns loyalty points and Insider-to-Vendor upgrade discounts', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      isPremium: true,
+      isVendorPremium: false,
+      isValetPremium: false,
+    });
+    (db.pointTransaction.findMany as any).mockResolvedValueOnce([
+      { type: 'earn', amount: 2500 },
+      { type: 'spend', amount: 300 },
+      { type: 'SUBSCRIPTION_CREDIT', amount: 200 },
+    ]);
+
+    const caller = createAuthenticatedCaller('user-1');
+    const result = await caller.subscription.status();
+
+    expect(result.availablePoints).toBe(2000);
+    expect(result.eligibleDiscounts.insiderToVendorPremium).toBe(999);
+    expect(result.subscriptionOffers['vendor-premium']).toEqual(expect.objectContaining({
+      baseUnitAmountCents: 4900,
+      upgradeDiscountCents: 999,
+      maxPointsDiscountCents: 2000,
+    }));
+  });
+
   it('subscription.webhook activates Vendor Premium from checkout metadata', async () => {
     const caller = createPublicCaller();
     await caller.subscription.webhook({
@@ -302,6 +373,169 @@ describe('subscription', () => {
       where: { id: 'user-1' },
       data: { isVendorPremium: true },
     });
+  });
+
+  it('subscription.webhook records subscription point credits with the Stripe session id', async () => {
+    const caller = createPublicCaller();
+    await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_test_points',
+          mode: 'subscription',
+          metadata: {
+            userId: 'user-1',
+            plan: 'insider-premium',
+            pointsToRedeem: '500',
+            pointsDiscountCents: '500',
+          },
+        },
+      },
+    });
+
+    expect(db.pointTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: 'user-1',
+        type: 'SUBSCRIPTION_CREDIT',
+        amount: 500,
+        category: 'subscription',
+        entity: Entity.BYTSPOT_INC,
+        stripeSessionId: 'cs_test_points',
+      }),
+    });
+  });
+
+  it('subscription.webhook marks marketplace booking checkout paid and ledgers point redemption by entity', async () => {
+    const caller = createPublicCaller();
+    await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_booking_points',
+          mode: 'payment',
+          payment_intent: 'pi_booking_123',
+          metadata: {
+            flow: 'booking.checkout',
+            bookingId: 'booking-1',
+            userId: 'user-1',
+            entity: Entity.VENDOR_SERVICES,
+            pointsToRedeem: '1000',
+            pointsDiscountCents: '1000',
+          },
+        },
+      },
+    });
+
+    expect(db.booking.update).toHaveBeenCalledWith({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({
+        status: 'paid',
+        stripeSessionId: 'cs_booking_points',
+        stripePaymentIntentId: 'pi_booking_123',
+      }),
+    });
+    expect(db.pointTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: 'user-1',
+        type: 'MARKETPLACE_CREDIT',
+        amount: 1000,
+        category: 'marketplace',
+        entity: Entity.VENDOR_SERVICES,
+        stripeSessionId: 'cs_booking_points',
+        stripePaymentIntentId: 'pi_booking_123',
+      }),
+    });
+  });
+
+  it('subscription.webhook marks refunded bookings and restores marketplace points with refund audit id', async () => {
+    (db.booking.findUnique as any).mockResolvedValueOnce({
+      id: 'booking-1',
+      userId: 'user-1',
+      entity: Entity.VENDOR_SERVICES,
+      status: 'paid',
+      stripeSessionId: 'cs_booking_points',
+      stripePaymentIntentId: 'pi_booking_123',
+      metadata: { pointsToRedeem: '1000', pointsDiscountCents: '1000' },
+    });
+
+    const caller = createPublicCaller();
+    const result = await caller.subscription.webhook({
+      type: 'refund.updated',
+      data: {
+        object: {
+          id: 're_123',
+          object: 'refund',
+          payment_intent: 'pi_booking_123',
+          amount: 14000,
+          status: 'succeeded',
+        },
+      },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ bookingId: 'booking-1', status: 'refunded' }));
+    expect(db.booking.update).toHaveBeenCalledWith({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({ status: 'refunded' }),
+    });
+    expect(db.pointTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: 'user-1',
+        type: 'MARKETPLACE_CREDIT_REVERSAL',
+        amount: 1000,
+        category: 'marketplace',
+        entity: Entity.VENDOR_SERVICES,
+        stripeRefundId: 're_123',
+      }),
+    });
+  });
+
+  it('subscription.webhook records open and lost marketplace disputes', async () => {
+    (db.booking.findUnique as any)
+      .mockResolvedValueOnce({
+        id: 'booking-1',
+        userId: 'user-1',
+        entity: Entity.VENDOR_SERVICES,
+        status: 'paid',
+        stripeSessionId: 'cs_booking_points',
+        stripePaymentIntentId: 'pi_booking_123',
+        metadata: { pointsToRedeem: '500', pointsDiscountCents: '500' },
+      })
+      .mockResolvedValueOnce({
+        id: 'booking-1',
+        userId: 'user-1',
+        entity: Entity.VENDOR_SERVICES,
+        status: 'disputed',
+        stripeSessionId: 'cs_booking_points',
+        stripePaymentIntentId: 'pi_booking_123',
+        metadata: { pointsToRedeem: '500', pointsDiscountCents: '500' },
+      });
+
+    const caller = createPublicCaller();
+    await caller.subscription.webhook({
+      type: 'charge.dispute.created',
+      data: { object: { id: 'du_123', payment_intent: 'pi_booking_123', status: 'needs_response', amount: 14000 } },
+    });
+    const result = await caller.subscription.webhook({
+      type: 'charge.dispute.closed',
+      data: { object: { id: 'du_123', payment_intent: 'pi_booking_123', status: 'lost', amount: 14000 } },
+    });
+
+    expect(db.booking.update).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({ status: 'disputed' }),
+    }));
+    expect(db.booking.update).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({ status: 'refunded' }),
+    }));
+    expect(db.pointTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: 'MARKETPLACE_CREDIT_REVERSAL',
+        amount: 500,
+        stripeDisputeId: 'du_123',
+      }),
+    });
+    expect(result).toEqual(expect.objectContaining({ bookingId: 'booking-1', status: 'refunded' }));
   });
 
   it('subscription.webhook deactivates Valet Premium on subscription deletion', async () => {
@@ -318,6 +552,7 @@ describe('subscription', () => {
   });
 });
 
+// ──────────────────────────────────────────────────────────
 // Providers (requires auth)
 // ──────────────────────────────────────────────────────────
 describe('providers', () => {
@@ -382,6 +617,21 @@ describe('user.points', () => {
     const result = await caller.user.points.get();
     expect(result.lifetime).toBe(2500);
     expect(result.tier).toBe('gold');
+  });
+
+  it('restores marketplace credit reversals to balance without inflating lifetime points', async () => {
+    (db.pointTransaction.findMany as any).mockResolvedValueOnce([
+      { id: '1', type: 'earn', amount: 2500, createdAt: new Date() },
+      { id: '2', type: 'MARKETPLACE_CREDIT', amount: 1000, createdAt: new Date() },
+      { id: '3', type: 'MARKETPLACE_CREDIT_REVERSAL', amount: 1000, createdAt: new Date() },
+    ]);
+
+    const caller = createAuthenticatedCaller();
+    const result = await caller.user.points.get();
+
+    expect(result.total).toBe(2500);
+    expect(result.lifetime).toBe(2500);
+    expect(result.spent).toBe(1000);
   });
 });
 

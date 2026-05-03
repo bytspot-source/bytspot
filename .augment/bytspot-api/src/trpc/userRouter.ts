@@ -32,6 +32,36 @@ function getTier(lifetime: number) {
   return TIER_THRESHOLDS.find((t) => lifetime >= t.min) ?? TIER_THRESHOLDS[3];
 }
 
+function mapAccessPass(pass: {
+  id: string;
+  productId: string;
+  productType: string;
+  title: string;
+  subtitle: string | null;
+  location: string;
+  priceLabel: string;
+  accessLabel: string;
+  orderNumber: string;
+  status: string;
+  ticketUrl: string | null;
+  createdAt: Date;
+}) {
+  return {
+    id: pass.id,
+    productId: pass.productId,
+    productType: pass.productType,
+    title: pass.title,
+    subtitle: pass.subtitle ?? '',
+    location: pass.location,
+    priceLabel: pass.priceLabel,
+    accessLabel: pass.accessLabel,
+    orderNumber: pass.orderNumber,
+    status: 'confirmed' as const,
+    ticketUrl: pass.ticketUrl,
+    purchasedAt: pass.createdAt.toISOString(),
+  };
+}
+
 // ─── Points sub-router ───────────────────────────────────────────────
 const pointsRouter = router({
   /** Get user's current points balance + tier */
@@ -40,9 +70,12 @@ const pointsRouter = router({
       where: { userId: ctx.user.userId },
       orderBy: { createdAt: 'desc' },
     });
-    const earned = txns.filter((t) => t.type !== 'spend').reduce((s, t) => s + t.amount, 0);
-    const spent = txns.filter((t) => t.type === 'spend').reduce((s, t) => s + Math.abs(t.amount), 0);
-    const total = earned - spent;
+    const isDebit = (type: string) => type === 'spend' || type === 'SUBSCRIPTION_CREDIT' || type === 'MARKETPLACE_CREDIT';
+    const isRestoration = (type: string) => type === 'MARKETPLACE_CREDIT_REVERSAL';
+    const earned = txns.filter((t) => !isDebit(t.type) && !isRestoration(t.type)).reduce((s, t) => s + Math.max(0, t.amount), 0);
+    const spent = txns.filter((t) => isDebit(t.type)).reduce((s, t) => s + Math.abs(t.amount), 0);
+    const restored = txns.filter((t) => isRestoration(t.type)).reduce((s, t) => s + Math.max(0, t.amount), 0);
+    const total = earned + restored - spent;
     const tier = getTier(earned);
     return { total, lifetime: earned, spent, tier: tier.level };
   }),
@@ -357,6 +390,62 @@ const notificationsRouter = router({
     }),
 });
 
+const accessPassInputSchema = z.object({
+  productId: z.string().max(120),
+  productType: z.enum(['venue', 'event']),
+  title: z.string().max(200),
+  subtitle: z.string().max(200).optional().nullable(),
+  location: z.string().max(300),
+  priceLabel: z.string().max(100),
+  accessLabel: z.string().max(100),
+  ticketUrl: z.string().url().optional().nullable(),
+});
+
+const accessPassesRouter = router({
+  list: protectedProcedure.query(async ({ ctx }) => {
+    const passes = await db.accessPass.findMany({
+      where: { userId: ctx.user.userId },
+      orderBy: { createdAt: 'desc' },
+    });
+    return passes.map(mapAccessPass);
+  }),
+
+  confirm: protectedProcedure
+    .input(accessPassInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const existing = await db.accessPass.findFirst({
+        where: {
+          userId: ctx.user.userId,
+          productId: input.productId,
+          productType: input.productType,
+          status: 'confirmed',
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (existing) return mapAccessPass(existing);
+
+      const created = await db.accessPass.create({
+        data: {
+          userId: ctx.user.userId,
+          productId: input.productId,
+          productType: input.productType,
+          title: input.title,
+          subtitle: input.subtitle ?? null,
+          location: input.location,
+          priceLabel: input.priceLabel,
+          accessLabel: input.accessLabel,
+          orderNumber: `BS-${Date.now().toString().slice(-6)}`,
+          status: 'confirmed',
+          ticketUrl: input.ticketUrl ?? null,
+          source: 'app',
+        },
+      });
+
+      return mapAccessPass(created);
+    }),
+});
+
 // ─── Compose user router ────────────────────────────────────────────
 export const userRouter = router({
   points: pointsRouter,
@@ -367,5 +456,6 @@ export const userRouter = router({
   profile: profileRouter,
   vehicles: vehiclesRouter,
   notifications: notificationsRouter,
+  accessPasses: accessPassesRouter,
 });
 

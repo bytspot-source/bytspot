@@ -101,7 +101,7 @@ export const socialRouter = router({
       const rows = await db.pointTransaction.groupBy({
         by: ['userId'],
         _sum: { amount: true },
-        where: { type: { not: 'spend' } },
+        where: { type: { notIn: ['spend', 'SUBSCRIPTION_CREDIT', 'MARKETPLACE_CREDIT', 'MARKETPLACE_CREDIT_REVERSAL'] } },
         orderBy: { _sum: { amount: 'desc' } },
         take: input.limit,
       });

@@ -13,6 +13,8 @@ vi.mock('../lib/db', () => {
       findUnique: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
       count: vi.fn().mockResolvedValue(0),
     },
     venue: {
@@ -107,6 +109,8 @@ vi.mock('../config', () => ({
     stripeSecretKey: '',
     stripeWebhookSecret: '',
     stripePremiumPriceId: '',
+    stripeVendorPremiumPriceId: '',
+    stripeValetPremiumPriceId: '',
     frontendUrl: 'http://localhost:3000',
     resendApiKey: '',
     adminPassword: 'test-admin-pass',

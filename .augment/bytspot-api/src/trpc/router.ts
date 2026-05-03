@@ -638,11 +638,76 @@ const paymentsRouter = router({
 /**
  * ── Subscription (Bytspot Premium) sub-router ────────
  */
+const subscriptionPlanSchema = z.enum(['insider-premium', 'vendor-premium', 'valet-premium']);
+type SubscriptionPlan = z.infer<typeof subscriptionPlanSchema>;
+
+type SubscriptionUserState = {
+  isPremium?: boolean | null;
+  isVendorPremium?: boolean | null;
+  isValetPremium?: boolean | null;
+};
+
+const subscriptionPlans: Record<SubscriptionPlan, {
+  priceId: string;
+  productName: string;
+  description: string;
+  unitAmount: number;
+  successPath: string;
+  cancelPath: string;
+}> = {
+  'insider-premium': {
+    priceId: config.stripePremiumPriceId,
+    productName: 'Bytspot Premium',
+    description: 'Ad-free experience, priority concierge, exclusive badge',
+    unitAmount: 999,
+    successPath: '/premium/success?session_id={CHECKOUT_SESSION_ID}',
+    cancelPath: '/premium/cancelled',
+  },
+  'vendor-premium': {
+    priceId: config.stripeVendorPremiumPriceId,
+    productName: 'Bytspot Vendor Premium',
+    description: 'AI patch placement, demand windows, and Es = Φ_EM + Φ_E + ΔD + f × λ_sim optimization insights',
+    unitAmount: 4900,
+    successPath: '/provider?premium=success&plan=vendor-premium&session_id={CHECKOUT_SESSION_ID}',
+    cancelPath: '/provider?premium=cancelled&plan=vendor-premium',
+  },
+  'valet-premium': {
+    priceId: config.stripeValetPremiumPriceId,
+    productName: 'Bytspot Valet Premium',
+    description: 'Priority dispatch insight, route quality signals, and premium payout recommendations',
+    unitAmount: 1499,
+    successPath: '/provider?premium=success&plan=valet-premium&session_id={CHECKOUT_SESSION_ID}',
+    cancelPath: '/provider?premium=cancelled&plan=valet-premium',
+  },
+};
+
+function subscriptionUpdateForPlan(plan: SubscriptionPlan, active: boolean) {
+  if (plan === 'vendor-premium') return { isVendorPremium: active };
+  if (plan === 'valet-premium') return { isValetPremium: active };
+  return { isPremium: active };
+}
+
+function isSubscriptionPlanActive(user: SubscriptionUserState, plan: SubscriptionPlan): boolean {
+  if (plan === 'vendor-premium') return user.isVendorPremium === true;
+  if (plan === 'valet-premium') return user.isValetPremium === true;
+  return user.isPremium === true;
+}
+
+function activeSubscriptionPlans(user: SubscriptionUserState): SubscriptionPlan[] {
+  return [
+    ...(user.isPremium ? ['insider-premium' as const] : []),
+    ...(user.isVendorPremium ? ['vendor-premium' as const] : []),
+    ...(user.isValetPremium ? ['valet-premium' as const] : []),
+  ];
+}
 const subscriptionRouter = router({
   /** POST /subscription/createCheckout → creates Stripe Checkout for premium subscription */
   createCheckout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'subscription:checkout' }))
-    .mutation(async ({ ctx }) => {
+    .input(z.object({ plan: subscriptionPlanSchema.optional() }).optional())
+    .mutation(async ({ ctx, input }) => {
+    const plan = input?.plan ?? 'insider-premium';
+    const planConfig = subscriptionPlans[plan];
     if (!config.stripeSecretKey) {
       return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
     }
@@ -650,9 +715,12 @@ const subscriptionRouter = router({
     const userId = ctx.user.userId;
 
     // Get or create Stripe customer
-    let user = await db.user.findUnique({ where: { id: userId }, select: { stripeCustomerId: true, email: true, isPremium: true } });
+    let user = await db.user.findUnique({
+      where: { id: userId },
+      select: { stripeCustomerId: true, email: true, isPremium: true, isVendorPremium: true, isValetPremium: true },
+    });
     if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
-    if (user.isPremium) return { url: null as string | null, demoMode: false, message: 'Already premium' };
+    if (isSubscriptionPlanActive(user, plan)) return { url: null as string | null, demoMode: false, message: 'Already premium', plan };
 
     let customerId = user.stripeCustomerId;
     if (!customerId) {
@@ -662,27 +730,28 @@ const subscriptionRouter = router({
     }
 
     try {
+      const lineItem = planConfig.priceId
+        ? { price: planConfig.priceId, quantity: 1 }
+        : {
+            price_data: {
+              currency: 'usd',
+              unit_amount: planConfig.unitAmount,
+              recurring: { interval: 'month' as const },
+              product_data: { name: planConfig.productName, description: planConfig.description },
+            },
+            quantity: 1,
+          };
       const session = await stripe.checkout.sessions.create({
         customer: customerId,
         payment_method_types: ['card'],
         mode: 'subscription',
-        line_items: [{
-          price: config.stripePremiumPriceId || undefined,
-          ...(!config.stripePremiumPriceId ? {
-            price_data: {
-              currency: 'usd',
-              unit_amount: 999, // $9.99/month
-              recurring: { interval: 'month' as const },
-              product_data: { name: 'Bytspot Premium', description: 'Ad-free experience, priority concierge, exclusive badge' },
-            },
-          } : {}),
-          quantity: 1,
-        }],
-        metadata: { userId },
-        success_url: `${config.frontendUrl}/premium/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${config.frontendUrl}/premium/cancelled`,
+        line_items: [lineItem],
+        metadata: { userId, plan },
+        subscription_data: { metadata: { userId, plan } },
+        success_url: `${config.frontendUrl}${planConfig.successPath}`,
+        cancel_url: `${config.frontendUrl}${planConfig.cancelPath}`,
       });
-      return { url: session.url };
+      return { url: session.url, plan };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Stripe error';
       console.error('[subscription] Stripe error:', msg);
@@ -692,8 +761,16 @@ const subscriptionRouter = router({
 
   /** GET /subscription/status → returns current user's premium status */
   status: protectedProcedure.query(async ({ ctx }) => {
-    const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { isPremium: true } });
-    return { isPremium: user?.isPremium ?? false };
+    const user = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { isPremium: true, isVendorPremium: true, isValetPremium: true },
+    });
+    return {
+      isPremium: user?.isPremium ?? false,
+      isVendorPremium: user?.isVendorPremium ?? false,
+      isValetPremium: user?.isValetPremium ?? false,
+      activePlans: activeSubscriptionPlans(user ?? {}),
+    };
   }),
 
   /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
@@ -703,7 +780,10 @@ const subscriptionRouter = router({
       type: z.string().max(100),
       data: z.object({
         object: z.object({
-          metadata: z.object({ userId: z.string().max(100).optional() }).optional(),
+          metadata: z.object({
+            userId: z.string().max(100).optional(),
+            plan: subscriptionPlanSchema.optional(),
+          }).optional(),
           mode: z.string().max(50).optional(),
           customer: z.string().max(100).optional(),
         }).passthrough().optional(),
@@ -713,15 +793,23 @@ const subscriptionRouter = router({
       const { type, data } = input;
       if (type === 'checkout.session.completed') {
         const userId = data?.object?.metadata?.userId;
+        const plan = data?.object?.metadata?.plan ?? 'insider-premium';
         if (userId && data?.object?.mode === 'subscription') {
-          await db.user.update({ where: { id: userId }, data: { isPremium: true } });
-          console.log(`[subscription] User ${userId} upgraded to Premium`);
+          await db.user.update({ where: { id: userId }, data: subscriptionUpdateForPlan(plan, true) });
+          console.log(`[subscription] User ${userId} upgraded to ${plan}`);
         }
       } else if (type === 'customer.subscription.deleted') {
+        const userId = data?.object?.metadata?.userId;
+        const plan = data?.object?.metadata?.plan ?? 'insider-premium';
         const customerId = data?.object?.customer;
+        if (userId) {
+          await db.user.update({ where: { id: userId }, data: subscriptionUpdateForPlan(plan, false) });
+          console.log(`[subscription] User ${userId} cancelled ${plan}`);
+          return { received: true };
+        }
         if (customerId) {
-          await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: { isPremium: false } });
-          console.log(`[subscription] Customer ${customerId} subscription cancelled`);
+          await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: subscriptionUpdateForPlan(plan, false) });
+          console.log(`[subscription] Customer ${customerId} cancelled ${plan}`);
         }
       }
       return { received: true };

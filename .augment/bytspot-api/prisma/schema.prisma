@@ -26,6 +26,8 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   isPremium  Boolean  @default(false) @map("is_premium")
+  isVendorPremium Boolean @default(false) @map("is_vendor_premium")
+  isValetPremium  Boolean @default(false) @map("is_valet_premium")
   stripeCustomerId String? @unique @map("stripe_customer_id")
 
   hostProfile    HostProfile?

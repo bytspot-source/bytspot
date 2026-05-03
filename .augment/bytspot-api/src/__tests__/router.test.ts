@@ -273,6 +273,51 @@ describe('push', () => {
 });
 
 // ──────────────────────────────────────────────────────────
+// Subscription Premium Tiers
+describe('subscription', () => {
+  it('subscription.status returns vendor and valet premium flags', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      isPremium: false,
+      isVendorPremium: true,
+      isValetPremium: false,
+    });
+
+    const caller = createAuthenticatedCaller();
+    const result = await caller.subscription.status();
+
+    expect(result.isPremium).toBe(false);
+    expect(result.isVendorPremium).toBe(true);
+    expect(result.isValetPremium).toBe(false);
+    expect(result.activePlans).toEqual(['vendor-premium']);
+  });
+
+  it('subscription.webhook activates Vendor Premium from checkout metadata', async () => {
+    const caller = createPublicCaller();
+    await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: { object: { mode: 'subscription', metadata: { userId: 'user-1', plan: 'vendor-premium' } } },
+    });
+
+    expect(db.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: { isVendorPremium: true },
+    });
+  });
+
+  it('subscription.webhook deactivates Valet Premium on subscription deletion', async () => {
+    const caller = createPublicCaller();
+    await caller.subscription.webhook({
+      type: 'customer.subscription.deleted',
+      data: { object: { customer: 'cus_123', metadata: { plan: 'valet-premium' } } },
+    });
+
+    expect(db.user.updateMany).toHaveBeenCalledWith({
+      where: { stripeCustomerId: 'cus_123' },
+      data: { isValetPremium: false },
+    });
+  });
+});
+
 // Providers (requires auth)
 // ──────────────────────────────────────────────────────────
 describe('providers', () => {

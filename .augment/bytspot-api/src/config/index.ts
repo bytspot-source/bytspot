@@ -29,6 +29,8 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY:      z.string().default(''),
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),
   STRIPE_PREMIUM_PRICE_ID:z.string().default(''),
+  STRIPE_VENDOR_PREMIUM_PRICE_ID:z.string().default(''),
+  STRIPE_VALET_PREMIUM_PRICE_ID:z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
   CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
 
@@ -82,6 +84,8 @@ export const config = {
   stripeSecretKey: env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
   stripePremiumPriceId: env.STRIPE_PREMIUM_PRICE_ID,
+  stripeVendorPremiumPriceId: env.STRIPE_VENDOR_PREMIUM_PRICE_ID,
+  stripeValetPremiumPriceId: env.STRIPE_VALET_PREMIUM_PRICE_ID,
   frontendUrl: env.FRONTEND_URL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,

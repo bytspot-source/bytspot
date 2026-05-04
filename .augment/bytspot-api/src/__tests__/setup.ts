@@ -11,6 +11,7 @@ vi.mock('../lib/db', () => {
     $queryRawUnsafe: vi.fn().mockResolvedValue([]),
     user: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
       update: vi.fn(),
@@ -106,6 +107,11 @@ vi.mock('../lib/db', () => {
     complianceLog: {
       create: vi.fn().mockResolvedValue({ id: 'cl-1' }),
     },
+    passwordResetToken: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     auditLog: {
       createMany: vi.fn().mockResolvedValue({ count: 0 }),
       findMany: vi.fn().mockResolvedValue([]),
@@ -165,6 +171,7 @@ vi.mock('../config', () => ({
 // ── Mock email ────────────────────────────────────────────
 vi.mock('../lib/email', () => ({
   sendWelcomeEmail: vi.fn().mockResolvedValue(undefined),
+  sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
   sendBetaLeadEmail: vi.fn().mockResolvedValue(undefined),
   sendCrowdAlertEmail: vi.fn().mockResolvedValue(undefined),
 }));

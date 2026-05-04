@@ -58,6 +58,37 @@ export async function sendWelcomeEmail(to: string, firstName: string): Promise<v
   }
 }
 
+export async function sendPasswordResetEmail(to: string, firstName: string, resetUrl: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  const name = firstName || 'there';
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: 'Reset your Bytspot password',
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <div style="font-size: 32px; margin-bottom: 8px;">🔐</div>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 8px;">Reset your password, ${name}</h1>
+          <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+            We received a request to reset your Bytspot password. This link expires in 1 hour and can only be used once.
+          </p>
+          <a href="${resetUrl}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6, #06b6d4); color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
+            Reset Password →
+          </a>
+          <p style="color: #555; font-size: 13px; margin-top: 32px; line-height: 1.5;">
+            If you didn't request this, you can safely ignore this email.<br>— The Bytspot Team
+          </p>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendPasswordResetEmail failed:', err?.message);
+  }
+}
+
 /**
  * Sent immediately when someone joins the waitlist via the beta funnel.
  * Short, warm, action-focused — links to the personalized /welcome page.

@@ -17,6 +17,7 @@ import pushRouter from './routes/push';             // VAPID public key + subscr
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import auditRouter from './routes/audit';           // /audit/beacon (sendBeacon fallback for client audit sink)
+import passwordResetRouter from './routes/passwordReset'; // /auth/forgot + /auth/reset
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 
@@ -67,6 +68,7 @@ app.use(healthRouter);
 app.use(cronRouter);
 app.use(pushRouter);
 app.use(betaSignupRouter);
+app.use(passwordResetRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(auditRouter);  // /audit/beacon — sendBeacon fallback
 

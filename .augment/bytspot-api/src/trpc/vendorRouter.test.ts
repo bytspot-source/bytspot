@@ -181,6 +181,58 @@ describe('vendor router', () => {
     });
   });
 
+  it('lists services owned by the authenticated vendor', async () => {
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.vendorService.findMany as any).mockResolvedValueOnce([activeService]);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.listServices({ status: 'all', limit: 10 });
+
+    expect(db.vendorService.findMany).toHaveBeenCalledWith({
+      where: { vendorId: 'vendor-1' },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 10,
+      select: expect.any(Object),
+    });
+    expect(result.vendor.id).toBe('vendor-1');
+    expect(result.services[0].id).toBe('svc-1');
+  });
+
+  it('updates owned vendor service metadata', async () => {
+    const updatedService = {
+      ...activeService,
+      title: 'VIP Arrival Plus',
+      description: 'Updated provider handoff',
+      priceCents: 17500,
+      durationMins: 120,
+    };
+    (db.vendorService.findUnique as any).mockResolvedValueOnce(activeService);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(vendorProfile);
+    (db.vendorService.update as any).mockResolvedValueOnce(updatedService);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.updateService({
+      serviceId: 'svc-1',
+      title: 'VIP Arrival Plus',
+      description: 'Updated provider handoff',
+      priceCents: 17500,
+      durationMins: 120,
+    });
+
+    expect(db.vendorService.update).toHaveBeenCalledWith({
+      where: { id: 'svc-1' },
+      data: {
+        title: 'VIP Arrival Plus',
+        description: 'Updated provider handoff',
+        priceCents: 17500,
+        durationMins: 120,
+      },
+      select: expect.any(Object),
+    });
+    expect(result.service.title).toBe('VIP Arrival Plus');
+    expect(result.service.cashFlow.grossCents).toBe(17500);
+  });
+
   it('resolves a bound physical patch to an active vendor service', async () => {
     (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(boundPatch);
     (db.vendorService.findUnique as any).mockResolvedValueOnce(activeService);

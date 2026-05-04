@@ -370,6 +370,81 @@ export const vendorRouter = router({
       return { received: true, vendor: mapVendorOnboarding(updated) };
     }),
 
+  listServices: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:listServices' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_SERVICE_MANAGEMENT_READ'],
+        policyContext: { surface: 'vendors', operation: 'listServices' },
+      }),
+    )
+    .input(
+      z.object({
+        vendorId: z.string().min(1).max(120).optional(),
+        status: z.enum(['active', 'draft', 'archived', 'all']).optional().default('all'),
+        limit: z.number().int().min(1).max(100).optional().default(50),
+      }).optional().default({}),
+    )
+    .query(async ({ ctx, input }) => {
+      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
+      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const where: Prisma.VendorServiceWhereInput = { vendorId: vendor.id };
+      if (input.status !== 'all') where.status = input.status;
+
+      const services = await db.vendorService.findMany({
+        where,
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+        take: input.limit,
+        select: serviceSelect,
+      });
+
+      return { vendor: mapVendorOnboarding(vendor), services: services.map(mapVendorService) };
+    }),
+
+  updateService: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:updateService' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_SERVICE_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'updateService' },
+      }),
+    )
+    .input(
+      z.object({
+        serviceId: z.string().min(1).max(120),
+        title: z.string().trim().min(2).max(120).optional(),
+        description: z.string().trim().max(600).nullable().optional(),
+        priceCents: z.number().int().min(50).max(1_000_000).optional(),
+        durationMins: z.number().int().min(5).max(24 * 60).nullable().optional(),
+        status: z.enum(['active', 'draft', 'archived']).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const existing = await db.vendorService.findUnique({ where: { id: input.serviceId }, select: serviceSelect });
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor service not found' });
+      const vendor = await findOwnedVendor(ctx.user.userId, existing.vendorId);
+      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+
+      const data: Prisma.VendorServiceUpdateInput = {};
+      if (input.title !== undefined) data.title = input.title;
+      if (input.description !== undefined) data.description = input.description;
+      if (input.priceCents !== undefined) data.priceCents = input.priceCents;
+      if (input.durationMins !== undefined) data.durationMins = input.durationMins;
+      if (input.status !== undefined) data.status = input.status;
+
+      const service = await db.vendorService.update({
+        where: { id: input.serviceId },
+        data,
+        select: serviceSelect,
+      });
+
+      return { service: mapVendorService(service) };
+    }),
+
   search: publicProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'vendors:search' }))
     .use(

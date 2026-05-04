@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
 import { Entity, type Prisma } from '@prisma/client';
-import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, enforceRateLimit } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
@@ -99,6 +99,27 @@ function signToken(userId: string, email: string): string {
   });
 }
 
+function getRequestIpForRateLimit(ctx: { req?: { headers?: Record<string, string | string[] | undefined>; ip?: string; socket?: { remoteAddress?: string } } }): string {
+  const forwarded = ctx.req?.headers?.['x-forwarded-for'];
+  if (Array.isArray(forwarded) && forwarded[0]) return forwarded[0].split(',')[0]?.trim() || 'unknown';
+  if (typeof forwarded === 'string' && forwarded) return forwarded.split(',')[0]?.trim() || 'unknown';
+  return ctx.req?.ip || ctx.req?.socket?.remoteAddress || 'unknown';
+}
+
+function normalizeAuthEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function enforceSignupRateLimit(ctx: { req?: { headers?: Record<string, string | string[] | undefined>; ip?: string; socket?: { remoteAddress?: string } } }): void {
+  const ip = getRequestIpForRateLimit(ctx);
+  enforceRateLimit({ windowMs: 60 * 60 * 1000, max: 5, label: 'auth:signup' }, `auth:signup:${ip}`);
+}
+
+function enforceLoginRateLimit(ctx: { req?: { headers?: Record<string, string | string[] | undefined>; ip?: string; socket?: { remoteAddress?: string } } }, email: string): void {
+  const ip = getRequestIpForRateLimit(ctx);
+  enforceRateLimit({ windowMs: 15 * 60 * 1000, max: 10, label: 'auth:login' }, `auth:login:${ip}:${normalizeAuthEmail(email)}`);
+}
+
 /**
  * ── Health sub-router ─────────────────────────────────
  */
@@ -149,16 +170,16 @@ const healthRouter = router({
  * ── Auth sub-router ───────────────────────────────────
  */
 const authRouter = router({
-  /** POST /auth/signup → auth.signup mutation */
+  /** POST /trpc/auth.signup */
   signup: publicProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'auth:signup' }))
     .input(z.object({
       email: z.string().email().max(255),
       password: z.string().min(8, 'Password must be at least 8 characters').max(128),
       name: z.string().max(100).optional(),
       ref: z.string().max(100).optional(),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
+      enforceSignupRateLimit(ctx);
       const { email, password, name, ref } = input;
 
       const existing = await db.user.findUnique({ where: { email } });
@@ -182,15 +203,15 @@ const authRouter = router({
       return { token, user: { id: user.id, email: user.email, name: user.name } };
     }),
 
-  /** POST /auth/login → auth.login mutation */
+  /** POST /trpc/auth.login */
   login: publicProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:login' }))
     .input(z.object({
       email: z.string().email().max(255),
       password: z.string().min(1).max(128),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const { email, password } = input;
+      enforceLoginRateLimit(ctx, email);
       const user = await db.user.findUnique({ where: { email } });
       if (!user) {
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });

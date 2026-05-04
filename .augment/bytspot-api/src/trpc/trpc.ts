@@ -35,6 +35,8 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
  */
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
+type RateLimitOptions = { windowMs: number; max: number; label: string };
+
 // Cleanup stale buckets every 5 minutes to prevent unbounded memory growth
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 setInterval(() => {
@@ -51,23 +53,34 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL_MS).unref(); // .unref() so this timer doesn't prevent graceful shutdown
 
-export function rateLimitMiddleware(opts: { windowMs: number; max: number; label: string }) {
+export function enforceRateLimit(opts: RateLimitOptions, key: string): void {
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+
+  if (bucket && bucket.resetAt > now) {
+    if (bucket.count >= opts.max) {
+      throw new TRPCError({
+        code: 'TOO_MANY_REQUESTS',
+        message: `Rate limit exceeded for ${opts.label}. Try again later.`,
+      });
+    }
+    bucket.count++;
+    return;
+  }
+
+  rateBuckets.set(key, { count: 1, resetAt: now + opts.windowMs });
+}
+
+export function resetRateLimitBucketsForTests(): void {
+  if (process.env.NODE_ENV === 'test') {
+    rateBuckets.clear();
+  }
+}
+
+export function rateLimitMiddleware(opts: RateLimitOptions) {
   return t.middleware(async ({ ctx, next }) => {
     const key = `${opts.label}:${ctx.user?.userId ?? 'anon'}`;
-    const now = Date.now();
-    const bucket = rateBuckets.get(key);
-
-    if (bucket && bucket.resetAt > now) {
-      if (bucket.count >= opts.max) {
-        throw new TRPCError({
-          code: 'TOO_MANY_REQUESTS',
-          message: `Rate limit exceeded for ${opts.label}. Try again later.`,
-        });
-      }
-      bucket.count++;
-    } else {
-      rateBuckets.set(key, { count: 1, resetAt: now + opts.windowMs });
-    }
+    enforceRateLimit(opts, key);
 
     return next();
   });

@@ -3,10 +3,12 @@ import { TRPCError } from '@trpc/server';
 import { Entity } from '@prisma/client';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
+import { resetRateLimitBucketsForTests } from '../trpc/trpc';
 
 // Reset all mocks between tests
 beforeEach(() => {
   vi.clearAllMocks();
+  resetRateLimitBucketsForTests();
 });
 
 // ──────────────────────────────────────────────────────────
@@ -92,6 +94,44 @@ describe('auth', () => {
     await expect(
       caller.auth.login({ email: 'bob@test.com', password: 'wrongpassword' }),
     ).rejects.toThrow(TRPCError);
+  });
+
+  it('auth.login rate-limits repeated failures for the same email', async () => {
+    (db.user.findUnique as any).mockResolvedValue(null);
+
+    const caller = createPublicCaller();
+    const input = { email: 'limit-login@test.com', password: 'wrongpassword' };
+
+    for (let i = 0; i < 10; i++) {
+      await expect(caller.auth.login(input)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    }
+
+    await expect(caller.auth.login(input)).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' });
+    expect(db.user.findUnique).toHaveBeenCalledTimes(10);
+  });
+
+  it('auth.signup rate-limits excessive signup attempts per IP', async () => {
+    (db.user.findUnique as any).mockResolvedValue(null);
+    (db.user.create as any).mockImplementation(({ data }: any) => ({
+      id: `user-${data.email}`,
+      email: data.email,
+      name: data.name ?? null,
+    }));
+
+    const caller = createPublicCaller();
+
+    for (let i = 0; i < 5; i++) {
+      await expect(caller.auth.signup({
+        email: `limit-signup-${i}@test.com`,
+        password: 'password123',
+      })).resolves.toHaveProperty('token');
+    }
+
+    await expect(caller.auth.signup({
+      email: 'limit-signup-6@test.com',
+      password: 'password123',
+    })).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' });
+    expect(db.user.create).toHaveBeenCalledTimes(5);
   });
 
   it('auth.me requires authentication', async () => {

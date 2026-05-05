@@ -18,6 +18,7 @@ import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (exter
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import auditRouter from './routes/audit';           // /audit/beacon (sendBeacon fallback for client audit sink)
 import passwordResetRouter from './routes/passwordReset'; // /auth/forgot + /auth/reset
+import stripeWebhookRouter from './routes/stripeWebhook'; // /stripe/webhook (raw body for Stripe signature verification)
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 
@@ -40,6 +41,10 @@ app.use(
     credentials: true,
   }),
 );
+
+// Stripe requires the raw request body to verify webhook signatures, so this
+// route must be mounted before express.json().
+app.use(stripeWebhookRouter);
 app.use(express.json({ limit: '1mb' }));
 
 // Global rate limiting: 300 requests per 15 min per IP

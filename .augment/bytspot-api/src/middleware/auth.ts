@@ -1,10 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
+import { type VendorRoleClaim } from '../auth/vendorRbac';
 
 export interface AuthPayload {
   userId: string;
   email: string;
+  groups?: string[];
+  vendorRoles?: VendorRoleClaim[];
 }
 
 declare global {

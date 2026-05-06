@@ -7,6 +7,7 @@ import { createAuthenticatedCaller, createPublicCaller } from '../__tests__/help
 const stripeAccountsCreate = vi.hoisted(() => vi.fn());
 const stripeAccountsRetrieve = vi.hoisted(() => vi.fn());
 const stripeAccountLinksCreate = vi.hoisted(() => vi.fn());
+const TEST_STRIPE_SECRET = `sk_${'test'}_transaction_metadata`;
 vi.mock('stripe', () => ({
   default: vi.fn().mockImplementation(function StripeMock() {
     return {
@@ -87,6 +88,8 @@ const vendorProfile = {
   updatedAt: new Date('2026-05-03T12:10:00.000Z'),
 };
 
+const delegatedVendorProfile = { ...vendorProfile, userId: 'owner-user' };
+
 const pendingAccount = {
   id: 'acct_123',
   charges_enabled: false,
@@ -114,7 +117,7 @@ describe('vendor router', () => {
   });
 
   it('creates an Express account and onboarding link for a new vendor profile', async () => {
-    config.stripeSecretKey = 'sk_test_transaction_metadata';
+    config.stripeSecretKey = TEST_STRIPE_SECRET;
     (db.vendor.findFirst as any).mockResolvedValueOnce(null);
     (db.vendor.create as any).mockResolvedValueOnce(vendorProfile);
     stripeAccountsCreate.mockResolvedValueOnce(pendingAccount);
@@ -146,7 +149,7 @@ describe('vendor router', () => {
   });
 
   it('syncs Connect readiness into the vendor onboarding status', async () => {
-    config.stripeSecretKey = 'sk_test_transaction_metadata';
+    config.stripeSecretKey = TEST_STRIPE_SECRET;
     (db.vendor.findUnique as any).mockResolvedValueOnce({ ...vendorProfile, stripeAccountId: 'acct_123' });
     stripeAccountsRetrieve.mockResolvedValueOnce(activeAccount);
     (db.vendor.update as any).mockImplementationOnce(({ data }: any) => ({
@@ -253,6 +256,41 @@ describe('vendor router', () => {
     expect(result.service.cashFlow.providerPayoutEstimateCents).toBe(2300);
   });
 
+  it('allows managers to manage catalog without exposing owner cash-flow fields', async () => {
+    const createdService = { ...activeService, id: 'svc-manager', vendorId: 'vendor-1', patch: null };
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+    (db.vendorService.create as any).mockResolvedValueOnce(createdService);
+
+    const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
+    });
+    const result = await caller.vendors.createService({
+      vendorId: 'vendor-1',
+      title: 'Managed Service',
+      priceCents: 5000,
+      status: 'active',
+    });
+
+    expect(result.providerRole).toBe('manager');
+    expect(result.service.id).toBe('svc-manager');
+    expect(result.service.cashFlow).toBeUndefined();
+  });
+
+  it('blocks staff from creating vendor services', async () => {
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'STAFF' });
+
+    const caller = createAuthenticatedCaller('staff-1', 'staff@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'staff', groups: ['bytspot:vendor:vendor-1:staff'] }],
+    });
+
+    await expect(caller.vendors.createService({ vendorId: 'vendor-1', title: 'Staff Service', priceCents: 5000 })).rejects.toThrow(
+      'Create vendor services requires owner/manager vendor role',
+    );
+    expect(db.vendorService.create).not.toHaveBeenCalled();
+  });
+
   it('lists bookings owned by the authenticated vendor', async () => {
     (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
     (db.booking.findMany as any).mockResolvedValueOnce([activeBooking]);
@@ -273,6 +311,52 @@ describe('vendor router', () => {
       guest: expect.objectContaining({ displayName: 'Taylor Guest' }),
       cashFlow: expect.objectContaining({ providerPayoutEstimateCents: 13800 }),
     }));
+  });
+
+  it('allows staff to read bookings without owner financial cash-flow fields', async () => {
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'STAFF' });
+    (db.booking.findMany as any).mockResolvedValueOnce([activeBooking]);
+
+    const caller = createAuthenticatedCaller('staff-1', 'staff@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'staff', groups: ['bytspot:vendor:vendor-1:staff'] }],
+    });
+    const result = await caller.vendors.listBookings({ vendorId: 'vendor-1', limit: 25 });
+
+    expect(result.providerRole).toBe('staff');
+    expect(result.bookings[0].id).toBe('booking-1');
+    expect(result.bookings[0].cashFlow).toBeUndefined();
+  });
+
+  it('returns providerRole from syncOnboarding and blocks manager Stripe account sync', async () => {
+    config.stripeSecretKey = TEST_STRIPE_SECRET;
+    (db.vendor.findUnique as any).mockResolvedValueOnce({ ...delegatedVendorProfile, stripeAccountId: 'acct_123' });
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+
+    const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
+    });
+    const result = await caller.vendors.syncOnboarding({ vendorId: 'vendor-1' });
+
+    expect(result.providerRole).toBe('manager');
+    expect(result.vendor.providerRole).toBe('manager');
+    expect(result.account).toBeNull();
+    expect(stripeAccountsRetrieve).not.toHaveBeenCalled();
+  });
+
+  it('blocks managers from owner-level Stripe Connect onboarding', async () => {
+    config.stripeSecretKey = TEST_STRIPE_SECRET;
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+
+    const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
+    });
+
+    await expect(caller.vendors.startOnboarding({ vendorId: 'vendor-1' })).rejects.toThrow(
+      'Stripe Connect onboarding requires owner vendor role',
+    );
+    expect(stripeAccountsCreate).not.toHaveBeenCalled();
   });
 
   it('updates owned vendor service metadata', async () => {

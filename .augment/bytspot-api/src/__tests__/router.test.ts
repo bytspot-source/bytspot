@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TRPCError } from '@trpc/server';
 import { Entity } from '@prisma/client';
+import jwt from 'jsonwebtoken';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
 import { config } from '../config';
@@ -166,6 +167,32 @@ describe('auth', () => {
     const result = await caller.auth.login({ email: 'bob@test.com', password: 'password123' });
     expect(result.token).toBeTruthy();
     expect(result.user.id).toBe('user-1');
+  });
+
+  it('auth.login signs immutable vendor role/group claims into the JWT', async () => {
+    const bcrypt = await import('bcryptjs');
+    const hashed = await bcrypt.hash('password123', 12);
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      id: 'manager-user', email: 'manager@test.com', name: 'Manager', password: hashed,
+    });
+    (db.vendorMember.findMany as any).mockResolvedValueOnce([
+      { vendorId: 'vendor-1', role: 'MANAGER' },
+    ]);
+    (db.vendor.findMany as any).mockResolvedValueOnce([]);
+
+    const caller = createPublicCaller();
+    const result = await caller.auth.login({ email: 'manager@test.com', password: 'password123' });
+    const decoded = jwt.verify(result.token, config.jwtSecret) as any;
+
+    expect(decoded.vendorRoles).toEqual([
+      expect.objectContaining({ vendorId: 'vendor-1', role: 'manager' }),
+    ]);
+    expect(decoded.groups).toEqual(expect.arrayContaining([
+      'bytspot:user',
+      'bytspot:vendor:vendor-1:manager',
+      'bytspot:vendor:vendor-1:operations',
+      'bytspot:vendor:vendor-1:catalog-write',
+    ]));
   });
 
   it('auth.login rejects wrong password', async () => {

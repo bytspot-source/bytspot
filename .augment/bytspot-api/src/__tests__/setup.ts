@@ -32,8 +32,15 @@ vi.mock('../lib/db', () => {
     vendor: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
       update: vi.fn(),
+    },
+    vendorMember: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      upsert: vi.fn(),
     },
     vendorService: {
       findUnique: vi.fn(),

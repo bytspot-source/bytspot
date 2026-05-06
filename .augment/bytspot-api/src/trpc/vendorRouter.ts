@@ -6,8 +6,13 @@ import { randomBytes } from 'crypto';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware } from './trpc';
+import { assertVendorRole, claimRoleForVendor, normalizeProviderRole, type ProviderRole, vendorGroups } from '../auth/vendorRbac';
+import { type AuthPayload } from '../middleware/auth';
 
 const vendorFrameworks = ['NIST_AI_RMF_1_0', 'EO_14365'] as const;
+const OWNER_ONLY = ['owner'] as const;
+const OPS_WRITE = ['owner', 'manager'] as const;
+const MEMBER_READ = ['owner', 'manager', 'staff'] as const;
 
 const connectReturnPath = '/provider/connect/return';
 const connectRefreshPath = '/provider/connect/refresh';
@@ -196,9 +201,9 @@ function createVirtualPatchUid(): string {
   return randomBytes(7).toString('hex').toUpperCase();
 }
 
-function mapVendorService(service: VendorServiceRow) {
+function mapVendorService(service: VendorServiceRow, includeCashFlow = true) {
   const platformFeeCents = Math.round(service.priceCents * (service.vendor.commissionBps / 10_000));
-  return {
+  const row: Record<string, unknown> = {
     id: service.id,
     title: service.title,
     description: service.description,
@@ -214,23 +219,26 @@ function mapVendorService(service: VendorServiceRow) {
       onboardingStatus: service.vendor.onboardingStatus,
     },
     patch: isBoundServicePatch(service.patch, service.id) ? mapPatchSummary(service.patch) : null,
-    cashFlow: {
+  };
+  if (includeCashFlow) {
+    row.cashFlow = {
       grossCents: service.priceCents,
       platformFeeCents,
       providerPayoutEstimateCents: service.priceCents - platformFeeCents,
       commissionBps: service.vendor.commissionBps,
-    },
-  };
+    };
+  }
+  return row;
 }
 
-function mapVendorBooking(booking: any, vendor: VendorRow) {
+function mapVendorBooking(booking: any, vendor: VendorRow, includeCashFlow = true) {
   const startsAt = booking.scheduledFor ?? booking.createdAt;
   const endsAt = booking.completedAt ?? (startsAt && booking.service?.durationMins
     ? new Date(startsAt.getTime() + booking.service.durationMins * 60_000)
     : null);
   const grossCents = Number(booking.priceCents ?? booking.service?.priceCents ?? 0);
   const platformFeeCents = Number(booking.platformFeeCents ?? Math.round(grossCents * (vendor.commissionBps / 10_000)));
-  return {
+  const row: Record<string, unknown> = {
     id: booking.id,
     serviceId: booking.serviceId,
     vendorId: booking.vendorId,
@@ -258,15 +266,18 @@ function mapVendorBooking(booking: any, vendor: VendorRow) {
     patch: isBoundServicePatch(booking.service?.patch ?? null, booking.service?.id ?? booking.serviceId)
       ? mapPatchSummary(booking.service.patch)
       : null,
-    cashFlow: {
+    createdAt: booking.createdAt?.toISOString?.() ?? null,
+    updatedAt: booking.updatedAt?.toISOString?.() ?? null,
+  };
+  if (includeCashFlow) {
+    row.cashFlow = {
       grossCents,
       platformFeeCents,
       providerPayoutEstimateCents: Math.max(0, grossCents - platformFeeCents),
       commissionBps: vendor.commissionBps,
-    },
-    createdAt: booking.createdAt?.toISOString?.() ?? null,
-    updatedAt: booking.updatedAt?.toISOString?.() ?? null,
-  };
+    };
+  }
+  return row;
 }
 
 function safePath(path: string | undefined, fallback: string): string {
@@ -295,7 +306,7 @@ function onboardingStatusForAccount(account: Stripe.Account): string {
   return 'pending';
 }
 
-function mapVendorOnboarding(vendor: VendorRow) {
+function mapVendorOnboarding(vendor: VendorRow, role: ProviderRole = 'owner') {
   return {
     id: vendor.id,
     entity: vendor.entity,
@@ -304,19 +315,65 @@ function mapVendorOnboarding(vendor: VendorRow) {
     stripeAccountId: vendor.stripeAccountId,
     onboardingStatus: vendor.onboardingStatus,
     commissionBps: vendor.commissionBps,
+    providerRole: role,
+    groups: vendorGroups(vendor.id, role),
     updatedAt: vendor.updatedAt.toISOString(),
   };
 }
 
-async function findOwnedVendor(userId: string, vendorId?: string): Promise<VendorRow | null> {
+type VendorAccess = { vendor: VendorRow; role: ProviderRole };
+
+function lowerRole(left: ProviderRole, right: ProviderRole): ProviderRole {
+  const rank: Record<ProviderRole, number> = { staff: 1, manager: 2, owner: 3 };
+  return rank[left] <= rank[right] ? left : right;
+}
+
+async function roleForVendor(user: AuthPayload, vendor: VendorRow): Promise<ProviderRole | null> {
+  let dbRole: ProviderRole | null = vendor.userId === user.userId ? 'owner' : null;
+  if (!dbRole) {
+    const membership = await (db as any).vendorMember?.findUnique?.({
+      where: { vendorId_userId: { vendorId: vendor.id, userId: user.userId } },
+      select: { role: true },
+    });
+    dbRole = membership ? normalizeProviderRole(membership.role) : null;
+  }
+  if (!dbRole) return null;
+  const claimRole = claimRoleForVendor(user, vendor.id);
+  return claimRole ? lowerRole(dbRole, claimRole) : dbRole;
+}
+
+async function resolveVendorAccess(
+  user: AuthPayload,
+  vendorId: string | undefined,
+  allowed: readonly ProviderRole[],
+  operation: string,
+): Promise<VendorAccess | null> {
   if (vendorId) {
     const vendor = await db.vendor.findUnique({ where: { id: vendorId }, select: vendorSelect });
-    if (vendor && vendor.userId !== userId) {
-      throw new TRPCError({ code: 'FORBIDDEN', message: 'Vendor profile does not belong to this user' });
-    }
-    return vendor as VendorRow | null;
+    if (!vendor) return null;
+    const role = await roleForVendor(user, vendor as VendorRow);
+    if (!role) throw new TRPCError({ code: 'FORBIDDEN', message: 'Vendor profile does not belong to this user' });
+    assertVendorRole(role, allowed, operation);
+    return { vendor: vendor as VendorRow, role };
   }
-  return db.vendor.findFirst({ where: { userId }, orderBy: { updatedAt: 'desc' }, select: vendorSelect }) as Promise<VendorRow | null>;
+
+  const owned = await db.vendor.findFirst({ where: { userId: user.userId }, orderBy: { updatedAt: 'desc' }, select: vendorSelect }) as VendorRow | null;
+  if (owned) {
+    assertVendorRole('owner', allowed, operation);
+    return { vendor: owned, role: 'owner' };
+  }
+
+  const membership = await (db as any).vendorMember?.findFirst?.({
+    where: { userId: user.userId },
+    orderBy: { updatedAt: 'desc' },
+    select: { role: true, vendor: { select: vendorSelect } },
+  });
+  if (!membership?.vendor) return null;
+  const dbRole = normalizeProviderRole(membership.role);
+  const claimRole = claimRoleForVendor(user, membership.vendor.id);
+  const role = claimRole ? lowerRole(dbRole, claimRole) : dbRole;
+  assertVendorRole(role, allowed, operation);
+  return { vendor: membership.vendor as VendorRow, role };
 }
 
 async function updateVendorFromAccount(vendor: VendorRow, account: Stripe.Account): Promise<VendorRow> {
@@ -373,7 +430,15 @@ export const vendorRouter = router({
 
       const stripe = new Stripe(config.stripeSecretKey);
       const userId = ctx.user.userId;
-      let vendor = await findOwnedVendor(userId, input.vendorId);
+      let existingAccess: VendorAccess | null = null;
+      if (input.vendorId) {
+        existingAccess = await resolveVendorAccess(ctx.user, input.vendorId, OWNER_ONLY, 'Stripe Connect onboarding');
+      } else {
+        const ownedVendor = await db.vendor.findFirst({ where: { userId }, orderBy: { updatedAt: 'desc' }, select: vendorSelect }) as VendorRow | null;
+        if (ownedVendor) existingAccess = { vendor: ownedVendor, role: 'owner' };
+      }
+      let vendor = existingAccess?.vendor ?? null;
+      let providerRole: ProviderRole = existingAccess?.role ?? 'owner';
       if (!vendor) {
         if (!input.displayName) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found. Provide displayName to create one.' });
@@ -388,6 +453,12 @@ export const vendorRouter = router({
           },
           select: vendorSelect,
         }) as VendorRow;
+        await (db as any).vendorMember?.upsert?.({
+          where: { vendorId_userId: { vendorId: vendor.id, userId } },
+          create: { vendorId: vendor.id, userId, role: 'OWNER' },
+          update: { role: 'OWNER' },
+        });
+        providerRole = 'owner';
       }
 
       let accountId = vendor.stripeAccountId;
@@ -426,7 +497,8 @@ export const vendorRouter = router({
       return {
         url: link.url,
         expiresAt: link.expires_at ? new Date(link.expires_at * 1000).toISOString() : null,
-        vendor: mapVendorOnboarding(vendor),
+        vendor: mapVendorOnboarding(vendor, providerRole),
+        providerRole,
       };
     }),
 
@@ -442,20 +514,25 @@ export const vendorRouter = router({
     )
     .input(z.object({ vendorId: z.string().min(1).max(120).optional() }).optional().default({}))
     .mutation(async ({ ctx, input }) => {
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'Vendor session sync');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
       if (!config.stripeSecretKey) {
-        return { demoMode: true, message: 'Stripe not configured' };
+        return { demoMode: true, message: 'Stripe not configured', vendor: mapVendorOnboarding(vendor, providerRole), providerRole };
       }
-      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
       if (!vendor.stripeAccountId) {
-        return { vendor: mapVendorOnboarding(vendor), account: null };
+        return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, account: null };
+      }
+      if (providerRole !== 'owner') {
+        return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, account: null };
       }
 
       const stripe = new Stripe(config.stripeSecretKey);
       const account = await stripe.accounts.retrieve(vendor.stripeAccountId);
       const updated = await updateVendorFromAccount(vendor, account);
       return {
-        vendor: mapVendorOnboarding(updated),
+        vendor: mapVendorOnboarding(updated, providerRole),
+        providerRole,
         account: {
           id: account.id,
           chargesEnabled: account.charges_enabled,
@@ -480,7 +557,7 @@ export const vendorRouter = router({
       const vendor = await db.vendor.findUnique({ where: { stripeAccountId: account.id }, select: vendorSelect }) as VendorRow | null;
       if (!vendor) return { received: true, ignored: true };
       const updated = await updateVendorFromAccount(vendor, account);
-      return { received: true, vendor: mapVendorOnboarding(updated) };
+      return { received: true, vendor: mapVendorOnboarding(updated, 'owner') };
     }),
 
   listServices: protectedProcedure
@@ -501,8 +578,9 @@ export const vendorRouter = router({
       }).optional().default({}),
     )
     .query(async ({ ctx, input }) => {
-      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'List vendor services');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
       const where: Prisma.VendorServiceWhereInput = { vendorId: vendor.id };
       if (input.status !== 'all') where.status = input.status;
 
@@ -513,7 +591,7 @@ export const vendorRouter = router({
         select: serviceSelect,
       });
 
-      return { vendor: mapVendorOnboarding(vendor), services: services.map(mapVendorService) };
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, services: services.map((service) => mapVendorService(service, providerRole === 'owner')) };
     }),
 
   createService: protectedProcedure
@@ -538,8 +616,9 @@ export const vendorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, OPS_WRITE, 'Create vendor services');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
 
       const service = await db.vendorService.create({
         data: {
@@ -554,7 +633,7 @@ export const vendorRouter = router({
         select: serviceSelect,
       });
 
-      return { vendor: mapVendorOnboarding(vendor), service: mapVendorService(service as VendorServiceRow) };
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, service: mapVendorService(service as VendorServiceRow, providerRole === 'owner') };
     }),
 
   listBookings: protectedProcedure
@@ -575,8 +654,9 @@ export const vendorRouter = router({
       }).optional().default({}),
     )
     .query(async ({ ctx, input }) => {
-      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'List vendor bookings');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
       const where: Prisma.BookingWhereInput = { vendorId: vendor.id };
       if (input.status !== 'all') where.status = input.status;
 
@@ -587,7 +667,7 @@ export const vendorRouter = router({
         select: vendorBookingSelect,
       });
 
-      return { vendor: mapVendorOnboarding(vendor), bookings: bookings.map((booking) => mapVendorBooking(booking, vendor)) };
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, bookings: bookings.map((booking) => mapVendorBooking(booking, vendor, providerRole === 'owner')) };
     }),
 
   updateService: protectedProcedure
@@ -613,8 +693,8 @@ export const vendorRouter = router({
     .mutation(async ({ ctx, input }) => {
       const existing = await db.vendorService.findUnique({ where: { id: input.serviceId }, select: serviceSelect });
       if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor service not found' });
-      const vendor = await findOwnedVendor(ctx.user.userId, existing.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+      const access = await resolveVendorAccess(ctx.user, existing.vendorId, OPS_WRITE, 'Update vendor services');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
 
       const data: Prisma.VendorServiceUpdateInput = {};
       if (input.title !== undefined) data.title = input.title;
@@ -629,7 +709,7 @@ export const vendorRouter = router({
         select: serviceSelect,
       });
 
-      return { service: mapVendorService(service) };
+      return { providerRole: access.role, service: mapVendorService(service, access.role === 'owner') };
     }),
 
   listPatches: protectedProcedure
@@ -649,8 +729,9 @@ export const vendorRouter = router({
       }).optional().default({}),
     )
     .query(async ({ ctx, input }) => {
-      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'List vendor patches');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
 
       const services = await db.vendorService.findMany({
         where: { vendorId: vendor.id },
@@ -679,7 +760,7 @@ export const vendorRouter = router({
         .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
         .slice(0, input.limit);
 
-      return { vendor: mapVendorOnboarding(vendor), patches };
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, patches };
     }),
 
   createPatch: protectedProcedure
@@ -700,8 +781,9 @@ export const vendorRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
-      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, OPS_WRITE, 'Create vendor patches');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
 
       let service: VendorPatchDashboardService | null = null;
       if (input.serviceId) {
@@ -746,7 +828,7 @@ export const vendorRouter = router({
         await db.vendorService.update({ where: { id: service.id }, data: { patchId: patch.id } });
       }
 
-      return { vendor: mapVendorOnboarding(vendor), patch: mapVendorPatchRecord(patch, vendor, service) };
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, patch: mapVendorPatchRecord(patch, vendor, service) };
     }),
 
   search: publicProcedure
@@ -786,7 +868,7 @@ export const vendorRouter = router({
         select: serviceSelect,
       });
 
-      return { services: services.map(mapVendorService) };
+      return { services: services.map((service) => mapVendorService(service)) };
     }),
 
   getByPatch: publicProcedure

@@ -1,7 +1,6 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
 import { Entity, type Prisma } from '@prisma/client';
@@ -34,6 +33,7 @@ import { patchRouter } from './patchRouter';
 import { bookingRouter } from './bookingRouter';
 import { vendorRouter } from './vendorRouter';
 import { auditRouter } from './auditRouter';
+import { signAuthToken } from '../auth/vendorRbac';
 
 const venueHardwarePatchSelect = {
   id: true,
@@ -91,12 +91,6 @@ async function attachVenueHardwarePatches<T extends { id: string }>(venues: T[])
     ...venue,
     hardwarePatch: patchesByVenueId.get(venue.id) ?? null,
   }));
-}
-
-function signToken(userId: string, email: string): string {
-  return jwt.sign({ userId, email }, config.jwtSecret, {
-    expiresIn: config.jwtExpiresIn as string & jwt.SignOptions['expiresIn'],
-  });
 }
 
 function getRequestIpForRateLimit(ctx: { req?: { headers?: Record<string, string | string[] | undefined>; ip?: string; socket?: { remoteAddress?: string } } }): string {
@@ -192,7 +186,7 @@ const authRouter = router({
         data: { email, password: hashed, name, ref },
       });
 
-      const token = signToken(user.id, user.email);
+      const token = await signAuthToken(user.id, user.email);
 
       // Send welcome email (non-blocking)
       if (user.email) {
@@ -222,7 +216,7 @@ const authRouter = router({
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
       }
 
-      const token = signToken(user.id, user.email);
+      const token = await signAuthToken(user.id, user.email);
       return { token, user: { id: user.id, email: user.email, name: user.name } };
     }),
 

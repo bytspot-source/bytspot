@@ -44,6 +44,7 @@ model User {
   tipsGiven      Tip[]             @relation("tipFrom")
   accessPasses   AccessPass[]
   vendors        Vendor[]
+  vendorMemberships VendorMember[]
   bookings       Booking[]
   complianceLogs ComplianceLog[]
   passwordResetTokens PasswordResetToken[]
@@ -381,6 +382,12 @@ enum Entity {
   FOUNDATION
 }
 
+enum VendorWorkspaceRole {
+  OWNER
+  MANAGER
+  STAFF
+}
+
 // ─── Hardware Patches (NTAG424 DNA physical tags) ────────
 // Each row represents one physical NFC tag. SDM/SUN keys are stored
 // as opaque KMS references — never raw AES material at rest.
@@ -421,12 +428,30 @@ model Vendor {
   updatedAt         DateTime @updatedAt @map("updated_at")
 
   user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  members  VendorMember[]
   services VendorService[]
   bookings Booking[]
 
   @@index([userId])
   @@index([entity])
   @@map("vendors")
+}
+
+model VendorMember {
+  id        String              @id @default(cuid())
+  vendorId  String              @map("vendor_id")
+  userId    String              @map("user_id")
+  role      VendorWorkspaceRole @default(STAFF)
+  createdAt DateTime            @default(now()) @map("created_at")
+  updatedAt DateTime            @updatedAt @map("updated_at")
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorId, userId])
+  @@index([userId, role])
+  @@index([vendorId, role])
+  @@map("vendor_members")
 }
 
 // ─── Vendor Services (bookable products / appointments) ──

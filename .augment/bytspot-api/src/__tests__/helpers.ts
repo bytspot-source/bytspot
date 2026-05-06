@@ -4,6 +4,7 @@
 import { createCallerFactory } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
 import type { Context } from '../trpc/context';
+import type { AuthPayload } from '../middleware/auth';
 
 const factory = createCallerFactory(appRouter);
 
@@ -14,8 +15,8 @@ export function createPublicCaller() {
 }
 
 /** Create an authenticated caller with the given userId + email */
-export function createAuthenticatedCaller(userId = 'test-user-id', email = 'test@bytspot.com') {
-  const ctx: Context = { user: { userId, email } };
+export function createAuthenticatedCaller(userId = 'test-user-id', email = 'test@bytspot.com', claims: Partial<AuthPayload> = {}) {
+  const ctx: Context = { user: { userId, email, ...claims } };
   return factory(ctx);
 }
 

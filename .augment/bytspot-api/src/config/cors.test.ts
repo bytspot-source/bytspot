@@ -11,6 +11,8 @@ describe('CORS helpers', () => {
     expect(origins).toContain('http://localhost:4173');
     expect(origins).toContain('capacitor://localhost');
     expect(origins).toContain('https://bytspot-beta-app.onrender.com');
+    expect(origins).toContain('https://bytspot.app');
+    expect(origins).toContain('https://www.bytspot.app');
     expect(origins).toContain('https://bytspot.com');
     expect(origins).toContain('https://beta.bytspot.com');
   });

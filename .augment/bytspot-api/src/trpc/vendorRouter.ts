@@ -2,6 +2,7 @@ import { Entity, type Prisma } from '@prisma/client';
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import Stripe from 'stripe';
+import { randomBytes } from 'crypto';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware } from './trpc';
@@ -34,6 +35,7 @@ const patchSelect = {
   bindingType: true,
   bindingId: true,
   confirmedAt: true,
+  createdAt: true,
   updatedAt: true,
 } as const;
 
@@ -59,6 +61,32 @@ const serviceSelect = {
   patch: { select: patchSelect },
 } as const;
 
+const vendorBookingSelect = {
+  id: true,
+  serviceId: true,
+  vendorId: true,
+  userId: true,
+  status: true,
+  priceCents: true,
+  platformFeeCents: true,
+  currency: true,
+  scheduledFor: true,
+  completedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  service: {
+    select: {
+      id: true,
+      title: true,
+      priceCents: true,
+      currency: true,
+      durationMins: true,
+      patch: { select: patchSelect },
+    },
+  },
+  user: { select: { id: true, name: true, email: true } },
+} as const;
+
 type VendorPatchRow = {
   id: string;
   uid: string;
@@ -69,7 +97,16 @@ type VendorPatchRow = {
   bindingType: string | null;
   bindingId: string | null;
   confirmedAt: Date | null;
+  createdAt: Date;
   updatedAt: Date;
+};
+
+type VendorPatchDashboardService = {
+  id: string;
+  title: string;
+  status?: string;
+  patchId?: string | null;
+  patch?: VendorPatchRow | null;
 };
 
 type VendorServiceRow = {
@@ -124,9 +161,39 @@ function mapPatchSummary(patch: VendorPatchRow) {
     tagType: patch.tagType,
     label: patch.label,
     readCounter: patch.readCounter,
+    status: patch.status,
+    binding: patch.bindingType && patch.bindingId ? { type: patch.bindingType, id: patch.bindingId } : null,
     confirmedAt: patch.confirmedAt?.toISOString() ?? null,
+    createdAt: patch.createdAt.toISOString(),
     updatedAt: patch.updatedAt.toISOString(),
   };
+}
+
+function buildProviderPatchUrl(patchId: string, vendorName: string, serviceId?: string | null): string {
+  const root = config.frontendUrl.replace(/\/$/, '');
+  const encodedVenue = encodeURIComponent(vendorName.trim() || 'Bytspot Provider');
+  const base = `${root}/p/${encodeURIComponent(patchId)}?patch=${encodeURIComponent(patchId)}&venue=${encodedVenue}`;
+  return serviceId ? `${base}&service=${encodeURIComponent(serviceId)}` : base;
+}
+
+function mapVendorPatchRecord(
+  patch: VendorPatchRow,
+  vendor: VendorRow,
+  service?: VendorPatchDashboardService | null,
+) {
+  const serviceId = service?.id ?? (patch.bindingType === 'service' ? patch.bindingId : null);
+  return {
+    ...mapPatchSummary(patch),
+    label: patch.label ?? 'Provider Patch',
+    venueName: vendor.displayName,
+    serviceId,
+    serviceTitle: service?.title ?? null,
+    url: buildProviderPatchUrl(patch.id, vendor.displayName, serviceId),
+  };
+}
+
+function createVirtualPatchUid(): string {
+  return randomBytes(7).toString('hex').toUpperCase();
 }
 
 function mapVendorService(service: VendorServiceRow) {
@@ -153,6 +220,52 @@ function mapVendorService(service: VendorServiceRow) {
       providerPayoutEstimateCents: service.priceCents - platformFeeCents,
       commissionBps: service.vendor.commissionBps,
     },
+  };
+}
+
+function mapVendorBooking(booking: any, vendor: VendorRow) {
+  const startsAt = booking.scheduledFor ?? booking.createdAt;
+  const endsAt = booking.completedAt ?? (startsAt && booking.service?.durationMins
+    ? new Date(startsAt.getTime() + booking.service.durationMins * 60_000)
+    : null);
+  const grossCents = Number(booking.priceCents ?? booking.service?.priceCents ?? 0);
+  const platformFeeCents = Number(booking.platformFeeCents ?? Math.round(grossCents * (vendor.commissionBps / 10_000)));
+  return {
+    id: booking.id,
+    serviceId: booking.serviceId,
+    vendorId: booking.vendorId,
+    status: booking.status,
+    startsAt: startsAt?.toISOString?.() ?? null,
+    endsAt: endsAt?.toISOString?.() ?? null,
+    scheduledFor: booking.scheduledFor?.toISOString?.() ?? null,
+    completedAt: booking.completedAt?.toISOString?.() ?? null,
+    priceCents: grossCents,
+    currency: booking.currency ?? booking.service?.currency ?? 'USD',
+    guest: {
+      id: booking.user?.id ?? booking.userId,
+      displayName: booking.user?.name ?? booking.user?.email ?? 'Guest',
+    },
+    service: {
+      id: booking.service?.id ?? booking.serviceId,
+      title: booking.service?.title ?? 'Booking',
+      priceCents: booking.service?.priceCents ?? grossCents,
+      currency: booking.service?.currency ?? booking.currency ?? 'USD',
+      durationMins: booking.service?.durationMins ?? null,
+      patch: isBoundServicePatch(booking.service?.patch ?? null, booking.service?.id ?? booking.serviceId)
+        ? mapPatchSummary(booking.service.patch)
+        : null,
+    },
+    patch: isBoundServicePatch(booking.service?.patch ?? null, booking.service?.id ?? booking.serviceId)
+      ? mapPatchSummary(booking.service.patch)
+      : null,
+    cashFlow: {
+      grossCents,
+      platformFeeCents,
+      providerPayoutEstimateCents: Math.max(0, grossCents - platformFeeCents),
+      commissionBps: vendor.commissionBps,
+    },
+    createdAt: booking.createdAt?.toISOString?.() ?? null,
+    updatedAt: booking.updatedAt?.toISOString?.() ?? null,
   };
 }
 
@@ -403,6 +516,80 @@ export const vendorRouter = router({
       return { vendor: mapVendorOnboarding(vendor), services: services.map(mapVendorService) };
     }),
 
+  createService: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'vendors:createService' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_SERVICE_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'createService' },
+      }),
+    )
+    .input(
+      z.object({
+        vendorId: z.string().min(1).max(120).optional(),
+        title: z.string().trim().min(2).max(120),
+        description: z.string().trim().max(600).nullable().optional(),
+        priceCents: z.number().int().min(50).max(1_000_000),
+        currency: z.string().trim().length(3).optional().default('USD'),
+        durationMins: z.number().int().min(5).max(24 * 60).nullable().optional(),
+        status: z.enum(['active', 'draft']).optional().default('active'),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
+      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+
+      const service = await db.vendorService.create({
+        data: {
+          vendorId: vendor.id,
+          title: input.title,
+          description: input.description ?? null,
+          priceCents: input.priceCents,
+          currency: input.currency.toUpperCase(),
+          durationMins: input.durationMins ?? null,
+          status: input.status,
+        },
+        select: serviceSelect,
+      });
+
+      return { vendor: mapVendorOnboarding(vendor), service: mapVendorService(service as VendorServiceRow) };
+    }),
+
+  listBookings: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:listBookings' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_READ'],
+        policyContext: { surface: 'vendors', operation: 'listBookings' },
+      }),
+    )
+    .input(
+      z.object({
+        vendorId: z.string().min(1).max(120).optional(),
+        status: z.enum(['pending', 'paid', 'confirmed', 'completed', 'canceled', 'refunded', 'disputed', 'all']).optional().default('all'),
+        limit: z.number().int().min(1).max(100).optional().default(50),
+      }).optional().default({}),
+    )
+    .query(async ({ ctx, input }) => {
+      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
+      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const where: Prisma.BookingWhereInput = { vendorId: vendor.id };
+      if (input.status !== 'all') where.status = input.status;
+
+      const bookings = await db.booking.findMany({
+        where,
+        orderBy: [{ scheduledFor: 'desc' }, { createdAt: 'desc' }],
+        take: input.limit,
+        select: vendorBookingSelect,
+      });
+
+      return { vendor: mapVendorOnboarding(vendor), bookings: bookings.map((booking) => mapVendorBooking(booking, vendor)) };
+    }),
+
   updateService: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:updateService' }))
     .use(
@@ -443,6 +630,123 @@ export const vendorRouter = router({
       });
 
       return { service: mapVendorService(service) };
+    }),
+
+  listPatches: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:listPatches' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_PATCH_MANAGEMENT_READ'],
+        policyContext: { surface: 'vendors', operation: 'listPatches' },
+      }),
+    )
+    .input(
+      z.object({
+        vendorId: z.string().min(1).max(120).optional(),
+        limit: z.number().int().min(1).max(100).optional().default(50),
+      }).optional().default({}),
+    )
+    .query(async ({ ctx, input }) => {
+      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
+      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+
+      const services = await db.vendorService.findMany({
+        where: { vendorId: vendor.id },
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+        take: input.limit,
+        select: { id: true, title: true, status: true, patchId: true, patch: { select: patchSelect } },
+      }) as VendorPatchDashboardService[];
+
+      const servicePatchRecords = services
+        .filter((service) => service.patch && isBoundServicePatch(service.patch, service.id))
+        .map((service) => mapVendorPatchRecord(service.patch!, vendor, service));
+
+      const vendorPatches = await db.hardwarePatch.findMany({
+        where: { bindingType: 'vendor', bindingId: vendor.id, entity: Entity.VENDOR_SERVICES },
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+        take: input.limit,
+        select: patchSelect,
+      }) as VendorPatchRow[];
+
+      const recordsById = new Map<string, ReturnType<typeof mapVendorPatchRecord>>();
+      for (const record of [...servicePatchRecords, ...vendorPatches.map((patch) => mapVendorPatchRecord(patch, vendor, null))]) {
+        recordsById.set(record.id, record);
+      }
+
+      const patches = Array.from(recordsById.values())
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+        .slice(0, input.limit);
+
+      return { vendor: mapVendorOnboarding(vendor), patches };
+    }),
+
+  createPatch: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:createPatch' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_PATCH_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'createPatch' },
+      }),
+    )
+    .input(
+      z.object({
+        vendorId: z.string().min(1).max(120).optional(),
+        label: z.string().trim().min(1).max(120),
+        serviceId: z.string().min(1).max(120).nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const vendor = await findOwnedVendor(ctx.user.userId, input.vendorId);
+      if (!vendor) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+
+      let service: VendorPatchDashboardService | null = null;
+      if (input.serviceId) {
+        const row = await db.vendorService.findUnique({
+          where: { id: input.serviceId },
+          select: { id: true, vendorId: true, title: true, status: true, patchId: true },
+        }) as (VendorPatchDashboardService & { vendorId: string }) | null;
+        if (!row || row.vendorId !== vendor.id) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor service not found' });
+        }
+        if (row.patchId) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Service already has a patch bound' });
+        }
+        service = row;
+      }
+
+      const bindingType = service ? 'service' : 'vendor';
+      const bindingId = service?.id ?? vendor.id;
+      let patch: VendorPatchRow | null = null;
+      for (let attempt = 0; attempt < 3 && !patch; attempt += 1) {
+        try {
+          patch = await db.hardwarePatch.create({
+            data: {
+              uid: createVirtualPatchUid(),
+              label: input.label,
+              tagType: 'BYTSPOT_LINK',
+              entity: Entity.VENDOR_SERVICES,
+              status: 'bound',
+              bindingType,
+              bindingId,
+              confirmedAt: new Date(),
+            },
+            select: patchSelect,
+          }) as VendorPatchRow;
+        } catch (error: any) {
+          if (error?.code !== 'P2002' || attempt === 2) throw error;
+        }
+      }
+      if (!patch) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Unable to create patch' });
+
+      if (service) {
+        await db.vendorService.update({ where: { id: service.id }, data: { patchId: patch.id } });
+      }
+
+      return { vendor: mapVendorOnboarding(vendor), patch: mapVendorPatchRecord(patch, vendor, service) };
     }),
 
   search: publicProcedure

@@ -38,6 +38,7 @@ vi.mock('../lib/db', () => {
     vendorService: {
       findUnique: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn(),
       update: vi.fn(),
     },
     booking: {

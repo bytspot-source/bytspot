@@ -26,6 +26,7 @@ const boundPatch = {
   bindingType: 'service',
   bindingId: 'svc-1',
   confirmedAt: new Date('2026-05-03T12:00:00.000Z'),
+  createdAt: new Date('2026-05-03T11:55:00.000Z'),
   updatedAt: new Date('2026-05-03T12:05:00.000Z'),
 };
 
@@ -47,6 +48,30 @@ const activeService = {
     commissionBps: 800,
   },
   patch: boundPatch,
+};
+
+const activeBooking = {
+  id: 'booking-1',
+  serviceId: 'svc-1',
+  vendorId: 'vendor-1',
+  userId: 'guest-1',
+  status: 'confirmed',
+  priceCents: 15000,
+  platformFeeCents: 1200,
+  currency: 'USD',
+  scheduledFor: new Date('2026-05-04T16:00:00.000Z'),
+  completedAt: null,
+  createdAt: new Date('2026-05-03T16:00:00.000Z'),
+  updatedAt: new Date('2026-05-03T16:05:00.000Z'),
+  service: {
+    id: 'svc-1',
+    title: 'VIP Arrival',
+    priceCents: 15000,
+    currency: 'USD',
+    durationMins: 90,
+    patch: boundPatch,
+  },
+  user: { id: 'guest-1', name: 'Taylor Guest', email: 'guest@test.com' },
 };
 
 const vendorProfile = {
@@ -198,6 +223,58 @@ describe('vendor router', () => {
     expect(result.services[0].id).toBe('svc-1');
   });
 
+  it('creates a vendor service owned by the authenticated vendor', async () => {
+    const createdService = { ...activeService, id: 'svc-new', title: 'Garage Parking', description: 'Secure indoor parking near the venue', priceCents: 2500, durationMins: 60, patch: null };
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.vendorService.create as any).mockResolvedValueOnce(createdService);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.createService({
+      title: 'Garage Parking',
+      description: 'Secure indoor parking near the venue',
+      priceCents: 2500,
+      durationMins: 60,
+      status: 'active',
+    });
+
+    expect(db.vendorService.create).toHaveBeenCalledWith({
+      data: {
+        vendorId: 'vendor-1',
+        title: 'Garage Parking',
+        description: 'Secure indoor parking near the venue',
+        priceCents: 2500,
+        currency: 'USD',
+        durationMins: 60,
+        status: 'active',
+      },
+      select: expect.any(Object),
+    });
+    expect(result.service.id).toBe('svc-new');
+    expect(result.service.cashFlow.providerPayoutEstimateCents).toBe(2300);
+  });
+
+  it('lists bookings owned by the authenticated vendor', async () => {
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.booking.findMany as any).mockResolvedValueOnce([activeBooking]);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.listBookings({ limit: 25 });
+
+    expect(db.booking.findMany).toHaveBeenCalledWith({
+      where: { vendorId: 'vendor-1' },
+      orderBy: [{ scheduledFor: 'desc' }, { createdAt: 'desc' }],
+      take: 25,
+      select: expect.any(Object),
+    });
+    expect(result.bookings[0]).toEqual(expect.objectContaining({
+      id: 'booking-1',
+      status: 'confirmed',
+      startsAt: '2026-05-04T16:00:00.000Z',
+      guest: expect.objectContaining({ displayName: 'Taylor Guest' }),
+      cashFlow: expect.objectContaining({ providerPayoutEstimateCents: 13800 }),
+    }));
+  });
+
   it('updates owned vendor service metadata', async () => {
     const updatedService = {
       ...activeService,
@@ -231,6 +308,58 @@ describe('vendor router', () => {
     });
     expect(result.service.title).toBe('VIP Arrival Plus');
     expect(result.service.cashFlow.grossCents).toBe(17500);
+  });
+
+  it('lists vendor-managed patches from service and vendor bindings', async () => {
+    const vendorPatch = {
+      ...boundPatch,
+      id: 'patch-vendor',
+      uid: '04A1B2C3D4E5F7',
+      label: 'Main Entrance',
+      bindingType: 'vendor',
+      bindingId: 'vendor-1',
+    };
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.vendorService.findMany as any).mockResolvedValueOnce([{ id: 'svc-1', title: 'VIP Arrival', status: 'active', patchId: 'patch-1', patch: boundPatch }]);
+    (db.hardwarePatch.findMany as any).mockResolvedValueOnce([vendorPatch]);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.listPatches({ limit: 10 });
+
+    expect(db.vendorService.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { vendorId: 'vendor-1' },
+      select: expect.objectContaining({ patch: { select: expect.any(Object) } }),
+    }));
+    expect(db.hardwarePatch.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { bindingType: 'vendor', bindingId: 'vendor-1', entity: Entity.VENDOR_SERVICES },
+    }));
+    expect(result.patches).toHaveLength(2);
+    expect(result.patches[0]).toEqual(expect.objectContaining({ venueName: 'Midtown Hosts', url: expect.stringContaining('/p/') }));
+    expect(result.patches.some((patch) => patch.serviceId === 'svc-1' && patch.serviceTitle === 'VIP Arrival')).toBe(true);
+  });
+
+  it('creates a live vendor patch and binds it to an owned service', async () => {
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.vendorService.findUnique as any).mockResolvedValueOnce({ id: 'svc-1', vendorId: 'vendor-1', title: 'VIP Arrival', status: 'active', patchId: null });
+    (db.hardwarePatch.create as any).mockResolvedValueOnce({ ...boundPatch, label: 'VIP Booth', createdAt: boundPatch.updatedAt });
+    (db.vendorService.update as any).mockResolvedValueOnce({ ...activeService, patchId: 'patch-1' });
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.createPatch({ label: 'VIP Booth', serviceId: 'svc-1' });
+
+    expect(db.hardwarePatch.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        label: 'VIP Booth',
+        tagType: 'BYTSPOT_LINK',
+        entity: Entity.VENDOR_SERVICES,
+        status: 'bound',
+        bindingType: 'service',
+        bindingId: 'svc-1',
+      }),
+      select: expect.any(Object),
+    }));
+    expect(db.vendorService.update).toHaveBeenCalledWith({ where: { id: 'svc-1' }, data: { patchId: 'patch-1' } });
+    expect(result.patch).toEqual(expect.objectContaining({ serviceId: 'svc-1', serviceTitle: 'VIP Arrival', url: expect.stringContaining('&service=svc-1') }));
   });
 
   it('resolves a bound physical patch to an active vendor service', async () => {

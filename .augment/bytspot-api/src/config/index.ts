@@ -113,11 +113,11 @@ export function printConfigDiagnostics(): void {
   console.log('   ── Service Configuration ──');
   check(config.vapidPublicKey && config.vapidPrivateKey ? 'ok' : '', 'VAPID keys', 'web push will not work');
   check(config.resendApiKey, 'Resend (email)', 'transactional emails will not send');
-  check(config.stripeSecretKey, 'Stripe', 'payments in demo mode');
+  check(config.stripeSecretKey, 'Stripe', 'payments disabled');
   check(config.openaiApiKey, 'OpenAI', 'concierge AI will not work');
-  check(config.redisUrl, 'Redis', 'caching disabled, using in-memory fallback');
+  check(config.redisUrl, 'Redis', 'cache, push, and invite storage disabled');
   check(config.cronSecret, 'Cron secret', 'cron endpoints unprotected');
-  check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
+  check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed disabled');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.googleClientIds.length ? 'ok' : '', 'Google Sign-In', 'Google auth disabled');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');

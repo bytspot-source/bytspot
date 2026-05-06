@@ -189,6 +189,7 @@ vi.mock('../lib/email', () => ({
 
 // ── Mock push ─────────────────────────────────────────────
 vi.mock('../routes/push', () => ({
+  default: (_req: any, _res: any, next: any) => next(),
   sendPushToAll: vi.fn().mockResolvedValue(undefined),
   getAllSubscriptions: vi.fn().mockResolvedValue([]),
   getAllNativeTokens: vi.fn().mockResolvedValue([]),
@@ -199,7 +200,10 @@ vi.mock('../routes/push', () => ({
 // ── Mock venues (crowdEmitter) ────────────────────────────
 vi.mock('../routes/venues', () => {
   const EventEmitter = require('events');
-  return { crowdEmitter: new EventEmitter() };
+  return {
+    default: (_req: any, _res: any, next: any) => next(),
+    crowdEmitter: new EventEmitter(),
+  };
 });
 
 // ── Mock crowdAlerts service ──────────────────────────────

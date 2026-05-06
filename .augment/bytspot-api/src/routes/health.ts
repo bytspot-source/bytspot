@@ -54,8 +54,7 @@ router.get('/stats', async (_req, res) => {
     ]);
     res.json({ userCount, venueCount, betaLeadCount });
   } catch {
-    // Fallback so the frontend never crashes
-    res.json({ userCount: 246, venueCount: 12, betaLeadCount: 0 });
+    res.status(503).json({ error: 'Stats are unavailable.' });
   }
 });
 

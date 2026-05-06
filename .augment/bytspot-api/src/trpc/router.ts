@@ -156,7 +156,7 @@ const healthRouter = router({
       ]);
       return { userCount, venueCount, betaLeadCount };
     } catch {
-      return { userCount: 246, venueCount: 12, betaLeadCount: 0 };
+      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Stats are unavailable.' });
     }
   }),
 });
@@ -441,22 +441,11 @@ const ridesRouter = router({
       const { lat, lng } = input;
       const cacheKey = `rides:${lat.toFixed(3)}:${lng.toFixed(3)}`;
       return cached(cacheKey, 60, async () => {
-        const basePrice = 8 + Math.random() * 6;
-        const day = new Date().getDay();
-        const surgeMultiplier = (day === 5 || day === 6) ? 1.2 + Math.random() * 0.8 : 1.0;
         return {
           location: { lat, lng },
           timestamp: new Date().toISOString(),
-          providers: [
-            { name: 'Uber', products: [
-              { type: 'UberX', etaMinutes: Math.floor(3 + Math.random() * 5), priceEstimate: `$${(basePrice * surgeMultiplier).toFixed(2)}`, surgeMultiplier: parseFloat(surgeMultiplier.toFixed(1)) },
-              { type: 'Uber Comfort', etaMinutes: Math.floor(5 + Math.random() * 7), priceEstimate: `$${(basePrice * surgeMultiplier * 1.4).toFixed(2)}`, surgeMultiplier: parseFloat(surgeMultiplier.toFixed(1)) },
-            ]},
-            { name: 'Lyft', products: [
-              { type: 'Lyft', etaMinutes: Math.floor(3 + Math.random() * 6), priceEstimate: `$${(basePrice * surgeMultiplier * 0.95).toFixed(2)}`, surgeMultiplier: parseFloat((surgeMultiplier * 0.95).toFixed(1)) },
-              { type: 'Lyft XL', etaMinutes: Math.floor(6 + Math.random() * 8), priceEstimate: `$${(basePrice * surgeMultiplier * 1.6).toFixed(2)}`, surgeMultiplier: parseFloat(surgeMultiplier.toFixed(1)) },
-            ]},
-          ],
+          providers: [],
+          source: 'unavailable' as const,
         };
       });
     }),
@@ -677,11 +666,7 @@ const paymentsRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       if (!config.stripeSecretKey) {
-        return {
-          url: null as string | null,
-          demoMode: true,
-          message: 'Stripe not configured — set STRIPE_SECRET_KEY env var on Render',
-        };
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
       }
 
       const stripe = new Stripe(config.stripeSecretKey);
@@ -1048,7 +1033,7 @@ const subscriptionRouter = router({
     const plan = input?.plan ?? 'insider-premium';
     const planConfig = subscriptionPlans[plan];
     if (!config.stripeSecretKey) {
-      return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
+      throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
     }
     const stripe = new Stripe(config.stripeSecretKey);
     const userId = ctx.user.userId;
@@ -1059,7 +1044,7 @@ const subscriptionRouter = router({
       select: { stripeCustomerId: true, email: true, isPremium: true, isVendorPremium: true, isValetPremium: true },
     });
     if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
-    if (isSubscriptionPlanActive(user, plan)) return { url: null as string | null, demoMode: false, message: 'Already premium', plan };
+    if (isSubscriptionPlanActive(user, plan)) return { url: null as string | null, message: 'Already premium', plan };
     const pointTxns = await db.pointTransaction.findMany({
       where: { userId },
       select: { type: true, amount: true },
@@ -1332,7 +1317,7 @@ const tipsRouter = router({
     .input(z.object({ valetId: z.string().max(100), amount: z.number().min(1).max(100) }))
     .mutation(async ({ ctx, input }) => {
       if (!config.stripeSecretKey) {
-        return { clientSecret: null as string | null, demoMode: true, message: 'Stripe not configured' };
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
       }
       const stripe = new Stripe(config.stripeSecretKey);
       const { valetId, amount } = input;

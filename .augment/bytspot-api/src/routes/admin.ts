@@ -36,12 +36,12 @@ router.post('/admin/generate-invite', adminAuth, async (req, res) => {
       // Store as JSON so we can track usage
       await r.set(`invite:${code}`, JSON.stringify({ used: false, createdAt: new Date().toISOString() }), 'EX', 60 * 60 * 24 * 30);
     } else {
-      // In-memory fallback: just return codes (won't persist across restarts)
+      res.status(503).json({ error: 'Invite code storage is not configured.' });
+      return;
     }
     codes.push(code);
   }
 
-  // If no Redis, store in DB as a note (codes field on first user row — not ideal but beats nothing)
   res.json({ codes, message: `Generated ${codes.length} invite code(s) — valid for 30 days` });
 });
 
@@ -62,8 +62,7 @@ router.post('/admin/validate-invite', async (req, res) => {
 
   const r = getRedis();
   if (!r) {
-    // No Redis — can't validate; allow signup so it's not a hard blocker
-    res.json({ valid: true, warning: 'Redis unavailable — skipping validation' });
+    res.status(503).json({ valid: false, error: 'Invite code storage is not configured.' });
     return;
   }
 

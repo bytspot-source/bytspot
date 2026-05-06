@@ -425,7 +425,7 @@ export const vendorRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       if (!config.stripeSecretKey) {
-        return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
       }
 
       const stripe = new Stripe(config.stripeSecretKey);
@@ -518,7 +518,7 @@ export const vendorRouter = router({
       if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
       const { vendor, role: providerRole } = access;
       if (!config.stripeSecretKey) {
-        return { demoMode: true, message: 'Stripe not configured', vendor: mapVendorOnboarding(vendor, providerRole), providerRole };
+        return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, account: null, stripeConfigured: false };
       }
       if (!vendor.stripeAccountId) {
         return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, account: null };

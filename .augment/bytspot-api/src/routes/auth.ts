@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { db } from '../lib/db';
 import { sendWelcomeEmail } from '../lib/email';
@@ -8,6 +9,15 @@ import { signAuthToken } from '../auth/vendorRbac';
 import { completeGoogleSignIn } from '../auth/google';
 
 const router = Router();
+
+function statusForAuthError(err: unknown): number {
+  if (err instanceof TRPCError) {
+    if (err.code === 'UNAUTHORIZED') return 401;
+    if (err.code === 'PRECONDITION_FAILED') return 412;
+    if (err.code === 'BAD_REQUEST') return 400;
+  }
+  return 500;
+}
 
 const signupSchema = z.object({
   email: z.string().email(),
@@ -97,8 +107,12 @@ router.post('/auth/google', async (req, res) => {
     res.status(400).json({ error: parsed.error.flatten().fieldErrors });
     return;
   }
-  const result = await completeGoogleSignIn(parsed.data);
-  res.status(result.isNewUser ? 201 : 200).json(result);
+  try {
+    const result = await completeGoogleSignIn(parsed.data);
+    res.status(result.isNewUser ? 201 : 200).json(result);
+  } catch (err: any) {
+    res.status(statusForAuthError(err)).json({ error: err?.message || 'Google sign-in failed' });
+  }
 });
 
 /** GET /auth/me — returns current user profile + referral stats */

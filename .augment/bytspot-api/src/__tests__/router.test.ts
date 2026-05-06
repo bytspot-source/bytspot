@@ -48,13 +48,10 @@ describe('health', () => {
     expect(result.checks.postgres).toBe('error');
   });
 
-  it('health.stats returns fallback counts', async () => {
+  it('health.stats reports an error when counts are unavailable', async () => {
     (db.user.count as any).mockRejectedValueOnce(new Error('db err'));
     const caller = createPublicCaller();
-    const result = await caller.health.stats();
-    // Fallback values from the catch block
-    expect(result).toHaveProperty('userCount');
-    expect(result).toHaveProperty('venueCount');
+    await expect(caller.health.stats()).rejects.toThrow(TRPCError);
   });
 });
 
@@ -448,12 +445,11 @@ describe('venues', () => {
 // Rides
 // ──────────────────────────────────────────────────────────
 describe('rides', () => {
-  it('rides.get returns providers with ETAs and prices', async () => {
+  it('rides.get returns no providers when a live ride integration is unavailable', async () => {
     const caller = createPublicCaller();
     const result = await caller.rides.get({ lat: 33.78, lng: -84.38 });
-    expect(result.providers).toHaveLength(2);
-    expect(result.providers[0].name).toBe('Uber');
-    expect(result.providers[1].name).toBe('Lyft');
+    expect(result.providers).toEqual([]);
+    expect(result.source).toBe('unavailable');
     expect(result.location.lat).toBe(33.78);
   });
 });
@@ -1051,7 +1047,7 @@ describe('rate limiting', () => {
     const caller = createPublicCaller();
     // rides.get has a rate limit — should work for a few calls
     const result = await caller.rides.get({ lat: 33.78, lng: -84.38 });
-    expect(result.providers).toHaveLength(2);
+    expect(result.providers).toEqual([]);
   });
 
   it('concierge rejects unauthenticated calls before rate limit applies', async () => {

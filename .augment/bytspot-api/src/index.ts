@@ -17,6 +17,7 @@ import pushRouter from './routes/push';             // VAPID public key + subscr
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import auditRouter from './routes/audit';           // /audit/beacon (sendBeacon fallback for client audit sink)
+import authRouter from './routes/auth';             // /auth/google REST sign-in for external clients
 import passwordResetRouter from './routes/passwordReset'; // /auth/forgot + /auth/reset
 import stripeWebhookRouter from './routes/stripeWebhook'; // /stripe/webhook (raw body for Stripe signature verification)
 
@@ -73,6 +74,7 @@ app.use(healthRouter);
 app.use(cronRouter);
 app.use(pushRouter);
 app.use(betaSignupRouter);
+app.use(authRouter);
 app.use(passwordResetRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(auditRouter);  // /audit/beacon — sendBeacon fallback
@@ -85,14 +87,16 @@ app.use((_req, res) => {
 // ─── Start ───────────────────────────────────────────
 // Critical env vars (DATABASE_URL, JWT_SECRET) are validated by Zod in config/index.ts
 // — the server won't even reach this point if they're missing in production.
-app.listen(config.port, () => {
-  console.log(`\n🟢 Bytspot API running on port ${config.port}`);
-  console.log(`   Environment: ${config.nodeEnv}`);
-  console.log(`   Health check: http://localhost:${config.port}/health`);
-  printConfigDiagnostics();
-  // Start in-process crowd simulation (fresh data every 15 min)
-  // Crowd alerts are chained — they run automatically after each simulation
-  startCrowdSimulator();
-});
+if (config.nodeEnv !== 'test') {
+  app.listen(config.port, () => {
+    console.log(`\n🟢 Bytspot API running on port ${config.port}`);
+    console.log(`   Environment: ${config.nodeEnv}`);
+    console.log(`   Health check: http://localhost:${config.port}/health`);
+    printConfigDiagnostics();
+    // Start in-process crowd simulation (fresh data every 15 min)
+    // Crowd alerts are chained — they run automatically after each simulation
+    startCrowdSimulator();
+  });
+}
 
 export default app;

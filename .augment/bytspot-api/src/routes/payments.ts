@@ -14,12 +14,7 @@ const router = Router();
  */
 router.post('/payments/checkout', optionalAuth, async (req, res) => {
   if (!config.stripeSecretKey) {
-    // Stripe not configured — return a demo mode response so the UI still works
-    res.json({
-      url: null,
-      demoMode: true,
-      message: 'Stripe not configured — set STRIPE_SECRET_KEY env var on Render',
-    });
+    res.status(503).json({ error: 'Payments are not configured.' });
     return;
   }
 

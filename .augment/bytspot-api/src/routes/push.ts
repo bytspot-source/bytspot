@@ -11,10 +11,6 @@ if (config.vapidPublicKey && config.vapidPrivateKey) {
   webpush.setVapidDetails(config.vapidEmail, config.vapidPublicKey, config.vapidPrivateKey);
 }
 
-/** In-memory fallback store when Redis is unavailable */
-const memorySubscriptions: string[] = [];
-const memoryNativeTokens: string[] = [];
-
 // ─── Web Push (VAPID) helpers ─────────────────────────────────────────────
 
 export async function storeSubscription(sub: object): Promise<void> {
@@ -23,7 +19,7 @@ export async function storeSubscription(sub: object): Promise<void> {
   if (r) {
     await r.sadd('push:subscriptions', json).catch(() => {});
   } else {
-    if (!memorySubscriptions.includes(json)) memorySubscriptions.push(json);
+    throw new Error('Push subscription storage is not configured.');
   }
 }
 
@@ -37,7 +33,7 @@ export async function getAllSubscriptions(): Promise<object[]> {
       return [];
     }
   }
-  return memorySubscriptions.map((m) => JSON.parse(m));
+  return [];
 }
 
 // ─── Native Push Token helpers (APNs / FCM) ──────────────────────────────
@@ -48,7 +44,7 @@ export async function storeNativeToken(token: string, platform: 'ios' | 'android
   if (r) {
     await r.sadd('push:native_tokens', json).catch(() => {});
   } else {
-    if (!memoryNativeTokens.includes(json)) memoryNativeTokens.push(json);
+    throw new Error('Native token storage is not configured.');
   }
 }
 
@@ -62,7 +58,7 @@ export async function getAllNativeTokens(): Promise<Array<{ token: string; platf
       return [];
     }
   }
-  return memoryNativeTokens.map((m) => JSON.parse(m));
+  return [];
 }
 
 // ─── Unified push sender ─────────────────────────────────────────────────
@@ -83,19 +79,12 @@ export async function sendPushToAll(title: string, body: string, data: object = 
         if (expired) {
           const json = JSON.stringify(subs[i]);
           if (r) r.srem('push:subscriptions', json).catch(() => {});
-          else {
-            const idx = memorySubscriptions.indexOf(json);
-            if (idx >= 0) memorySubscriptions.splice(idx, 1);
-          }
         }
       }
     });
   }
 
-  // 2. Native tokens (APNs/FCM) — placeholder for Phase 2
-  // When APNs credentials are configured, send via apple-push-notification-service here.
-  // const nativeTokens = await getAllNativeTokens();
-  // TODO: Implement APNs HTTP/2 sender when apnsKeyId is configured
+  // 2. Native token delivery requires APNs/FCM integration before production sending.
 }
 
 /** GET /push/vapid-public-key — frontend fetches this to subscribe */

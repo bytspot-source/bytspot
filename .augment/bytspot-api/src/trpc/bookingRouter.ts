@@ -331,7 +331,7 @@ export const bookingRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       if (!config.stripeSecretKey) {
-        return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
       }
 
       const [service, pointTxns] = await Promise.all([

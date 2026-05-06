@@ -1,7 +1,7 @@
 import Redis from 'ioredis';
 import { config } from '../config';
 
-/** Singleton Redis client — falls back gracefully if no REDIS_URL */
+/** Singleton Redis client — returns null if REDIS_URL is not configured */
 let redis: Redis | null = null;
 
 export function getRedis(): Redis | null {

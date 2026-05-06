@@ -24,6 +24,7 @@ beforeEach(() => {
   stripeCheckoutSessionsCreate.mockReset();
   stripePaymentIntentsCreate.mockReset();
   config.stripeSecretKey = '';
+  (config as any).googleClientIds = [];
   resetRateLimitBucketsForTests();
 });
 
@@ -193,6 +194,61 @@ describe('auth', () => {
       'bytspot:vendor:vendor-1:operations',
       'bytspot:vendor:vendor-1:catalog-write',
     ]));
+  });
+
+  it('auth.googleSignIn creates a Google user and returns a Bytspot JWT', async () => {
+    (config as any).googleClientIds = ['google-web-client-id'];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        sub: 'google-sub-1',
+        email: 'Google.User@Test.com',
+        email_verified: 'true',
+        name: 'Google User',
+        aud: 'google-web-client-id',
+      }),
+    } as any);
+    (db.user.findFirst as any).mockResolvedValueOnce(null);
+    (db.user.create as any).mockResolvedValueOnce({
+      id: 'google-user-1',
+      email: 'google.user@test.com',
+      name: 'Google User',
+      googleSubject: 'google-sub-1',
+      authProvider: 'google',
+    });
+
+    const caller = createPublicCaller();
+    const result = await caller.auth.googleSignIn({ idToken: 'valid-google-id-token-for-test', surface: 'parker' });
+
+    expect(result.isNewUser).toBe(true);
+    expect(result.user.authProvider).toBe('google');
+    expect(result.token).toBeTruthy();
+    expect(db.user.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        email: 'google.user@test.com',
+        googleSubject: 'google-sub-1',
+        authProvider: 'google',
+      }),
+    }));
+    fetchSpy.mockRestore();
+  });
+
+  it('auth.googleSignIn rejects Google tokens for the wrong client audience', async () => {
+    (config as any).googleClientIds = ['allowed-client-id'];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        sub: 'google-sub-2',
+        email: 'bad-aud@test.com',
+        email_verified: true,
+        aud: 'other-client-id',
+      }),
+    } as any);
+
+    const caller = createPublicCaller();
+    await expect(caller.auth.googleSignIn({ idToken: 'valid-google-id-token-for-test' })).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(db.user.create).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 
   it('auth.login rejects wrong password', async () => {

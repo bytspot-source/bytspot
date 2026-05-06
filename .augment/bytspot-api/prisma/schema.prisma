@@ -14,6 +14,8 @@ model User {
   id        String   @id @default(cuid())
   email     String   @unique
   password  String
+  googleSubject String? @unique @map("google_subject")
+  authProvider  String  @default("password") @map("auth_provider")
   name      String?
   phone     String?
   profileImage String? @map("profile_image")

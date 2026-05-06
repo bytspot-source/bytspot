@@ -5,6 +5,7 @@ import { db } from '../lib/db';
 import { sendWelcomeEmail } from '../lib/email';
 import { requireAuth } from '../middleware/auth';
 import { signAuthToken } from '../auth/vendorRbac';
+import { completeGoogleSignIn } from '../auth/google';
 
 const router = Router();
 
@@ -18,6 +19,12 @@ const signupSchema = z.object({
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string(),
+});
+
+const googleSchema = z.object({
+  idToken: z.string().min(20),
+  ref: z.string().max(100).optional(),
+  surface: z.enum(['parker', 'provider-onboarding']).optional(),
 });
 
 /** POST /auth/signup */
@@ -81,6 +88,17 @@ router.post('/auth/login', async (req, res) => {
     token,
     user: { id: user.id, email: user.email, name: user.name },
   });
+});
+
+/** POST /auth/google — Google Identity Services ID token sign-in */
+router.post('/auth/google', async (req, res) => {
+  const parsed = googleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten().fieldErrors });
+    return;
+  }
+  const result = await completeGoogleSignIn(parsed.data);
+  res.status(result.isNewUser ? 201 : 200).json(result);
 });
 
 /** GET /auth/me — returns current user profile + referral stats */

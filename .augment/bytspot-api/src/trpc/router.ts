@@ -34,6 +34,7 @@ import { bookingRouter } from './bookingRouter';
 import { vendorRouter } from './vendorRouter';
 import { auditRouter } from './auditRouter';
 import { signAuthToken } from '../auth/vendorRbac';
+import { completeGoogleSignIn } from '../auth/google';
 
 const venueHardwarePatchSelect = {
   id: true,
@@ -219,6 +220,15 @@ const authRouter = router({
       const token = await signAuthToken(user.id, user.email);
       return { token, user: { id: user.id, email: user.email, name: user.name } };
     }),
+
+  /** POST /trpc/auth.googleSignIn */
+  googleSignIn: publicProcedure
+    .input(z.object({
+      idToken: z.string().min(20),
+      ref: z.string().max(100).optional(),
+      surface: z.enum(['parker', 'provider-onboarding']).optional(),
+    }))
+    .mutation(async ({ input }) => completeGoogleSignIn(input)),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */
   me: protectedProcedure.query(async ({ ctx }) => {

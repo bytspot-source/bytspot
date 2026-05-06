@@ -39,6 +39,8 @@ const envSchema = z.object({
   OPENAI_API_KEY:         z.string().default(''),
   TICKETMASTER_API_KEY:   z.string().default(''),
   GOOGLE_PLACES_API_KEY:  z.string().default(''),
+  GOOGLE_CLIENT_IDS:      z.string().default(''),
+  GOOGLE_CLIENT_ID:       z.string().default(''),
   APNS_KEY_ID:            z.string().default(''),
   APNS_TEAM_ID:           z.string().default(''),
   APNS_KEY_PATH:          z.string().default(''),
@@ -93,6 +95,7 @@ export const config = {
   cronSecret: env.CRON_SECRET,
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
   googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY,
+  googleClientIds: [...env.GOOGLE_CLIENT_IDS.split(','), env.GOOGLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
   apnsKeyId: env.APNS_KEY_ID,
   apnsTeamId: env.APNS_TEAM_ID,
   apnsKeyPath: env.APNS_KEY_PATH,
@@ -116,6 +119,7 @@ export function printConfigDiagnostics(): void {
   check(config.cronSecret, 'Cron secret', 'cron endpoints unprotected');
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
+  check(config.googleClientIds.length ? 'ok' : '', 'Google Sign-In', 'Google auth disabled');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
   console.log('');
 }

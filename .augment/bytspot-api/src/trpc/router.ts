@@ -671,7 +671,7 @@ const paymentsRouter = router({
       duration: z.number().min(0.5).max(24),
       totalCost: z.number().min(0.01).max(10000),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       if (!config.stripeSecretKey) {
         return {
           url: null as string | null,
@@ -682,6 +682,7 @@ const paymentsRouter = router({
 
       const stripe = new Stripe(config.stripeSecretKey);
       const { spotName, address, duration, totalCost, spotId } = input;
+      const amountCents = Math.round(totalCost * 100);
 
       if (!spotName || !totalCost) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'spotName and totalCost are required' });
@@ -694,7 +695,7 @@ const paymentsRouter = router({
           line_items: [{
             price_data: {
               currency: 'usd',
-              unit_amount: Math.round(totalCost * 100),
+              unit_amount: amountCents,
               product_data: {
                 name: `Parking — ${spotName}`,
                 description: `${duration}h at ${address}`,
@@ -702,7 +703,14 @@ const paymentsRouter = router({
             },
             quantity: 1,
           }],
-          metadata: { spotId: spotId || '', duration: String(duration) },
+          metadata: {
+            flow: 'parking.checkout',
+            source: 'parking.checkout',
+            spotId: spotId || '',
+            duration: String(duration),
+            amountCents: String(amountCents),
+            userId: ctx.user.userId,
+          },
           success_url: `${config.frontendUrl}/parking/success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${config.frontendUrl}/parking/cancelled`,
         });
@@ -1159,6 +1167,12 @@ const subscriptionRouter = router({
             entity: z.nativeEnum(Entity).optional(),
             flow: z.string().max(80).optional(),
             bookingId: z.string().max(120).optional(),
+            spotId: z.string().max(120).optional(),
+            duration: z.string().max(40).optional(),
+            amountCents: z.string().max(20).optional(),
+            source: z.string().max(80).optional(),
+            fromUserId: z.string().max(100).optional(),
+            toValetId: z.string().max(100).optional(),
             pointsToRedeem: z.string().max(20).optional(),
             pointsDiscountCents: z.string().max(20).optional(),
           }).optional(),
@@ -1196,6 +1210,27 @@ const subscriptionRouter = router({
             }
           }
           console.log(`[subscription] User ${userId} upgraded to ${plan}`);
+        } else if (data?.object?.mode === 'payment' && data?.object?.metadata?.flow === 'parking.checkout') {
+          const metadata = data.object.metadata;
+          const stripeSessionId = data.object.id;
+          const paymentIntent = (data.object as any).payment_intent;
+          const stripePaymentIntentId = typeof paymentIntent === 'string' ? paymentIntent : paymentIntent?.id ?? null;
+          console.log('[subscription:webhook] Parking checkout completed', {
+            stripeSessionId,
+            stripePaymentIntentId,
+            userId: metadata.userId,
+            spotId: metadata.spotId,
+            amountCents: metadata.amountCents,
+          });
+          return {
+            received: true,
+            flow: 'parking.checkout',
+            stripeSessionId,
+            stripePaymentIntentId,
+            spotId: metadata.spotId ?? null,
+            userId: metadata.userId ?? null,
+            amountCents: metadata.amountCents ?? null,
+          };
         } else if (data?.object?.mode === 'payment' && data?.object?.metadata?.flow === 'booking.checkout') {
           const metadata = data.object.metadata;
           const bookingId = metadata.bookingId;
@@ -1241,6 +1276,26 @@ const subscriptionRouter = router({
             }
           }
         }
+      } else if ((type === 'payment_intent.succeeded' || type === 'payment_intent.payment_failed') && data?.object?.metadata?.flow === 'valet.tip') {
+        const metadata = data.object.metadata;
+        const stripePaymentIntentId = data.object.id ?? null;
+        const status = type === 'payment_intent.succeeded' ? 'succeeded' : 'failed';
+        console.log('[subscription:webhook] Valet tip payment intent updated', {
+          stripePaymentIntentId,
+          status,
+          fromUserId: metadata.fromUserId,
+          toValetId: metadata.toValetId,
+          amountCents: metadata.amountCents,
+        });
+        return {
+          received: true,
+          flow: 'valet.tip',
+          status,
+          stripePaymentIntentId,
+          fromUserId: metadata.fromUserId ?? null,
+          toValetId: metadata.toValetId ?? null,
+          amountCents: metadata.amountCents ?? null,
+        };
       } else if (type === 'charge.refunded' || type === 'refund.updated') {
         return handleMarketplaceRefundEvent(data.object as Record<string, any>, type);
       } else if (type === 'charge.dispute.created' || type === 'charge.dispute.closed') {
@@ -1277,12 +1332,19 @@ const tipsRouter = router({
       }
       const stripe = new Stripe(config.stripeSecretKey);
       const { valetId, amount } = input;
+      const amountCents = Math.round(amount * 100);
 
       try {
         const paymentIntent = await stripe.paymentIntents.create({
-          amount: Math.round(amount * 100),
+          amount: amountCents,
           currency: 'usd',
-          metadata: { fromUserId: ctx.user.userId, toValetId: valetId },
+          metadata: {
+            flow: 'valet.tip',
+            source: 'tips.createTip',
+            fromUserId: ctx.user.userId,
+            toValetId: valetId,
+            amountCents: String(amountCents),
+          },
           description: `Valet tip from ${ctx.user.email}`,
         });
 

@@ -91,6 +91,9 @@ vi.mock('../lib/db', () => {
       create: vi.fn().mockResolvedValue({ id: 'pt-1' }),
       groupBy: vi.fn().mockResolvedValue([]),
     },
+    tip: {
+      create: vi.fn().mockResolvedValue({ id: 'tip-1' }),
+    },
     userAchievement: {
       findMany: vi.fn().mockResolvedValue([]),
     },

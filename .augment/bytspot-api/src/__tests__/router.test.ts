@@ -3,11 +3,26 @@ import { TRPCError } from '@trpc/server';
 import { Entity } from '@prisma/client';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
+import { config } from '../config';
 import { resetRateLimitBucketsForTests } from '../trpc/trpc';
+
+const stripeCheckoutSessionsCreate = vi.hoisted(() => vi.fn());
+const stripePaymentIntentsCreate = vi.hoisted(() => vi.fn());
+vi.mock('stripe', () => ({
+  default: vi.fn().mockImplementation(function StripeMock() {
+    return {
+      checkout: { sessions: { create: stripeCheckoutSessionsCreate } },
+      paymentIntents: { create: stripePaymentIntentsCreate },
+    };
+  }),
+}));
 
 // Reset all mocks between tests
 beforeEach(() => {
   vi.clearAllMocks();
+  stripeCheckoutSessionsCreate.mockReset();
+  stripePaymentIntentsCreate.mockReset();
+  config.stripeSecretKey = '';
   resetRateLimitBucketsForTests();
 });
 
@@ -38,6 +53,76 @@ describe('health', () => {
     // Fallback values from the catch block
     expect(result).toHaveProperty('userCount');
     expect(result).toHaveProperty('venueCount');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Payments
+// ──────────────────────────────────────────────────────────
+describe('payments', () => {
+  it('payments.checkout creates parking checkout metadata with flow, amount, and user id', async () => {
+    config.stripeSecretKey = 'configured_for_parking_metadata_test';
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_parking_123' });
+
+    const caller = createAuthenticatedCaller('user-parking-1', 'driver@test.com');
+    const result = await caller.payments.checkout({
+      spotId: 'spot-123',
+      spotName: 'Colony Square Garage',
+      address: '1197 Peachtree St NE',
+      duration: 2.5,
+      totalCost: 18.75,
+    });
+
+    expect(result.url).toBe('https://checkout.stripe.test/pay/cs_parking_123');
+    expect(stripeCheckoutSessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'payment',
+      line_items: [expect.objectContaining({
+        price_data: expect.objectContaining({ unit_amount: 1875 }),
+      })],
+      metadata: {
+        flow: 'parking.checkout',
+        source: 'parking.checkout',
+        spotId: 'spot-123',
+        duration: '2.5',
+        amountCents: '1875',
+        userId: 'user-parking-1',
+      },
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Tips
+// ──────────────────────────────────────────────────────────
+describe('tips', () => {
+  it('tips.createTip creates Valet tip PaymentIntent metadata with flow and user ids', async () => {
+    config.stripeSecretKey = 'configured_for_valet_tip_metadata_test';
+    stripePaymentIntentsCreate.mockResolvedValueOnce({ id: 'pi_valet_tip_123', client_secret: 'pi_valet_tip_123_secret_abc' });
+
+    const caller = createAuthenticatedCaller('user-tip-1', 'tipper@test.com');
+    const result = await caller.tips.createTip({ valetId: 'valet-123', amount: 12.5 });
+
+    expect(result.clientSecret).toBe('pi_valet_tip_123_secret_abc');
+    expect(stripePaymentIntentsCreate).toHaveBeenCalledWith({
+      amount: 1250,
+      currency: 'usd',
+      metadata: {
+        flow: 'valet.tip',
+        source: 'tips.createTip',
+        fromUserId: 'user-tip-1',
+        toValetId: 'valet-123',
+        amountCents: '1250',
+      },
+      description: 'Valet tip from tipper@test.com',
+    });
+    expect(db.tip.create).toHaveBeenCalledWith({
+      data: {
+        fromUserId: 'user-tip-1',
+        toValetId: 'valet-123',
+        amount: 12.5,
+        stripePaymentIntentId: 'pi_valet_tip_123',
+      },
+    });
   });
 });
 
@@ -485,6 +570,91 @@ describe('subscription', () => {
         stripePaymentIntentId: 'pi_booking_123',
       }),
     });
+  });
+
+  it('subscription.webhook explicitly acknowledges parking checkout completion metadata', async () => {
+    const caller = createPublicCaller();
+    const result = await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_parking_123',
+          mode: 'payment',
+          payment_intent: 'pi_parking_123',
+          metadata: {
+            flow: 'parking.checkout',
+            source: 'parking.checkout',
+            userId: 'user-1',
+            spotId: 'spot-123',
+            duration: '2.5',
+            amountCents: '1875',
+          },
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      received: true,
+      flow: 'parking.checkout',
+      stripeSessionId: 'cs_parking_123',
+      stripePaymentIntentId: 'pi_parking_123',
+      spotId: 'spot-123',
+      userId: 'user-1',
+      amountCents: '1875',
+    });
+    expect(db.booking.update).not.toHaveBeenCalled();
+    expect(db.pointTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('subscription.webhook acknowledges Valet tip payment intent success and failure metadata', async () => {
+    const caller = createPublicCaller();
+    const succeeded = await caller.subscription.webhook({
+      type: 'payment_intent.succeeded',
+      data: {
+        object: {
+          id: 'pi_valet_tip_success',
+          metadata: {
+            flow: 'valet.tip',
+            source: 'tips.createTip',
+            fromUserId: 'user-tip-1',
+            toValetId: 'valet-123',
+            amountCents: '1250',
+          },
+        },
+      },
+    });
+    const failed = await caller.subscription.webhook({
+      type: 'payment_intent.payment_failed',
+      data: {
+        object: {
+          id: 'pi_valet_tip_failed',
+          metadata: {
+            flow: 'valet.tip',
+            fromUserId: 'user-tip-1',
+            toValetId: 'valet-123',
+            amountCents: '1250',
+          },
+        },
+      },
+    });
+
+    expect(succeeded).toEqual({
+      received: true,
+      flow: 'valet.tip',
+      status: 'succeeded',
+      stripePaymentIntentId: 'pi_valet_tip_success',
+      fromUserId: 'user-tip-1',
+      toValetId: 'valet-123',
+      amountCents: '1250',
+    });
+    expect(failed).toEqual(expect.objectContaining({
+      received: true,
+      flow: 'valet.tip',
+      status: 'failed',
+      stripePaymentIntentId: 'pi_valet_tip_failed',
+    }));
+    expect(db.booking.update).not.toHaveBeenCalled();
+    expect(db.pointTransaction.create).not.toHaveBeenCalled();
   });
 
   it('subscription.webhook marks refunded bookings and restores marketplace points with refund audit id', async () => {

@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
 import { Entity, type Prisma } from '@prisma/client';
-import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, enforceRateLimit } from './trpc';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, enforceRateLimit, sovereignShieldMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
@@ -35,6 +35,7 @@ import { vendorRouter } from './vendorRouter';
 import { auditRouter } from './auditRouter';
 import { signAuthToken } from '../auth/vendorRbac';
 import { completeGoogleSignIn } from '../auth/google';
+import { approveProviderApplication, assertProviderApprovalAdmin, listPendingProviderApplications } from '../services/providerApproval';
 
 const venueHardwarePatchSelect = {
   id: true,
@@ -1377,6 +1378,7 @@ const providersRouter = router({
             currentStep: hostProfile.currentStep,
             onboardingData: hostProfile.onboardingData as Record<string, unknown> | null,
             submittedAt: hostProfile.submittedAt?.toISOString() ?? null,
+            approvedAt: hostProfile.approvedAt?.toISOString() ?? null,
           }
         : null,
       valet: valetProfile
@@ -1515,6 +1517,50 @@ const adminRouter = router({
         })),
         generatedAt: new Date().toISOString(),
       };
+    }),
+
+  listPendingProviderApplications: protectedProcedure
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: ['NIST_AI_RMF_1_0', 'EO_14365'],
+        stateFlags: ['PROVIDER_ADMIN_APPROVAL_READ'],
+        policyContext: { surface: 'admin', operation: 'listPendingProviderApplications' },
+      }),
+    )
+    .input(z.object({ limit: z.number().int().min(1).max(100).optional().default(50) }).optional().default({}))
+    .query(async ({ ctx, input }) => {
+      assertProviderApprovalAdmin(ctx.user);
+      return listPendingProviderApplications(input.limit);
+    }),
+
+  approveProviderApplication: protectedProcedure
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: ['NIST_AI_RMF_1_0', 'EO_14365'],
+        stateFlags: ['PROVIDER_ADMIN_APPROVAL'],
+        policyContext: { surface: 'admin', operation: 'approveProviderApplication' },
+      }),
+    )
+    .input(z.object({
+      userId: z.string().min(1).max(120).optional(),
+      email: z.string().email().max(255).optional(),
+      activateVendor: z.boolean().optional().default(true),
+      markStripeConnectReady: z.boolean().optional().default(false),
+    }).refine((value) => Boolean(value.userId || value.email), {
+      message: 'Provide either userId or email.',
+      path: ['userId'],
+    }))
+    .mutation(async ({ ctx, input }) => {
+      assertProviderApprovalAdmin(ctx.user);
+      return approveProviderApplication({
+        userId: input.userId,
+        email: input.email,
+        approvedBy: ctx.user.email,
+        activateVendor: input.activateVendor,
+        markStripeConnectReady: input.markStripeConnectReady,
+      });
     }),
 
   /** POST /admin/generate-invite → admin.generateInvite mutation */

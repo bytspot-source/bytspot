@@ -22,6 +22,7 @@ router.get('/providers/status', requireAuth, async (req: Request, res: Response)
           currentStep: hostProfile.currentStep,
           onboardingData: hostProfile.onboardingData,
           submittedAt: hostProfile.submittedAt,
+          approvedAt: hostProfile.approvedAt,
         }
       : null,
     valet: valetProfile

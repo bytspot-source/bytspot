@@ -68,6 +68,7 @@ vi.mock('../lib/db', () => {
     },
     hostProfile: {
       findUnique: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn(),
       update: vi.fn(),
       deleteMany: vi.fn(),
@@ -134,6 +135,7 @@ vi.mock('../lib/db', () => {
       count: vi.fn().mockResolvedValue(0),
     },
   };
+  mockDb.$transaction = vi.fn(async (callback: (tx: typeof mockDb) => Promise<unknown>) => callback(mockDb));
   return { db: mockDb };
 });
 

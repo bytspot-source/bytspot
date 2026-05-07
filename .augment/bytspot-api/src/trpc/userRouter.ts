@@ -277,6 +277,14 @@ const profileRouter = router({
       });
       return user;
     }),
+
+	  /** Permanently delete the signed-in user's account and related data. */
+	  deleteAccount: protectedProcedure
+	    .input(z.object({ confirmation: z.literal('DELETE') }))
+	    .mutation(async ({ ctx }) => {
+	      await db.user.delete({ where: { id: ctx.user.userId } });
+	      return { success: true };
+	    }),
 });
 
 // ─── Vehicles sub-router ────────────────────────────────────────────

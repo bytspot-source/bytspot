@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TRPCError } from '@trpc/server';
 import { Entity } from '@prisma/client';
+import { generateKeyPairSync, type JsonWebKey } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
@@ -25,6 +26,7 @@ beforeEach(() => {
   stripePaymentIntentsCreate.mockReset();
   config.stripeSecretKey = '';
   (config as any).googleClientIds = [];
+	(config as any).appleClientIds = [];
   resetRateLimitBucketsForTests();
 });
 
@@ -271,6 +273,44 @@ describe('auth', () => {
     expect(db.user.create).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
+
+	it('auth.appleSignIn creates an Apple user and returns a Bytspot JWT', async () => {
+	  (config as any).appleClientIds = ['com.bytspot.app'];
+	  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+	  const jwk = publicKey.export({ format: 'jwk' }) as JsonWebKey;
+	  const identityToken = jwt.sign(
+	    { sub: 'apple-sub-1', email: 'Apple.User@Test.com', email_verified: 'true' },
+	    privateKey,
+	    { algorithm: 'RS256', keyid: 'apple-key-1', issuer: 'https://appleid.apple.com', audience: 'com.bytspot.app' },
+	  );
+	  const fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockResolvedValueOnce({
+	    ok: true,
+	    json: async () => ({ keys: [{ ...jwk, kid: 'apple-key-1', alg: 'RS256' }] }),
+	  } as any);
+	  (db.user.findFirst as any).mockResolvedValueOnce(null);
+	  (db.user.create as any).mockResolvedValueOnce({
+	    id: 'apple-user-1',
+	    email: 'apple.user@test.com',
+	    name: 'Apple User',
+	    appleSubject: 'apple-sub-1',
+	    authProvider: 'apple',
+	  });
+
+	  const caller = createPublicCaller();
+	  const result = await caller.auth.appleSignIn({ identityToken, name: 'Apple User' });
+
+	  expect(result.isNewUser).toBe(true);
+	  expect(result.user.authProvider).toBe('apple');
+	  expect(result.token).toBeTruthy();
+	  expect(db.user.create).toHaveBeenCalledWith(expect.objectContaining({
+	    data: expect.objectContaining({
+	      email: 'apple.user@test.com',
+	      appleSubject: 'apple-sub-1',
+	      authProvider: 'apple',
+	    }),
+	  }));
+	  fetchSpy.mockRestore();
+	});
 
   it('auth.login rejects wrong password', async () => {
     const bcrypt = await import('bcryptjs');
@@ -1021,6 +1061,18 @@ describe('user.preferences', () => {
     const result = await caller.user.preferences.update({ interests: ['nightlife'], vibes: ['chill'] });
     expect(result.interests).toContain('nightlife');
   });
+});
+
+describe('user.profile', () => {
+	it('deletes the authenticated account after explicit confirmation', async () => {
+	  (db.user.delete as any).mockResolvedValueOnce({ id: 'user-delete-1' });
+	  const caller = createAuthenticatedCaller('user-delete-1', 'delete@test.com');
+
+	  const result = await caller.user.profile.deleteAccount({ confirmation: 'DELETE' });
+
+	  expect(result.success).toBe(true);
+	  expect(db.user.delete).toHaveBeenCalledWith({ where: { id: 'user-delete-1' } });
+	});
 });
 
 // ──────────────────────────────────────────────────────────

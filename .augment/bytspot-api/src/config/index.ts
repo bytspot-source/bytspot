@@ -47,6 +47,8 @@ const envSchema = z.object({
   GOOGLE_PLACES_API_KEY:  z.string().default(''),
   GOOGLE_CLIENT_IDS:      z.string().default(''),
   GOOGLE_CLIENT_ID:       z.string().default(''),
+	  APPLE_CLIENT_IDS:       z.string().default(''),
+	  APPLE_CLIENT_ID:        z.string().default('com.bytspot.app'),
   APNS_KEY_ID:            z.string().default(''),
   APNS_TEAM_ID:           z.string().default(''),
   APNS_KEY_PATH:          z.string().default(''),
@@ -104,6 +106,7 @@ export const config = {
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
   googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY,
   googleClientIds: [...parseCsv(env.GOOGLE_CLIENT_IDS), env.GOOGLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
+	  appleClientIds: [...parseCsv(env.APPLE_CLIENT_IDS), env.APPLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
   apnsKeyId: env.APNS_KEY_ID,
   apnsTeamId: env.APNS_TEAM_ID,
   apnsKeyPath: env.APNS_KEY_PATH,
@@ -128,6 +131,7 @@ export function printConfigDiagnostics(): void {
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed disabled');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.googleClientIds.length ? 'ok' : '', 'Google Sign-In', 'Google auth disabled');
+	  check(config.appleClientIds.length ? 'ok' : '', 'Sign in with Apple', 'Apple auth disabled');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
   check(config.bytspotAdminEmails.length || config.bytspotInternalOpsEmails.length ? 'ok' : '', 'Admin approval groups', 'provider approvals require admin email allowlist');
   console.log('');

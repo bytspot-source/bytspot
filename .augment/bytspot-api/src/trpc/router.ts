@@ -35,6 +35,7 @@ import { vendorRouter } from './vendorRouter';
 import { auditRouter } from './auditRouter';
 import { signAuthToken } from '../auth/vendorRbac';
 import { completeGoogleSignIn } from '../auth/google';
+import { completeAppleSignIn } from '../auth/apple';
 import { approveProviderApplication, assertProviderApprovalAdmin, listPendingProviderApplications } from '../services/providerApproval';
 
 const venueHardwarePatchSelect = {
@@ -230,6 +231,16 @@ const authRouter = router({
       surface: z.enum(['parker', 'provider-onboarding']).optional(),
     }))
     .mutation(async ({ input }) => completeGoogleSignIn(input)),
+
+	  /** POST /trpc/auth.appleSignIn */
+	  appleSignIn: publicProcedure
+	    .input(z.object({
+	      identityToken: z.string().min(20),
+	      email: z.string().email().max(255).optional(),
+	      name: z.string().max(100).optional(),
+	      ref: z.string().max(100).optional(),
+	    }))
+	    .mutation(async ({ input }) => completeAppleSignIn(input)),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */
   me: protectedProcedure.query(async ({ ctx }) => {

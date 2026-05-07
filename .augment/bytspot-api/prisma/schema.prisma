@@ -15,6 +15,7 @@ model User {
   email     String   @unique
   password  String
   googleSubject String? @unique @map("google_subject")
+  appleSubject  String? @unique @map("apple_subject")
   authProvider  String  @default("password") @map("auth_provider")
   name      String?
   phone     String?

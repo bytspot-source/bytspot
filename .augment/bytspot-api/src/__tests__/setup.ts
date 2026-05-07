@@ -16,6 +16,7 @@ vi.mock('../lib/db', () => {
       create: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
+	      delete: vi.fn(),
       count: vi.fn().mockResolvedValue(0),
     },
     venue: {
@@ -175,6 +176,8 @@ vi.mock('../config', () => ({
     cronSecret: 'test-cron-secret',
     ticketmasterApiKey: '',
     googlePlacesApiKey: '',
+	    googleClientIds: [],
+	    appleClientIds: [],
     apnsKeyId: '',
     apnsTeamId: '',
     apnsKeyPath: '',

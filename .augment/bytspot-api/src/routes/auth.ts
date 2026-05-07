@@ -7,6 +7,7 @@ import { sendWelcomeEmail } from '../lib/email';
 import { requireAuth } from '../middleware/auth';
 import { signAuthToken } from '../auth/vendorRbac';
 import { completeGoogleSignIn } from '../auth/google';
+import { completeAppleSignIn } from '../auth/apple';
 
 const router = Router();
 
@@ -35,6 +36,13 @@ const googleSchema = z.object({
   idToken: z.string().min(20),
   ref: z.string().max(100).optional(),
   surface: z.enum(['parker', 'provider-onboarding']).optional(),
+});
+
+const appleSchema = z.object({
+	identityToken: z.string().min(20),
+	email: z.string().email().max(255).optional(),
+	name: z.string().max(100).optional(),
+	ref: z.string().max(100).optional(),
 });
 
 /** POST /auth/signup */
@@ -113,6 +121,21 @@ router.post('/auth/google', async (req, res) => {
   } catch (err: any) {
     res.status(statusForAuthError(err)).json({ error: err?.message || 'Google sign-in failed' });
   }
+});
+
+/** POST /auth/apple — Sign in with Apple identity token sign-in */
+router.post('/auth/apple', async (req, res) => {
+	const parsed = appleSchema.safeParse(req.body);
+	if (!parsed.success) {
+		res.status(400).json({ error: parsed.error.flatten().fieldErrors });
+		return;
+	}
+	try {
+		const result = await completeAppleSignIn(parsed.data);
+		res.status(result.isNewUser ? 201 : 200).json(result);
+	} catch (err: any) {
+		res.status(statusForAuthError(err)).json({ error: err?.message || 'Apple sign-in failed' });
+	}
 });
 
 /** GET /auth/me — returns current user profile + referral stats */

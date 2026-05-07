@@ -169,6 +169,8 @@ vi.mock('../config', () => ({
     frontendUrl: 'http://localhost:3000',
     resendApiKey: '',
     adminPassword: 'test-admin-pass',
+    bytspotAdminEmails: [],
+    bytspotInternalOpsEmails: [],
     openaiApiKey: '',
     cronSecret: 'test-cron-secret',
     ticketmasterApiKey: '',

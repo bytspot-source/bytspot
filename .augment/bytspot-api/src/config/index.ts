@@ -3,6 +3,10 @@ import { parseCorsOrigins } from './cors';
 
 const isDev = (process.env.NODE_ENV || 'development') === 'development';
 
+function parseCsv(value: string): string[] {
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
 /**
  * Env var schema — parsed and validated at import time.
  *
@@ -32,6 +36,8 @@ const envSchema = z.object({
   STRIPE_VENDOR_PREMIUM_PRICE_ID:z.string().default(''),
   STRIPE_VALET_PREMIUM_PRICE_ID:z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
+  BYTSPOT_ADMIN_EMAILS:   z.string().default(''),
+  BYTSPOT_INTERNAL_OPS_EMAILS:z.string().default(''),
   CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
 
   // ── OPTIONAL (integrations) ───────────────────────────
@@ -91,11 +97,13 @@ export const config = {
   frontendUrl: env.FRONTEND_URL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
+  bytspotAdminEmails: parseCsv(env.BYTSPOT_ADMIN_EMAILS).map((email) => email.toLowerCase()),
+  bytspotInternalOpsEmails: parseCsv(env.BYTSPOT_INTERNAL_OPS_EMAILS).map((email) => email.toLowerCase()),
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
   googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY,
-  googleClientIds: [...env.GOOGLE_CLIENT_IDS.split(','), env.GOOGLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
+  googleClientIds: [...parseCsv(env.GOOGLE_CLIENT_IDS), env.GOOGLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
   apnsKeyId: env.APNS_KEY_ID,
   apnsTeamId: env.APNS_TEAM_ID,
   apnsKeyPath: env.APNS_KEY_PATH,
@@ -121,5 +129,6 @@ export function printConfigDiagnostics(): void {
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.googleClientIds.length ? 'ok' : '', 'Google Sign-In', 'Google auth disabled');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
+  check(config.bytspotAdminEmails.length || config.bytspotInternalOpsEmails.length ? 'ok' : '', 'Admin approval groups', 'provider approvals require admin email allowlist');
   console.log('');
 }

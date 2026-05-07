@@ -193,6 +193,30 @@ describe('auth', () => {
     ]));
   });
 
+  it('auth.login signs admin approval group claims for allowlisted emails', async () => {
+    const bcrypt = await import('bcryptjs');
+    const hashed = await bcrypt.hash('password123', 12);
+    const originalAdminEmails = [...(config as any).bytspotAdminEmails];
+    const originalOpsEmails = [...(config as any).bytspotInternalOpsEmails];
+    (config as any).bytspotAdminEmails = ['admin@test.com'];
+    (config as any).bytspotInternalOpsEmails = ['ops@test.com'];
+    try {
+      (db.user.findUnique as any).mockResolvedValueOnce({
+        id: 'admin-user', email: 'Admin@Test.com', name: 'Admin', password: hashed,
+      });
+
+      const caller = createPublicCaller();
+      const result = await caller.auth.login({ email: 'Admin@Test.com', password: 'password123' });
+      const decoded = jwt.verify(result.token, config.jwtSecret) as any;
+
+      expect(decoded.groups).toEqual(expect.arrayContaining(['bytspot:user', 'BYTSPOT_ADMIN']));
+      expect(decoded.groups).not.toContain('INTERNAL_OPS');
+    } finally {
+      (config as any).bytspotAdminEmails = originalAdminEmails;
+      (config as any).bytspotInternalOpsEmails = originalOpsEmails;
+    }
+  });
+
   it('auth.googleSignIn creates a Google user and returns a Bytspot JWT', async () => {
     (config as any).googleClientIds = ['google-web-client-id'];
     const fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockResolvedValueOnce({

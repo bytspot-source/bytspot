@@ -20,6 +20,14 @@ export type AuthClaims = {
 
 const ROLE_RANK: Record<ProviderRole, number> = { staff: 1, manager: 2, owner: 3 };
 
+function adminGroupsForEmail(email: string): string[] {
+  const normalizedEmail = email.trim().toLowerCase();
+  const groups: string[] = [];
+  if (config.bytspotAdminEmails.includes(normalizedEmail)) groups.push('BYTSPOT_ADMIN');
+  if (config.bytspotInternalOpsEmails.includes(normalizedEmail)) groups.push('INTERNAL_OPS');
+  return groups;
+}
+
 export function normalizeProviderRole(role: unknown): ProviderRole {
   const value = String(role ?? '').trim().toLowerCase();
   if (value === 'owner') return 'owner';
@@ -70,7 +78,7 @@ export async function buildVendorRoleClaims(userId: string): Promise<VendorRoleC
 
 export async function buildAuthClaims(userId: string, email: string): Promise<AuthClaims> {
   const vendorRoles = await buildVendorRoleClaims(userId);
-  const groups = Array.from(new Set(['bytspot:user', ...vendorRoles.flatMap((claim) => claim.groups)]));
+  const groups = Array.from(new Set(['bytspot:user', ...adminGroupsForEmail(email), ...vendorRoles.flatMap((claim) => claim.groups)]));
   return { userId, email, groups, vendorRoles };
 }
 

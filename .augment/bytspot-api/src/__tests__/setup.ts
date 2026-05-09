@@ -19,6 +19,13 @@ vi.mock('../lib/db', () => {
 	      delete: vi.fn(),
       count: vi.fn().mockResolvedValue(0),
     },
+    vehicle: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
     venue: {
       findUnique: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),

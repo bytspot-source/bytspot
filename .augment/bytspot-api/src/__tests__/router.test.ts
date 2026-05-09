@@ -10,11 +10,19 @@ import { resetRateLimitBucketsForTests } from '../trpc/trpc';
 
 const stripeCheckoutSessionsCreate = vi.hoisted(() => vi.fn());
 const stripePaymentIntentsCreate = vi.hoisted(() => vi.fn());
+const stripeCustomersCreate = vi.hoisted(() => vi.fn());
+const stripeCustomersRetrieve = vi.hoisted(() => vi.fn());
+const stripeCustomersUpdate = vi.hoisted(() => vi.fn());
+const stripePaymentMethodsList = vi.hoisted(() => vi.fn());
+const stripePaymentMethodsRetrieve = vi.hoisted(() => vi.fn());
+const stripePaymentMethodsDetach = vi.hoisted(() => vi.fn());
 vi.mock('stripe', () => ({
   default: vi.fn().mockImplementation(function StripeMock() {
     return {
       checkout: { sessions: { create: stripeCheckoutSessionsCreate } },
       paymentIntents: { create: stripePaymentIntentsCreate },
+      customers: { create: stripeCustomersCreate, retrieve: stripeCustomersRetrieve, update: stripeCustomersUpdate },
+      paymentMethods: { list: stripePaymentMethodsList, retrieve: stripePaymentMethodsRetrieve, detach: stripePaymentMethodsDetach },
     };
   }),
 }));
@@ -24,6 +32,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   stripeCheckoutSessionsCreate.mockReset();
   stripePaymentIntentsCreate.mockReset();
+  stripeCustomersCreate.mockReset();
+  stripeCustomersRetrieve.mockReset();
+  stripeCustomersUpdate.mockReset();
+  stripePaymentMethodsList.mockReset();
+  stripePaymentMethodsRetrieve.mockReset();
+  stripePaymentMethodsDetach.mockReset();
   config.stripeSecretKey = '';
   (config as any).googleClientIds = [];
 	(config as any).appleClientIds = [];
@@ -63,6 +77,9 @@ describe('health', () => {
 describe('payments', () => {
   it('payments.checkout creates parking checkout metadata with flow, amount, and user id', async () => {
     config.stripeSecretKey = 'configured_for_parking_metadata_test';
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      id: 'user-parking-1', email: 'driver@test.com', name: 'Driver', stripeCustomerId: 'cus_parking_1',
+    });
     stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_parking_123' });
 
     const caller = createAuthenticatedCaller('user-parking-1', 'driver@test.com');
@@ -77,18 +94,58 @@ describe('payments', () => {
     expect(result.url).toBe('https://checkout.stripe.test/pay/cs_parking_123');
     expect(stripeCheckoutSessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'payment',
+      customer: 'cus_parking_1',
       line_items: [expect.objectContaining({
         price_data: expect.objectContaining({ unit_amount: 1875 }),
       })],
-      metadata: {
+      metadata: expect.objectContaining({
         flow: 'parking.checkout',
         source: 'parking.checkout',
         spotId: 'spot-123',
         duration: '2.5',
         amountCents: '1875',
         userId: 'user-parking-1',
-      },
+      }),
+      payment_intent_data: expect.objectContaining({ setup_future_usage: 'off_session' }),
     }));
+  });
+
+  it('payments.listMethods returns saved Stripe cards without exposing raw card data', async () => {
+    config.stripeSecretKey = 'configured_for_saved_cards_test';
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      email: 'driver@test.com', name: 'Driver', stripeCustomerId: 'cus_saved_1',
+    });
+    stripeCustomersRetrieve.mockResolvedValueOnce({
+      id: 'cus_saved_1',
+      invoice_settings: { default_payment_method: { id: 'pm_default' } },
+    });
+    stripePaymentMethodsList.mockResolvedValueOnce({
+      data: [
+        { id: 'pm_default', card: { brand: 'visa', last4: '4242', exp_month: 12, exp_year: 2028 } },
+      ],
+    });
+
+    const caller = createAuthenticatedCaller('user-payment-1', 'driver@test.com');
+    const result = await caller.payments.listMethods();
+
+    expect(result).toEqual([
+      { id: 'pm_default', type: 'card', brand: 'visa', last4: '4242', expiryMonth: '12', expiryYear: '28', isDefault: true },
+    ]);
+  });
+
+  it('payments.setDefaultMethod verifies customer ownership before updating Stripe default', async () => {
+    config.stripeSecretKey = 'configured_for_default_card_test';
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      email: 'driver@test.com', name: 'Driver', stripeCustomerId: 'cus_saved_1',
+    });
+    stripePaymentMethodsRetrieve.mockResolvedValueOnce({ id: 'pm_123', customer: 'cus_saved_1' });
+    stripeCustomersUpdate.mockResolvedValueOnce({ id: 'cus_saved_1' });
+
+    const caller = createAuthenticatedCaller('user-payment-1', 'driver@test.com');
+    await expect(caller.payments.setDefaultMethod({ paymentMethodId: 'pm_123' })).resolves.toEqual({ success: true });
+    expect(stripeCustomersUpdate).toHaveBeenCalledWith('cus_saved_1', {
+      invoice_settings: { default_payment_method: 'pm_123' },
+    });
   });
 });
 
@@ -1040,6 +1097,53 @@ describe('user.savedSpots', () => {
     const caller = createAuthenticatedCaller();
     const result = await caller.user.savedSpots.remove({ venueId: 'v1' });
     expect(result.success).toBe(true);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// User — Vehicles
+// ──────────────────────────────────────────────────────────
+describe('user.vehicles', () => {
+  const vehicleRow = {
+    id: 'veh-1',
+    userId: 'driver-1',
+    type: 'sedan',
+    make: 'Tesla',
+    model: 'Model 3',
+    year: 2025,
+    color: 'Black',
+    licensePlate: 'ABC123',
+    photo: null,
+    vin: null,
+    transmissionType: 'ev',
+    trunkCategory: 'compact',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it('lists relational saved vehicles for the authenticated user', async () => {
+    (db.vehicle.findMany as any).mockResolvedValueOnce([vehicleRow]);
+    const caller = createAuthenticatedCaller('driver-1', 'driver@test.com');
+    const result = await caller.user.vehicles.list();
+
+    expect(db.vehicle.findMany).toHaveBeenCalledWith({
+      where: { userId: 'driver-1' },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(result[0]).toEqual(expect.objectContaining({ id: 'veh-1', licensePlate: 'ABC123' }));
+  });
+
+  it('normalizes license plate before creating a saved vehicle', async () => {
+    (db.vehicle.create as any).mockResolvedValueOnce(vehicleRow);
+    const caller = createAuthenticatedCaller('driver-1', 'driver@test.com');
+    await caller.user.vehicles.add({
+      type: 'sedan', make: 'Tesla', model: 'Model 3', year: 2025, color: 'Black',
+      licensePlate: 'abc123', transmissionType: 'ev', trunkCategory: 'compact',
+    });
+
+    expect(db.vehicle.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ userId: 'driver-1', licensePlate: 'ABC123' }),
+    });
   });
 });
 

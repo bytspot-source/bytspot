@@ -665,7 +665,129 @@ const conciergeRouter = router({
 /**
  * ── Payments (Stripe) sub-router ──────────────────────
  */
+async function getOrCreateStripeCustomer(stripe: Stripe, userId: string) {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { stripeCustomerId: true, email: true, name: true },
+  });
+  if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+  if (user.stripeCustomerId) return user.stripeCustomerId;
+
+  const customer = await stripe.customers.create({
+    email: user.email,
+    name: user.name ?? undefined,
+    metadata: { userId },
+  });
+  await db.user.update({ where: { id: userId }, data: { stripeCustomerId: customer.id } });
+  return customer.id;
+}
+
+async function getStripeDefaultPaymentMethodId(stripe: Stripe, customerId: string) {
+  const customer = await stripe.customers.retrieve(customerId, {
+    expand: ['invoice_settings.default_payment_method'],
+  });
+  if ('deleted' in customer && customer.deleted) return null;
+  const method = customer.invoice_settings.default_payment_method;
+  if (!method) return null;
+  return typeof method === 'string' ? method : method.id;
+}
+
+async function assertStripePaymentMethodOwner(stripe: Stripe, paymentMethodId: string, customerId: string) {
+  const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId);
+  const owner = paymentMethod.customer;
+  const ownerId = typeof owner === 'string' ? owner : owner?.id;
+  if (ownerId !== customerId) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Payment method not found' });
+  }
+  return paymentMethod;
+}
+
 const paymentsRouter = router({
+  listMethods: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'payments:listMethods' }))
+    .query(async ({ ctx }) => {
+      if (!config.stripeSecretKey) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+      }
+
+      const stripe = new Stripe(config.stripeSecretKey);
+      const customerId = await getOrCreateStripeCustomer(stripe, ctx.user.userId);
+      const [defaultPaymentMethodId, paymentMethods] = await Promise.all([
+        getStripeDefaultPaymentMethodId(stripe, customerId),
+        stripe.paymentMethods.list({ customer: customerId, type: 'card' }),
+      ]);
+
+      return paymentMethods.data.map((method) => ({
+        id: method.id,
+        type: 'card' as const,
+        brand: method.card?.brand ?? 'card',
+        last4: method.card?.last4 ?? '',
+        expiryMonth: method.card?.exp_month ? String(method.card.exp_month).padStart(2, '0') : undefined,
+        expiryYear: method.card?.exp_year ? String(method.card.exp_year).slice(-2) : undefined,
+        isDefault: method.id === defaultPaymentMethodId,
+      }));
+    }),
+
+  setupSession: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'payments:setupSession' }))
+    .input(z.object({
+      successPath: z.string().trim().min(1).max(200).optional(),
+      cancelPath: z.string().trim().min(1).max(200).optional(),
+    }).optional().default({}))
+    .mutation(async ({ ctx, input }) => {
+      if (!config.stripeSecretKey) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+      }
+
+      const stripe = new Stripe(config.stripeSecretKey);
+      const customerId = await getOrCreateStripeCustomer(stripe, ctx.user.userId);
+      const session = await stripe.checkout.sessions.create({
+        mode: 'setup',
+        customer: customerId,
+        payment_method_types: ['card'],
+        metadata: { flow: 'payment_method.setup', userId: ctx.user.userId },
+        success_url: `${config.frontendUrl}${input.successPath ?? '/profile/payment'}?setup=success`,
+        cancel_url: `${config.frontendUrl}${input.cancelPath ?? '/profile/payment'}?setup=cancelled`,
+      });
+
+      return { url: session.url };
+    }),
+
+  setDefaultMethod: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'payments:setDefaultMethod' }))
+    .input(z.object({ paymentMethodId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      if (!config.stripeSecretKey) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+      }
+
+      const stripe = new Stripe(config.stripeSecretKey);
+      const customerId = await getOrCreateStripeCustomer(stripe, ctx.user.userId);
+      await assertStripePaymentMethodOwner(stripe, input.paymentMethodId, customerId);
+      await stripe.customers.update(customerId, {
+        invoice_settings: { default_payment_method: input.paymentMethodId },
+      });
+      return { success: true };
+    }),
+
+  removeMethod: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'payments:removeMethod' }))
+    .input(z.object({ paymentMethodId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      if (!config.stripeSecretKey) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+      }
+
+      const stripe = new Stripe(config.stripeSecretKey);
+      const customerId = await getOrCreateStripeCustomer(stripe, ctx.user.userId);
+      await assertStripePaymentMethodOwner(stripe, input.paymentMethodId, customerId);
+      if ((await getStripeDefaultPaymentMethodId(stripe, customerId)) === input.paymentMethodId) {
+        await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: null } } as any);
+      }
+      await stripe.paymentMethods.detach(input.paymentMethodId);
+      return { success: true };
+    }),
+
   /** POST /payments/checkout → payments.checkout mutation (auth required — handles $$) */
   checkout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'payments:checkout' }))
@@ -675,6 +797,8 @@ const paymentsRouter = router({
       address: z.string().max(500),
       duration: z.number().min(0.5).max(24),
       totalCost: z.number().min(0.01).max(10000),
+      vehicleId: z.string().min(1).optional(),
+      paymentMethodId: z.string().min(1).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       if (!config.stripeSecretKey) {
@@ -682,7 +806,7 @@ const paymentsRouter = router({
       }
 
       const stripe = new Stripe(config.stripeSecretKey);
-      const { spotName, address, duration, totalCost, spotId } = input;
+      const { spotName, address, duration, totalCost, spotId, vehicleId, paymentMethodId } = input;
       const amountCents = Math.round(totalCost * 100);
 
       if (!spotName || !totalCost) {
@@ -690,9 +814,26 @@ const paymentsRouter = router({
       }
 
       try {
+        const customerId = await getOrCreateStripeCustomer(stripe, ctx.user.userId);
+        let selectedVehicleMetadata: Record<string, string> = {};
+        if (vehicleId) {
+          const vehicle = await db.vehicle.findFirst({ where: { id: vehicleId, userId: ctx.user.userId } });
+          if (!vehicle) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
+          selectedVehicleMetadata = {
+            vehicleId: vehicle.id,
+            licensePlate: vehicle.licensePlate,
+            vehicleLabel: `${vehicle.year} ${vehicle.make} ${vehicle.model}`,
+          };
+        }
+        if (paymentMethodId) {
+          await assertStripePaymentMethodOwner(stripe, paymentMethodId, customerId);
+          await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: paymentMethodId } });
+        }
+
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ['card'],
           mode: 'payment',
+          customer: customerId,
           line_items: [{
             price_data: {
               currency: 'usd',
@@ -711,6 +852,21 @@ const paymentsRouter = router({
             duration: String(duration),
             amountCents: String(amountCents),
             userId: ctx.user.userId,
+            selectedPaymentMethodId: paymentMethodId ?? '',
+            ...selectedVehicleMetadata,
+          },
+          payment_intent_data: {
+            setup_future_usage: 'off_session',
+            metadata: {
+              flow: 'parking.checkout',
+              source: 'parking.checkout',
+              spotId: spotId || '',
+              duration: String(duration),
+              amountCents: String(amountCents),
+              userId: ctx.user.userId,
+              selectedPaymentMethodId: paymentMethodId ?? '',
+              ...selectedVehicleMetadata,
+            },
           },
           success_url: `${config.frontendUrl}/parking/success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${config.frontendUrl}/parking/cancelled`,
@@ -718,6 +874,7 @@ const paymentsRouter = router({
 
         return { url: session.url };
       } catch (err: unknown) {
+        if (err instanceof TRPCError) throw err;
         const msg = err instanceof Error ? err.message : 'Stripe error';
         console.error('[payments] Stripe error:', msg);
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: msg });

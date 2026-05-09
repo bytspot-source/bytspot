@@ -3,6 +3,7 @@
  * Handles points, achievements, check-in history, saved spots, preferences.
  */
 import { z } from 'zod';
+import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from './trpc';
 import { db } from '../lib/db';
 
@@ -289,61 +290,117 @@ const profileRouter = router({
 
 // ─── Vehicles sub-router ────────────────────────────────────────────
 const vehicleSchema = z.object({
-  id: z.string(),
+  id: z.string().min(1),
   type: z.enum(['sedan', 'suv', 'truck', 'ev', 'motorcycle']),
-  make: z.string().max(50),
-  model: z.string().max(50),
+  make: z.string().trim().min(1).max(50),
+  model: z.string().trim().min(1).max(50),
   year: z.number().int().min(1900).max(2100),
-  color: z.string().max(30),
-  licensePlate: z.string().max(15),
-  photo: z.string().optional(),
-  vin: z.string().max(17).optional(),
+  color: z.string().trim().max(30).default(''),
+  licensePlate: z.string().trim().min(1).max(15),
+  photo: z.string().max(500_000).optional(),
+  vin: z.string().trim().max(17).optional(),
   transmissionType: z.enum(['automatic', 'manual', 'ev']),
   trunkCategory: z.enum(['full', 'compact', 'frunk_only', 'none']),
 });
+const vehicleInputSchema = vehicleSchema.omit({ id: true });
+type VehicleInput = z.infer<typeof vehicleInputSchema>;
+
+type VehicleRow = {
+  id: string;
+  type: string;
+  make: string;
+  model: string;
+  year: number;
+  color: string;
+  licensePlate: string;
+  photo: string | null;
+  vin: string | null;
+  transmissionType: string;
+  trunkCategory: string;
+};
+
+function normalizeVehicleInput(input: VehicleInput) {
+  return {
+    ...input,
+    make: input.make.trim(),
+    model: input.model.trim(),
+    color: input.color.trim(),
+    licensePlate: input.licensePlate.trim().toUpperCase(),
+    vin: input.vin?.trim().toUpperCase() || null,
+    photo: input.photo || null,
+  };
+}
+
+function mapVehicle(vehicle: VehicleRow) {
+  return {
+    id: vehicle.id,
+    type: vehicle.type as 'sedan' | 'suv' | 'truck' | 'ev' | 'motorcycle',
+    make: vehicle.make,
+    model: vehicle.model,
+    year: vehicle.year,
+    color: vehicle.color,
+    licensePlate: vehicle.licensePlate,
+    photo: vehicle.photo ?? undefined,
+    vin: vehicle.vin ?? undefined,
+    transmissionType: vehicle.transmissionType as 'automatic' | 'manual' | 'ev',
+    trunkCategory: vehicle.trunkCategory as 'full' | 'compact' | 'frunk_only' | 'none',
+  };
+}
 
 const vehiclesRouter = router({
   /** List user's saved vehicles */
   list: protectedProcedure.query(async ({ ctx }) => {
-    const user = await db.user.findUnique({
-      where: { id: ctx.user.userId },
-      select: { vehicles: true },
+    const vehicles = await db.vehicle.findMany({
+      where: { userId: ctx.user.userId },
+      orderBy: { createdAt: 'desc' },
     });
-    return (user?.vehicles as any[]) ?? [];
+    return vehicles.map(mapVehicle);
   }),
 
   /** Add a vehicle */
   add: protectedProcedure
-    .input(vehicleSchema.omit({ id: true }))
+    .input(vehicleInputSchema)
     .mutation(async ({ ctx, input }) => {
-      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
-      const vehicles = (user?.vehicles as any[]) ?? [];
-      const newVehicle = { id: `v_${Date.now()}`, ...input };
-      vehicles.push(newVehicle);
-      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
-      return newVehicle;
+      try {
+        const vehicle = await db.vehicle.create({
+          data: { userId: ctx.user.userId, ...normalizeVehicleInput(input) },
+        });
+        return mapVehicle(vehicle);
+      } catch (err: any) {
+        if (err?.code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'A vehicle with that license plate already exists.' });
+        }
+        throw err;
+      }
     }),
 
   /** Update a vehicle */
   update: protectedProcedure
     .input(vehicleSchema)
     .mutation(async ({ ctx, input }) => {
-      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
-      const vehicles = (user?.vehicles as any[]) ?? [];
-      const idx = vehicles.findIndex((v: any) => v.id === input.id);
-      if (idx === -1) throw new (await import('@trpc/server')).TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
-      vehicles[idx] = input;
-      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
-      return input;
+      const { id, ...vehicleInput } = input;
+      try {
+        const result = await db.vehicle.updateMany({
+          where: { id, userId: ctx.user.userId },
+          data: normalizeVehicleInput(vehicleInput),
+        });
+        if (result.count === 0) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
+        const vehicle = await db.vehicle.findFirst({ where: { id, userId: ctx.user.userId } });
+        if (!vehicle) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
+        return mapVehicle(vehicle);
+      } catch (err: any) {
+        if (err?.code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'A vehicle with that license plate already exists.' });
+        }
+        throw err;
+      }
     }),
 
   /** Remove a vehicle */
   remove: protectedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
-      const vehicles = ((user?.vehicles as any[]) ?? []).filter((v: any) => v.id !== input.id);
-      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
+      await db.vehicle.deleteMany({ where: { id: input.id, userId: ctx.user.userId } });
       return { success: true };
     }),
 });

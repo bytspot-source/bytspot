@@ -49,10 +49,34 @@ model User {
   vendors        Vendor[]
   vendorMemberships VendorMember[]
   bookings       Booking[]
+  savedVehicles  Vehicle[]
   complianceLogs ComplianceLog[]
   passwordResetTokens PasswordResetToken[]
 
   @@map("users")
+}
+
+model Vehicle {
+  id               String   @id @default(cuid())
+  userId           String   @map("user_id")
+  type             String   @default("sedan")
+  make             String
+  model            String
+  year             Int
+  color            String
+  licensePlate     String   @map("license_plate")
+  photo            String?
+  vin              String?
+  transmissionType String   @default("automatic") @map("transmission_type")
+  trunkCategory    String   @default("full") @map("trunk_category")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, licensePlate])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("vehicles")
 }
 
 model PasswordResetToken {

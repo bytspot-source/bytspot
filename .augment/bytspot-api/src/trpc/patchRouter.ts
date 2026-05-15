@@ -8,6 +8,19 @@ import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sover
 const bindingTypeSchema = z.enum(['vendor', 'service', 'venue']);
 const uidHexSchema = z.string().min(1, 'UID is required');
 
+type ResolvedVendor = {
+  id: string;
+  userId: string;
+  displayName: string;
+  onboardingStatus: string;
+};
+
+type ResolvedService = {
+  id: string;
+  title: string;
+  status: string;
+};
+
 function normalizePatchUid(uid: string): string {
   const normalized = uid.replace(/[^0-9a-f]/gi, '').toUpperCase();
   if (!/^[0-9A-F]{14}$/.test(normalized)) {
@@ -47,6 +60,67 @@ function mapPatch(
     createdAt: patch.createdAt.toISOString(),
     updatedAt: patch.updatedAt.toISOString(),
   };
+}
+
+async function findPatchByIdOrUid(patchId: string) {
+  const normalizedId = patchId.trim();
+  const patch = await db.hardwarePatch.findUnique({ where: { id: normalizedId } });
+  if (patch) return patch;
+
+  const normalizedUid = normalizedId.replace(/[^0-9a-f]/gi, '').toUpperCase();
+  if (!/^[0-9A-F]{14}$/.test(normalizedUid)) return null;
+  return db.hardwarePatch.findUnique({ where: { uid: normalizedUid } });
+}
+
+async function resolvePatchVendor(patch: { bindingType: string | null; bindingId: string | null }): Promise<{
+  vendor: ResolvedVendor | null;
+  service: ResolvedService | null;
+}> {
+  if (!patch.bindingType || !patch.bindingId) return { vendor: null, service: null };
+
+  if (patch.bindingType === 'vendor') {
+    const vendor = await db.vendor.findUnique({
+      where: { id: patch.bindingId },
+      select: { id: true, userId: true, displayName: true, onboardingStatus: true },
+    });
+    return { vendor, service: null };
+  }
+
+  if (patch.bindingType === 'service') {
+    const service = await db.vendorService.findUnique({
+      where: { id: patch.bindingId },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        vendor: { select: { id: true, userId: true, displayName: true, onboardingStatus: true } },
+      },
+    });
+    if (!service) return { vendor: null, service: null };
+    return {
+      vendor: service.vendor,
+      service: { id: service.id, title: service.title, status: service.status },
+    };
+  }
+
+  return { vendor: null, service: null };
+}
+
+function normalizeWorkspaceRole(role: unknown): 'owner' | 'manager' | 'staff' | null {
+  if (typeof role !== 'string') return null;
+  const normalized = role.toLowerCase();
+  return normalized === 'owner' || normalized === 'manager' || normalized === 'staff' ? normalized : null;
+}
+
+async function resolveProviderRole(userId: string | null | undefined, vendor: ResolvedVendor | null) {
+  if (!userId || !vendor) return null;
+  if (vendor.userId === userId) return 'owner' as const;
+
+  const membership = await db.vendorMember.findUnique({
+    where: { vendorId_userId: { vendorId: vendor.id, userId } },
+    select: { role: true },
+  });
+  return normalizeWorkspaceRole(membership?.role);
 }
 
 async function getBindingEntity(bindingType: z.infer<typeof bindingTypeSchema>, bindingId: string) {
@@ -123,6 +197,31 @@ const revocationsRouter = router({
 
 export const patchRouter = router({
   revocations: revocationsRouter,
+
+  resolve: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 120, label: 'patch:resolve' }))
+    .input(z.object({ patchId: z.string().trim().min(1) }))
+    .query(async ({ ctx, input }) => {
+      const patch = await findPatchByIdOrUid(input.patchId);
+      if (!patch) throw new TRPCError({ code: 'NOT_FOUND', message: 'Hardware patch not found' });
+
+      const { vendor, service } = await resolvePatchVendor(patch);
+      const providerRole = await resolveProviderRole(ctx.user?.userId, vendor);
+
+      return {
+        type: providerRole ? 'VENDOR_STATION' : 'CONSUMER_ACCESS',
+        patch: mapPatch(patch),
+        vendor: vendor
+          ? {
+              id: vendor.id,
+              displayName: vendor.displayName,
+              onboardingStatus: vendor.onboardingStatus,
+            }
+          : null,
+        service,
+        providerRole,
+      };
+    }),
 
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'patch:create' }))

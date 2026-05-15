@@ -69,6 +69,74 @@ describe('patch router', () => {
     });
   });
 
+
+  it('resolves provider-owned service patches to station mode', async () => {
+    (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(basePatch);
+    (db.vendorService.findUnique as any).mockResolvedValueOnce({
+      id: 'svc-1',
+      title: 'VIP Arrival',
+      status: 'active',
+      vendor: {
+        id: 'vendor-1',
+        userId: 'user-1',
+        displayName: 'Midtown Hosts',
+        onboardingStatus: 'active',
+      },
+    });
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.patch.resolve({ patchId: 'patch-1' });
+
+    expect(result.type).toBe('VENDOR_STATION');
+    expect(result.providerRole).toBe('owner');
+    expect(result.vendor?.displayName).toBe('Midtown Hosts');
+    expect(result.service?.title).toBe('VIP Arrival');
+  });
+
+  it('resolves guest patch taps to consumer access', async () => {
+    (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(basePatch);
+    (db.vendorService.findUnique as any).mockResolvedValueOnce({
+      id: 'svc-1',
+      title: 'VIP Arrival',
+      status: 'active',
+      vendor: {
+        id: 'vendor-1',
+        userId: 'user-1',
+        displayName: 'Midtown Hosts',
+        onboardingStatus: 'active',
+      },
+    });
+
+    const caller = createPublicCaller();
+    const result = await caller.patch.resolve({ patchId: 'patch-1' });
+
+    expect(result.type).toBe('CONSUMER_ACCESS');
+    expect(result.providerRole).toBeNull();
+    expect(result.vendor?.id).toBe('vendor-1');
+  });
+
+  it('resolves staff-managed patches to station mode', async () => {
+    (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(basePatch);
+    (db.vendorService.findUnique as any).mockResolvedValueOnce({
+      id: 'svc-1',
+      title: 'VIP Arrival',
+      status: 'active',
+      vendor: {
+        id: 'vendor-1',
+        userId: 'owner-1',
+        displayName: 'Midtown Hosts',
+        onboardingStatus: 'active',
+      },
+    });
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'STAFF' });
+
+    const caller = createAuthenticatedCaller('staff-1', 'staff@test.com');
+    const result = await caller.patch.resolve({ patchId: 'patch-1' });
+
+    expect(result.type).toBe('VENDOR_STATION');
+    expect(result.providerRole).toBe('staff');
+  });
+
   it('confirms a service binding and links the vendor service to the patch', async () => {
     (db.hardwarePatch.findUnique as any).mockResolvedValueOnce({
       ...basePatch,

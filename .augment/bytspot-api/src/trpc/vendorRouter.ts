@@ -49,9 +49,12 @@ const serviceSelect = {
   vendorId: true,
   title: true,
   description: true,
+  category: true,
   priceCents: true,
   currency: true,
   durationMins: true,
+  maxGuests: true,
+  patchRequired: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -83,6 +86,7 @@ const vendorBookingSelect = {
     select: {
       id: true,
       title: true,
+      category: true,
       priceCents: true,
       currency: true,
       durationMins: true,
@@ -119,9 +123,12 @@ type VendorServiceRow = {
   vendorId: string;
   title: string;
   description: string | null;
+  category: string;
   priceCents: number;
   currency: string;
   durationMins: number | null;
+  maxGuests: number | null;
+  patchRequired: boolean;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -207,9 +214,12 @@ function mapVendorService(service: VendorServiceRow, includeCashFlow = true) {
     id: service.id,
     title: service.title,
     description: service.description,
+    category: service.category,
     priceCents: service.priceCents,
     currency: service.currency,
     durationMins: service.durationMins,
+    maxGuests: service.maxGuests,
+    patchRequired: service.patchRequired,
     status: service.status,
     createdAt: service.createdAt.toISOString(),
     updatedAt: service.updatedAt.toISOString(),
@@ -609,9 +619,12 @@ export const vendorRouter = router({
         vendorId: z.string().min(1).max(120).optional(),
         title: z.string().trim().min(2).max(120),
         description: z.string().trim().max(600).nullable().optional(),
-        priceCents: z.number().int().min(50).max(1_000_000),
+        category: z.string().trim().min(2).max(80).optional().default('General'),
+        priceCents: z.number().int().min(1).max(1_000_000),
         currency: z.string().trim().length(3).optional().default('USD'),
-        durationMins: z.number().int().min(5).max(24 * 60).nullable().optional(),
+        durationMins: z.number().int().min(15).max(24 * 60).nullable().optional(),
+        maxGuests: z.number().int().min(1).max(500).nullable().optional(),
+        patchRequired: z.boolean().optional().default(false),
         status: z.enum(['active', 'draft']).optional().default('active'),
       }),
     )
@@ -625,9 +638,12 @@ export const vendorRouter = router({
           vendorId: vendor.id,
           title: input.title,
           description: input.description ?? null,
+          category: input.category,
           priceCents: input.priceCents,
           currency: input.currency.toUpperCase(),
           durationMins: input.durationMins ?? null,
+          maxGuests: input.maxGuests ?? null,
+          patchRequired: input.patchRequired,
           status: input.status,
         },
         select: serviceSelect,
@@ -670,6 +686,36 @@ export const vendorRouter = router({
       return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, bookings: bookings.map((booking) => mapVendorBooking(booking, vendor, providerRole === 'owner')) };
     }),
 
+  updateBookingStatus: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:updateBookingStatus' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'updateBookingStatus' },
+      }),
+    )
+    .input(z.object({ bookingId: z.string().min(1).max(120), status: z.enum(['confirmed', 'in_progress', 'completed', 'cancelled']) }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await db.booking.findUnique({ where: { id: input.bookingId }, select: vendorBookingSelect });
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
+      const access = await resolveVendorAccess(ctx.user, existing.vendorId, MEMBER_READ, 'Update booking handoff');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+      const { vendor, role: providerRole } = access;
+
+      const booking = await db.booking.update({
+        where: { id: existing.id },
+        data: {
+          status: input.status,
+          completedAt: input.status === 'completed' ? new Date() : existing.completedAt,
+        },
+        select: vendorBookingSelect,
+      });
+
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, booking: mapVendorBooking(booking, vendor, providerRole === 'owner') };
+    }),
+
   updateService: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:updateService' }))
     .use(
@@ -685,8 +731,11 @@ export const vendorRouter = router({
         serviceId: z.string().min(1).max(120),
         title: z.string().trim().min(2).max(120).optional(),
         description: z.string().trim().max(600).nullable().optional(),
-        priceCents: z.number().int().min(50).max(1_000_000).optional(),
-        durationMins: z.number().int().min(5).max(24 * 60).nullable().optional(),
+        category: z.string().trim().min(2).max(80).optional(),
+        priceCents: z.number().int().min(1).max(1_000_000).optional(),
+        durationMins: z.number().int().min(15).max(24 * 60).nullable().optional(),
+        maxGuests: z.number().int().min(1).max(500).nullable().optional(),
+        patchRequired: z.boolean().optional(),
         status: z.enum(['active', 'draft', 'archived']).optional(),
       }),
     )
@@ -699,8 +748,11 @@ export const vendorRouter = router({
       const data: Prisma.VendorServiceUpdateInput = {};
       if (input.title !== undefined) data.title = input.title;
       if (input.description !== undefined) data.description = input.description;
+      if (input.category !== undefined) data.category = input.category;
       if (input.priceCents !== undefined) data.priceCents = input.priceCents;
       if (input.durationMins !== undefined) data.durationMins = input.durationMins;
+      if (input.maxGuests !== undefined) data.maxGuests = input.maxGuests;
+      if (input.patchRequired !== undefined) data.patchRequired = input.patchRequired;
       if (input.status !== undefined) data.status = input.status;
 
       const service = await db.vendorService.update({
@@ -745,14 +797,22 @@ export const vendorRouter = router({
         .map((service) => mapVendorPatchRecord(service.patch!, vendor, service));
 
       const vendorPatches = await db.hardwarePatch.findMany({
-        where: { bindingType: 'vendor', bindingId: vendor.id, entity: Entity.VENDOR_SERVICES },
+        where: {
+          entity: Entity.VENDOR_SERVICES,
+          OR: [
+            { bindingType: 'vendor', bindingId: vendor.id },
+            { bindingType: 'service', bindingId: { in: services.map((service) => service.id) } },
+          ],
+        },
         orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
         take: input.limit,
         select: patchSelect,
       }) as VendorPatchRow[];
 
+      const serviceById = new Map(services.map((service) => [service.id, service]));
+
       const recordsById = new Map<string, ReturnType<typeof mapVendorPatchRecord>>();
-      for (const record of [...servicePatchRecords, ...vendorPatches.map((patch) => mapVendorPatchRecord(patch, vendor, null))]) {
+      for (const record of [...servicePatchRecords, ...vendorPatches.map((patch) => mapVendorPatchRecord(patch, vendor, patch.bindingType === 'service' && patch.bindingId ? serviceById.get(patch.bindingId) ?? null : null))]) {
         recordsById.set(record.id, record);
       }
 
@@ -794,9 +854,6 @@ export const vendorRouter = router({
         if (!row || row.vendorId !== vendor.id) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor service not found' });
         }
-        if (row.patchId) {
-          throw new TRPCError({ code: 'CONFLICT', message: 'Service already has a patch bound' });
-        }
         service = row;
       }
 
@@ -824,7 +881,7 @@ export const vendorRouter = router({
       }
       if (!patch) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Unable to create patch' });
 
-      if (service) {
+      if (service && !service.patchId) {
         await db.vendorService.update({ where: { id: service.id }, data: { patchId: patch.id } });
       }
 
@@ -852,7 +909,11 @@ export const vendorRouter = router({
     .query(async ({ input }) => {
       const where: Prisma.VendorServiceWhereInput = { status: 'active' };
       if (input.vendorId) where.vendorId = input.vendorId;
-      if (input.patchId) where.patchId = input.patchId;
+      if (input.patchId) {
+        const patch = await db.hardwarePatch.findUnique({ where: { id: input.patchId }, select: patchSelect });
+        if (patch?.bindingType === 'service' && patch.bindingId) where.id = patch.bindingId;
+        else where.patchId = input.patchId;
+      }
       if (input.query) {
         where.OR = [
           { title: { contains: input.query, mode: 'insensitive' } },

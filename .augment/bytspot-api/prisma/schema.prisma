@@ -487,9 +487,12 @@ model VendorService {
   vendorId     String   @map("vendor_id")
   title        String
   description  String?
+  category     String   @default("General")
   priceCents   Int      @map("price_cents")
   currency     String   @default("USD")
   durationMins Int?     @map("duration_mins")
+  maxGuests    Int?     @map("max_guests")
+  patchRequired Boolean @default(false) @map("patch_required")
   status       String   @default("draft") // draft | active | archived
   patchId      String?  @map("patch_id")
   createdAt    DateTime @default(now()) @map("created_at")

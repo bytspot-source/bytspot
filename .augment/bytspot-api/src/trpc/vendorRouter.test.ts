@@ -36,9 +36,12 @@ const activeService = {
   vendorId: 'vendor-1',
   title: 'VIP Arrival',
   description: 'Door-to-table escort with patch verified access',
+  category: 'Transportation',
   priceCents: 15000,
   currency: 'USD',
   durationMins: 90,
+  maxGuests: 4,
+  patchRequired: true,
   status: 'active',
   createdAt: new Date('2026-05-03T11:00:00.000Z'),
   updatedAt: new Date('2026-05-03T12:10:00.000Z'),
@@ -67,6 +70,7 @@ const activeBooking = {
   service: {
     id: 'svc-1',
     title: 'VIP Arrival',
+    category: 'Transportation',
     priceCents: 15000,
     currency: 'USD',
     durationMins: 90,
@@ -227,7 +231,7 @@ describe('vendor router', () => {
   });
 
   it('creates a vendor service owned by the authenticated vendor', async () => {
-    const createdService = { ...activeService, id: 'svc-new', title: 'Garage Parking', description: 'Secure indoor parking near the venue', priceCents: 2500, durationMins: 60, patch: null };
+    const createdService = { ...activeService, id: 'svc-new', title: 'Garage Parking', description: 'Secure indoor parking near the venue', category: 'Parking', priceCents: 2500, durationMins: 60, maxGuests: 1, patchRequired: false, patch: null };
     (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
     (db.vendorService.create as any).mockResolvedValueOnce(createdService);
 
@@ -235,8 +239,11 @@ describe('vendor router', () => {
     const result = await caller.vendors.createService({
       title: 'Garage Parking',
       description: 'Secure indoor parking near the venue',
+      category: 'Parking',
       priceCents: 2500,
       durationMins: 60,
+      maxGuests: 1,
+      patchRequired: false,
       status: 'active',
     });
 
@@ -245,9 +252,12 @@ describe('vendor router', () => {
         vendorId: 'vendor-1',
         title: 'Garage Parking',
         description: 'Secure indoor parking near the venue',
+        category: 'Parking',
         priceCents: 2500,
         currency: 'USD',
         durationMins: 60,
+        maxGuests: 1,
+        patchRequired: false,
         status: 'active',
       },
       select: expect.any(Object),
@@ -256,8 +266,8 @@ describe('vendor router', () => {
     expect(result.service.cashFlow.providerPayoutEstimateCents).toBe(2300);
   });
 
-  it('allows managers to manage catalog without exposing owner cash-flow fields', async () => {
-    const createdService = { ...activeService, id: 'svc-manager', vendorId: 'vendor-1', patch: null };
+  it('allows managers to create and edit catalog without exposing owner cash-flow fields', async () => {
+    const createdService = { ...activeService, id: 'svc-manager-new', title: 'Manager Service', category: 'Catering', patch: null };
     (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
     (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
     (db.vendorService.create as any).mockResolvedValueOnce(createdService);
@@ -265,15 +275,32 @@ describe('vendor router', () => {
     const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
       vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
     });
-    const result = await caller.vendors.createService({
+    const created = await caller.vendors.createService({
       vendorId: 'vendor-1',
-      title: 'Managed Service',
+      title: 'Manager Service',
+      category: 'Catering',
       priceCents: 5000,
-      status: 'active',
+      status: 'draft',
+    });
+
+    expect(created.providerRole).toBe('manager');
+    expect(created.service.id).toBe('svc-manager-new');
+    expect(created.service.cashFlow).toBeUndefined();
+
+    const updatedService = { ...activeService, title: 'Managed Service', category: 'Catering', patch: null };
+    (db.vendorService.findUnique as any).mockResolvedValueOnce(activeService);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+    (db.vendorService.update as any).mockResolvedValueOnce(updatedService);
+
+    const result = await caller.vendors.updateService({
+      serviceId: 'svc-1',
+      title: 'Managed Service',
+      category: 'Catering',
     });
 
     expect(result.providerRole).toBe('manager');
-    expect(result.service.id).toBe('svc-manager');
+    expect(result.service.id).toBe('svc-1');
     expect(result.service.cashFlow).toBeUndefined();
   });
 
@@ -328,6 +355,26 @@ describe('vendor router', () => {
     expect(result.bookings[0].cashFlow).toBeUndefined();
   });
 
+  it('allows staff to check in an owned booking without exposing financial fields', async () => {
+    (db.booking.findUnique as any).mockResolvedValueOnce(activeBooking);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'STAFF' });
+    (db.booking.update as any).mockResolvedValueOnce({ ...activeBooking, status: 'in_progress' });
+
+    const caller = createAuthenticatedCaller('staff-1', 'staff@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'staff', groups: ['bytspot:vendor:vendor-1:staff'] }],
+    });
+    const result = await caller.vendors.updateBookingStatus({ bookingId: 'booking-1', status: 'in_progress' });
+
+    expect(db.booking.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({ status: 'in_progress' }),
+    }));
+    expect(result.providerRole).toBe('staff');
+    expect(result.booking.status).toBe('in_progress');
+    expect(result.booking.cashFlow).toBeUndefined();
+  });
+
   it('returns providerRole from syncOnboarding and blocks manager Stripe account sync', async () => {
     config.stripeSecretKey = TEST_STRIPE_SECRET;
     (db.vendor.findUnique as any).mockResolvedValueOnce({ ...delegatedVendorProfile, stripeAccountId: 'acct_123' });
@@ -378,6 +425,8 @@ describe('vendor router', () => {
       description: 'Updated provider handoff',
       priceCents: 17500,
       durationMins: 120,
+      maxGuests: 6,
+      patchRequired: true,
     });
 
     expect(db.vendorService.update).toHaveBeenCalledWith({
@@ -387,6 +436,8 @@ describe('vendor router', () => {
         description: 'Updated provider handoff',
         priceCents: 17500,
         durationMins: 120,
+        maxGuests: 6,
+        patchRequired: true,
       },
       select: expect.any(Object),
     });
@@ -415,7 +466,13 @@ describe('vendor router', () => {
       select: expect.objectContaining({ patch: { select: expect.any(Object) } }),
     }));
     expect(db.hardwarePatch.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { bindingType: 'vendor', bindingId: 'vendor-1', entity: Entity.VENDOR_SERVICES },
+      where: {
+        entity: Entity.VENDOR_SERVICES,
+        OR: [
+          { bindingType: 'vendor', bindingId: 'vendor-1' },
+          { bindingType: 'service', bindingId: { in: ['svc-1'] } },
+        ],
+      },
     }));
     expect(result.patches).toHaveLength(2);
     expect(result.patches[0]).toEqual(expect.objectContaining({ venueName: 'Midtown Hosts', url: expect.stringContaining('/p/') }));

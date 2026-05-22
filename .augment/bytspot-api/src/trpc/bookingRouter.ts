@@ -6,13 +6,30 @@ import Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { getActiveICTKid, signICT } from '../services/ictSigner';
-import { protectedProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware } from './trpc';
+import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware } from './trpc';
 
 const bookingFrameworks = ['NIST_AI_RMF_1_0', 'EO_14365'] as const;
 const POINTS_PER_USD = 100;
 const CENTS_PER_USD = 100;
 const MARKETPLACE_MIN_UNIT_AMOUNT_CENTS = 50;
 const MARKETPLACE_CREDIT_TYPE = 'MARKETPLACE_CREDIT';
+
+const bookingUserForCustomerSelect = {
+  id: true,
+  email: true,
+  name: true,
+  phone: true,
+  stripeCustomerId: true,
+  authProvider: true,
+} as const;
+
+const secureHoldGuestContactSchema = z.object({
+  email: z.string().trim().email().max(255).optional(),
+  name: z.string().trim().min(1).max(120).optional(),
+  phone: z.string().trim().min(3).max(40).optional(),
+  postalCode: z.string().trim().min(2).max(20).optional(),
+  country: z.string().trim().min(2).max(2).optional(),
+}).optional();
 
 const patchSelect = {
   id: true,
@@ -106,6 +123,23 @@ type BookingRow = {
   };
 };
 
+type BookingUserForCustomer = {
+  id: string;
+  email: string;
+  name: string | null;
+  phone?: string | null;
+  stripeCustomerId: string | null;
+  authProvider?: string | null;
+};
+
+type SecureHoldGuestContact = {
+  email?: string;
+  name?: string;
+  phone?: string;
+  postalCode?: string;
+  country?: string;
+};
+
 function isBoundServicePatch(patch: BookingPatchRow | null, serviceId: string): patch is BookingPatchRow {
   return !!patch && patch.status === 'bound' && patch.bindingType === 'service' && patch.bindingId === serviceId;
 }
@@ -146,6 +180,79 @@ function buildMarketplaceOffer(basePriceCents: number, commissionBps: number, av
     commissionBps,
     pointsPerUsd: POINTS_PER_USD,
   };
+}
+
+function cleanOptionalString(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeGuestContact(contact: SecureHoldGuestContact | undefined): SecureHoldGuestContact {
+  const email = cleanOptionalString(contact?.email)?.toLowerCase();
+  return {
+    email,
+    name: cleanOptionalString(contact?.name),
+    phone: cleanOptionalString(contact?.phone),
+    postalCode: cleanOptionalString(contact?.postalCode),
+    country: cleanOptionalString(contact?.country)?.toUpperCase(),
+  };
+}
+
+async function ensureStripeCustomerForBookingUser(
+  stripe: Stripe,
+  user: BookingUserForCustomer,
+  source: 'authenticated' | 'apple_pay_guest',
+) {
+  if (user.stripeCustomerId) return user.stripeCustomerId;
+
+  const customer = await stripe.customers.create({
+    email: user.email,
+    name: user.name ?? undefined,
+    phone: user.phone ?? undefined,
+    metadata: { userId: user.id, source },
+  });
+  await db.user.update({ where: { id: user.id }, data: { stripeCustomerId: customer.id } });
+  return customer.id;
+}
+
+async function getOrCreateBookingStripeCustomer(stripe: Stripe, userId: string) {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: bookingUserForCustomerSelect,
+  });
+  if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+  return ensureStripeCustomerForBookingUser(stripe, user, 'authenticated');
+}
+
+async function getOrCreateApplePayGuestBooker(stripe: Stripe, contactInput: SecureHoldGuestContact | undefined) {
+  const contact = normalizeGuestContact(contactInput);
+  if (!contact.email) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: 'Guest Apple Pay secure holds require an email address from Apple Pay contact information.',
+    });
+  }
+
+  let user = await db.user.findUnique({
+    where: { email: contact.email },
+    select: bookingUserForCustomerSelect,
+  });
+  if (!user) {
+    user = await db.user.create({
+      data: {
+        email: contact.email,
+        name: contact.name ?? contact.email.split('@')[0],
+        phone: contact.phone ?? null,
+        password: `apple-pay-guest:${randomUUID()}`,
+        authProvider: 'apple_pay_guest',
+        ref: 'app_clip.apple_pay_secure_hold',
+      },
+      select: bookingUserForCustomerSelect,
+    });
+  }
+
+  const customerId = await ensureStripeCustomerForBookingUser(stripe, user, 'apple_pay_guest');
+  return { user, customerId, contact };
 }
 
 function mapPatchSummary(patch: BookingPatchRow) {
@@ -480,6 +587,216 @@ export const bookingRouter = router({
           transferDestination: service.vendor.stripeAccountId,
           pointsToRedeem: offer.pointsToRedeem,
           pointsDiscountCents: offer.pointsDiscountCents,
+        },
+      };
+    }),
+
+  authorizeApplePayHold: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 8, label: 'booking:authorizeApplePayHold' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: bookingFrameworks,
+        stateFlags: ['BOOKING_CREATE', 'MARKETPLACE_PAYMENT_CREATE'],
+        policyContext: { surface: 'booking', operation: 'authorizeApplePayHold' },
+      }),
+    )
+    .input(
+      z.object({
+        serviceId: z.string().min(1),
+        patchId: z.string().min(1).max(120).optional(),
+        amountCents: z.number().int().min(MARKETPLACE_MIN_UNIT_AMOUNT_CENTS).max(500_000),
+        currency: z.string().trim().min(3).max(3).default('usd'),
+        stripePaymentMethodId: z.string().trim().startsWith('pm_').optional(),
+        stripeTokenId: z.string().trim().startsWith('tok_').optional(),
+        paymentNetworkToken: z.string().trim().max(20_000).optional(),
+        scheduledFor: z.string().datetime().optional(),
+        idempotencyKey: z.string().trim().min(8).max(120).optional(),
+        guestContact: secureHoldGuestContactSchema,
+        metadata: z.record(z.string(), z.unknown()).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      if (!config.stripeSecretKey) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+      }
+      if (!config.stripeSecureHoldPaymentMethodConfigurationId) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Secure hold payment configuration is not configured.' });
+      }
+      if (!input.stripePaymentMethodId && !input.stripeTokenId) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'Apple Pay secure hold requires a Stripe payment method or token. Raw Apple Pay network tokens must be converted by the native Stripe SDK first.',
+        });
+      }
+
+      const service = await db.vendorService.findUnique({
+        where: { id: input.serviceId },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          priceCents: true,
+          currency: true,
+          durationMins: true,
+          status: true,
+          vendor: {
+            select: {
+              id: true,
+              displayName: true,
+              commissionBps: true,
+              stripeAccountId: true,
+              onboardingStatus: true,
+              entity: true,
+            },
+          },
+          patch: { select: patchSelect },
+        },
+      });
+
+      if (!service) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor service not found' });
+      if (service.status !== 'active') {
+        throw new TRPCError({ code: 'CONFLICT', message: 'Only active vendor services can be booked' });
+      }
+      if (!service.vendor.stripeAccountId || service.vendor.onboardingStatus !== 'active') {
+        throw new TRPCError({ code: 'CONFLICT', message: 'Vendor Stripe Connect onboarding is not ready' });
+      }
+      if (input.amountCents !== service.priceCents) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Secure hold amount does not match the service price.' });
+      }
+      if (input.currency.toUpperCase() !== service.currency.toUpperCase()) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Secure hold currency does not match the service currency.' });
+      }
+
+      const stripe = new Stripe(config.stripeSecretKey);
+      const guestBooker = ctx.user ? null : await getOrCreateApplePayGuestBooker(stripe, input.guestContact);
+      const bookingUserId = ctx.user?.userId ?? guestBooker?.user.id;
+      if (!bookingUserId) {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Not authenticated' });
+      }
+      const customerId = ctx.user ? await getOrCreateBookingStripeCustomer(stripe, ctx.user.userId) : guestBooker!.customerId;
+      const bookingMode = ctx.user ? 'authenticated' : 'apple_pay_guest';
+      const entity = service.vendor.entity;
+      const boundPatch = isBoundServicePatch(service.patch, service.id) ? service.patch : null;
+      if (input.patchId && boundPatch && ![boundPatch.id, boundPatch.uid].includes(input.patchId)) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Patch does not match the selected service.' });
+      }
+      const scheduledFor = input.scheduledFor ? new Date(input.scheduledFor) : null;
+      const offer = buildMarketplaceOffer(service.priceCents, service.vendor.commissionBps, 0, false);
+      const stripeMetadata: Record<string, string> = {
+        flow: 'booking.apple_pay_secure_hold',
+        source: 'booking.authorizeApplePayHold',
+        captureMode: 'manual',
+        secureHoldStatus: 'authorization_requested',
+        entity,
+        userId: bookingUserId,
+        bookingMode,
+        guestEmailProvided: guestBooker?.contact.email ? 'true' : 'false',
+        vendorId: service.vendor.id,
+        vendorName: service.vendor.displayName,
+        serviceId: service.id,
+        serviceTitle: service.title,
+        patchId: boundPatch?.id ?? input.patchId ?? '',
+        patchUid: boundPatch?.uid ?? '',
+        finalChargeCents: String(offer.finalChargeCents),
+        platformFeeCents: String(offer.platformFeeCents),
+        providerPayoutEstimateCents: String(offer.providerPayoutEstimateCents),
+        commissionBps: String(offer.commissionBps),
+        transferDestination: service.vendor.stripeAccountId,
+      };
+      const guestMetadata = guestBooker
+        ? {
+            guestContact: {
+              email: guestBooker.contact.email,
+              name: guestBooker.contact.name ?? null,
+              phone: guestBooker.contact.phone ?? null,
+              postalCode: guestBooker.contact.postalCode ?? null,
+              country: guestBooker.contact.country ?? null,
+            },
+            guestLinking: { strategy: 'email_match_on_future_auth', userId: bookingUserId },
+          }
+        : { guestContact: null, guestLinking: null };
+
+      const booking = await db.booking.create({
+        data: {
+          serviceId: service.id,
+          vendorId: service.vendor.id,
+          userId: bookingUserId,
+          entity,
+          status: 'pending',
+          priceCents: offer.finalChargeCents,
+          platformFeeCents: offer.platformFeeCents,
+          currency: service.currency,
+          scheduledFor,
+          stripeTransferDestination: service.vendor.stripeAccountId,
+          metadata: {
+            ...input.metadata,
+            ...stripeMetadata,
+            ...guestMetadata,
+            paymentMethodConfigurationId: config.stripeSecureHoldPaymentMethodConfigurationId,
+            patch: boundPatch ? { id: boundPatch.id, uid: boundPatch.uid, label: boundPatch.label } : null,
+          },
+        },
+        select: bookingSelect,
+      });
+
+      const sessionMetadata = { ...stripeMetadata, bookingId: booking.id, secureHoldStatus: 'authorization_requested' };
+      const paymentMethodData = input.stripeTokenId
+        ? ({ type: 'card', card: { token: input.stripeTokenId } } as unknown as Stripe.PaymentIntentCreateParams.PaymentMethodData)
+        : undefined;
+      const paymentIntentParams: Stripe.PaymentIntentCreateParams = {
+        amount: offer.finalChargeCents,
+        currency: service.currency.toLowerCase(),
+        customer: customerId,
+        capture_method: 'manual',
+        confirm: true,
+        payment_method: input.stripePaymentMethodId,
+        payment_method_data: paymentMethodData,
+        payment_method_configuration: config.stripeSecureHoldPaymentMethodConfigurationId,
+        application_fee_amount: offer.platformFeeCents,
+        transfer_data: { destination: service.vendor.stripeAccountId },
+        metadata: sessionMetadata,
+        description: `Bytspot secure hold — ${service.title}`,
+      };
+      const paymentIntent = await stripe.paymentIntents.create(
+        paymentIntentParams,
+        input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
+      );
+
+      const holdAuthorized = paymentIntent.status === 'requires_capture' || paymentIntent.status === 'succeeded';
+      const updatedBooking = await db.booking.update({
+        where: { id: booking.id },
+        data: {
+          status: holdAuthorized ? 'funds_authorized' : 'pending',
+          stripePaymentIntentId: paymentIntent.id,
+          metadata: {
+            ...sessionMetadata,
+            ...guestMetadata,
+            paymentIntentStatus: paymentIntent.status,
+            secureHoldStatus: holdAuthorized ? 'funds_authorized' : 'requires_action',
+            clientSecretCreated: Boolean(paymentIntent.client_secret),
+          },
+        },
+        select: bookingSelect,
+      });
+
+      return {
+        booking: mapBooking(updatedBooking),
+        bookingId: updatedBooking.id,
+        paymentIntentId: paymentIntent.id,
+        clientSecret: paymentIntent.client_secret,
+        status: holdAuthorized ? 'funds_authorized' : paymentIntent.status,
+        captureMode: 'manual' as const,
+        guestMode: bookingMode === 'apple_pay_guest',
+        message: holdAuthorized
+          ? 'Secure hold authorized. Funds will be captured after service completion.'
+          : 'Secure hold created. Additional payment confirmation may be required.',
+        moneyFlow: {
+          entity,
+          grossCents: offer.finalChargeCents,
+          applicationFeeAmount: offer.platformFeeCents,
+          providerPayoutEstimateCents: offer.providerPayoutEstimateCents,
+          transferDestination: service.vendor.stripeAccountId,
         },
       };
     }),

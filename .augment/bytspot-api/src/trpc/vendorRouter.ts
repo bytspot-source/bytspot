@@ -78,6 +78,9 @@ const vendorBookingSelect = {
   priceCents: true,
   platformFeeCents: true,
   currency: true,
+  stripePaymentIntentId: true,
+  stripeTransferDestination: true,
+  metadata: true,
   scheduledFor: true,
   completedAt: true,
   createdAt: true,
@@ -259,6 +262,10 @@ function mapVendorBooking(booking: any, vendor: VendorRow, includeCashFlow = tru
     completedAt: booking.completedAt?.toISOString?.() ?? null,
     priceCents: grossCents,
     currency: booking.currency ?? booking.service?.currency ?? 'USD',
+    payment: {
+      status: booking.metadata?.secureHoldStatus ?? booking.metadata?.paymentIntentStatus ?? null,
+      captureMode: booking.metadata?.captureMode ?? null,
+    },
     guest: {
       id: booking.user?.id ?? booking.userId,
       displayName: booking.user?.name ?? booking.user?.email ?? 'Guest',
@@ -703,17 +710,64 @@ export const vendorRouter = router({
       const access = await resolveVendorAccess(ctx.user, existing.vendorId, MEMBER_READ, 'Update booking handoff');
       if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
       const { vendor, role: providerRole } = access;
+      const existingMetadata = metadataObject(existing.metadata ?? null);
+      const shouldCaptureSecureHold = input.status === 'completed'
+        && existing.status === 'funds_authorized'
+        && Boolean(existing.stripePaymentIntentId);
+
+      let capturedPaymentIntent: Stripe.PaymentIntent | null = null;
+      if (shouldCaptureSecureHold) {
+        assertVendorRole(providerRole, OPS_WRITE, 'Capture secure hold');
+        if (!config.stripeSecretKey) {
+          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+        }
+        const stripe = new Stripe(config.stripeSecretKey);
+        capturedPaymentIntent = await stripe.paymentIntents.capture(existing.stripePaymentIntentId!, {
+          amount_to_capture: existing.priceCents,
+          metadata: {
+            ...Object.fromEntries(Object.entries(existingMetadata).map(([key, value]) => [key, String(value ?? '')])),
+            secureHoldStatus: 'captured_after_completion',
+            capturedByUserId: ctx.user.userId,
+            capturedByVendorId: vendor.id,
+            capturedVia: 'vendors.updateBookingStatus',
+          },
+        });
+      }
+
+      const bookingUpdateData: Prisma.BookingUpdateInput = {
+        status: input.status,
+        completedAt: input.status === 'completed' ? new Date() : existing.completedAt,
+      };
+      if (shouldCaptureSecureHold) {
+        bookingUpdateData.metadata = {
+          ...existingMetadata,
+          secureHoldStatus: 'captured_after_completion',
+          paymentIntentStatus: capturedPaymentIntent?.status ?? 'succeeded',
+          capturedAt: new Date().toISOString(),
+          capturedByUserId: ctx.user.userId,
+          capturedByVendorId: vendor.id,
+        };
+      }
 
       const booking = await db.booking.update({
         where: { id: existing.id },
-        data: {
-          status: input.status,
-          completedAt: input.status === 'completed' ? new Date() : existing.completedAt,
-        },
+        data: bookingUpdateData,
         select: vendorBookingSelect,
       });
 
-      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, booking: mapVendorBooking(booking, vendor, providerRole === 'owner') };
+      return {
+        vendor: mapVendorOnboarding(vendor, providerRole),
+        providerRole,
+        booking: mapVendorBooking(booking, vendor, providerRole === 'owner'),
+        paymentCapture: shouldCaptureSecureHold
+          ? {
+              paymentIntentId: existing.stripePaymentIntentId,
+              status: capturedPaymentIntent?.status ?? 'succeeded',
+              amountCaptured: capturedPaymentIntent?.amount_received ?? existing.priceCents,
+              message: 'Secure hold captured after service completion.',
+            }
+          : null,
+      };
     }),
 
   updateService: protectedProcedure

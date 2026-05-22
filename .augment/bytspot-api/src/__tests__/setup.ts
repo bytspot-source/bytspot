@@ -174,6 +174,7 @@ vi.mock('../config', () => ({
     stripePremiumPriceId: '',
     stripeVendorPremiumPriceId: '',
     stripeValetPremiumPriceId: '',
+    stripeSecureHoldPaymentMethodConfigurationId: '',
     frontendUrl: 'http://localhost:3000',
     resendApiKey: '',
     adminPassword: 'test-admin-pass',

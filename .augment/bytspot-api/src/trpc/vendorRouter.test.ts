@@ -7,12 +7,14 @@ import { createAuthenticatedCaller, createPublicCaller } from '../__tests__/help
 const stripeAccountsCreate = vi.hoisted(() => vi.fn());
 const stripeAccountsRetrieve = vi.hoisted(() => vi.fn());
 const stripeAccountLinksCreate = vi.hoisted(() => vi.fn());
+const stripePaymentIntentsCapture = vi.hoisted(() => vi.fn());
 const TEST_STRIPE_SECRET = `sk_${'test'}_transaction_metadata`;
 vi.mock('stripe', () => ({
   default: vi.fn().mockImplementation(function StripeMock() {
     return {
       accounts: { create: stripeAccountsCreate, retrieve: stripeAccountsRetrieve },
       accountLinks: { create: stripeAccountLinksCreate },
+      paymentIntents: { capture: stripePaymentIntentsCapture },
     };
   }),
 }));
@@ -63,6 +65,9 @@ const activeBooking = {
   priceCents: 15000,
   platformFeeCents: 1200,
   currency: 'USD',
+  stripePaymentIntentId: null,
+  stripeTransferDestination: null,
+  metadata: null,
   scheduledFor: new Date('2026-05-04T16:00:00.000Z'),
   completedAt: null,
   createdAt: new Date('2026-05-03T16:00:00.000Z'),
@@ -116,6 +121,7 @@ describe('vendor router', () => {
     stripeAccountsCreate.mockReset();
     stripeAccountsRetrieve.mockReset();
     stripeAccountLinksCreate.mockReset();
+    stripePaymentIntentsCapture.mockReset();
     config.stripeSecretKey = '';
     process.env.NODE_ENV = 'development';
   });
@@ -373,6 +379,84 @@ describe('vendor router', () => {
     expect(result.providerRole).toBe('staff');
     expect(result.booking.status).toBe('in_progress');
     expect(result.booking.cashFlow).toBeUndefined();
+  });
+
+  it('captures an authorized secure hold when a manager completes the service', async () => {
+    config.stripeSecretKey = TEST_STRIPE_SECRET;
+    const authorizedBooking = {
+      ...activeBooking,
+      status: 'funds_authorized',
+      stripePaymentIntentId: 'pi_secure_hold_1',
+      stripeTransferDestination: 'acct_vendor_123',
+      metadata: {
+        flow: 'booking.apple_pay_secure_hold',
+        captureMode: 'manual',
+        secureHoldStatus: 'funds_authorized',
+      },
+    };
+    (db.booking.findUnique as any).mockResolvedValueOnce(authorizedBooking);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+    stripePaymentIntentsCapture.mockResolvedValueOnce({
+      id: 'pi_secure_hold_1',
+      status: 'succeeded',
+      amount_received: 15000,
+    });
+    (db.booking.update as any).mockImplementationOnce(({ data }: any) => ({
+      ...authorizedBooking,
+      status: data.status,
+      completedAt: data.completedAt,
+      metadata: data.metadata,
+    }));
+
+    const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
+    });
+    const result = await caller.vendors.updateBookingStatus({ bookingId: 'booking-1', status: 'completed' });
+
+    expect(stripePaymentIntentsCapture).toHaveBeenCalledWith('pi_secure_hold_1', expect.objectContaining({
+      amount_to_capture: 15000,
+      metadata: expect.objectContaining({
+        secureHoldStatus: 'captured_after_completion',
+        capturedByUserId: 'manager-1',
+        capturedByVendorId: 'vendor-1',
+      }),
+    }));
+    expect(db.booking.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({
+        status: 'completed',
+        metadata: expect.objectContaining({ secureHoldStatus: 'captured_after_completion' }),
+      }),
+    }));
+    expect(result.paymentCapture).toEqual(expect.objectContaining({
+      paymentIntentId: 'pi_secure_hold_1',
+      status: 'succeeded',
+      amountCaptured: 15000,
+    }));
+    expect(result.booking.status).toBe('completed');
+  });
+
+  it('blocks staff from capturing a secure hold on completion', async () => {
+    const authorizedBooking = {
+      ...activeBooking,
+      status: 'funds_authorized',
+      stripePaymentIntentId: 'pi_secure_hold_1',
+      metadata: { captureMode: 'manual', secureHoldStatus: 'funds_authorized' },
+    };
+    (db.booking.findUnique as any).mockResolvedValueOnce(authorizedBooking);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'STAFF' });
+
+    const caller = createAuthenticatedCaller('staff-1', 'staff@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'staff', groups: ['bytspot:vendor:vendor-1:staff'] }],
+    });
+
+    await expect(caller.vendors.updateBookingStatus({ bookingId: 'booking-1', status: 'completed' })).rejects.toThrow(
+      'Capture secure hold requires owner/manager vendor role',
+    );
+    expect(stripePaymentIntentsCapture).not.toHaveBeenCalled();
+    expect(db.booking.update).not.toHaveBeenCalled();
   });
 
   it('returns providerRole from syncOnboarding and blocks manager Stripe account sync', async () => {

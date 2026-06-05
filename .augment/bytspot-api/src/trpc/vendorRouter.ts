@@ -5,7 +5,8 @@ import Stripe from 'stripe';
 import { randomBytes } from 'crypto';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware } from './trpc';
+import { createVendorExpirationWarnings, createVendorNotification, expireVendorOpenRequests, getVendorUnreadNotificationCount } from '../services/vendorNotifications';
+import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware, stripeWebhookProcedure } from './trpc';
 import { assertVendorRole, claimRoleForVendor, normalizeProviderRole, type ProviderRole, vendorGroups } from '../auth/vendorRbac';
 import { type AuthPayload } from '../middleware/auth';
 
@@ -13,6 +14,12 @@ const vendorFrameworks = ['NIST_AI_RMF_1_0', 'EO_14365'] as const;
 const OWNER_ONLY = ['owner'] as const;
 const OPS_WRITE = ['owner', 'manager'] as const;
 const MEMBER_READ = ['owner', 'manager', 'staff'] as const;
+
+const serviceTierSchema = z.enum(['SIMPLE', 'GREEN', 'PLATINUM', 'BLACK']);
+const requestStatusSchema = z.enum(['REQUESTED', 'HOLD_AUTHORIZED', 'ACCEPTED', 'DECLINED', 'COUNTER_OFFERED', 'EXPIRED', 'CANCELLED', 'COMPLETED']);
+const incomingRequestStatuses = ['REQUESTED', 'HOLD_AUTHORIZED', 'COUNTER_OFFERED'] as const;
+const activeBookingStatuses = ['paid', 'confirmed', 'funds_authorized', 'in_progress'] as const;
+const lifecycleStatusSchema = z.enum(['confirmed', 'in_progress', 'completed', 'cancelled']);
 
 const connectReturnPath = '/provider/connect/return';
 const connectRefreshPath = '/provider/connect/refresh';
@@ -69,7 +76,7 @@ const serviceSelect = {
   patch: { select: patchSelect },
 } as const;
 
-const vendorBookingSelect = {
+const vendorBookingSelect: any = {
   id: true,
   serviceId: true,
   vendorId: true,
@@ -78,6 +85,16 @@ const vendorBookingSelect = {
   priceCents: true,
   platformFeeCents: true,
   currency: true,
+  tier: true,
+  requestStatus: true,
+  requestExpiresAt: true,
+  acceptedAt: true,
+  declinedAt: true,
+  counterOfferCents: true,
+  counterOfferCurrency: true,
+  counterOfferMessage: true,
+  guestNotes: true,
+  logisticsMode: true,
   stripePaymentIntentId: true,
   stripeTransferDestination: true,
   metadata: true,
@@ -93,6 +110,7 @@ const vendorBookingSelect = {
       priceCents: true,
       currency: true,
       durationMins: true,
+      tier: true,
       patch: { select: patchSelect },
     },
   },
@@ -132,6 +150,7 @@ type VendorServiceRow = {
   durationMins: number | null;
   maxGuests: number | null;
   patchRequired: boolean;
+  tier?: string | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -223,6 +242,7 @@ function mapVendorService(service: VendorServiceRow, includeCashFlow = true) {
     durationMins: service.durationMins,
     maxGuests: service.maxGuests,
     patchRequired: service.patchRequired,
+    tier: service.tier ?? 'SIMPLE',
     status: service.status,
     createdAt: service.createdAt.toISOString(),
     updatedAt: service.updatedAt.toISOString(),
@@ -262,6 +282,19 @@ function mapVendorBooking(booking: any, vendor: VendorRow, includeCashFlow = tru
     completedAt: booking.completedAt?.toISOString?.() ?? null,
     priceCents: grossCents,
     currency: booking.currency ?? booking.service?.currency ?? 'USD',
+    tier: booking.tier ?? booking.service?.tier ?? 'SIMPLE',
+    requestStatus: booking.requestStatus ?? null,
+    request: {
+      status: booking.requestStatus ?? null,
+      expiresAt: booking.requestExpiresAt?.toISOString?.() ?? null,
+      acceptedAt: booking.acceptedAt?.toISOString?.() ?? null,
+      declinedAt: booking.declinedAt?.toISOString?.() ?? null,
+      counterOfferCents: booking.counterOfferCents ?? null,
+      counterOfferCurrency: booking.counterOfferCurrency ?? null,
+      counterOfferMessage: booking.counterOfferMessage ?? null,
+      guestNotes: booking.guestNotes ?? null,
+      logisticsMode: booking.logisticsMode ?? null,
+    },
     payment: {
       status: booking.metadata?.secureHoldStatus ?? booking.metadata?.paymentIntentStatus ?? null,
       captureMode: booking.metadata?.captureMode ?? null,
@@ -295,6 +328,22 @@ function mapVendorBooking(booking: any, vendor: VendorRow, includeCashFlow = tru
     };
   }
   return row;
+}
+
+function mapVendorNotification(notification: any) {
+  return {
+    id: notification.id,
+    vendorId: notification.vendorId,
+    bookingId: notification.bookingId ?? null,
+    recipientUserId: notification.recipientUserId ?? null,
+    type: notification.type,
+    title: notification.title,
+    body: notification.body,
+    payload: notification.payload ?? null,
+    readAt: notification.readAt?.toISOString?.() ?? null,
+    createdAt: notification.createdAt?.toISOString?.() ?? null,
+    updatedAt: notification.updatedAt?.toISOString?.() ?? null,
+  };
 }
 
 function safePath(path: string | undefined, fallback: string): string {
@@ -418,6 +467,90 @@ async function updateVendorFromAccount(vendor: VendorRow, account: Stripe.Accoun
     select: vendorSelect,
   });
   return updated as VendorRow;
+}
+
+function secureHoldIsAuthorized(booking: any, metadata: Record<string, unknown>): boolean {
+  return Boolean(booking.stripePaymentIntentId)
+    && (booking.status === 'funds_authorized'
+      || (metadata.captureMode === 'manual' && metadata.secureHoldStatus === 'funds_authorized'));
+}
+
+async function updateVendorBookingStatus(user: AuthPayload, bookingId: string, status: 'confirmed' | 'in_progress' | 'completed' | 'cancelled') {
+  const existing = await db.booking.findUnique({ where: { id: bookingId }, select: vendorBookingSelect as any }) as any;
+  if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
+  const access = await resolveVendorAccess(user, existing.vendorId, MEMBER_READ, 'Update booking handoff');
+  if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+  const { vendor, role: providerRole } = access;
+  const existingMetadata = metadataObject(existing.metadata ?? null);
+  const shouldCaptureSecureHold = status === 'completed' && secureHoldIsAuthorized(existing, existingMetadata);
+
+  let capturedPaymentIntent: Stripe.PaymentIntent | null = null;
+  if (shouldCaptureSecureHold) {
+    assertVendorRole(providerRole, OPS_WRITE, 'Capture secure hold');
+    if (!config.stripeSecretKey) {
+      throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+    }
+    const stripe = new Stripe(config.stripeSecretKey);
+    capturedPaymentIntent = await stripe.paymentIntents.capture(existing.stripePaymentIntentId!, {
+      amount_to_capture: existing.priceCents,
+      metadata: {
+        ...Object.fromEntries(Object.entries(existingMetadata).map(([key, value]) => [key, String(value ?? '')])),
+        secureHoldStatus: 'captured_after_completion',
+        capturedByUserId: user.userId,
+        capturedByVendorId: vendor.id,
+        capturedVia: 'vendors.updateBookingStatus',
+      },
+    });
+  }
+
+  const bookingUpdateData: any = {
+    status,
+    completedAt: status === 'completed' ? new Date() : existing.completedAt,
+  };
+  if (status === 'completed') bookingUpdateData.requestStatus = 'COMPLETED';
+  if (status === 'cancelled') bookingUpdateData.requestStatus = 'CANCELLED';
+  if (status === 'confirmed' || status === 'in_progress') bookingUpdateData.requestStatus = 'ACCEPTED';
+  if (shouldCaptureSecureHold) {
+    bookingUpdateData.metadata = {
+      ...existingMetadata,
+      secureHoldStatus: 'captured_after_completion',
+      paymentIntentStatus: capturedPaymentIntent?.status ?? 'succeeded',
+      capturedAt: new Date().toISOString(),
+      capturedByUserId: user.userId,
+      capturedByVendorId: vendor.id,
+    };
+  }
+
+  const booking = await db.booking.update({
+    where: { id: existing.id },
+    data: bookingUpdateData,
+    select: vendorBookingSelect as any,
+  }) as any;
+
+  if (status === 'completed') {
+    await createVendorNotification({
+      vendorId: vendor.id,
+      bookingId: booking.id,
+      type: 'COMPLETED',
+      title: 'Booking completed',
+      body: `${booking.service?.title ?? 'Booking'} has been completed.`,
+      payload: { bookingId: booking.id, tier: booking.tier ?? null, paymentCaptured: shouldCaptureSecureHold },
+    });
+  }
+
+  return {
+    vendor: mapVendorOnboarding(vendor, providerRole),
+    providerRole,
+    booking: mapVendorBooking(booking, vendor, providerRole === 'owner'),
+    paymentCapture: shouldCaptureSecureHold
+      ? {
+          paymentIntentId: existing.stripePaymentIntentId,
+          status: capturedPaymentIntent?.status ?? 'succeeded',
+          amountCaptured: capturedPaymentIntent?.amount_received ?? existing.priceCents,
+          message: 'Secure hold captured after service completion.',
+        }
+      : null,
+  };
 }
 
 export const vendorRouter = router({
@@ -560,7 +693,7 @@ export const vendorRouter = router({
       };
     }),
 
-  connectWebhook: publicProcedure
+  connectWebhook: stripeWebhookProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 100, label: 'vendors:connectWebhook' }))
     .input(
       z.object({
@@ -672,7 +805,7 @@ export const vendorRouter = router({
     .input(
       z.object({
         vendorId: z.string().min(1).max(120).optional(),
-        status: z.enum(['pending', 'paid', 'confirmed', 'completed', 'canceled', 'refunded', 'disputed', 'all']).optional().default('all'),
+        status: z.enum(['pending', 'paid', 'confirmed', 'funds_authorized', 'in_progress', 'completed', 'canceled', 'cancelled', 'refunded', 'disputed', 'all']).optional().default('all'),
         limit: z.number().int().min(1).max(100).optional().default(50),
       }).optional().default({}),
     )
@@ -693,6 +826,197 @@ export const vendorRouter = router({
       return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, bookings: bookings.map((booking) => mapVendorBooking(booking, vendor, providerRole === 'owner')) };
     }),
 
+  listIncomingRequests: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:listIncomingRequests' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_READ'],
+        policyContext: { surface: 'vendors', operation: 'listIncomingRequests' },
+      }),
+    )
+    .input(
+      z.object({
+        vendorId: z.string().min(1).max(120).optional(),
+        status: requestStatusSchema.or(z.literal('all')).optional().default('all'),
+        tier: serviceTierSchema.or(z.literal('all')).optional().default('all'),
+        limit: z.number().int().min(1).max(100).optional().default(50),
+      }).optional().default({}),
+    )
+    .query(async ({ ctx, input }) => {
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'List incoming requests');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
+      const expiredRequests = await expireVendorOpenRequests({ vendorId: vendor.id });
+      const where: any = { vendorId: vendor.id };
+      where.requestStatus = input.status === 'all' ? { in: [...incomingRequestStatuses] } : input.status;
+      if (input.tier !== 'all') where.tier = input.tier;
+      const bookings = await db.booking.findMany({
+        where,
+        orderBy: [{ requestExpiresAt: 'asc' }, { createdAt: 'desc' }] as any,
+        take: input.limit,
+        select: vendorBookingSelect as any,
+      }) as any[];
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, expiredRequests, requests: bookings.map((booking) => mapVendorBooking(booking, vendor, providerRole === 'owner')) };
+    }),
+
+  listActiveBookings: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:listActiveBookings' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_READ'],
+        policyContext: { surface: 'vendors', operation: 'listActiveBookings' },
+      }),
+    )
+    .input(z.object({ vendorId: z.string().min(1).max(120).optional(), limit: z.number().int().min(1).max(100).optional().default(50) }).optional().default({}))
+    .query(async ({ ctx, input }) => {
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'List active bookings');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
+      const bookings = await db.booking.findMany({
+        where: { vendorId: vendor.id, status: { in: [...activeBookingStatuses] }, requestStatus: 'ACCEPTED' } as any,
+        orderBy: [{ scheduledFor: 'asc' }, { createdAt: 'desc' }] as any,
+        take: input.limit,
+        select: vendorBookingSelect as any,
+      }) as any[];
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, bookings: bookings.map((booking) => mapVendorBooking(booking, vendor, providerRole === 'owner')) };
+    }),
+
+  getRequest: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 40, label: 'vendors:getRequest' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_READ'],
+        policyContext: { surface: 'vendors', operation: 'getRequest' },
+      }),
+    )
+    .input(z.object({ bookingId: z.string().min(1).max(120) }))
+    .query(async ({ ctx, input }) => {
+      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: vendorBookingSelect as any }) as any;
+      if (!booking) throw new TRPCError({ code: 'NOT_FOUND', message: 'Request not found' });
+      const access = await resolveVendorAccess(ctx.user, booking.vendorId, MEMBER_READ, 'Get request detail');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+      const { vendor, role: providerRole } = access;
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, request: mapVendorBooking(booking, vendor, providerRole === 'owner') };
+    }),
+
+  acceptRequest: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:acceptRequest' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'acceptRequest' },
+      }),
+    )
+    .input(z.object({ bookingId: z.string().min(1).max(120) }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await db.booking.findUnique({ where: { id: input.bookingId }, select: vendorBookingSelect as any }) as any;
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Request not found' });
+      const access = await resolveVendorAccess(ctx.user, existing.vendorId, OPS_WRITE, 'Accept request');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+      const { vendor, role: providerRole } = access;
+      if (existing.requestExpiresAt && existing.requestExpiresAt.getTime() < Date.now()) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This request has expired.' });
+      }
+      const bookingStatus = ['pending', 'paid', 'funds_authorized'].includes(existing.status) ? 'confirmed' : existing.status;
+      const booking = await db.booking.update({
+        where: { id: existing.id },
+        data: {
+          status: bookingStatus,
+          requestStatus: 'ACCEPTED',
+          acceptedAt: new Date(),
+          metadata: { ...metadataObject(existing.metadata ?? null), acceptedByUserId: ctx.user.userId, acceptedAt: new Date().toISOString() },
+        } as any,
+        select: vendorBookingSelect as any,
+      }) as any;
+      await createVendorNotification({ vendorId: vendor.id, bookingId: booking.id, type: 'BOOKING_CONFIRMED', title: 'Request accepted', body: `${booking.service?.title ?? 'Request'} was accepted.`, payload: { bookingId: booking.id, tier: booking.tier ?? null } });
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, request: mapVendorBooking(booking, vendor, providerRole === 'owner') };
+    }),
+
+  declineRequest: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:declineRequest' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'declineRequest' },
+      }),
+    )
+    .input(z.object({ bookingId: z.string().min(1).max(120), reason: z.string().trim().max(280).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await db.booking.findUnique({ where: { id: input.bookingId }, select: vendorBookingSelect as any }) as any;
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Request not found' });
+      const access = await resolveVendorAccess(ctx.user, existing.vendorId, OPS_WRITE, 'Decline request');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+      const { vendor, role: providerRole } = access;
+      const existingMetadata = metadataObject(existing.metadata ?? null);
+      let releasedPaymentIntent: Stripe.PaymentIntent | null = null;
+      if (secureHoldIsAuthorized(existing, existingMetadata)) {
+        if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+        const stripe = new Stripe(config.stripeSecretKey);
+        releasedPaymentIntent = await (stripe.paymentIntents as any).cancel(existing.stripePaymentIntentId, { cancellation_reason: 'requested_by_customer' });
+      }
+      const booking = await db.booking.update({
+        where: { id: existing.id },
+        data: {
+          status: 'canceled',
+          requestStatus: 'DECLINED',
+          declinedAt: new Date(),
+          metadata: {
+            ...existingMetadata,
+            declinedByUserId: ctx.user.userId,
+            declinedAt: new Date().toISOString(),
+            declineReason: input.reason ?? null,
+            secureHoldStatus: releasedPaymentIntent ? 'released_after_decline' : existingMetadata.secureHoldStatus,
+            paymentIntentStatus: releasedPaymentIntent?.status ?? existingMetadata.paymentIntentStatus,
+          },
+        } as any,
+        select: vendorBookingSelect as any,
+      }) as any;
+      await createVendorNotification({ vendorId: vendor.id, bookingId: booking.id, type: 'DECLINED', title: 'Request declined', body: `${booking.service?.title ?? 'Request'} was declined.`, payload: { bookingId: booking.id, reason: input.reason ?? null, tier: booking.tier ?? null } });
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, request: mapVendorBooking(booking, vendor, providerRole === 'owner'), paymentRelease: releasedPaymentIntent ? { paymentIntentId: releasedPaymentIntent.id, status: releasedPaymentIntent.status } : null };
+    }),
+
+  counterOffer: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:counterOffer' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'counterOffer' },
+      }),
+    )
+    .input(z.object({ bookingId: z.string().min(1).max(120), amountCents: z.number().int().min(50).max(1_000_000), currency: z.string().trim().min(3).max(3).default('USD'), message: z.string().trim().min(1).max(500).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await db.booking.findUnique({ where: { id: input.bookingId }, select: vendorBookingSelect as any }) as any;
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Request not found' });
+      const access = await resolveVendorAccess(ctx.user, existing.vendorId, OPS_WRITE, 'Counter offer request');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
+      const { vendor, role: providerRole } = access;
+      const booking = await db.booking.update({
+        where: { id: existing.id },
+        data: {
+          requestStatus: 'COUNTER_OFFERED',
+          counterOfferCents: input.amountCents,
+          counterOfferCurrency: input.currency.toUpperCase(),
+          counterOfferMessage: input.message ?? null,
+          metadata: { ...metadataObject(existing.metadata ?? null), counterOfferByUserId: ctx.user.userId, counterOfferedAt: new Date().toISOString() },
+        } as any,
+        select: vendorBookingSelect as any,
+      }) as any;
+      await createVendorNotification({ vendorId: vendor.id, bookingId: booking.id, type: 'COUNTER_OFFER', title: 'Counter offer sent', body: `${booking.service?.title ?? 'Request'} has a counter offer.`, payload: { bookingId: booking.id, amountCents: input.amountCents, currency: input.currency.toUpperCase(), tier: booking.tier ?? null } });
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, request: mapVendorBooking(booking, vendor, providerRole === 'owner') };
+    }),
+
   updateBookingStatus: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:updateBookingStatus' }))
     .use(
@@ -703,71 +1027,65 @@ export const vendorRouter = router({
         policyContext: { surface: 'vendors', operation: 'updateBookingStatus' },
       }),
     )
-    .input(z.object({ bookingId: z.string().min(1).max(120), status: z.enum(['confirmed', 'in_progress', 'completed', 'cancelled']) }))
+    .input(z.object({ bookingId: z.string().min(1).max(120), status: lifecycleStatusSchema }))
     .mutation(async ({ ctx, input }) => {
-      const existing = await db.booking.findUnique({ where: { id: input.bookingId }, select: vendorBookingSelect });
-      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
-      const access = await resolveVendorAccess(ctx.user, existing.vendorId, MEMBER_READ, 'Update booking handoff');
+      return updateVendorBookingStatus(ctx.user, input.bookingId, input.status);
+    }),
+
+  completeBooking: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'vendors:completeBooking' }))
+    .use(
+      sovereignShieldMiddleware({
+        entity: Entity.VENDOR_SERVICES,
+        frameworks: vendorFrameworks,
+        stateFlags: ['VENDOR_BOOKING_MANAGEMENT_WRITE'],
+        policyContext: { surface: 'vendors', operation: 'completeBooking' },
+      }),
+    )
+    .input(z.object({ bookingId: z.string().min(1).max(120) }))
+    .mutation(async ({ ctx, input }) => updateVendorBookingStatus(ctx.user, input.bookingId, 'completed')),
+
+  listNotifications: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 40, label: 'vendors:listNotifications' }))
+    .input(z.object({ vendorId: z.string().min(1).max(120).optional(), unreadOnly: z.boolean().optional().default(false), limit: z.number().int().min(1).max(100).optional().default(50), type: z.string().trim().min(1).max(80).optional() }).optional().default({}))
+    .query(async ({ ctx, input }) => {
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'List notifications');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
+      const where: any = { vendorId: vendor.id };
+      if (input.unreadOnly) where.readAt = null;
+      if (input.type) where.type = input.type;
+      const [notifications, unreadCount] = await Promise.all([
+        (db as any).vendorNotification.findMany({ where, orderBy: { createdAt: 'desc' }, take: input.limit }),
+        getVendorUnreadNotificationCount(vendor.id, input.type),
+      ]);
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, notifications: notifications.map(mapVendorNotification), unreadCount };
+    }),
+
+  syncNotifications: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'vendors:syncNotifications' }))
+    .input(z.object({ vendorId: z.string().min(1).max(120).optional(), warningWindowMinutes: z.number().int().min(1).max(180).optional().default(15) }).optional().default({}))
+    .mutation(async ({ ctx, input }) => {
+      const access = await resolveVendorAccess(ctx.user, input.vendorId, MEMBER_READ, 'Sync notifications');
+      if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'No vendor profile found' });
+      const { vendor, role: providerRole } = access;
+      const expiredRequests = await expireVendorOpenRequests({ vendorId: vendor.id });
+      const expirationWarnings = await createVendorExpirationWarnings({ vendorId: vendor.id, warningWindowMinutes: input.warningWindowMinutes, limit: 100 });
+      const unreadCount = await getVendorUnreadNotificationCount(vendor.id);
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, expiredRequests, expirationWarnings: { checked: expirationWarnings.checked, warningsCreated: expirationWarnings.warningsCreated }, unreadCount };
+    }),
+
+  markNotificationRead: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'vendors:markNotificationRead' }))
+    .input(z.object({ notificationId: z.string().min(1).max(120) }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await (db as any).vendorNotification.findUnique({ where: { id: input.notificationId } });
+      if (!existing) throw new TRPCError({ code: 'NOT_FOUND', message: 'Notification not found' });
+      const access = await resolveVendorAccess(ctx.user, existing.vendorId, MEMBER_READ, 'Mark notification read');
       if (!access) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vendor profile not found' });
       const { vendor, role: providerRole } = access;
-      const existingMetadata = metadataObject(existing.metadata ?? null);
-      const shouldCaptureSecureHold = input.status === 'completed'
-        && existing.status === 'funds_authorized'
-        && Boolean(existing.stripePaymentIntentId);
-
-      let capturedPaymentIntent: Stripe.PaymentIntent | null = null;
-      if (shouldCaptureSecureHold) {
-        assertVendorRole(providerRole, OPS_WRITE, 'Capture secure hold');
-        if (!config.stripeSecretKey) {
-          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
-        }
-        const stripe = new Stripe(config.stripeSecretKey);
-        capturedPaymentIntent = await stripe.paymentIntents.capture(existing.stripePaymentIntentId!, {
-          amount_to_capture: existing.priceCents,
-          metadata: {
-            ...Object.fromEntries(Object.entries(existingMetadata).map(([key, value]) => [key, String(value ?? '')])),
-            secureHoldStatus: 'captured_after_completion',
-            capturedByUserId: ctx.user.userId,
-            capturedByVendorId: vendor.id,
-            capturedVia: 'vendors.updateBookingStatus',
-          },
-        });
-      }
-
-      const bookingUpdateData: Prisma.BookingUpdateInput = {
-        status: input.status,
-        completedAt: input.status === 'completed' ? new Date() : existing.completedAt,
-      };
-      if (shouldCaptureSecureHold) {
-        bookingUpdateData.metadata = {
-          ...existingMetadata,
-          secureHoldStatus: 'captured_after_completion',
-          paymentIntentStatus: capturedPaymentIntent?.status ?? 'succeeded',
-          capturedAt: new Date().toISOString(),
-          capturedByUserId: ctx.user.userId,
-          capturedByVendorId: vendor.id,
-        };
-      }
-
-      const booking = await db.booking.update({
-        where: { id: existing.id },
-        data: bookingUpdateData,
-        select: vendorBookingSelect,
-      });
-
-      return {
-        vendor: mapVendorOnboarding(vendor, providerRole),
-        providerRole,
-        booking: mapVendorBooking(booking, vendor, providerRole === 'owner'),
-        paymentCapture: shouldCaptureSecureHold
-          ? {
-              paymentIntentId: existing.stripePaymentIntentId,
-              status: capturedPaymentIntent?.status ?? 'succeeded',
-              amountCaptured: capturedPaymentIntent?.amount_received ?? existing.priceCents,
-              message: 'Secure hold captured after service completion.',
-            }
-          : null,
-      };
+      const notification = await (db as any).vendorNotification.update({ where: { id: existing.id }, data: { readAt: existing.readAt ?? new Date() } });
+      return { vendor: mapVendorOnboarding(vendor, providerRole), providerRole, notification: mapVendorNotification(notification) };
     }),
 
   updateService: protectedProcedure

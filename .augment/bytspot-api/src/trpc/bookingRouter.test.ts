@@ -217,6 +217,8 @@ describe('booking router', () => {
         priceCents: 14000,
         platformFeeCents: 1120,
         stripeTransferDestination: 'acct_vendor_123',
+        requestStatus: 'REQUESTED',
+        tier: 'SIMPLE',
       }),
       select: expect.any(Object),
     });
@@ -231,6 +233,14 @@ describe('booking router', () => {
           pointsToRedeem: '1000',
           finalChargeCents: '14000',
         }),
+      }),
+    }));
+    expect((db as any).vendorNotification.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        vendorId: 'vendor-1',
+        bookingId: 'booking-1',
+        type: 'NEW_REQUEST',
+        payload: expect.objectContaining({ requestStatus: 'REQUESTED', amountCents: 14000 }),
       }),
     }));
     expect(result.moneyFlow).toEqual(expect.objectContaining({
@@ -345,10 +355,19 @@ describe('booking router', () => {
 	      where: { id: 'booking-apple-pay-1' },
 	      data: expect.objectContaining({
 	        status: 'funds_authorized',
+	        requestStatus: 'HOLD_AUTHORIZED',
 	        stripePaymentIntentId: 'pi_secure_hold_1',
 	      }),
 	      select: expect.any(Object),
 	    });
+	    expect((db as any).vendorNotification.create).toHaveBeenCalledWith(expect.objectContaining({
+	      data: expect.objectContaining({
+	        vendorId: 'vendor-1',
+	        bookingId: 'booking-apple-pay-1',
+	        type: 'NEW_REQUEST',
+	        payload: expect.objectContaining({ requestStatus: 'HOLD_AUTHORIZED', secureHoldAuthorized: true }),
+	      }),
+	    }));
 	    expect(result.status).toBe('funds_authorized');
 	    expect(result.captureMode).toBe('manual');
 	    expect(result.moneyFlow).toEqual(expect.objectContaining({ applicationFeeAmount: 1200 }));
@@ -488,6 +507,13 @@ describe('booking router', () => {
     }), undefined);
     expect(result.status).toBe('funds_authorized');
     expect(result.guestMode).toBe(true);
+    expect((db as any).vendorNotification.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        vendorId: 'vendor-1',
+        bookingId: 'booking-guest-hold-1',
+        type: 'NEW_REQUEST',
+      }),
+    }));
     expect(db.complianceLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         userId: null,

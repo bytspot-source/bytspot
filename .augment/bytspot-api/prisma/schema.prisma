@@ -48,6 +48,7 @@ model User {
   accessPasses   AccessPass[]
   vendors        Vendor[]
   vendorMemberships VendorMember[]
+  vendorNotifications VendorNotification[]
   bookings       Booking[]
   savedVehicles  Vehicle[]
   complianceLogs ComplianceLog[]
@@ -415,6 +416,24 @@ enum VendorWorkspaceRole {
   STAFF
 }
 
+enum VendorServiceTier {
+  SIMPLE
+  GREEN
+  PLATINUM
+  BLACK
+}
+
+enum VendorBookingRequestStatus {
+  REQUESTED
+  HOLD_AUTHORIZED
+  ACCEPTED
+  DECLINED
+  COUNTER_OFFERED
+  EXPIRED
+  CANCELLED
+  COMPLETED
+}
+
 // ─── Hardware Patches (NTAG424 DNA physical tags) ────────
 // Each row represents one physical NFC tag. SDM/SUN keys are stored
 // as opaque KMS references — never raw AES material at rest.
@@ -458,6 +477,7 @@ model Vendor {
   members  VendorMember[]
   services VendorService[]
   bookings Booking[]
+  notifications VendorNotification[]
 
   @@index([userId])
   @@index([entity])
@@ -493,6 +513,7 @@ model VendorService {
   durationMins Int?     @map("duration_mins")
   maxGuests    Int?     @map("max_guests")
   patchRequired Boolean @default(false) @map("patch_required")
+  tier         VendorServiceTier @default(SIMPLE)
   status       String   @default("draft") // draft | active | archived
   patchId      String?  @map("patch_id")
   createdAt    DateTime @default(now()) @map("created_at")
@@ -503,6 +524,7 @@ model VendorService {
   bookings Booking[]
 
   @@index([vendorId, status])
+  @@index([vendorId, tier])
   @@index([patchId])
   @@map("vendor_services")
 }
@@ -518,6 +540,16 @@ model Booking {
   priceCents            Int       @map("price_cents")
   platformFeeCents      Int       @default(0) @map("platform_fee_cents")
   currency              String    @default("USD")
+  tier                  VendorServiceTier @default(SIMPLE)
+  requestStatus         VendorBookingRequestStatus @default(ACCEPTED) @map("request_status")
+  requestExpiresAt      DateTime? @map("request_expires_at")
+  acceptedAt            DateTime? @map("accepted_at")
+  declinedAt            DateTime? @map("declined_at")
+  counterOfferCents     Int?      @map("counter_offer_cents")
+  counterOfferCurrency  String?   @map("counter_offer_currency")
+  counterOfferMessage   String?   @map("counter_offer_message")
+  guestNotes            String?   @map("guest_notes")
+  logisticsMode         String?   @map("logistics_mode")
   stripeSessionId       String?   @unique @map("stripe_session_id")
   stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
   stripeTransferDestination String? @map("stripe_transfer_destination")
@@ -531,12 +563,40 @@ model Booking {
   service VendorService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
   vendor  Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
   user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notifications VendorNotification[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([vendorId, status])
+  @@index([vendorId, requestStatus])
+  @@index([vendorId, tier])
+  @@index([requestExpiresAt])
   @@index([serviceId])
   @@index([entity, status])
   @@map("bookings")
+}
+
+model VendorNotification {
+  id              String   @id @default(cuid())
+  vendorId        String   @map("vendor_id")
+  bookingId       String?  @map("booking_id")
+  recipientUserId String?  @map("recipient_user_id")
+  type            String
+  title           String
+  body            String
+  payload         Json?
+  readAt          DateTime? @map("read_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  vendor        Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  booking       Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  recipientUser User?    @relation(fields: [recipientUserId], references: [id], onDelete: SetNull)
+
+  @@index([vendorId, readAt, createdAt(sort: Desc)])
+  @@index([vendorId, type, createdAt(sort: Desc)])
+  @@index([bookingId])
+  @@index([recipientUserId, readAt, createdAt(sort: Desc)])
+  @@map("vendor_notifications")
 }
 
 // ─── Liability Vault Records (WORM audit trail) ──────────

@@ -3,7 +3,7 @@ import { TRPCError } from '@trpc/server';
 import { Entity } from '@prisma/client';
 import { generateKeyPairSync, type JsonWebKey } from 'crypto';
 import jwt from 'jsonwebtoken';
-import { createPublicCaller, createAuthenticatedCaller } from './helpers';
+import { createPublicCaller, createAuthenticatedCaller, createStripeWebhookCaller } from './helpers';
 import { db } from '../lib/db';
 import { config } from '../config';
 import { resetRateLimitBucketsForTests } from '../trpc/trpc';
@@ -436,6 +436,14 @@ describe('auth', () => {
     expect(result.user.email).toBe('bob@test.com');
     expect(result.referralCount).toBe(3);
   });
+
+  it('rejects protected procedures when the JWT user has been deleted', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce(null);
+
+    const caller = createAuthenticatedCaller('deleted-user', 'deleted@test.com', {}, { authUserExists: false });
+
+    await expect(caller.user.profile.get()).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  });
 });
 
 
@@ -688,7 +696,7 @@ describe('subscription', () => {
   });
 
   it('subscription.webhook activates Vendor Premium from checkout metadata', async () => {
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     await caller.subscription.webhook({
       type: 'checkout.session.completed',
       data: { object: { mode: 'subscription', metadata: { userId: 'user-1', plan: 'vendor-premium' } } },
@@ -700,8 +708,18 @@ describe('subscription', () => {
     });
   });
 
-  it('subscription.webhook records subscription point credits with the Stripe session id', async () => {
+  it('subscription.webhook rejects direct public callers without Stripe signature context', async () => {
     const caller = createPublicCaller();
+    await expect(caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: { object: { mode: 'subscription', metadata: { userId: 'user-1', plan: 'vendor-premium' } } },
+    })).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('subscription.webhook records subscription point credits with the Stripe session id', async () => {
+    const caller = createStripeWebhookCaller();
     await caller.subscription.webhook({
       type: 'checkout.session.completed',
       data: {
@@ -731,7 +749,7 @@ describe('subscription', () => {
   });
 
   it('subscription.webhook marks marketplace booking checkout paid and ledgers point redemption by entity', async () => {
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     await caller.subscription.webhook({
       type: 'checkout.session.completed',
       data: {
@@ -773,7 +791,7 @@ describe('subscription', () => {
   });
 
   it('subscription.webhook explicitly acknowledges parking checkout completion metadata', async () => {
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     const result = await caller.subscription.webhook({
       type: 'checkout.session.completed',
       data: {
@@ -807,7 +825,7 @@ describe('subscription', () => {
   });
 
   it('subscription.webhook acknowledges Valet tip payment intent success and failure metadata', async () => {
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     const succeeded = await caller.subscription.webhook({
       type: 'payment_intent.succeeded',
       data: {
@@ -868,7 +886,7 @@ describe('subscription', () => {
       metadata: { pointsToRedeem: '1000', pointsDiscountCents: '1000' },
     });
 
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     const result = await caller.subscription.webhook({
       type: 'refund.updated',
       data: {
@@ -920,7 +938,7 @@ describe('subscription', () => {
         metadata: { pointsToRedeem: '500', pointsDiscountCents: '500' },
       });
 
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     await caller.subscription.webhook({
       type: 'charge.dispute.created',
       data: { object: { id: 'du_123', payment_intent: 'pi_booking_123', status: 'needs_response', amount: 14000 } },
@@ -949,7 +967,7 @@ describe('subscription', () => {
   });
 
   it('subscription.webhook deactivates Valet Premium on subscription deletion', async () => {
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     await caller.subscription.webhook({
       type: 'customer.subscription.deleted',
       data: { object: { customer: 'cus_123', metadata: { plan: 'valet-premium' } } },

@@ -6,6 +6,7 @@ import Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { getActiveICTKid, signICT } from '../services/ictSigner';
+import { notifyVendorNewRequest } from '../services/vendorNotifications';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sovereignShieldMiddleware } from './trpc';
 
 const bookingFrameworks = ['NIST_AI_RMF_1_0', 'EO_14365'] as const;
@@ -13,6 +14,7 @@ const POINTS_PER_USD = 100;
 const CENTS_PER_USD = 100;
 const MARKETPLACE_MIN_UNIT_AMOUNT_CENTS = 50;
 const MARKETPLACE_CREDIT_TYPE = 'MARKETPLACE_CREDIT';
+const PROVIDER_REQUEST_TTL_MS = 30 * 60_000;
 
 const bookingUserForCustomerSelect = {
   id: true,
@@ -44,7 +46,7 @@ const patchSelect = {
   updatedAt: true,
 } as const;
 
-const bookingSelect = {
+const bookingSelect: any = {
   id: true,
   userId: true,
   entity: true,
@@ -52,6 +54,16 @@ const bookingSelect = {
   priceCents: true,
   platformFeeCents: true,
   currency: true,
+  tier: true,
+  requestStatus: true,
+  requestExpiresAt: true,
+  acceptedAt: true,
+  declinedAt: true,
+  counterOfferCents: true,
+  counterOfferCurrency: true,
+  counterOfferMessage: true,
+  guestNotes: true,
+  logisticsMode: true,
   stripeSessionId: true,
   stripePaymentIntentId: true,
   stripeTransferDestination: true,
@@ -330,12 +342,13 @@ export const bookingRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const service = await db.vendorService.findUnique({
+      const service = await (db.vendorService as any).findUnique({
         where: { id: input.serviceId },
         select: {
           id: true,
           title: true,
           description: true,
+          tier: true,
           priceCents: true,
           currency: true,
           durationMins: true,
@@ -378,10 +391,12 @@ export const bookingRouter = router({
           priceCents: service.priceCents,
           platformFeeCents,
           currency: service.currency,
+          tier: (service as any).tier ?? 'SIMPLE',
+          requestStatus: 'ACCEPTED',
           ictJti,
           scheduledFor,
           metadata,
-        },
+        } as any,
         select: bookingSelect,
       });
 
@@ -406,7 +421,7 @@ export const bookingRouter = router({
       );
 
       return {
-        booking: mapBooking(booking),
+        booking: mapBooking(booking as any),
         access: {
           token,
           kid: getActiveICTKid(),
@@ -442,12 +457,13 @@ export const bookingRouter = router({
       }
 
       const [service, pointTxns] = await Promise.all([
-        db.vendorService.findUnique({
+        (db.vendorService as any).findUnique({
           where: { id: input.serviceId },
           select: {
             id: true,
             title: true,
             description: true,
+            tier: true,
             priceCents: true,
             currency: true,
             durationMins: true,
@@ -513,6 +529,7 @@ export const bookingRouter = router({
         ...stripeMetadata,
         patch: boundPatch ? { id: boundPatch.id, uid: boundPatch.uid, label: boundPatch.label } : null,
       };
+      const requestExpiresAt = new Date(Date.now() + PROVIDER_REQUEST_TTL_MS);
 
       const booking = await db.booking.create({
         data: {
@@ -524,6 +541,9 @@ export const bookingRouter = router({
           priceCents: offer.finalChargeCents,
           platformFeeCents: offer.platformFeeCents,
           currency: service.currency,
+          tier: (service as any).tier ?? 'SIMPLE',
+          requestStatus: 'REQUESTED',
+          requestExpiresAt,
           scheduledFor,
           stripeTransferDestination: service.vendor.stripeAccountId,
           metadata: {
@@ -531,7 +551,7 @@ export const bookingRouter = router({
             bookingBasePriceCents: offer.basePriceCents,
             bookingPendingAt: new Date().toISOString(),
           },
-        },
+        } as any,
         select: bookingSelect,
       });
 
@@ -573,6 +593,16 @@ export const bookingRouter = router({
           },
         },
         select: bookingSelect,
+      }) as any;
+      await notifyVendorNewRequest({
+        vendorId: service.vendor.id,
+        bookingId: updatedBooking.id,
+        serviceTitle: service.title,
+        tier: updatedBooking.tier ?? (service as any).tier ?? 'SIMPLE',
+        amountCents: updatedBooking.priceCents,
+        currency: updatedBooking.currency,
+        requestStatus: updatedBooking.requestStatus ?? 'REQUESTED',
+        requestExpiresAt: updatedBooking.requestExpiresAt ?? requestExpiresAt,
       });
 
       return {
@@ -630,12 +660,13 @@ export const bookingRouter = router({
         });
       }
 
-      const service = await db.vendorService.findUnique({
+      const service = await (db.vendorService as any).findUnique({
         where: { id: input.serviceId },
         select: {
           id: true,
           title: true,
           description: true,
+          tier: true,
           priceCents: true,
           currency: true,
           durationMins: true,
@@ -716,6 +747,7 @@ export const bookingRouter = router({
             guestLinking: { strategy: 'email_match_on_future_auth', userId: bookingUserId },
           }
         : { guestContact: null, guestLinking: null };
+      const requestExpiresAt = new Date(Date.now() + PROVIDER_REQUEST_TTL_MS);
 
       const booking = await db.booking.create({
         data: {
@@ -727,6 +759,9 @@ export const bookingRouter = router({
           priceCents: offer.finalChargeCents,
           platformFeeCents: offer.platformFeeCents,
           currency: service.currency,
+          tier: (service as any).tier ?? 'SIMPLE',
+          requestStatus: 'REQUESTED',
+          requestExpiresAt,
           scheduledFor,
           stripeTransferDestination: service.vendor.stripeAccountId,
           metadata: {
@@ -736,7 +771,7 @@ export const bookingRouter = router({
             paymentMethodConfigurationId: config.stripeSecureHoldPaymentMethodConfigurationId,
             patch: boundPatch ? { id: boundPatch.id, uid: boundPatch.uid, label: boundPatch.label } : null,
           },
-        },
+        } as any,
         select: bookingSelect,
       });
 
@@ -768,6 +803,7 @@ export const bookingRouter = router({
         where: { id: booking.id },
         data: {
           status: holdAuthorized ? 'funds_authorized' : 'pending',
+          requestStatus: holdAuthorized ? 'HOLD_AUTHORIZED' : 'REQUESTED',
           stripePaymentIntentId: paymentIntent.id,
           metadata: {
             ...sessionMetadata,
@@ -776,8 +812,19 @@ export const bookingRouter = router({
             secureHoldStatus: holdAuthorized ? 'funds_authorized' : 'requires_action',
             clientSecretCreated: Boolean(paymentIntent.client_secret),
           },
-        },
+        } as any,
         select: bookingSelect,
+      }) as any;
+      await notifyVendorNewRequest({
+        vendorId: service.vendor.id,
+        bookingId: updatedBooking.id,
+        serviceTitle: service.title,
+        tier: updatedBooking.tier ?? (service as any).tier ?? 'SIMPLE',
+        amountCents: updatedBooking.priceCents,
+        currency: updatedBooking.currency,
+        requestStatus: updatedBooking.requestStatus ?? (holdAuthorized ? 'HOLD_AUTHORIZED' : 'REQUESTED'),
+        requestExpiresAt: updatedBooking.requestExpiresAt ?? requestExpiresAt,
+        secureHoldAuthorized: holdAuthorized,
       });
 
       return {
@@ -820,7 +867,7 @@ export const bookingRouter = router({
         select: bookingSelect,
       });
 
-      return { bookings: bookings.map(mapBooking) };
+      return { bookings: (bookings as any[]).map((booking) => mapBooking(booking)) };
     }),
 
   get: protectedProcedure
@@ -840,7 +887,7 @@ export const bookingRouter = router({
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
       }
 
-      return mapBooking(booking);
+      return mapBooking(booking as any);
     }),
 
   cancel: protectedProcedure
@@ -864,7 +911,7 @@ export const bookingRouter = router({
       }
       if (booking.status === 'canceled') {
         return {
-          booking: mapBooking(booking),
+          booking: mapBooking(booking as any),
           alreadyCanceled: true,
         };
       }
@@ -895,7 +942,7 @@ export const bookingRouter = router({
       });
 
       return {
-        booking: mapBooking(canceledBooking),
+        booking: mapBooking(canceledBooking as any),
         alreadyCanceled: false,
       };
     }),

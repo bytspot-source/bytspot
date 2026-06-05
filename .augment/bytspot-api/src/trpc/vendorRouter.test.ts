@@ -2,19 +2,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Entity } from '@prisma/client';
 import { db } from '../lib/db';
 import { config } from '../config';
-import { createAuthenticatedCaller, createPublicCaller } from '../__tests__/helpers';
+import { createAuthenticatedCaller, createPublicCaller, createStripeWebhookCaller } from '../__tests__/helpers';
 
 const stripeAccountsCreate = vi.hoisted(() => vi.fn());
 const stripeAccountsRetrieve = vi.hoisted(() => vi.fn());
 const stripeAccountLinksCreate = vi.hoisted(() => vi.fn());
 const stripePaymentIntentsCapture = vi.hoisted(() => vi.fn());
+const stripePaymentIntentsCancel = vi.hoisted(() => vi.fn());
 const TEST_STRIPE_SECRET = `sk_${'test'}_transaction_metadata`;
 vi.mock('stripe', () => ({
   default: vi.fn().mockImplementation(function StripeMock() {
     return {
       accounts: { create: stripeAccountsCreate, retrieve: stripeAccountsRetrieve },
       accountLinks: { create: stripeAccountLinksCreate },
-      paymentIntents: { capture: stripePaymentIntentsCapture },
+      paymentIntents: { capture: stripePaymentIntentsCapture, cancel: stripePaymentIntentsCancel },
     };
   }),
 }));
@@ -44,6 +45,7 @@ const activeService = {
   durationMins: 90,
   maxGuests: 4,
   patchRequired: true,
+  tier: 'BLACK',
   status: 'active',
   createdAt: new Date('2026-05-03T11:00:00.000Z'),
   updatedAt: new Date('2026-05-03T12:10:00.000Z'),
@@ -65,6 +67,16 @@ const activeBooking = {
   priceCents: 15000,
   platformFeeCents: 1200,
   currency: 'USD',
+  tier: 'BLACK',
+  requestStatus: 'ACCEPTED',
+  requestExpiresAt: null,
+  acceptedAt: new Date('2026-05-03T16:01:00.000Z'),
+  declinedAt: null,
+  counterOfferCents: null,
+  counterOfferCurrency: null,
+  counterOfferMessage: null,
+  guestNotes: 'Window table if available',
+  logisticsMode: 'onsite',
   stripePaymentIntentId: null,
   stripeTransferDestination: null,
   metadata: null,
@@ -122,6 +134,7 @@ describe('vendor router', () => {
     stripeAccountsRetrieve.mockReset();
     stripeAccountLinksCreate.mockReset();
     stripePaymentIntentsCapture.mockReset();
+    stripePaymentIntentsCancel.mockReset();
     config.stripeSecretKey = '';
     process.env.NODE_ENV = 'development';
   });
@@ -190,11 +203,22 @@ describe('vendor router', () => {
       metadata: data.metadata,
     }));
 
-    const caller = createPublicCaller();
+    const caller = createStripeWebhookCaller();
     const result = await caller.vendors.connectWebhook({ type: 'account.updated', data: { object: activeAccount } });
 
     expect(db.vendor.findUnique).toHaveBeenCalledWith({ where: { stripeAccountId: 'acct_123' }, select: expect.any(Object) });
     expect(result.vendor?.onboardingStatus).toBe('active');
+  });
+
+  it('rejects direct public Connect webhook calls without Stripe signature context', async () => {
+    const caller = createPublicCaller();
+
+    await expect(caller.vendors.connectWebhook({
+      type: 'account.updated',
+      data: { object: activeAccount },
+    })).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+
+    expect(db.vendor.findUnique).not.toHaveBeenCalledWith({ where: { stripeAccountId: 'acct_123' }, select: expect.any(Object) });
   });
 
   it('searches active vendor services and exposes marketplace cash-flow estimates', async () => {
@@ -359,6 +383,198 @@ describe('vendor router', () => {
     expect(result.providerRole).toBe('staff');
     expect(result.bookings[0].id).toBe('booking-1');
     expect(result.bookings[0].cashFlow).toBeUndefined();
+  });
+
+  it('lists incoming requests by request lifecycle and tier', async () => {
+    const incomingRequest = {
+      ...activeBooking,
+      status: 'funds_authorized',
+      requestStatus: 'HOLD_AUTHORIZED',
+      requestExpiresAt: new Date('2026-07-03T16:20:00.000Z'),
+      acceptedAt: null,
+      metadata: { captureMode: 'manual', secureHoldStatus: 'funds_authorized' },
+    };
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.booking.updateMany as any).mockResolvedValueOnce({ count: 0 });
+    (db.booking.findMany as any).mockResolvedValueOnce([incomingRequest]);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.listIncomingRequests({ tier: 'BLACK', limit: 10 });
+
+    expect(db.booking.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        vendorId: 'vendor-1',
+        requestStatus: { in: ['REQUESTED', 'HOLD_AUTHORIZED', 'COUNTER_OFFERED'] },
+        requestExpiresAt: { lte: expect.any(Date) },
+      }),
+      data: { requestStatus: 'EXPIRED' },
+    }));
+    expect(db.booking.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { vendorId: 'vendor-1', requestStatus: { in: ['REQUESTED', 'HOLD_AUTHORIZED', 'COUNTER_OFFERED'] }, tier: 'BLACK' },
+      take: 10,
+    }));
+    expect(result.expiredRequests.expiredCount).toBe(0);
+    expect(result.requests[0]).toEqual(expect.objectContaining({
+      id: 'booking-1',
+      status: 'funds_authorized',
+      tier: 'BLACK',
+      requestStatus: 'HOLD_AUTHORIZED',
+      request: expect.objectContaining({ status: 'HOLD_AUTHORIZED', guestNotes: 'Window table if available' }),
+    }));
+  });
+
+  it('expires open requests before returning incoming triage', async () => {
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.booking.updateMany as any).mockResolvedValueOnce({ count: 2 });
+    (db.booking.findMany as any).mockResolvedValueOnce([]);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.listIncomingRequests({ limit: 10 });
+
+    expect(db.booking.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        vendorId: 'vendor-1',
+        requestStatus: { in: ['REQUESTED', 'HOLD_AUTHORIZED', 'COUNTER_OFFERED'] },
+        requestExpiresAt: { lte: expect.any(Date) },
+      }),
+      data: { requestStatus: 'EXPIRED' },
+    }));
+    expect(result.expiredRequests.expiredCount).toBe(2);
+    expect(result.requests).toEqual([]);
+  });
+
+  it('accepts an authorized request and creates a vendor notification', async () => {
+    const incomingRequest = {
+      ...activeBooking,
+      status: 'funds_authorized',
+      requestStatus: 'HOLD_AUTHORIZED',
+      acceptedAt: null,
+      requestExpiresAt: new Date('2026-07-03T16:20:00.000Z'),
+      metadata: { captureMode: 'manual', secureHoldStatus: 'funds_authorized' },
+    };
+    (db.booking.findUnique as any).mockResolvedValueOnce(incomingRequest);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+    (db.booking.update as any).mockImplementationOnce(({ data }: any) => ({ ...incomingRequest, ...data }));
+    ((db as any).vendorNotification.create as any).mockResolvedValueOnce({ id: 'note-1' });
+
+    const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
+    });
+    const result = await caller.vendors.acceptRequest({ bookingId: 'booking-1' });
+
+    expect(db.booking.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'booking-1' },
+      data: expect.objectContaining({ status: 'confirmed', requestStatus: 'ACCEPTED', acceptedAt: expect.any(Date) }),
+    }));
+    expect((db as any).vendorNotification.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ vendorId: 'vendor-1', bookingId: 'booking-1', type: 'BOOKING_CONFIRMED' }),
+    }));
+    expect(result.request.requestStatus).toBe('ACCEPTED');
+  });
+
+  it('stores counter offers for owner or manager request triage', async () => {
+    const incomingRequest = { ...activeBooking, requestStatus: 'REQUESTED', acceptedAt: null };
+    (db.booking.findUnique as any).mockResolvedValueOnce(incomingRequest);
+    (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
+    (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
+    (db.booking.update as any).mockImplementationOnce(({ data }: any) => ({ ...incomingRequest, ...data }));
+
+    const caller = createAuthenticatedCaller('manager-1', 'manager@test.com', {
+      vendorRoles: [{ vendorId: 'vendor-1', role: 'manager', groups: ['bytspot:vendor:vendor-1:manager'] }],
+    });
+    const result = await caller.vendors.counterOffer({ bookingId: 'booking-1', amountCents: 18000, currency: 'usd', message: 'Premium entrance timing available.' });
+
+    expect(db.booking.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        requestStatus: 'COUNTER_OFFERED',
+        counterOfferCents: 18000,
+        counterOfferCurrency: 'USD',
+        counterOfferMessage: 'Premium entrance timing available.',
+      }),
+    }));
+    expect(result.request.request.counterOfferCents).toBe(18000);
+  });
+
+  it('lists unread vendor notifications and marks one read', async () => {
+    const notification = {
+      id: 'note-1',
+      vendorId: 'vendor-1',
+      bookingId: 'booking-1',
+      recipientUserId: null,
+      type: 'NEW_REQUEST',
+      title: 'New Black request',
+      body: 'A new request is waiting.',
+      payload: { tier: 'BLACK' },
+      readAt: null,
+      createdAt: new Date('2026-06-01T18:00:00.000Z'),
+      updatedAt: new Date('2026-06-01T18:00:00.000Z'),
+    };
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    ((db as any).vendorNotification.findMany as any).mockResolvedValueOnce([notification]);
+    ((db as any).vendorNotification.count as any).mockResolvedValueOnce(1);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const listed = await caller.vendors.listNotifications({ unreadOnly: true, limit: 10 });
+
+    expect((db as any).vendorNotification.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { vendorId: 'vendor-1', readAt: null },
+      take: 10,
+    }));
+    expect(listed.unreadCount).toBe(1);
+    expect(listed.notifications[0]).toEqual(expect.objectContaining({ id: 'note-1', readAt: null, type: 'NEW_REQUEST' }));
+
+    (db.vendor.findUnique as any).mockResolvedValueOnce(vendorProfile);
+    ((db as any).vendorNotification.findUnique as any).mockResolvedValueOnce(notification);
+    ((db as any).vendorNotification.update as any).mockImplementationOnce(({ data }: any) => ({ ...notification, ...data }));
+    const read = await caller.vendors.markNotificationRead({ notificationId: 'note-1' });
+
+    expect((db as any).vendorNotification.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'note-1' },
+      data: { readAt: expect.any(Date) },
+    }));
+    expect(read.notification.readAt).toEqual(expect.any(String));
+  });
+
+  it('syncs expiration warnings for open requests and returns unread count', async () => {
+    const expiringRequest = {
+      ...activeBooking,
+      requestStatus: 'HOLD_AUTHORIZED',
+      requestExpiresAt: new Date(Date.now() + 10 * 60_000),
+      service: { ...activeBooking.service, title: 'Black Car Arrival' },
+    };
+    (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
+    (db.booking.updateMany as any).mockResolvedValueOnce({ count: 1 });
+    (db.booking.findMany as any).mockResolvedValueOnce([expiringRequest]);
+    ((db as any).vendorNotification.findFirst as any).mockResolvedValueOnce(null);
+    ((db as any).vendorNotification.create as any).mockResolvedValueOnce({ id: 'note-expiring-1' });
+    ((db as any).vendorNotification.count as any).mockResolvedValueOnce(1);
+
+    const caller = createAuthenticatedCaller('user-1', 'owner@test.com');
+    const result = await caller.vendors.syncNotifications({ warningWindowMinutes: 30 });
+
+    expect(db.booking.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ vendorId: 'vendor-1', requestExpiresAt: { lte: expect.any(Date) } }),
+      data: { requestStatus: 'EXPIRED' },
+    }));
+    expect(db.booking.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        vendorId: 'vendor-1',
+        requestStatus: { in: ['REQUESTED', 'HOLD_AUTHORIZED', 'COUNTER_OFFERED'] },
+        requestExpiresAt: expect.objectContaining({ gt: expect.any(Date), lte: expect.any(Date) }),
+      }),
+    }));
+    expect((db as any).vendorNotification.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        vendorId: 'vendor-1',
+        bookingId: 'booking-1',
+        type: 'EXPIRATION_WARNING',
+        payload: expect.objectContaining({ requestStatus: 'HOLD_AUTHORIZED', amountCents: 15000 }),
+      }),
+    }));
+    expect(result.expiredRequests.expiredCount).toBe(1);
+    expect(result.expirationWarnings).toEqual({ checked: 1, warningsCreated: 1 });
+    expect(result.unreadCount).toBe(1);
   });
 
   it('allows staff to check in an owned booking without exposing financial fields', async () => {

@@ -173,7 +173,7 @@ describe('patch router', () => {
     expect(result.binding).toEqual({ type: 'service', id: 'svc-1' });
   });
 
-  it('issues a short-lived ICT for a patch verification flow', async () => {
+  it('issues a short-lived low-trust ICT for patch discovery', async () => {
     (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(basePatch);
 
     const caller = createAuthenticatedCaller('user-99', 'tapper@test.com');
@@ -186,10 +186,13 @@ describe('patch router', () => {
     const claims = verifyICT(result.token);
     expect(result.kid).toBe(getActiveICTKid());
     expect(result.expiresInSec).toBe(90);
-    expect(claims.action).toBe('patch.tap');
+    expect(result.trustLevel).toBe('static-discovery');
+    expect(result.patch.readCounter).toBeNull();
+    expect(claims.action).toBe('patch.discovery');
     expect(claims.resource).toEqual({ type: 'patch', id: 'patch-1' });
     expect(claims.sub).toBe('user-99');
     expect(claims.uid).toBe('04A1B2C3D4E5F6');
+    expect(claims.trustLevel).toBe('static-discovery');
   });
 
   it('keeps rotating tokens valid within the default 60 second skew window only', async () => {
@@ -236,7 +239,81 @@ describe('patch router', () => {
       data: { readCounter: 4 },
     });
     expect(result.verified).toBe(true);
+    expect(result.trustLevel).toBe('nfc-counter-verified');
+    expect(result.counterAdvanced).toBe(true);
     expect(result.patch.readCounter).toBe(4);
     expect(result.binding).toEqual({ type: 'service', id: 'svc-1' });
+  });
+
+  it('downgrades public rotating tokens to discovery when no NFC counter is supplied', async () => {
+    (db.hardwarePatch.findUnique as any)
+      .mockResolvedValueOnce(basePatch)
+      .mockResolvedValueOnce(basePatch);
+
+    const caller = createPublicCaller();
+    const rotation = await caller.patch.rotatingToken({ patchId: 'patch-1' });
+    const result = await caller.patch.verifyTap({ token: rotation.token, uid: '04A1B2C3D4E5F6' });
+
+    expect(db.hardwarePatch.update).not.toHaveBeenCalled();
+    expect(result.verified).toBe(false);
+    expect(result.trustLevel).toBe('static-discovery');
+    expect(result.requiresCounter).toBe(true);
+    expect(result.counterAdvanced).toBe(false);
+    expect(result.patch.readCounter).toBeNull();
+    expect(result.binding).toEqual({ type: 'service', id: 'svc-1' });
+  });
+
+  it('does not elevate public discovery tokens even if a caller guesses a fresh counter', async () => {
+    (db.hardwarePatch.findUnique as any)
+      .mockResolvedValueOnce(basePatch)
+      .mockResolvedValueOnce(basePatch);
+
+    const caller = createPublicCaller();
+    const rotation = await caller.patch.rotatingToken({ patchId: 'patch-1' });
+    const result = await caller.patch.verifyTap({
+      token: rotation.token,
+      uid: '04A1B2C3D4E5F6',
+      readCounter: 99,
+    });
+
+    expect(db.hardwarePatch.update).not.toHaveBeenCalled();
+    expect(result.verified).toBe(false);
+    expect(result.trustLevel).toBe('static-discovery');
+    expect(result.patch.readCounter).toBeNull();
+  });
+
+  it('does not mark tap ICTs verified without a fresh NFC counter', async () => {
+    const token = signICT({
+      action: 'patch.tap',
+      resource: { type: 'patch', id: 'patch-1' },
+      uid: '04A1B2C3D4E5F6',
+      entity: 'VENDOR_SERVICES',
+    });
+    (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(basePatch);
+
+    const caller = createPublicCaller();
+    const result = await caller.patch.verifyTap({ token, uid: '04A1B2C3D4E5F6' });
+
+    expect(db.hardwarePatch.update).not.toHaveBeenCalled();
+    expect(result.verified).toBe(false);
+    expect(result.trustLevel).toBe('static-discovery');
+    expect(result.requiresCounter).toBe(true);
+  });
+
+  it('rejects stale NFC counters for tap ICTs', async () => {
+    const token = signICT({
+      action: 'patch.tap',
+      resource: { type: 'patch', id: 'patch-1' },
+      uid: '04A1B2C3D4E5F6',
+      entity: 'VENDOR_SERVICES',
+    });
+    (db.hardwarePatch.findUnique as any).mockResolvedValueOnce(basePatch);
+
+    const caller = createPublicCaller();
+    await expect(caller.patch.verifyTap({
+      token,
+      uid: '04A1B2C3D4E5F6',
+      readCounter: 3,
+    })).rejects.toThrow(/stale/);
   });
 });

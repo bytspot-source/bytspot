@@ -25,7 +25,26 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   if (!ctx.user) {
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Not authenticated' });
   }
+
+  if (!ctx.authUserExists) {
+    const activeUser = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { id: true },
+    });
+    if (!activeUser) {
+      throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Session user no longer exists' });
+    }
+  }
+
   return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+/** Internal-only procedure for events that already passed Stripe signature verification. */
+export const stripeWebhookProcedure = t.procedure.use(async ({ ctx, next }) => {
+  if (!ctx.internal?.stripeWebhook) {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Stripe webhook signature verification required' });
+  }
+  return next();
 });
 
 /**

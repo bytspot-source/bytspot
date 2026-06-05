@@ -10,7 +10,7 @@ router.get('/stripe/webhook', (_req, res) => {
 });
 
 function webhookCaller() {
-  return appRouter.createCaller({ user: null });
+  return appRouter.createCaller({ user: null, internal: { stripeWebhook: true } });
 }
 
 async function dispatchStripeEvent(event: Stripe.Event) {

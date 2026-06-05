@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
 import { Entity, type Prisma } from '@prisma/client';
-import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, enforceRateLimit, sovereignShieldMiddleware } from './trpc';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, enforceRateLimit, sovereignShieldMiddleware, stripeWebhookProcedure } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
@@ -1321,7 +1321,7 @@ const subscriptionRouter = router({
   }),
 
   /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
-  webhook: publicProcedure
+  webhook: stripeWebhookProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 50, label: 'subscription:webhook' }))
     .input(z.object({
       type: z.string().max(100),

@@ -7,6 +7,10 @@ import { protectedProcedure, publicProcedure, rateLimitMiddleware, router, sover
 
 const bindingTypeSchema = z.enum(['vendor', 'service', 'venue']);
 const uidHexSchema = z.string().min(1, 'UID is required');
+const PATCH_TRUST_LEVELS = {
+  staticDiscovery: 'static-discovery',
+  nfcCounterVerified: 'nfc-counter-verified',
+} as const;
 
 type ResolvedVendor = {
   id: string;
@@ -45,13 +49,15 @@ function mapPatch(
     createdAt: Date;
     updatedAt: Date;
   },
+  options: { exposeReadCounter?: boolean } = {},
 ) {
+  const exposeReadCounter = options.exposeReadCounter ?? true;
   return {
     id: patch.id,
     uid: patch.uid,
     tagType: patch.tagType,
     sdmKeyRef: patch.sdmKeyRef,
-    readCounter: patch.readCounter,
+    readCounter: exposeReadCounter ? patch.readCounter : null,
     label: patch.label,
     status: patch.status,
     entity: patch.entity,
@@ -210,7 +216,7 @@ export const patchRouter = router({
 
       return {
         type: providerRole ? 'VENDOR_STATION' : 'CONSUMER_ACCESS',
-        patch: mapPatch(patch),
+        patch: mapPatch(patch, { exposeReadCounter: Boolean(providerRole) }),
         vendor: vendor
           ? {
               id: vendor.id,
@@ -350,7 +356,7 @@ export const patchRouter = router({
       const token = signICT(
         {
           sub: ctx.user?.userId,
-          action: 'patch.tap',
+          action: 'patch.discovery',
           resource: { type: 'patch', id: patch.id },
           geo: input.geo,
           device: input.device,
@@ -358,7 +364,7 @@ export const patchRouter = router({
           entity: patch.entity,
           bindingType: patch.bindingType,
           bindingId: patch.bindingId,
-          readCounter: patch.readCounter,
+          trustLevel: PATCH_TRUST_LEVELS.staticDiscovery,
         },
         { ttlSec: input.ttlSec },
       );
@@ -367,7 +373,8 @@ export const patchRouter = router({
         token,
         kid: getActiveICTKid(),
         expiresInSec: input.ttlSec,
-        patch: mapPatch(patch),
+        trustLevel: PATCH_TRUST_LEVELS.staticDiscovery,
+        patch: mapPatch(patch, { exposeReadCounter: false }),
       };
     }),
 
@@ -396,8 +403,8 @@ export const patchRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: getICTErrorMessage(error) });
       }
 
-      if (claims.action !== 'patch.tap' || claims.resource.type !== 'patch') {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'ICT token is not a patch tap token' });
+      if (!['patch.tap', 'patch.discovery'].includes(claims.action) || claims.resource.type !== 'patch') {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'ICT token is not a patch token' });
       }
 
       const patch = await db.hardwarePatch.findUnique({ where: { id: claims.resource.id } });
@@ -415,19 +422,45 @@ export const patchRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Supplied UID does not match the patch' });
       }
 
+      const suppliedReadCounter = input.readCounter;
+      const canVerifyPhysicalTap = claims.action === 'patch.tap' && typeof suppliedReadCounter === 'number';
+
       let verifiedPatch = patch;
-      if (typeof input.readCounter === 'number') {
-        if (input.readCounter <= patch.readCounter) {
+      if (canVerifyPhysicalTap) {
+        if (suppliedReadCounter <= patch.readCounter) {
           throw new TRPCError({ code: 'CONFLICT', message: 'Tap counter is stale or has already been used' });
         }
         verifiedPatch = await db.hardwarePatch.update({
           where: { id: patch.id },
-          data: { readCounter: input.readCounter },
+          data: { readCounter: suppliedReadCounter },
         });
+      }
+
+      if (!canVerifyPhysicalTap) {
+        return {
+          verified: false,
+          trustLevel: PATCH_TRUST_LEVELS.staticDiscovery,
+          requiresCounter: true,
+          counterAdvanced: false,
+          patch: mapPatch(patch, { exposeReadCounter: false }),
+          binding: patch.bindingType && patch.bindingId
+            ? { type: patch.bindingType, id: patch.bindingId }
+            : null,
+          token: {
+            jti: claims.jti,
+            action: claims.action,
+            subject: claims.sub ?? null,
+            issuedAt: new Date(claims.iat * 1000).toISOString(),
+            expiresAt: new Date(claims.exp * 1000).toISOString(),
+          },
+        };
       }
 
       return {
         verified: true,
+        trustLevel: PATCH_TRUST_LEVELS.nfcCounterVerified,
+        requiresCounter: false,
+        counterAdvanced: true,
         patch: mapPatch(verifiedPatch),
         binding: verifiedPatch.bindingType && verifiedPatch.bindingId
           ? { type: verifiedPatch.bindingType, id: verifiedPatch.bindingId }

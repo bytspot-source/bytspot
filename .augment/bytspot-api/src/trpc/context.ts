@@ -5,6 +5,12 @@ import { AuthPayload } from '../middleware/auth';
 
 export interface Context {
   user: AuthPayload | null;
+  /** True only after the user row backing the JWT has been checked for this request. */
+  authUserExists?: true;
+  internal?: {
+    /** Set only by the signed `/stripe/webhook` REST dispatcher after Stripe signature verification. */
+    stripeWebhook?: true;
+  };
   req?: trpcExpress.CreateExpressContextOptions['req'];
   res?: trpcExpress.CreateExpressContextOptions['res'];
 }

@@ -61,6 +61,15 @@ vi.mock('../lib/db', () => {
       findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    vendorNotification: {
+      create: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+      update: vi.fn(),
     },
     crowdLevel: {
       findFirst: vi.fn(),

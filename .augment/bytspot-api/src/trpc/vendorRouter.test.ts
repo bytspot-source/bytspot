@@ -225,15 +225,16 @@ describe('vendor router', () => {
     (db.vendorService.findMany as any).mockResolvedValueOnce([activeService]);
 
     const caller = createPublicCaller();
-    const result = await caller.vendors.search({ query: 'vip', limit: 5 });
+    const result = await caller.vendors.search({ query: 'vip', tier: 'black', limit: 5 });
 
     expect(db.vendorService.findMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({ status: 'active' }),
+      where: expect.objectContaining({ status: 'active', tier: 'BLACK' }),
       orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
       take: 5,
       select: expect.any(Object),
     });
     expect(result.services).toHaveLength(1);
+    expect(result.services[0].tier).toBe('BLACK');
     expect(result.services[0].patch).toEqual(expect.objectContaining({ id: 'patch-1' }));
     expect(result.services[0].cashFlow).toEqual({
       grossCents: 15000,
@@ -261,7 +262,7 @@ describe('vendor router', () => {
   });
 
   it('creates a vendor service owned by the authenticated vendor', async () => {
-    const createdService = { ...activeService, id: 'svc-new', title: 'Garage Parking', description: 'Secure indoor parking near the venue', category: 'Parking', priceCents: 2500, durationMins: 60, maxGuests: 1, patchRequired: false, patch: null };
+    const createdService = { ...activeService, id: 'svc-new', title: 'Garage Parking', description: 'Secure indoor parking near the venue', category: 'Parking', priceCents: 2500, durationMins: 60, maxGuests: 1, patchRequired: false, tier: 'PLATINUM', patch: null };
     (db.vendor.findFirst as any).mockResolvedValueOnce(vendorProfile);
     (db.vendorService.create as any).mockResolvedValueOnce(createdService);
 
@@ -274,6 +275,7 @@ describe('vendor router', () => {
       durationMins: 60,
       maxGuests: 1,
       patchRequired: false,
+      tier: 'platinum',
       status: 'active',
     });
 
@@ -288,11 +290,13 @@ describe('vendor router', () => {
         durationMins: 60,
         maxGuests: 1,
         patchRequired: false,
+        tier: 'PLATINUM',
         status: 'active',
       },
       select: expect.any(Object),
     });
     expect(result.service.id).toBe('svc-new');
+    expect(result.service.tier).toBe('PLATINUM');
     expect(result.service.cashFlow.providerPayoutEstimateCents).toBe(2300);
   });
 
@@ -317,7 +321,7 @@ describe('vendor router', () => {
     expect(created.service.id).toBe('svc-manager-new');
     expect(created.service.cashFlow).toBeUndefined();
 
-    const updatedService = { ...activeService, title: 'Managed Service', category: 'Catering', patch: null };
+    const updatedService = { ...activeService, title: 'Managed Service', category: 'Catering', tier: 'GREEN', patch: null };
     (db.vendorService.findUnique as any).mockResolvedValueOnce(activeService);
     (db.vendor.findUnique as any).mockResolvedValueOnce(delegatedVendorProfile);
     (db.vendorMember.findUnique as any).mockResolvedValueOnce({ role: 'MANAGER' });
@@ -327,10 +331,15 @@ describe('vendor router', () => {
       serviceId: 'svc-1',
       title: 'Managed Service',
       category: 'Catering',
+      tier: 'green',
     });
 
+    expect(db.vendorService.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ tier: 'GREEN' }),
+    }));
     expect(result.providerRole).toBe('manager');
     expect(result.service.id).toBe('svc-1');
+    expect(result.service.tier).toBe('GREEN');
     expect(result.service.cashFlow).toBeUndefined();
   });
 

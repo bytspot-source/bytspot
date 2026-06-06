@@ -16,6 +16,13 @@ const OPS_WRITE = ['owner', 'manager'] as const;
 const MEMBER_READ = ['owner', 'manager', 'staff'] as const;
 
 const serviceTierSchema = z.enum(['SIMPLE', 'GREEN', 'PLATINUM', 'BLACK']);
+const normalizeServiceTierInput = (value: unknown) => {
+  if (typeof value !== 'string') return value;
+  const normalized = value.trim();
+  return normalized.toLowerCase() === 'all' ? 'all' : normalized.toUpperCase();
+};
+const serviceTierInputSchema = z.preprocess(normalizeServiceTierInput, serviceTierSchema);
+const serviceTierFilterSchema = z.preprocess(normalizeServiceTierInput, serviceTierSchema.or(z.literal('all')));
 const requestStatusSchema = z.enum(['REQUESTED', 'HOLD_AUTHORIZED', 'ACCEPTED', 'DECLINED', 'COUNTER_OFFERED', 'EXPIRED', 'CANCELLED', 'COMPLETED']);
 const incomingRequestStatuses = ['REQUESTED', 'HOLD_AUTHORIZED', 'COUNTER_OFFERED'] as const;
 const activeBookingStatuses = ['paid', 'confirmed', 'funds_authorized', 'in_progress'] as const;
@@ -62,6 +69,7 @@ const serviceSelect = {
   durationMins: true,
   maxGuests: true,
   patchRequired: true,
+  tier: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -765,6 +773,7 @@ export const vendorRouter = router({
         durationMins: z.number().int().min(15).max(24 * 60).nullable().optional(),
         maxGuests: z.number().int().min(1).max(500).nullable().optional(),
         patchRequired: z.boolean().optional().default(false),
+        tier: serviceTierInputSchema.optional().default('SIMPLE'),
         status: z.enum(['active', 'draft']).optional().default('active'),
       }),
     )
@@ -784,6 +793,7 @@ export const vendorRouter = router({
           durationMins: input.durationMins ?? null,
           maxGuests: input.maxGuests ?? null,
           patchRequired: input.patchRequired,
+          tier: input.tier,
           status: input.status,
         },
         select: serviceSelect,
@@ -840,7 +850,7 @@ export const vendorRouter = router({
       z.object({
         vendorId: z.string().min(1).max(120).optional(),
         status: requestStatusSchema.or(z.literal('all')).optional().default('all'),
-        tier: serviceTierSchema.or(z.literal('all')).optional().default('all'),
+        tier: serviceTierFilterSchema.optional().default('all'),
         limit: z.number().int().min(1).max(100).optional().default(50),
       }).optional().default({}),
     )
@@ -1104,6 +1114,7 @@ export const vendorRouter = router({
         title: z.string().trim().min(2).max(120).optional(),
         description: z.string().trim().max(600).nullable().optional(),
         category: z.string().trim().min(2).max(80).optional(),
+        tier: serviceTierInputSchema.optional(),
         priceCents: z.number().int().min(1).max(1_000_000).optional(),
         durationMins: z.number().int().min(15).max(24 * 60).nullable().optional(),
         maxGuests: z.number().int().min(1).max(500).nullable().optional(),
@@ -1121,6 +1132,7 @@ export const vendorRouter = router({
       if (input.title !== undefined) data.title = input.title;
       if (input.description !== undefined) data.description = input.description;
       if (input.category !== undefined) data.category = input.category;
+      if (input.tier !== undefined) data.tier = input.tier;
       if (input.priceCents !== undefined) data.priceCents = input.priceCents;
       if (input.durationMins !== undefined) data.durationMins = input.durationMins;
       if (input.maxGuests !== undefined) data.maxGuests = input.maxGuests;
@@ -1275,12 +1287,14 @@ export const vendorRouter = router({
         query: z.string().trim().min(1).max(120).optional(),
         vendorId: z.string().min(1).max(120).optional(),
         patchId: z.string().min(1).max(120).optional(),
+        tier: serviceTierFilterSchema.optional().default('all'),
         limit: z.number().int().min(1).max(50).optional().default(20),
       }).optional().default({}),
     )
     .query(async ({ input }) => {
       const where: Prisma.VendorServiceWhereInput = { status: 'active' };
       if (input.vendorId) where.vendorId = input.vendorId;
+      if (input.tier !== 'all') where.tier = input.tier;
       if (input.patchId) {
         const patch = await db.hardwarePatch.findUnique({ where: { id: input.patchId }, select: patchSelect });
         if (patch?.bindingType === 'service' && patch.bindingId) where.id = patch.bindingId;

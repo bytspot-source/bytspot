@@ -398,7 +398,7 @@ export const bookingRouter = router({
           metadata,
         } as any,
         select: bookingSelect,
-      });
+      }) as any;
 
       const token = signICT(
         {
@@ -553,10 +553,11 @@ export const bookingRouter = router({
           },
         } as any,
         select: bookingSelect,
-      });
+      }) as any;
 
-      const sessionMetadata = { ...stripeMetadata, bookingId: booking.id };
-      const session = await stripe.checkout.sessions.create({
+      const bookingId = String(booking.id);
+      const sessionMetadata = { ...stripeMetadata, bookingId };
+      const checkoutSessionParams: Stripe.Checkout.SessionCreateParams = {
         payment_method_types: ['card'],
         mode: 'payment',
         line_items: [
@@ -579,11 +580,12 @@ export const bookingRouter = router({
         },
         metadata: sessionMetadata,
         success_url: `${config.frontendUrl}${input.successPath ?? '/booking/success'}?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${config.frontendUrl}${input.cancelPath ?? '/booking/cancelled'}?booking_id=${booking.id}`,
-      });
+        cancel_url: `${config.frontendUrl}${input.cancelPath ?? '/booking/cancelled'}?booking_id=${bookingId}`,
+      };
+      const session = await stripe.checkout.sessions.create(checkoutSessionParams);
 
       const updatedBooking = await db.booking.update({
-        where: { id: booking.id },
+        where: { id: bookingId },
         data: {
           stripeSessionId: session.id,
           metadata: {
@@ -773,9 +775,9 @@ export const bookingRouter = router({
           },
         } as any,
         select: bookingSelect,
-      });
+      }) as any;
 
-      const sessionMetadata = { ...stripeMetadata, bookingId: booking.id, secureHoldStatus: 'authorization_requested' };
+      const sessionMetadata = { ...stripeMetadata, bookingId: String(booking.id), secureHoldStatus: 'authorization_requested' };
       const paymentMethodData = input.stripeTokenId
         ? ({ type: 'card', card: { token: input.stripeTokenId } } as unknown as Stripe.PaymentIntentCreateParams.PaymentMethodData)
         : undefined;
@@ -785,6 +787,7 @@ export const bookingRouter = router({
         customer: customerId,
         capture_method: 'manual',
         confirm: true,
+        automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
         payment_method: input.stripePaymentMethodId,
         payment_method_data: paymentMethodData,
         payment_method_configuration: config.stripeSecureHoldPaymentMethodConfigurationId,
@@ -882,7 +885,7 @@ export const bookingRouter = router({
     )
     .input(z.object({ bookingId: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
-      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect });
+      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect }) as any;
       if (!booking || booking.userId !== ctx.user.userId) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
       }
@@ -902,7 +905,7 @@ export const bookingRouter = router({
     )
     .input(z.object({ bookingId: z.string().min(1), reason: z.string().trim().min(1).max(280).optional() }))
     .mutation(async ({ ctx, input }) => {
-      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect });
+      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect }) as any;
       if (!booking || booking.userId !== ctx.user.userId) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
       }

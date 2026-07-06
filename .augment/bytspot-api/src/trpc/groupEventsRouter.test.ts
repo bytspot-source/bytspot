@@ -9,7 +9,8 @@ import { resetRateLimitBucketsForTests } from './trpc';
 
 const HOST = 'host-1';
 const GUEST = 'guest-1';
-const SLUG = 'sunset-loft-9x2';
+const SLUG = 'sunset-loft-9x2Kp7Rt4Nc1Wq8Zb5';
+const LEGACY_SLUG = 'family-dinner';
 
 function eventRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -57,6 +58,27 @@ describe('groupEvents router', () => {
     await expect(
       caller.groupEvents.create({ id: SLUG, title: 'X', groupType: 'friends' }),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('create rejects a new event whose invite slug is guessable (low entropy)', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(null);
+    const caller = createAuthenticatedCaller(HOST);
+    await expect(
+      caller.groupEvents.create({ id: 'group-friends-1', title: 'X', groupType: 'friends' }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(db.groupEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it('create still allows updating an existing legacy slug owned by the host', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ id: LEGACY_SLUG, hostId: HOST }));
+    (db.groupEvent.upsert as any).mockImplementationOnce(({ create, update }: any) =>
+      eventRow({ id: LEGACY_SLUG, ...create, ...update }),
+    );
+
+    const caller = createAuthenticatedCaller(HOST);
+    const res = await caller.groupEvents.create({ id: LEGACY_SLUG, title: 'Family Dinner', groupType: 'friends' });
+
+    expect(res).toMatchObject({ id: LEGACY_SLUG, hostId: HOST });
   });
 
   it('join on an open event marks the guest joined', async () => {

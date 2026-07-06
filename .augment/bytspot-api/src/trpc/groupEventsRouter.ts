@@ -83,6 +83,14 @@ async function requireHostEvent(eventId: string, userId: string): Promise<EventR
   return event;
 }
 
+/** Newly-created invite slugs must carry a high-entropy, unguessable suffix so
+ * private events can't be enumerated. The native client appends a 22-char CSPRNG
+ * token (`group-<type>-<token>`); we require the final hyphen-delimited segment to
+ * be at least 16 url-safe chars, which rejects predictable ids like timestamps.
+ * Existing rows (legacy ids created before this rule) may still be updated by
+ * their host — the check only applies when creating a brand-new event. */
+const UNGUESSABLE_INVITE_SUFFIX = /-[A-Za-z0-9]{16,}$/;
+
 const eventInput = z.object({
   id: z.string().min(1).max(200),
   title: z.string().min(1).max(200),
@@ -107,6 +115,12 @@ export const groupEventsRouter = router({
       const existing = await db.groupEvent.findUnique({ where: { id: input.id } });
       if (existing && existing.hostId !== hostId) {
         throw new TRPCError({ code: 'CONFLICT', message: 'That invite link is already in use.' });
+      }
+      if (!existing && !UNGUESSABLE_INVITE_SUFFIX.test(input.id)) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Invite link is not sufficiently random. Recreate the event to get a secure link.',
+        });
       }
       const { id, ...rest } = input;
       const event = await db.groupEvent.upsert({

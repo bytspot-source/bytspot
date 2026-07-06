@@ -133,6 +133,18 @@ vi.mock('../lib/db', () => {
       upsert: vi.fn().mockResolvedValue({ id: 'f-1' }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    groupEvent: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      upsert: vi.fn(),
+      update: vi.fn(),
+    },
+    groupEventGuest: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
     complianceLog: {
       create: vi.fn().mockResolvedValue({ id: 'cl-1' }),
     },

@@ -28,6 +28,7 @@ import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
+import { groupEventsRouter } from './groupEventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
 import { patchRouter } from './patchRouter';
 import { bookingRouter } from './bookingRouter';
@@ -1911,6 +1912,7 @@ export const appRouter = router({
   social: socialRouter,
   reviews: reviewsRouter,
   events: eventsRouter,
+  groupEvents: groupEventsRouter,
   places: placesRouter,
   patch: patchRouter,
   booking: bookingRouter,

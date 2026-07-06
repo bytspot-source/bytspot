@@ -138,8 +138,9 @@ export const groupEventsRouter = router({
     }),
 
   /** Guest: the joined guest list for an invite (pull-on-open). Restricted to the
-   * host or a caller who already has a membership row — private events must not
-   * expose their guest list to arbitrary authenticated users who guess the slug. */
+   * host or a caller who is already a *joined* member — private events must not
+   * expose their guest list to slug-guessers, nor to pending/declined requesters
+   * the host has not approved. */
   guests: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'groupEvents:guests' }))
     .input(z.object({ eventId: z.string().min(1) }))
@@ -151,8 +152,8 @@ export const groupEventsRouter = router({
         const membership = await db.groupEventGuest.findUnique({
           where: { eventId_userId: { eventId: input.eventId, userId } },
         });
-        if (!membership) {
-          throw new TRPCError({ code: 'FORBIDDEN', message: 'Join the event to see its guest list.' });
+        if (membership?.status !== 'joined') {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'Only approved guests can see the guest list.' });
         }
       }
       const rows = await db.groupEventGuest.findMany({

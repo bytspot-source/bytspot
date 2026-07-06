@@ -123,6 +123,24 @@ describe('groupEvents router', () => {
     expect(db.groupEventGuest.findMany).not.toHaveBeenCalled();
   });
 
+  it('guests rejects a pending caller with FORBIDDEN (approval gate not passed)', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ hostId: HOST }));
+    (db.groupEventGuest.findUnique as any).mockResolvedValueOnce({ userId: GUEST, status: 'pending' });
+
+    const caller = createAuthenticatedCaller(GUEST);
+    await expect(caller.groupEvents.guests({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.groupEventGuest.findMany).not.toHaveBeenCalled();
+  });
+
+  it('guests rejects a declined caller with FORBIDDEN', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ hostId: HOST }));
+    (db.groupEventGuest.findUnique as any).mockResolvedValueOnce({ userId: GUEST, status: 'declined' });
+
+    const caller = createAuthenticatedCaller(GUEST);
+    await expect(caller.groupEvents.guests({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.groupEventGuest.findMany).not.toHaveBeenCalled();
+  });
+
   it('guests allows the host without a membership row', async () => {
     (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ hostId: HOST }));
     (db.groupEventGuest.findMany as any).mockResolvedValueOnce([]);

@@ -85,8 +85,23 @@ describe('groupEvents router', () => {
     await expect(caller.groupEvents.join({ eventId: 'nope' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
-  it('guests returns the joined list with initials fallback', async () => {
+  it('re-join keeps a previously declined guest declined (no revive to pending)', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ approvalMode: 'approval' }));
+    // update: {} means the existing declined row is returned untouched.
+    (db.groupEventGuest.upsert as any).mockResolvedValueOnce({ status: 'declined' });
+
+    const caller = createAuthenticatedCaller(GUEST);
+    const res = await caller.groupEvents.join({ eventId: SLUG });
+
+    expect(res).toEqual({ status: 'declined' });
+    expect(db.groupEventGuest.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ update: {} }),
+    );
+  });
+
+  it('guests returns the joined list with initials fallback for a member', async () => {
     (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow());
+    (db.groupEventGuest.findUnique as any).mockResolvedValueOnce({ userId: GUEST, status: 'joined' });
     (db.groupEventGuest.findMany as any).mockResolvedValueOnce([
       { userId: GUEST, status: 'joined', message: null, createdAt: new Date('2026-07-06T18:05:00.000Z'),
         user: { id: GUEST, name: 'Ada Lovelace', profileImage: null } },
@@ -97,6 +112,26 @@ describe('groupEvents router', () => {
 
     expect(res.count).toBe(1);
     expect(res.guests[0]).toMatchObject({ userId: GUEST, name: 'Ada Lovelace', initials: 'AL', status: 'joined' });
+  });
+
+  it('guests rejects a non-member caller with FORBIDDEN', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ hostId: HOST }));
+    (db.groupEventGuest.findUnique as any).mockResolvedValueOnce(null);
+
+    const caller = createAuthenticatedCaller('stranger');
+    await expect(caller.groupEvents.guests({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.groupEventGuest.findMany).not.toHaveBeenCalled();
+  });
+
+  it('guests allows the host without a membership row', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ hostId: HOST }));
+    (db.groupEventGuest.findMany as any).mockResolvedValueOnce([]);
+
+    const caller = createAuthenticatedCaller(HOST);
+    const res = await caller.groupEvents.guests({ eventId: SLUG });
+
+    expect(res.count).toBe(0);
+    expect(db.groupEventGuest.findUnique).not.toHaveBeenCalled();
   });
 
   it('host returns joined and pending guests split, host-only', async () => {

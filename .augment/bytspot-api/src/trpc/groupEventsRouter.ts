@@ -117,7 +117,9 @@ export const groupEventsRouter = router({
       return mapEvent(event);
     }),
 
-  /** Guest: join an event. Open events join instantly; approval events go pending. */
+  /** Guest: join an event. Open events join instantly; approval events go pending.
+   * Re-joining never changes an existing row, so a guest the host previously
+   * declined stays 'declined' (returned as-is) rather than reverting to pending. */
   join: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'groupEvents:join' }))
     .input(z.object({ eventId: z.string().min(1), message: z.string().max(280).optional() }))
@@ -130,17 +132,29 @@ export const groupEventsRouter = router({
       const guest = await db.groupEventGuest.upsert({
         where: { eventId_userId: { eventId: input.eventId, userId } },
         create: { eventId: input.eventId, userId, status, message: input.message },
-        update: {}, // never downgrade an existing membership on re-join
+        update: {}, // never downgrade or revive an existing membership on re-join
       });
       return { status: guest.status };
     }),
 
-  /** Guest: the public-facing joined guest list for an invite (pull-on-open). */
+  /** Guest: the joined guest list for an invite (pull-on-open). Restricted to the
+   * host or a caller who already has a membership row — private events must not
+   * expose their guest list to arbitrary authenticated users who guess the slug. */
   guests: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'groupEvents:guests' }))
     .input(z.object({ eventId: z.string().min(1) }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
       const event = await db.groupEvent.findUnique({ where: { id: input.eventId } });
       if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      const userId = ctx.user.userId;
+      if (event.hostId !== userId) {
+        const membership = await db.groupEventGuest.findUnique({
+          where: { eventId_userId: { eventId: input.eventId, userId } },
+        });
+        if (!membership) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'Join the event to see its guest list.' });
+        }
+      }
       const rows = await db.groupEventGuest.findMany({
         where: { eventId: input.eventId, status: 'joined' },
         include: { user: { select: guestUserSelect } },
@@ -156,6 +170,7 @@ export const groupEventsRouter = router({
 
   /** Host: the full event view — joined guests plus pending requests. */
   host: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'groupEvents:host' }))
     .input(z.object({ eventId: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
       const event = await requireHostEvent(input.eventId, ctx.user.userId);
@@ -174,6 +189,7 @@ export const groupEventsRouter = router({
 
   /** Host: approve or decline a pending guest. */
   decide: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'groupEvents:decide' }))
     .input(z.object({
       eventId: z.string().min(1),
       userId: z.string().min(1),
@@ -194,6 +210,7 @@ export const groupEventsRouter = router({
 
   /** Host: switch an event between open and approval-gated joining. */
   setApprovalMode: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'groupEvents:setApprovalMode' }))
     .input(z.object({ eventId: z.string().min(1), approvalMode: z.enum(['open', 'approval']) }))
     .mutation(async ({ ctx, input }) => {
       await requireHostEvent(input.eventId, ctx.user.userId);

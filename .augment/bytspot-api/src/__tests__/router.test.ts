@@ -165,9 +165,10 @@ describe('payments', () => {
       duration: 1,
       totalCost: 96,
       productType: 'airport_transfer',
-      successPath: '/booking/success',
+      successPath: '/booking/success?from=airport',
       cancelPath: '/booking/cancelled',
-      metadata: { source: 'native-private-airport-transfer', captureMode: 'manual_after_authorization', quoteId: 'quote-123' },
+      source: 'native-private-airport-transfer',
+      metadata: { captureMode: 'manual_after_authorization', quoteId: 'quote-123' },
     });
 
     expect(result.url).toBe('https://checkout.stripe.test/pay/cs_airport_123');
@@ -176,13 +177,44 @@ describe('payments', () => {
       line_items: [expect.objectContaining({
         price_data: expect.objectContaining({
           unit_amount: 9600,
-          product_data: expect.objectContaining({ name: 'Airport Transfer — Airport Transfer' }),
+          product_data: expect.objectContaining({ name: 'Airport Transfer — Airport Transfer', description: 'Transfer authorization for ATL → Midtown' }),
         }),
       })],
       metadata: expect.objectContaining({ flow: 'native.airport_transfer.checkout', source: 'native-private-airport-transfer', productType: 'airport_transfer', captureMode: 'manual_after_authorization', quoteId: 'quote-123' }),
       payment_intent_data: expect.objectContaining({ capture_method: 'manual', metadata: expect.objectContaining({ productType: 'airport_transfer', captureMode: 'manual_after_authorization' }) }),
-      success_url: expect.stringContaining('/booking/success?session_id={CHECKOUT_SESSION_ID}'),
+      success_url: expect.stringContaining('/booking/success?from=airport&session_id={CHECKOUT_SESSION_ID}'),
       cancel_url: expect.stringContaining('/booking/cancelled'),
+    }));
+  });
+
+  it('payments.checkout manually captures boutique stays and preserves top-level native source', async () => {
+    config.stripeSecretKey = 'configured_for_native_stay_checkout_test';
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_stay_123' });
+
+    const caller = createAuthenticatedCaller('user-stay-1', 'guest@test.com');
+    const result = await caller.payments.checkout({
+      spotId: 'native-boutique-stay-venue-1',
+      spotName: 'Juniper Boutique Loft',
+      address: 'Midtown Atlanta',
+      duration: 2,
+      totalCost: 420,
+      productType: 'boutique_stay',
+      successPath: '/booking/success',
+      cancelPath: '/booking/cancelled',
+      source: 'native-boutique-stay',
+      metadata: { captureMode: 'manual_after_host_approval', nightsLabel: '2 nights' },
+    });
+
+    expect(result.url).toBe('https://checkout.stripe.test/pay/cs_stay_123');
+    expect(stripeCheckoutSessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+      line_items: [expect.objectContaining({
+        price_data: expect.objectContaining({
+          unit_amount: 42000,
+          product_data: expect.objectContaining({ name: 'Boutique Stay — Juniper Boutique Loft', description: 'Stay authorization for Midtown Atlanta' }),
+        }),
+      })],
+      metadata: expect.objectContaining({ flow: 'native.boutique_stay.checkout', source: 'native-boutique-stay', productType: 'boutique_stay', captureMode: 'manual_after_host_approval', nightsLabel: '2 nights' }),
+      payment_intent_data: expect.objectContaining({ capture_method: 'manual', metadata: expect.objectContaining({ source: 'native-boutique-stay', productType: 'boutique_stay' }) }),
     }));
   });
 });

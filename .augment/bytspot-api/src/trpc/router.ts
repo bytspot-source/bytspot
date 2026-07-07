@@ -592,6 +592,7 @@ const paymentsRouter = router({
       productType: z.enum(['parking', 'boutique_stay', 'menu_order', 'airport_transfer']).optional().default('parking'),
       successPath: z.string().trim().min(1).max(200).optional(),
       cancelPath: z.string().trim().min(1).max(200).optional(),
+      source: z.string().trim().min(1).max(100).optional(),
       metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
     }))
     .mutation(async ({ input }) => {
@@ -604,7 +605,7 @@ const paymentsRouter = router({
       }
 
       const stripe = new Stripe(config.stripeSecretKey);
-      const { spotName, address, duration, totalCost, spotId, productType, successPath, cancelPath } = input;
+      const { spotName, address, duration, totalCost, spotId, productType, successPath, cancelPath, source } = input;
       const amountCents = Math.round(totalCost * 100);
 
       if (!spotName || !totalCost) {
@@ -616,11 +617,18 @@ const paymentsRouter = router({
           if (!path || !path.startsWith('/') || path.startsWith('//')) return fallback;
           return path;
         };
+        const checkoutSuccessUrl = (path: string) => `${config.frontendUrl}${path}${path.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`;
         const productNames: Record<typeof productType, string> = {
           parking: `Parking — ${spotName}`,
           boutique_stay: `Boutique Stay — ${spotName}`,
           menu_order: `Menu Order — ${spotName}`,
           airport_transfer: `Airport Transfer — ${spotName}`,
+        };
+        const productDescriptions: Record<typeof productType, string> = {
+          parking: `${duration}h at ${address}`,
+          boutique_stay: `Stay authorization for ${address}`,
+          menu_order: `Order checkout for ${address}`,
+          airport_transfer: `Transfer authorization for ${address}`,
         };
         const flow = productType === 'parking' ? 'parking.checkout' : `native.${productType}.checkout`;
         const nativeMetadata = Object.fromEntries(
@@ -631,7 +639,7 @@ const paymentsRouter = router({
         const checkoutMetadata = {
           ...nativeMetadata,
           flow,
-          source: nativeMetadata.source ?? flow,
+          source: nativeMetadata.source ?? source ?? flow,
           productType,
           spotId: spotId || '',
           duration: String(duration),
@@ -652,14 +660,14 @@ const paymentsRouter = router({
               unit_amount: amountCents,
               product_data: {
                 name: productNames[productType],
-                description: `${duration}h at ${address}`,
+                description: productDescriptions[productType],
               },
             },
             quantity: 1,
           }],
           metadata: checkoutMetadata,
           payment_intent_data: paymentIntentData,
-          success_url: `${config.frontendUrl}${safePath(successPath, '/parking/success')}?session_id={CHECKOUT_SESSION_ID}`,
+          success_url: checkoutSuccessUrl(safePath(successPath, '/parking/success')),
           cancel_url: `${config.frontendUrl}${safePath(cancelPath, '/parking/cancelled')}`,
         });
 

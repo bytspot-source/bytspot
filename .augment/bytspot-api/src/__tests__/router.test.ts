@@ -2,10 +2,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TRPCError } from '@trpc/server';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
+import { config } from '../config';
+
+const stripeCheckoutSessionsCreate = vi.hoisted(() => vi.fn());
+vi.mock('stripe', () => ({
+  default: vi.fn().mockImplementation(function StripeMock() {
+    return { checkout: { sessions: { create: stripeCheckoutSessionsCreate } } };
+  }),
+}));
 
 // Reset all mocks between tests
 beforeEach(() => {
   vi.clearAllMocks();
+  stripeCheckoutSessionsCreate.mockReset();
+  config.stripeSecretKey = '';
 });
 
 // ──────────────────────────────────────────────────────────
@@ -108,6 +118,72 @@ describe('auth', () => {
     const result = await caller.auth.me();
     expect(result.user.email).toBe('bob@test.com');
     expect(result.referralCount).toBe(3);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Payments
+// ──────────────────────────────────────────────────────────
+describe('payments', () => {
+  it('payments.checkout keeps parking defaults for legacy parking callers', async () => {
+    config.stripeSecretKey = 'configured_for_parking_checkout_test';
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_parking_123' });
+
+    const caller = createAuthenticatedCaller('user-parking-1', 'driver@test.com');
+    const result = await caller.payments.checkout({
+      spotId: 'spot-123',
+      spotName: 'Colony Square Garage',
+      address: '1197 Peachtree St NE',
+      duration: 2.5,
+      totalCost: 18.75,
+    });
+
+    expect(result.url).toBe('https://checkout.stripe.test/pay/cs_parking_123');
+    expect(stripeCheckoutSessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'payment',
+      line_items: [expect.objectContaining({
+        price_data: expect.objectContaining({
+          unit_amount: 1875,
+          product_data: expect.objectContaining({ name: 'Parking — Colony Square Garage' }),
+        }),
+      })],
+      metadata: expect.objectContaining({ flow: 'parking.checkout', productType: 'parking', spotId: 'spot-123', amountCents: '1875' }),
+      success_url: expect.stringContaining('/parking/success?session_id={CHECKOUT_SESSION_ID}'),
+      cancel_url: expect.stringContaining('/parking/cancelled'),
+    }));
+  });
+
+  it('payments.checkout supports native authorization products without parking labels or automatic capture', async () => {
+    config.stripeSecretKey = 'configured_for_native_authorization_checkout_test';
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_airport_123' });
+
+    const caller = createAuthenticatedCaller('user-airport-1', 'traveler@test.com');
+    const result = await caller.payments.checkout({
+      spotId: 'native-private-airport-transfer',
+      spotName: 'Airport Transfer',
+      address: 'ATL → Midtown',
+      duration: 1,
+      totalCost: 96,
+      productType: 'airport_transfer',
+      successPath: '/booking/success',
+      cancelPath: '/booking/cancelled',
+      metadata: { source: 'native-private-airport-transfer', captureMode: 'manual_after_authorization', quoteId: 'quote-123' },
+    });
+
+    expect(result.url).toBe('https://checkout.stripe.test/pay/cs_airport_123');
+    expect(stripeCheckoutSessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'payment',
+      line_items: [expect.objectContaining({
+        price_data: expect.objectContaining({
+          unit_amount: 9600,
+          product_data: expect.objectContaining({ name: 'Airport Transfer — Airport Transfer' }),
+        }),
+      })],
+      metadata: expect.objectContaining({ flow: 'native.airport_transfer.checkout', source: 'native-private-airport-transfer', productType: 'airport_transfer', captureMode: 'manual_after_authorization', quoteId: 'quote-123' }),
+      payment_intent_data: expect.objectContaining({ capture_method: 'manual', metadata: expect.objectContaining({ productType: 'airport_transfer', captureMode: 'manual_after_authorization' }) }),
+      success_url: expect.stringContaining('/booking/success?session_id={CHECKOUT_SESSION_ID}'),
+      cancel_url: expect.stringContaining('/booking/cancelled'),
+    }));
   });
 });
 

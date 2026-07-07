@@ -589,6 +589,10 @@ const paymentsRouter = router({
       address: z.string().max(500),
       duration: z.number().min(0.5).max(24),
       totalCost: z.number().min(0.01).max(10000),
+      productType: z.enum(['parking', 'boutique_stay', 'menu_order', 'airport_transfer']).optional().default('parking'),
+      successPath: z.string().trim().min(1).max(200).optional(),
+      cancelPath: z.string().trim().min(1).max(200).optional(),
+      metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
     }))
     .mutation(async ({ input }) => {
       if (!config.stripeSecretKey) {
@@ -600,30 +604,63 @@ const paymentsRouter = router({
       }
 
       const stripe = new Stripe(config.stripeSecretKey);
-      const { spotName, address, duration, totalCost, spotId } = input;
+      const { spotName, address, duration, totalCost, spotId, productType, successPath, cancelPath } = input;
+      const amountCents = Math.round(totalCost * 100);
 
       if (!spotName || !totalCost) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'spotName and totalCost are required' });
       }
 
       try {
+        const safePath = (path: string | undefined, fallback: string) => {
+          if (!path || !path.startsWith('/') || path.startsWith('//')) return fallback;
+          return path;
+        };
+        const productNames: Record<typeof productType, string> = {
+          parking: `Parking — ${spotName}`,
+          boutique_stay: `Boutique Stay — ${spotName}`,
+          menu_order: `Menu Order — ${spotName}`,
+          airport_transfer: `Airport Transfer — ${spotName}`,
+        };
+        const flow = productType === 'parking' ? 'parking.checkout' : `native.${productType}.checkout`;
+        const nativeMetadata = Object.fromEntries(
+          Object.entries(input.metadata ?? {})
+            .filter(([, value]) => value !== null && value !== undefined)
+            .map(([key, value]) => [key, String(value)]),
+        );
+        const checkoutMetadata = {
+          ...nativeMetadata,
+          flow,
+          source: nativeMetadata.source ?? flow,
+          productType,
+          spotId: spotId || '',
+          duration: String(duration),
+          amountCents: String(amountCents),
+        };
+        const shouldManualCapture = productType === 'boutique_stay' || productType === 'airport_transfer' || String(nativeMetadata.captureMode ?? '').startsWith('manual_');
+        const paymentIntentData: Stripe.Checkout.SessionCreateParams.PaymentIntentData = {
+          metadata: checkoutMetadata,
+        };
+        if (shouldManualCapture) paymentIntentData.capture_method = 'manual';
+
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ['card'],
           mode: 'payment',
           line_items: [{
             price_data: {
               currency: 'usd',
-              unit_amount: Math.round(totalCost * 100),
+              unit_amount: amountCents,
               product_data: {
-                name: `Parking — ${spotName}`,
+                name: productNames[productType],
                 description: `${duration}h at ${address}`,
               },
             },
             quantity: 1,
           }],
-          metadata: { spotId: spotId || '', duration: String(duration) },
-          success_url: `${config.frontendUrl}/parking/success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${config.frontendUrl}/parking/cancelled`,
+          metadata: checkoutMetadata,
+          payment_intent_data: paymentIntentData,
+          success_url: `${config.frontendUrl}${safePath(successPath, '/parking/success')}?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${config.frontendUrl}${safePath(cancelPath, '/parking/cancelled')}`,
         });
 
         return { url: session.url };

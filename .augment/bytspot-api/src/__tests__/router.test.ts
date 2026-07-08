@@ -429,6 +429,45 @@ describe('rides', () => {
 });
 
 // ──────────────────────────────────────────────────────────
+// Live provider value
+// ──────────────────────────────────────────────────────────
+describe('live.bestValue', () => {
+  it('ranks vendor parking by constrained price parity and estimated total cost', async () => {
+    (db.venue.findMany as any).mockResolvedValueOnce([
+      { id: 'venue-cheap', name: 'Near Deck', lat: 33.7758, lng: -84.3964, parking: [{ id: 'spot-cheap', name: 'Main Deck', available: 6, pricePerHr: 5 }] },
+      { id: 'venue-pricey', name: 'Premium Garage', lat: 33.776, lng: -84.397, parking: [{ id: 'spot-pricey', name: 'VIP Deck', available: 5, pricePerHr: 15 }] },
+    ]);
+    const caller = createPublicCaller();
+    const result = await caller.live.bestValue({ productType: 'parking', durationHours: 2, maxBudgetCents: 2000, maxDistanceMeters: 1000, limit: 2 });
+
+    expect(result.source).toBe('live');
+    expect(result.bestValue).toEqual(expect.objectContaining({ id: 'parking:spot-cheap:Main Deck', title: 'Near Deck — Main Deck', eligible: true, priceParityScore: 100 }));
+    expect(result.bestValue?.estimatedTotalCents).toBeLessThanOrEqual(2000);
+    expect(result.options[0].valueScore).toBeGreaterThan(result.options[1].valueScore);
+  });
+
+  it('can apply strict budget constraints instead of only ranking them lower', async () => {
+    (db.venue.findMany as any).mockResolvedValueOnce([
+      { id: 'venue-over', name: 'Over Budget Garage', lat: 33.7758, lng: -84.3964, parking: [{ id: 'spot-over', name: 'Deck', available: 6, pricePerHr: 12 }] },
+    ]);
+    const caller = createPublicCaller();
+    const result = await caller.live.bestValue({ productType: 'parking', durationHours: 2, maxBudgetCents: 900, strict: true });
+
+    expect(result.options).toHaveLength(0);
+    expect(result.bestValue).toBeNull();
+  });
+
+  it('returns curated low-cost product options when live providers are not configured', async () => {
+    const caller = createPublicCaller();
+    const result = await caller.live.bestValue({ productType: 'menu_order', maxBudgetCents: 2500, limit: 1 });
+
+    expect(result.source).toBe('curated');
+    expect(result.bestValue).toEqual(expect.objectContaining({ id: 'menu:broni-home-taste', productType: 'menu_order', eligible: true }));
+    expect(result.bestValue?.explanation).toEqual(expect.arrayContaining([expect.stringContaining('estimated total')]));
+  });
+});
+
+// ──────────────────────────────────────────────────────────
 // Admin
 // ──────────────────────────────────────────────────────────
 describe('admin', () => {

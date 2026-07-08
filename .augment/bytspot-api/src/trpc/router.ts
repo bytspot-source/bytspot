@@ -39,6 +39,25 @@ const nativeCheckoutInputSchema = z.object({
   metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
 });
 type NativeCheckoutInput = z.infer<typeof nativeCheckoutInputSchema>;
+const liveValueInputSchema = z.object({
+  productType: z.enum(['parking', 'event_pass', 'menu_order', 'airport_transfer', 'any']).optional().default('any'),
+  lat: z.number().optional().default(33.7756),
+  lng: z.number().optional().default(-84.3963),
+  durationHours: z.number().min(0.5).max(24).optional().default(2),
+  maxBudgetCents: z.number().int().min(0).max(1_000_000).optional(),
+  maxDistanceMeters: z.number().min(100).max(50_000).optional().default(5_000),
+  limit: z.number().min(1).max(12).optional().default(6),
+  strict: z.boolean().optional().default(false),
+});
+type LiveValueInput = z.infer<typeof liveValueInputSchema>;
+type LiveValueSource = 'vendor' | 'google_places' | 'ticketmaster' | 'curated' | 'simulated';
+type LiveValueOption = {
+  id: string; productType: LiveValueInput['productType']; title: string; providerName: string; source: LiveValueSource;
+  listedPriceCents: number | null; estimatedFeesCents: number | null; estimatedTotalCents: number | null; marketReferenceCents: number | null;
+  distanceMeters: number | null; availability: string; confidence: number; handoff: 'discover' | 'map' | 'access';
+  priceParityScore: number; valueScore: number; eligible: boolean; constraints: { budgetFit: boolean | null; distanceFit: boolean | null; availabilityFit: boolean | null };
+  explanation: string[];
+};
 type ConciergeAction = {
   id: string;
   type: string;
@@ -469,6 +488,97 @@ function nativeVenueToDiscoverCard(venue: any) {
   };
 }
 
+type LiveValueCandidate = {
+  id: string; productType: Exclude<LiveValueInput['productType'], 'any'>; title: string; providerName: string; source: LiveValueSource;
+  listedPriceCents: number | null; distanceMeters: number | null; availability: string; available: boolean | null; confidence: number; handoff: 'discover' | 'map' | 'access';
+};
+
+function clampScore(value: number) { return Math.round(Math.max(0, Math.min(100, value))); }
+function median(values: number[]) {
+  const sorted = values.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+function dollars(cents: number | null) { return cents == null ? 'unknown price' : `$${(cents / 100).toFixed(cents % 100 === 0 ? 0 : 2)}`; }
+function parsePriceCents(value: unknown) {
+  const text = String(value ?? '').toLowerCase();
+  if (!text || text.includes('see link')) return null;
+  if (text.includes('free')) return 0;
+  const match = text.match(/\$([0-9]+(?:\.[0-9]{1,2})?)/);
+  return match ? Math.round(Number(match[1]) * 100) : null;
+}
+function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const toRad = (degrees: number) => degrees * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return Math.round(6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
+}
+function defaultMarketCents(productType: LiveValueCandidate['productType'], durationHours: number) {
+  return ({ parking: Math.round(900 * durationHours), event_pass: 2500, menu_order: 2100, airport_transfer: 9600 } as Record<LiveValueCandidate['productType'], number>)[productType];
+}
+function scoreLiveValueCandidate(candidate: LiveValueCandidate, constraints: LiveValueInput, peers: LiveValueCandidate[]): LiveValueOption {
+  const peerPrices = peers.filter((peer) => peer.productType === candidate.productType).map((peer) => peer.listedPriceCents ?? 0);
+  const marketReferenceCents = median(peerPrices) ?? defaultMarketCents(candidate.productType, constraints.durationHours);
+  const estimatedFeesCents = candidate.listedPriceCents == null ? null : Math.max(0, Math.round(candidate.listedPriceCents * 0.029) + 30);
+  const estimatedTotalCents = candidate.listedPriceCents == null ? null : candidate.listedPriceCents + (estimatedFeesCents ?? 0);
+  const priceParityScore = candidate.listedPriceCents == null ? 55 : candidate.listedPriceCents <= marketReferenceCents ? 100 : clampScore(100 - ((candidate.listedPriceCents - marketReferenceCents) / Math.max(marketReferenceCents, 1)) * 100);
+  const budgetFit = constraints.maxBudgetCents == null || estimatedTotalCents == null ? null : estimatedTotalCents <= constraints.maxBudgetCents;
+  const distanceFit = candidate.distanceMeters == null ? null : candidate.distanceMeters <= constraints.maxDistanceMeters;
+  const availabilityFit = candidate.available;
+  const budgetScore = constraints.maxBudgetCents == null ? 78 : estimatedTotalCents == null ? 50 : estimatedTotalCents <= constraints.maxBudgetCents ? 100 : clampScore(100 - ((estimatedTotalCents - constraints.maxBudgetCents) / Math.max(constraints.maxBudgetCents, 1)) * 100);
+  const distanceScore = candidate.distanceMeters == null ? 62 : clampScore(100 - (candidate.distanceMeters / Math.max(constraints.maxDistanceMeters, 1)) * 100);
+  const availabilityScore = candidate.available == null ? 60 : candidate.available ? 100 : 15;
+  const confidenceScore = clampScore(candidate.confidence * 100);
+  const valueScore = clampScore(priceParityScore * 0.35 + budgetScore * 0.25 + distanceScore * 0.15 + availabilityScore * 0.15 + confidenceScore * 0.10);
+  const eligible = (budgetFit !== false) && (distanceFit !== false) && (availabilityFit !== false);
+  const explanation = [
+    `${dollars(candidate.listedPriceCents)} listed vs ${dollars(marketReferenceCents)} market reference`,
+    estimatedTotalCents == null ? 'Final cost unknown until provider checkout' : `${dollars(estimatedTotalCents)} estimated total with checkout fees`,
+    budgetFit == null ? 'No hard budget constraint applied' : budgetFit ? 'Within budget constraint' : 'Above budget constraint',
+    distanceFit == null ? 'Distance unknown' : distanceFit ? `Within ${Math.round(constraints.maxDistanceMeters)}m distance constraint` : `Outside ${Math.round(constraints.maxDistanceMeters)}m distance constraint`,
+    `Confidence ${confidenceScore}/100 from ${candidate.source}`,
+  ];
+  return { ...candidate, estimatedFeesCents, estimatedTotalCents, marketReferenceCents, priceParityScore, valueScore, eligible, constraints: { budgetFit, distanceFit, availabilityFit }, explanation };
+}
+
+async function buildLiveValueCandidates(input: LiveValueInput): Promise<LiveValueCandidate[]> {
+  const wants = (productType: LiveValueInput['productType']) => input.productType === 'any' || input.productType === productType;
+  const origin = { lat: input.lat, lng: input.lng };
+  const candidates: LiveValueCandidate[] = [];
+  if (wants('parking')) {
+    const venues = await db.venue.findMany({ include: { parking: true }, take: 30 }).catch(() => [] as any[]);
+    const venueRows = venues.length > 0 ? venues : NATIVE_FALLBACK_VENUES;
+    for (const venue of venueRows) {
+      const parkingRows = Array.isArray(venue.parking) ? venue.parking : venue.parking?.spots ?? [];
+      for (const spot of parkingRows) {
+        const pricePerHr = Number(spot.pricePerHr ?? 0);
+        candidates.push({
+          id: `parking:${spot.id ?? venue.id}:${spot.name ?? 'spot'}`, productType: 'parking', title: spot.name ? `${venue.name} — ${spot.name}` : venue.name,
+          providerName: venue.name, source: venues.length > 0 ? 'vendor' : 'curated', listedPriceCents: pricePerHr > 0 ? Math.round(pricePerHr * input.durationHours * 100) : null,
+          distanceMeters: typeof venue.lat === 'number' && typeof venue.lng === 'number' ? haversineMeters(origin, { lat: venue.lat, lng: venue.lng }) : null,
+          availability: Number(spot.available ?? venue.parking?.totalAvailable ?? 0) > 0 ? `${spot.available ?? venue.parking?.totalAvailable} available` : 'Availability unknown',
+          available: Number(spot.available ?? venue.parking?.totalAvailable ?? 0) > 0 ? true : null, confidence: venues.length > 0 ? 0.9 : 0.58, handoff: 'map',
+        });
+      }
+    }
+  }
+  if (wants('airport_transfer')) {
+    candidates.push({ id: 'transfer:byspot-elife', productType: 'airport_transfer', title: 'Private Airport Transfer', providerName: 'Bytspot + Elife', source: 'curated', listedPriceCents: 9600, distanceMeters: null, availability: 'Estimate + review', available: null, confidence: 0.62, handoff: 'discover' });
+  }
+  if (wants('menu_order')) {
+    candidates.push({ id: 'menu:broni-home-taste', productType: 'menu_order', title: 'Broni Home Taste', providerName: 'Broni Home Taste', source: 'curated', listedPriceCents: 2100, distanceMeters: null, availability: 'Available now', available: true, confidence: 0.64, handoff: 'discover' });
+  }
+  if (wants('event_pass')) {
+    const events = await loadNativeEvents(Math.max(input.limit, 6)).catch(() => ({ events: NATIVE_FALLBACK_EVENTS, source: 'fallback' as const }));
+    for (const event of events.events) candidates.push({ id: `event:${event.id}`, productType: 'event_pass', title: event.title, providerName: event.venue, source: events.source === 'live' ? 'ticketmaster' : 'curated', listedPriceCents: parsePriceCents(event.price), distanceMeters: null, availability: event.time ?? 'Upcoming', available: true, confidence: events.source === 'live' ? 0.8 : 0.55, handoff: 'discover' });
+  }
+  return candidates;
+}
+
 async function loadNativePublicContent(limit: number) {
   return cached(`native:bootstrap:public:v${NATIVE_BOOTSTRAP_VERSION}:${limit}`, NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS, async () => {
     const [venuesResult, eventsResult] = await Promise.allSettled([
@@ -703,6 +813,29 @@ const ridesRouter = router({
           ],
         };
       });
+    }),
+});
+
+/**
+ * ── Live Provider Value sub-router ─────────────────────
+ * Scores low-cost live/curated provider options for constrained best value.
+ */
+const liveRouter = router({
+  bestValue: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'live:bestValue' }))
+    .input(liveValueInputSchema.optional())
+    .query(async ({ input }) => {
+      const constraints = liveValueInputSchema.parse(input ?? {});
+      const candidates = await buildLiveValueCandidates(constraints);
+      const scored = candidates.map((candidate) => scoreLiveValueCandidate(candidate, constraints, candidates));
+      const ranked = scored
+        .filter((option) => !constraints.strict || option.eligible)
+        .sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.valueScore - a.valueScore || (a.estimatedTotalCents ?? Number.MAX_SAFE_INTEGER) - (b.estimatedTotalCents ?? Number.MAX_SAFE_INTEGER));
+      const returned = ranked.slice(0, constraints.limit);
+      const source = returned.some((option) => option.source === 'vendor' || option.source === 'ticketmaster' || option.source === 'google_places')
+        ? returned.every((option) => option.source === 'vendor' || option.source === 'ticketmaster' || option.source === 'google_places') ? 'live' : 'mixed'
+        : 'curated';
+      return { generatedAt: new Date().toISOString(), constraints, source, bestValue: returned[0] ?? null, options: returned };
     }),
 });
 
@@ -1531,6 +1664,7 @@ export const appRouter = router({
   native: nativeRouter,
   venues: venuesRouter,
   rides: ridesRouter,
+  live: liveRouter,
   concierge: conciergeRouter,
   payments: paymentsRouter,
   subscription: subscriptionRouter,

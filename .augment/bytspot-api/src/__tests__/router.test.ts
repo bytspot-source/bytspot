@@ -139,6 +139,38 @@ describe('native.walletLedger', () => {
   });
 });
 
+describe('concierge.actions', () => {
+  it('plans safe transfer and provider-contact actions without requiring AI configuration', async () => {
+    const caller = createAuthenticatedCaller('user-concierge-1', 'concierge@test.com');
+    const result = await caller.concierge.actions({ query: 'Book an airport transfer and contact a human provider specialist' });
+
+    expect(result.actionSource).toBe('server_rules');
+    expect(result.escalationRequired).toBe(true);
+    expect(result.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'request-transfer', type: 'transfer_booking', productType: 'airport_transfer', status: 'authorization_review', handoff: 'discover' }),
+      expect.objectContaining({ id: 'provider-contact', type: 'provider_contact', status: 'concierge_review', handoff: 'access' }),
+    ]));
+  });
+
+  it('plans host-reviewed stay and access actions with honest pending states', async () => {
+    const caller = createAuthenticatedCaller('user-concierge-2', 'stay@test.com');
+    const result = await caller.concierge.actions({ query: 'Check dates for a boutique suite and show my booking receipt in My Access' });
+
+    expect(result.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'check-stay-dates', type: 'host_review', productType: 'boutique_stay', status: 'host_review_required', handoff: 'stay' }),
+      expect.objectContaining({ id: 'open-my-access', type: 'wallet_review', status: 'server_ledger', handoff: 'access' }),
+    ]));
+  });
+
+  it('returns live-option fallback actions for broad nearby searches', async () => {
+    const caller = createAuthenticatedCaller('user-concierge-3', 'nearby@test.com');
+    const result = await caller.concierge.actions({ query: 'What is open nearby tonight?' });
+
+    expect(result.liveContext).toEqual({ placeCount: 0, eventCount: 0 });
+    expect(result.actions[0]).toEqual(expect.objectContaining({ id: 'live-search', type: 'live_option_search', source: 'fallback', status: 'curated_context', handoff: 'discover' }));
+  });
+});
+
 // ──────────────────────────────────────────────────────────
 // Auth
 // ──────────────────────────────────────────────────────────

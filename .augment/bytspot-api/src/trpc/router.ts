@@ -39,6 +39,17 @@ const nativeCheckoutInputSchema = z.object({
   metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
 });
 type NativeCheckoutInput = z.infer<typeof nativeCheckoutInputSchema>;
+type ConciergeAction = {
+  id: string;
+  type: string;
+  title: string;
+  subtitle: string;
+  status: string;
+  source: 'server_rules' | 'live_context' | 'fallback';
+  handoff: 'discover' | 'map' | 'access' | 'stay';
+  productType?: NativeWalletProductType | 'event_pass' | 'provider_contact' | 'live_search';
+  metadata?: Record<string, string | number | boolean>;
+};
 
 const NATIVE_SPECIAL_DISCOVER_CARDS = [
   { id: 'service-valet-ride', type: 'mobility', title: 'Private Airport Transfer', subtitle: 'Airport pickup, driver review, and authorization-first checkout.', distance: 'Airport', rating: '4.9', icon: 'airplane.departure', verified: true, entryType: 'paid', cta: 'Request Transfer', imageUrl: null, categoryLabel: 'Mobility', badgeText: 'Mobility', metadataLine: 'Bytspot + Elife · Airport', features: ['Review estimate', 'Authorization request', 'My Access status'], vibeScore: 9, availability: 'Estimate + review', membershipRequired: true },
@@ -826,6 +837,54 @@ STRICT RULES:
 10. You know Atlanta Midtown inside out — be confident and local.`;
 }
 
+function latestUserMessage(messages: { role: 'user' | 'assistant'; content: string }[]) {
+  return [...messages].reverse().find((message) => message.role === 'user')?.content ?? messages[messages.length - 1]?.content ?? '';
+}
+
+function pushConciergeAction(actions: ConciergeAction[], action: ConciergeAction) {
+  if (!actions.some((existing) => existing.id === action.id)) actions.push(action);
+}
+
+function planConciergeActions(query: string, liveCtx?: LiveContext): { actions: ConciergeAction[]; escalationRequired: boolean } {
+  const q = query.toLowerCase();
+  const actions: ConciergeAction[] = [];
+  const livePlaceCount = liveCtx?.nearbyPlaces?.length ?? 0;
+  const liveEventCount = liveCtx?.events?.length ?? 0;
+
+  if (/airport|transfer|ride|pickup|drop[- ]?off|chauffeur|valet/.test(q)) {
+    pushConciergeAction(actions, { id: 'request-transfer', type: 'transfer_booking', title: 'Request airport transfer', subtitle: 'Review estimate, vehicle fit, and authorization before any capture.', status: 'authorization_review', source: 'server_rules', handoff: 'discover', productType: 'airport_transfer', metadata: { captureMode: 'manual_authorization' } });
+  }
+  if (/parking|park|garage|spot|arrive/.test(q)) {
+    pushConciergeAction(actions, { id: 'compare-parking', type: 'live_option_search', title: 'Compare parking nearby', subtitle: livePlaceCount > 0 ? `${livePlaceCount} live nearby places available for context.` : 'Open Map with curated parking and venue pins.', status: livePlaceCount > 0 ? 'live_context' : 'curated_context', source: livePlaceCount > 0 ? 'live_context' : 'server_rules', handoff: 'map', productType: 'live_search' });
+  }
+  if (/stay|suite|hotel|host|availability|check dates|boutique/.test(q)) {
+    pushConciergeAction(actions, { id: 'check-stay-dates', type: 'host_review', title: 'Check stay dates', subtitle: 'Host availability is reviewed before payment capture.', status: 'host_review_required', source: 'server_rules', handoff: 'stay', productType: 'boutique_stay', metadata: { captureMode: 'manual_after_host_confirm' } });
+  }
+  if (/pass|ticket|event|fifa|akwaaba|game|match/.test(q)) {
+    pushConciergeAction(actions, { id: 'view-event-pass', type: 'event_pass', title: 'View event and pass options', subtitle: liveEventCount > 0 ? `${liveEventCount} live event options found.` : 'Open Discover for curated pass options.', status: liveEventCount > 0 ? 'live_options' : 'curated_options', source: liveEventCount > 0 ? 'live_context' : 'server_rules', handoff: 'discover', productType: 'event_pass' });
+  }
+  if (/food|menu|order|broni|dining|chef|catering/.test(q)) {
+    pushConciergeAction(actions, { id: 'open-menu-order', type: 'menu_order', title: 'View menu or order options', subtitle: 'Open verified service cards; checkout still confirms details first.', status: 'review_before_checkout', source: 'server_rules', handoff: 'discover', productType: 'menu_order' });
+  }
+  if (/access|booking|reservation|receipt|wallet|my access/.test(q)) {
+    pushConciergeAction(actions, { id: 'open-my-access', type: 'wallet_review', title: 'Open My Access', subtitle: 'Review reservations, payment state, references, and receipts.', status: 'server_ledger', source: 'server_rules', handoff: 'access' });
+  }
+  if (/provider|contact|human|specialist|refund|vip|support|concierge/.test(q)) {
+    pushConciergeAction(actions, { id: 'provider-contact', type: 'provider_contact', title: 'Contact provider through Concierge', subtitle: 'Keep provider coordination attached to your wallet/request context.', status: 'concierge_review', source: 'server_rules', handoff: 'access', productType: 'provider_contact' });
+  }
+  if (/open|nearby|tonight|happening|recommend|options|search/.test(q)) {
+    pushConciergeAction(actions, { id: 'live-search', type: 'live_option_search', title: 'Search live nearby options', subtitle: livePlaceCount + liveEventCount > 0 ? `${livePlaceCount} places · ${liveEventCount} events in live context.` : 'Open Discover and Map with curated fallbacks.', status: livePlaceCount + liveEventCount > 0 ? 'live_context' : 'curated_context', source: livePlaceCount + liveEventCount > 0 ? 'live_context' : 'fallback', handoff: 'discover', productType: 'live_search' });
+  }
+
+  if (actions.length === 0) {
+    pushConciergeAction(actions, { id: 'open-discover', type: 'live_option_search', title: 'Open Discover', subtitle: 'Browse nearby places, services, passes, and mobility options.', status: 'curated_context', source: 'fallback', handoff: 'discover', productType: 'live_search' });
+    pushConciergeAction(actions, { id: 'show-map', type: 'live_option_search', title: 'Show on Map', subtitle: 'Compare verified zones, parking, and nearby access points.', status: 'curated_context', source: 'fallback', handoff: 'map', productType: 'live_search' });
+  }
+
+  const escalationRequired = /human|specialist|refund|vip|host|provider|catering|private chef/.test(q);
+  return { actions: actions.slice(0, 4), escalationRequired };
+}
+
 const conciergeRouter = router({
   /** POST /concierge/chat → concierge.chat mutation (auth required — costs $, rate limited) */
   chat: protectedProcedure
@@ -854,6 +913,7 @@ const conciergeRouter = router({
         // RAG: Fetch live places + events in parallel with OpenAI call setup
         const liveCtx = await fetchLiveContext();
 
+        const actionPlan = planConciergeActions(latestUserMessage(messages), liveCtx);
         const openai = getOpenAI();
         const completion = await openai.chat.completions.create({
           model: 'gpt-4o-mini',
@@ -886,11 +946,23 @@ const conciergeRouter = router({
             placeId: p.placeId, name: p.name, address: p.address,
             rating: p.rating, primaryType: p.primaryType, photoUrls: p.photoUrls.slice(0, 1),
           })),
+          actions: actionPlan.actions,
+          escalationRequired: actionPlan.escalationRequired,
+          actionSource: 'server_rules' as const,
         };
       } catch (err: any) {
         console.error('[Concierge] OpenAI error:', err?.message);
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'AI concierge temporarily unavailable' });
       }
+    }),
+  /** POST /concierge/actions → deterministic Concierge action plan without AI completion */
+  actions: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'concierge:actions' }))
+    .input(z.object({ query: z.string().trim().min(1).max(1000) }))
+    .mutation(async ({ input }) => {
+      const liveCtx = await fetchLiveContext();
+      const actionPlan = planConciergeActions(input.query, liveCtx);
+      return { ...actionPlan, actionSource: 'server_rules' as const, liveContext: { placeCount: liveCtx.nearbyPlaces.length, eventCount: liveCtx.events.length } };
     }),
 });
 

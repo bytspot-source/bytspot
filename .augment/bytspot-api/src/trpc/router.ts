@@ -845,6 +845,13 @@ function pushConciergeAction(actions: ConciergeAction[], action: ConciergeAction
   if (!actions.some((existing) => existing.id === action.id)) actions.push(action);
 }
 
+function conciergeActionPriority(action: ConciergeAction, query: string, escalationRequired: boolean) {
+  if (action.id === 'provider-contact' && escalationRequired) return 0;
+  if (action.id === 'open-my-access' && /access|booking|reservation|receipt|wallet|my access/.test(query)) return 1;
+  if (action.type === 'live_option_search') return 4;
+  return 2;
+}
+
 function planConciergeActions(query: string, liveCtx?: LiveContext): { actions: ConciergeAction[]; escalationRequired: boolean } {
   const q = query.toLowerCase();
   const actions: ConciergeAction[] = [];
@@ -870,7 +877,7 @@ function planConciergeActions(query: string, liveCtx?: LiveContext): { actions: 
     pushConciergeAction(actions, { id: 'open-my-access', type: 'wallet_review', title: 'Open My Access', subtitle: 'Review reservations, payment state, references, and receipts.', status: 'server_ledger', source: 'server_rules', handoff: 'access' });
   }
   if (/provider|contact|human|specialist|refund|vip|support|concierge/.test(q)) {
-    pushConciergeAction(actions, { id: 'provider-contact', type: 'provider_contact', title: 'Contact provider through Concierge', subtitle: 'Keep provider coordination attached to your wallet/request context.', status: 'concierge_review', source: 'server_rules', handoff: 'access', productType: 'provider_contact' });
+    pushConciergeAction(actions, { id: 'provider-contact', type: 'provider_contact', title: 'Review provider contact options', subtitle: 'Open My Access to prepare provider coordination with your wallet/request context.', status: 'concierge_review', source: 'server_rules', handoff: 'access', productType: 'provider_contact' });
   }
   if (/open|nearby|tonight|happening|recommend|options|search/.test(q)) {
     pushConciergeAction(actions, { id: 'live-search', type: 'live_option_search', title: 'Search live nearby options', subtitle: livePlaceCount + liveEventCount > 0 ? `${livePlaceCount} places · ${liveEventCount} events in live context.` : 'Open Discover and Map with curated fallbacks.', status: livePlaceCount + liveEventCount > 0 ? 'live_context' : 'curated_context', source: livePlaceCount + liveEventCount > 0 ? 'live_context' : 'fallback', handoff: 'discover', productType: 'live_search' });
@@ -882,7 +889,11 @@ function planConciergeActions(query: string, liveCtx?: LiveContext): { actions: 
   }
 
   const escalationRequired = /human|specialist|refund|vip|host|provider|catering|private chef/.test(q);
-  return { actions: actions.slice(0, 4), escalationRequired };
+  const prioritizedActions = actions
+    .map((action, index) => ({ action, index, priority: conciergeActionPriority(action, q, escalationRequired) }))
+    .sort((a, b) => a.priority - b.priority || a.index - b.index)
+    .map(({ action }) => action);
+  return { actions: prioritizedActions.slice(0, 4), escalationRequired };
 }
 
 const conciergeRouter = router({

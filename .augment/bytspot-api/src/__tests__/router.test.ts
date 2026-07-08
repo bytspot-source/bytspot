@@ -142,10 +142,11 @@ describe('native.walletLedger', () => {
 describe('concierge.actions', () => {
   it('plans safe transfer and provider-contact actions without requiring AI configuration', async () => {
     const caller = createAuthenticatedCaller('user-concierge-1', 'concierge@test.com');
-    const result = await caller.concierge.actions({ query: 'Book an airport transfer and contact a human provider specialist' });
+    const result = await caller.concierge.actions({ query: 'Book an airport transfer, find parking, check stay dates, get an event pass, order food, and contact a human provider specialist' });
 
     expect(result.actionSource).toBe('server_rules');
     expect(result.escalationRequired).toBe(true);
+    expect(result.actions.length).toBeLessThanOrEqual(4);
     expect(result.actions).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'request-transfer', type: 'transfer_booking', productType: 'airport_transfer', status: 'authorization_review', handoff: 'discover' }),
       expect.objectContaining({ id: 'provider-contact', type: 'provider_contact', status: 'concierge_review', handoff: 'access' }),

@@ -72,6 +72,10 @@ vi.mock('../lib/db', () => {
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn().mockResolvedValue({ id: 'up-1' }),
     },
+    walletLedgerEntry: {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ id: 'wle-1' }),
+    },
     follow: {
       findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn().mockResolvedValue(null),

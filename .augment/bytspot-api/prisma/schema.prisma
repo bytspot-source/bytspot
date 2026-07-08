@@ -40,6 +40,7 @@ model User {
   following      Follow[]          @relation("follower")  // users I follow
   reviews        Review[]
   tipsGiven      Tip[]             @relation("tipFrom")
+  walletLedgerEntries WalletLedgerEntry[]
 
   @@map("users")
 }
@@ -313,4 +314,36 @@ model Tip {
   @@index([fromUserId])
   @@index([toValetId])
   @@map("tips")
+}
+
+// ─── Native Wallet Ledger ──────────────────────────────────
+model WalletLedgerEntry {
+  id                   String   @id @default(cuid())
+  userId               String   @map("user_id")
+  productType          String   @map("product_type")
+  title                String
+  subtitle             String?
+  venueName            String?  @map("venue_name")
+  providerName         String?  @map("provider_name")
+  windowLabel          String?  @map("window_label")
+  paymentState         String   @default("unknown") @map("payment_state")
+  providerState        String   @default("pending") @map("provider_state")
+  reservationReference String?  @map("reservation_reference")
+  amountCents          Int?     @map("amount_cents")
+  currency             String   @default("usd")
+  source               String   @default("server")
+  receiptUrl           String?  @map("receipt_url")
+  actions              Json?
+  metadata             Json?
+  startsAt             DateTime? @map("starts_at")
+  endsAt               DateTime? @map("ends_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, productType])
+  @@index([providerState])
+  @@map("wallet_ledger_entries")
 }

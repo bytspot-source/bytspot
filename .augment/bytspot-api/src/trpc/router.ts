@@ -24,6 +24,21 @@ const NATIVE_BOOTSTRAP_VERSION = 2;
 const NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS = 20;
 const NATIVE_EVENTS_CACHE_SCHEMA_VERSION = 2;
 type NativeBootstrapSource = 'live' | 'fallback' | 'mixed';
+const nativeWalletProductTypeSchema = z.enum(['parking', 'boutique_stay', 'menu_order', 'airport_transfer']);
+type NativeWalletProductType = z.infer<typeof nativeWalletProductTypeSchema>;
+const nativeCheckoutInputSchema = z.object({
+  spotId: z.string().max(100),
+  spotName: z.string().max(200),
+  address: z.string().max(500),
+  duration: z.number().min(0.5).max(24),
+  totalCost: z.number().min(0.01).max(10000),
+  productType: nativeWalletProductTypeSchema.optional().default('parking'),
+  successPath: z.string().trim().min(1).max(200).optional(),
+  cancelPath: z.string().trim().min(1).max(200).optional(),
+  source: z.string().trim().min(1).max(100).optional(),
+  metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+});
+type NativeCheckoutInput = z.infer<typeof nativeCheckoutInputSchema>;
 
 const NATIVE_SPECIAL_DISCOVER_CARDS = [
   { id: 'service-valet-ride', type: 'mobility', title: 'Private Airport Transfer', subtitle: 'Airport pickup, driver review, and authorization-first checkout.', distance: 'Airport', rating: '4.9', icon: 'airplane.departure', verified: true, entryType: 'paid', cta: 'Request Transfer', imageUrl: null, categoryLabel: 'Mobility', badgeText: 'Mobility', metadataLine: 'Bytspot + Elife · Airport', features: ['Review estimate', 'Authorization request', 'My Access status'], vibeScore: 9, availability: 'Estimate + review', membershipRequired: true },
@@ -488,9 +503,10 @@ async function loadNativeEvents(limit: number) {
 async function loadNativeAccount(userId: string | undefined) {
   if (!userId) return nativeGuestAccount();
   try {
-    const [user, savedSpots] = await Promise.all([
+    const [user, savedSpots, activeBookings] = await Promise.all([
       db.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, phone: true, address: true, birthday: true, vehicles: true, isPremium: true, stripeCustomerId: true, createdAt: true } }),
       db.savedSpot.findMany({ where: { userId }, include: { venue: { select: { id: true, name: true, slug: true, category: true, address: true, lat: true, lng: true, imageUrl: true } } }, orderBy: { savedAt: 'desc' }, take: 4 }).catch(() => []),
+      loadNativeWalletLedger(userId, 8),
     ]);
     const vehicles = Array.isArray(user?.vehicles) ? user?.vehicles : [];
     const identityReady = Boolean(user?.email && user?.name && (user?.phone || user?.address));
@@ -504,7 +520,7 @@ async function loadNativeAccount(userId: string | undefined) {
       profileReadiness: readiness(checks, ['identity', 'payment', 'vehicle']),
       paymentReadiness: { ready: hasVerifiedPaymentMethod, hasStripeCustomer, savedMethodCount: 0, note: hasStripeCustomer ? 'Stripe customer exists; saved payment method verification is not wired yet.' : 'No Stripe customer on file.' },
       savedPlaces: savedSpots.map((spot: any) => ({ id: spot.id, venueId: spot.venueId, title: spot.venue?.name ?? 'Saved place', subtitle: spot.venue?.address ?? '', category: spot.venue?.category ?? 'venue', imageUrl: spot.venue?.imageUrl ?? null, savedAt: spot.savedAt instanceof Date ? spot.savedAt.toISOString() : String(spot.savedAt) })),
-      activeBookings: { source: 'device_local' as const, count: 0, items: [] as any[], note: 'Native device wallet remains the arrival ledger until P3 server ledger sync.' },
+      activeBookings,
     };
   } catch {
     return nativeGuestAccount('authenticated_unavailable');
@@ -517,6 +533,104 @@ function nativeGuestAccount(mode: 'guest' | 'authenticated_unavailable' = 'guest
 
 function readiness(checks: boolean[], names: string[]) {
   return { completed: checks.filter(Boolean).length, total: checks.length, checks: names.map((name, index) => ({ name, ready: checks[index] })), missing: names.filter((_, index) => !checks[index]) };
+}
+
+const nativeWalletActions = [{ id: 'open_access', title: 'Open My Access', type: 'native_panel', target: 'access' }];
+
+function nativeWalletDate(value: unknown): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function nativeWalletMetadataValue(metadata: Record<string, string>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (value && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function nativeWalletProviderState(productType: NativeWalletProductType, metadata: Record<string, string>) {
+  if (productType === 'parking') return 'payment_pending';
+  if (productType === 'menu_order') return 'stripe_checkout_pending';
+  if (productType === 'boutique_stay') return 'host_review_pending';
+  return nativeWalletMetadataValue(metadata, ['requestedStatus', 'providerState']) ?? 'pending_authorization';
+}
+
+function nativeWalletPaymentState(productType: NativeWalletProductType, metadata: Record<string, string>) {
+  const captureMode = metadata.captureMode ?? '';
+  if (productType === 'boutique_stay' || productType === 'airport_transfer' || captureMode.startsWith('manual_')) return 'authorization_pending';
+  return 'checkout_pending';
+}
+
+function nativeWalletTitle(productType: NativeWalletProductType) {
+  return ({ parking: 'Parking Reserved', boutique_stay: 'Boutique Stay Request', menu_order: 'Menu Order', airport_transfer: 'Airport Transfer' } as Record<NativeWalletProductType, string>)[productType];
+}
+
+function mapNativeWalletLedgerEntry(entry: any) {
+  const actions = Array.isArray(entry.actions) ? entry.actions : nativeWalletActions;
+  return {
+    id: entry.id,
+    productType: entry.productType,
+    title: entry.title,
+    subtitle: entry.subtitle ?? null,
+    venueName: entry.venueName ?? null,
+    providerName: entry.providerName ?? null,
+    windowLabel: entry.windowLabel ?? null,
+    paymentState: entry.paymentState,
+    providerState: entry.providerState,
+    reservationReference: entry.reservationReference ?? null,
+    amountCents: entry.amountCents ?? null,
+    currency: entry.currency ?? 'usd',
+    source: entry.source ?? 'server',
+    receiptUrl: entry.receiptUrl ?? null,
+    actions,
+    metadata: entry.metadata ?? {},
+    createdAt: nativeWalletDate(entry.createdAt) ?? new Date().toISOString(),
+    updatedAt: nativeWalletDate(entry.updatedAt) ?? nativeWalletDate(entry.createdAt) ?? new Date().toISOString(),
+  };
+}
+
+async function loadNativeWalletLedger(userId: string, limit = 12) {
+  try {
+    const entries = await db.walletLedgerEntry.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: limit });
+    return {
+      source: 'server' as const,
+      count: entries.length,
+      items: entries.map(mapNativeWalletLedgerEntry),
+      note: entries.length > 0 ? 'Server wallet ledger is authoritative for signed-in users.' : 'No server wallet entries yet; native wallet can show device-local fallback entries.',
+    };
+  } catch {
+    return { source: 'unavailable' as const, count: 0, items: [] as any[], note: 'Server wallet ledger unavailable; native wallet can show device-local fallback entries.' };
+  }
+}
+
+async function createNativeWalletLedgerFromCheckout(userId: string, input: NativeCheckoutInput, amountCents: number, session: { id?: string | null; payment_intent?: string | { id?: string } | null }, checkoutMetadata: Record<string, string>) {
+  const productType = input.productType;
+  const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
+  const venueName = nativeWalletMetadataValue(checkoutMetadata, ['venueName', 'spotName']) ?? input.spotName;
+  const providerName = productType === 'airport_transfer' ? 'Elife Transfer' : 'Bytspot';
+  const windowLabel = nativeWalletMetadataValue(checkoutMetadata, ['accessWindowLabel', 'pickupTimeLabel', 'nightsLabel', 'fulfillmentLabel']) ?? `${input.duration}h window`;
+  const reservationReference = nativeWalletMetadataValue(checkoutMetadata, ['reservationReference', 'reservationCode', 'requestCode', 'orderCode', 'quoteId']) ?? session.id ?? undefined;
+  return db.walletLedgerEntry.create({
+    data: {
+      userId,
+      productType,
+      title: nativeWalletTitle(productType),
+      subtitle: input.address,
+      venueName,
+      providerName,
+      windowLabel,
+      paymentState: nativeWalletPaymentState(productType, checkoutMetadata),
+      providerState: nativeWalletProviderState(productType, checkoutMetadata),
+      reservationReference,
+      amountCents,
+      currency: 'usd',
+      source: 'server_checkout',
+      actions: nativeWalletActions,
+      metadata: { ...checkoutMetadata, stripeCheckoutSessionId: session.id ?? null, stripePaymentIntentId: paymentIntentId },
+    },
+  });
 }
 
 /**
@@ -540,9 +654,13 @@ const nativeRouter = router({
         content: { venues: content.venues, discoverCards: content.discoverCards, events: content.events, source: content.source },
         account,
         concierge: { city: 'Midtown', starterPrompts: ['Find parking nearby', 'Check stay dates', 'Access my booking', 'What’s open now?'] },
-        featureFlags: { nativeBootstrap: true, appClipHandoff: true, stripeManualAuthorization: true, serverArrivalLedger: false },
+        featureFlags: { nativeBootstrap: true, appClipHandoff: true, stripeManualAuthorization: true, serverArrivalLedger: true },
       };
     }),
+  /** /trpc/native.walletLedger → server-authoritative Profile/My Access ledger */
+  walletLedger: protectedProcedure
+    .input(z.object({ limit: z.number().min(1).max(50).optional().default(20) }).optional())
+    .query(async ({ ctx, input }) => loadNativeWalletLedger(ctx.user.userId, input?.limit ?? 20)),
 });
 
 /**
@@ -783,19 +901,8 @@ const paymentsRouter = router({
   /** POST /payments/checkout → payments.checkout mutation (auth required — handles $$) */
   checkout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'payments:checkout' }))
-    .input(z.object({
-      spotId: z.string().max(100),
-      spotName: z.string().max(200),
-      address: z.string().max(500),
-      duration: z.number().min(0.5).max(24),
-      totalCost: z.number().min(0.01).max(10000),
-      productType: z.enum(['parking', 'boutique_stay', 'menu_order', 'airport_transfer']).optional().default('parking'),
-      successPath: z.string().trim().min(1).max(200).optional(),
-      cancelPath: z.string().trim().min(1).max(200).optional(),
-      source: z.string().trim().min(1).max(100).optional(),
-      metadata: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
-    }))
-    .mutation(async ({ input }) => {
+    .input(nativeCheckoutInputSchema)
+    .mutation(async ({ ctx, input }) => {
       if (!config.stripeSecretKey) {
         return {
           url: null as string | null,
@@ -818,13 +925,13 @@ const paymentsRouter = router({
           return path;
         };
         const checkoutSuccessUrl = (path: string) => `${config.frontendUrl}${path}${path.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`;
-        const productNames: Record<typeof productType, string> = {
+        const productNames: Record<NativeWalletProductType, string> = {
           parking: `Parking — ${spotName}`,
           boutique_stay: `Boutique Stay — ${spotName}`,
           menu_order: `Menu Order — ${spotName}`,
           airport_transfer: `Airport Transfer — ${spotName}`,
         };
-        const productDescriptions: Record<typeof productType, string> = {
+        const productDescriptions: Record<NativeWalletProductType, string> = {
           parking: `${duration}h at ${address}`,
           boutique_stay: `Stay authorization for ${address}`,
           menu_order: `Order checkout for ${address}`,
@@ -871,7 +978,13 @@ const paymentsRouter = router({
           cancel_url: `${config.frontendUrl}${safePath(cancelPath, '/parking/cancelled')}`,
         });
 
-        return { url: session.url };
+        const ledgerEntry = await createNativeWalletLedgerFromCheckout(ctx.user.userId, input, amountCents, session, checkoutMetadata).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : 'wallet ledger persistence failed';
+          console.error('[payments] Wallet ledger create failed:', msg);
+          return null;
+        });
+
+        return { url: session.url, ledgerEntryId: ledgerEntry?.id ?? null };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Stripe error';
         console.error('[payments] Stripe error:', msg);

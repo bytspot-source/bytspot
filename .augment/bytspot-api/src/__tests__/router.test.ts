@@ -105,7 +105,31 @@ describe('native.bootstrap', () => {
     expect(result.account.paymentReadiness.ready).toBe(false);
     expect(result.account.paymentReadiness.hasStripeCustomer).toBe(true);
     expect(result.account.paymentReadiness.savedMethodCount).toBe(0);
+    expect(result.account.activeBookings.source).toBe('server');
     expect(result.account.savedPlaces[0]).toEqual(expect.objectContaining({ title: 'Colony Square' }));
+  });
+});
+
+describe('native.walletLedger', () => {
+  it('returns server-authoritative wallet ledger entries for the signed-in user', async () => {
+    (db.walletLedgerEntry.findMany as any).mockResolvedValueOnce([
+      {
+        id: 'ledger-1', productType: 'airport_transfer', title: 'Airport Transfer', subtitle: 'ATL → Midtown',
+        venueName: 'Airport Transfer', providerName: 'Elife Transfer', windowLabel: 'Today · 8:00 PM',
+        paymentState: 'authorization_pending', providerState: 'pending_authorization', reservationReference: 'quote-123',
+        amountCents: 9600, currency: 'usd', source: 'server_checkout', receiptUrl: null,
+        actions: [{ id: 'open_access', title: 'Open My Access' }], metadata: { quoteId: 'quote-123' },
+        createdAt: new Date('2026-01-03T00:00:00Z'), updatedAt: new Date('2026-01-03T00:00:00Z'),
+      },
+    ]);
+
+    const caller = createAuthenticatedCaller('user-ledger-1', 'wallet@test.com');
+    const result = await caller.native.walletLedger({ limit: 3 });
+
+    expect(db.walletLedgerEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: 'user-ledger-1' }, take: 3 }));
+    expect(result.source).toBe('server');
+    expect(result.count).toBe(1);
+    expect(result.items[0]).toEqual(expect.objectContaining({ id: 'ledger-1', productType: 'airport_transfer', paymentState: 'authorization_pending', providerState: 'pending_authorization', reservationReference: 'quote-123' }));
   });
 });
 
@@ -188,7 +212,7 @@ describe('auth', () => {
 describe('payments', () => {
   it('payments.checkout keeps parking defaults for legacy parking callers', async () => {
     config.stripeSecretKey = 'configured_for_parking_checkout_test';
-    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_parking_123' });
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ id: 'cs_parking_123', payment_intent: 'pi_parking_123', url: 'https://checkout.stripe.test/pay/cs_parking_123' });
 
     const caller = createAuthenticatedCaller('user-parking-1', 'driver@test.com');
     const result = await caller.payments.checkout({
@@ -200,6 +224,7 @@ describe('payments', () => {
     });
 
     expect(result.url).toBe('https://checkout.stripe.test/pay/cs_parking_123');
+    expect(result.ledgerEntryId).toBe('wle-1');
     expect(stripeCheckoutSessionsCreate).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'payment',
       line_items: [expect.objectContaining({
@@ -212,11 +237,14 @@ describe('payments', () => {
       success_url: expect.stringContaining('/parking/success?session_id={CHECKOUT_SESSION_ID}'),
       cancel_url: expect.stringContaining('/parking/cancelled'),
     }));
+    expect(db.walletLedgerEntry.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ userId: 'user-parking-1', productType: 'parking', paymentState: 'checkout_pending', providerState: 'payment_pending', amountCents: 1875 }),
+    }));
   });
 
   it('payments.checkout supports native authorization products without parking labels or automatic capture', async () => {
     config.stripeSecretKey = 'configured_for_native_authorization_checkout_test';
-    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_airport_123' });
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ id: 'cs_airport_123', payment_intent: 'pi_airport_123', url: 'https://checkout.stripe.test/pay/cs_airport_123' });
 
     const caller = createAuthenticatedCaller('user-airport-1', 'traveler@test.com');
     const result = await caller.payments.checkout({
@@ -246,11 +274,17 @@ describe('payments', () => {
       success_url: expect.stringContaining('/booking/success?from=airport&session_id={CHECKOUT_SESSION_ID}'),
       cancel_url: expect.stringContaining('/booking/cancelled'),
     }));
+    expect(db.walletLedgerEntry.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        userId: 'user-airport-1', productType: 'airport_transfer', title: 'Airport Transfer', providerName: 'Elife Transfer',
+        paymentState: 'authorization_pending', providerState: 'pending_authorization', reservationReference: 'quote-123', amountCents: 9600,
+      }),
+    }));
   });
 
   it('payments.checkout manually captures boutique stays and preserves top-level native source', async () => {
     config.stripeSecretKey = 'configured_for_native_stay_checkout_test';
-    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ url: 'https://checkout.stripe.test/pay/cs_stay_123' });
+    stripeCheckoutSessionsCreate.mockResolvedValueOnce({ id: 'cs_stay_123', payment_intent: 'pi_stay_123', url: 'https://checkout.stripe.test/pay/cs_stay_123' });
 
     const caller = createAuthenticatedCaller('user-stay-1', 'guest@test.com');
     const result = await caller.payments.checkout({
@@ -276,6 +310,9 @@ describe('payments', () => {
       })],
       metadata: expect.objectContaining({ flow: 'native.boutique_stay.checkout', source: 'native-boutique-stay', productType: 'boutique_stay', captureMode: 'manual_after_host_approval', nightsLabel: '2 nights' }),
       payment_intent_data: expect.objectContaining({ capture_method: 'manual', metadata: expect.objectContaining({ source: 'native-boutique-stay', productType: 'boutique_stay' }) }),
+    }));
+    expect(db.walletLedgerEntry.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ userId: 'user-stay-1', productType: 'boutique_stay', paymentState: 'authorization_pending', providerState: 'host_review_pending', windowLabel: '2 nights' }),
     }));
   });
 });

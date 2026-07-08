@@ -20,6 +20,49 @@ import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
 
+const NATIVE_BOOTSTRAP_VERSION = 1;
+const NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS = 20;
+
+const NATIVE_SPECIAL_DISCOVER_CARDS = [
+  { id: 'service-valet-ride', type: 'mobility', title: 'Private Airport Transfer', subtitle: 'Airport pickup, driver review, and authorization-first checkout.', distance: 'Airport', rating: '4.9', icon: 'airplane.departure', verified: true, entryType: 'paid', cta: 'Request Transfer', imageUrl: null, categoryLabel: 'Mobility', badgeText: 'Mobility', metadataLine: 'Bytspot + Elife · Airport', features: ['Review estimate', 'Authorization request', 'My Access status'], vibeScore: 9, availability: 'Estimate + review', membershipRequired: true },
+  { id: 'service-group-transport', type: 'mobility', title: 'Group Transport', subtitle: 'Coordinate larger group movement with Concierge.', distance: 'Group', rating: '4.8', icon: 'bus.fill', verified: true, entryType: 'paid', cta: 'Plan Group Ride', imageUrl: null, categoryLabel: 'Mobility', badgeText: 'Mobility', metadataLine: 'Bytspot · Group ride', features: ['Group ETA', 'Concierge support', 'Arrival routing'], vibeScore: 8, availability: 'Request review', membershipRequired: true },
+  { id: 'broni-home-taste', type: 'service', title: 'Broni Home Taste', subtitle: 'Ghanaian comfort food, ready for pickup or delivery.', distance: 'Service', rating: '4.9', icon: 'fork.knife', verified: true, entryType: 'paid', cta: 'View Menu', imageUrl: 'https://images.unsplash.com/photo-1604329760661-e71dc83f8f26?auto=format&fit=crop&w=1200&q=88', categoryLabel: 'Dining', badgeText: 'Dining', metadataLine: 'From $21 • Available now', features: ['Jollof + chicken', 'Banku + tilapia', 'Family-style portions'], vibeScore: 9, availability: 'Available now', membershipRequired: true },
+  { id: 'gh-akwaaba-pass', type: 'service', title: 'GH Akwaaba Pass', subtitle: 'Ghana matchday access, ready on your phone.', distance: 'Pass', rating: '4.9', icon: 'ticket.fill', verified: true, entryType: 'paid', cta: 'View Pass', imageUrl: 'https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1200&q=88', categoryLabel: 'Event Pass', badgeText: 'Event Pass', metadataLine: '$50 • Digital pass ready', features: ['Fast-track entry', 'VIP lounge access', 'Digital pass delivery'], vibeScore: 9, availability: 'Digital pass ready', membershipRequired: true },
+];
+
+const NATIVE_FALLBACK_EVENTS = [
+  { id: 'fifa-gh', title: 'GH Akwaaba FIFA Matchday', venue: 'Mercedes-Benz Stadium', time: 'Tonight', price: 'Platinum', emoji: '🇬🇭', imageUrl: 'https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=900&q=80' },
+  { id: 'midtown-live', title: 'Midtown Live Lounge', venue: 'Colony Square', time: '8:00 PM', price: 'Free', emoji: '🎶', imageUrl: 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?auto=format&fit=crop&w=900&q=80' },
+];
+
+const NATIVE_FALLBACK_VENUES = [
+  { id: 'colony-square', name: 'Colony Square', slug: 'colony-square', address: '1197 Peachtree St NE', lat: 33.7878, lng: -84.3832, category: 'dining', imageUrl: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=900&q=80', entryType: 'free', entryPrice: null, ticketUrl: null, crowd: { level: 2, label: 'Active', waitMins: 5 }, parking: { totalAvailable: 14, spots: [{ name: 'Colony Garage', type: 'garage', available: 14, total: 120, pricePerHr: 8 }] } },
+  { id: 'midtown-smart-parking', name: 'Midtown Smart Parking', slug: 'midtown-smart-parking', address: '10th St NE', lat: 33.7819, lng: -84.3847, category: 'parking', imageUrl: null, entryType: 'paid', entryPrice: '$8/hr', ticketUrl: null, crowd: { level: 1, label: 'Easy', waitMins: 0 }, parking: { totalAvailable: 22, spots: [{ name: 'Smart Garage', type: 'garage', available: 22, total: 80, pricePerHr: 8 }] } },
+  { id: 'arts-center-access', name: 'Arts Center Access', slug: 'arts-center-access', address: '1280 Peachtree St NE', lat: 33.7892, lng: -84.3849, category: 'entertainment', imageUrl: null, entryType: 'free', entryPrice: null, ticketUrl: null, crowd: { level: 3, label: 'Busy', waitMins: 12 }, parking: { totalAvailable: 8, spots: [{ name: 'Arts Deck', type: 'garage', available: 8, total: 60, pricePerHr: 10 }] } },
+];
+
+function nativeIconFor(type: string): string {
+  const map: Record<string, string> = { dining: 'fork.knife', nightlife: 'music.note', coffee: 'cup.and.saucer.fill', parking: 'parkingsign.circle.fill', boutique_apartment: 'house.fill', entertainment: 'ticket.fill', fitness: 'figure.mind.and.body', shopping: 'bag.fill', mobility: 'car.side.fill', service: 'checkmark.seal.fill' };
+  return map[type] ?? 'mappin.and.ellipse';
+}
+
+function nativeLabelFor(type: string): string {
+  const map: Record<string, string> = { dining: 'Dining', nightlife: 'Nightlife', coffee: 'Coffee', parking: 'Parking', entertainment: 'Events', fitness: 'Fitness', shopping: 'Shopping', service: 'Services' };
+  return map[type] ?? 'Nearby';
+}
+
+function nativeDiscoverType(category: string): string {
+  const normalized = category.toLowerCase();
+  if (normalized.includes('restaurant') || normalized.includes('food') || normalized.includes('dining')) return 'dining';
+  if (normalized.includes('bar') || normalized.includes('club') || normalized.includes('nightlife')) return 'nightlife';
+  if (normalized.includes('coffee') || normalized.includes('cafe')) return 'coffee';
+  if (normalized.includes('parking') || normalized.includes('garage')) return 'parking';
+  if (normalized.includes('fitness') || normalized.includes('gym')) return 'fitness';
+  if (normalized.includes('shop') || normalized.includes('market')) return 'shopping';
+  if (normalized.includes('event') || normalized.includes('entertainment')) return 'entertainment';
+  return 'venue';
+}
+
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
     expiresIn: config.jwtExpiresIn as string & jwt.SignOptions['expiresIn'],
@@ -342,6 +385,150 @@ const venuesRouter = router({
       }
 
       return result;
+    }),
+});
+
+function mapNativeVenue(v: any) {
+  const parkingRows = Array.isArray(v.parking) ? v.parking : [];
+  return {
+    id: v.id,
+    name: v.name,
+    slug: v.slug,
+    address: v.address,
+    lat: v.lat,
+    lng: v.lng,
+    category: v.category,
+    imageUrl: v.imageUrl ?? null,
+    entryType: (v.entryType ?? 'free') as 'free' | 'paid',
+    entryPrice: v.entryPrice ?? null,
+    ticketUrl: v.ticketUrl ?? null,
+    crowd: v.crowdLevels?.[0]
+      ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
+      : v.crowd ?? null,
+    parking: {
+      totalAvailable: v.parking?.totalAvailable ?? parkingRows.reduce((sum: number, p: any) => sum + (p.available ?? 0), 0),
+      spots: v.parking?.spots ?? parkingRows.map((p: any) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots ?? p.total, pricePerHr: p.pricePerHr })),
+    },
+  };
+}
+
+function nativeVenueToDiscoverCard(venue: any) {
+  const type = nativeDiscoverType(venue.category ?? 'venue');
+  const spots = venue.parking?.totalAvailable ?? 0;
+  const firstSpot = venue.parking?.spots?.[0];
+  const price = firstSpot?.pricePerHr ? `$${firstSpot.pricePerHr}/hr` : venue.entryPrice ?? 'Free';
+  const features = [nativeLabelFor(type), venue.crowd?.label ?? 'Open'];
+  if (spots > 0) features.push(`${spots} spots`);
+  return {
+    id: `venue-${venue.id}`,
+    type,
+    title: venue.name,
+    subtitle: venue.address || 'Live venue from bytspot-api',
+    distance: '—',
+    rating: '4.5',
+    icon: nativeIconFor(type),
+    verified: false,
+    entryType: venue.entryType ?? 'free',
+    cta: 'Open details',
+    imageUrl: venue.imageUrl ?? null,
+    categoryLabel: nativeLabelFor(type),
+    badgeText: venue.entryType === 'paid' ? 'PAID ENTRY' : 'FREE ENTRY',
+    metadataLine: spots > 0 ? `${price} • ${spots} spots` : price,
+    features: features.slice(0, 4),
+    vibeScore: Math.min(Math.max((venue.crowd?.level ?? 2) * 2, 1), 10),
+    availability: venue.crowd?.label ?? 'Open',
+    membershipRequired: false,
+  };
+}
+
+async function loadNativePublicContent(limit: number) {
+  return cached(`native:bootstrap:public:v${NATIVE_BOOTSTRAP_VERSION}:${limit}`, NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS, async () => {
+    const [venuesResult, eventsResult] = await Promise.allSettled([
+      db.venue.findMany({
+        include: { crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 }, parking: true },
+        orderBy: { name: 'asc' },
+        take: limit,
+      }),
+      loadNativeEvents(limit),
+    ]);
+
+    const liveVenues = venuesResult.status === 'fulfilled' ? venuesResult.value.map(mapNativeVenue) : [];
+    const venues = liveVenues.length > 0 ? liveVenues : NATIVE_FALLBACK_VENUES;
+    const events = eventsResult.status === 'fulfilled' && eventsResult.value.length > 0 ? eventsResult.value : NATIVE_FALLBACK_EVENTS;
+    const discoverCards = [...NATIVE_SPECIAL_DISCOVER_CARDS, ...venues.slice(0, 8).map(nativeVenueToDiscoverCard)];
+    const source = liveVenues.length > 0 ? 'live' : 'fallback';
+
+    return { venues, events, discoverCards, source };
+  });
+}
+
+async function loadNativeEvents(limit: number) {
+  if (!config.ticketmasterApiKey) return NATIVE_FALLBACK_EVENTS.slice(0, Math.min(limit, NATIVE_FALLBACK_EVENTS.length));
+  return cached(`native:events:atl:${limit}`, 900, async () => {
+    const params = new URLSearchParams({ apikey: config.ticketmasterApiKey, city: 'Atlanta', stateCode: 'GA', size: String(Math.min(limit, 20)), sort: 'date,asc' });
+    const res = await fetch(`${TM_BASE}/events.json?${params}`, { signal: AbortSignal.timeout(3500) });
+    if (!res.ok) return NATIVE_FALLBACK_EVENTS;
+    const data = (await res.json()) as { _embedded?: { events?: any[] } };
+    return (data._embedded?.events ?? []).map(mapTmEvent).map((event) => ({ ...event, imageUrl: event.image ?? null })).slice(0, limit);
+  });
+}
+
+async function loadNativeAccount(userId: string | undefined) {
+  if (!userId) return nativeGuestAccount();
+  try {
+    const [user, savedSpots] = await Promise.all([
+      db.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, phone: true, address: true, birthday: true, vehicles: true, isPremium: true, stripeCustomerId: true, createdAt: true } }),
+      db.savedSpot.findMany({ where: { userId }, include: { venue: { select: { id: true, name: true, slug: true, category: true, address: true, lat: true, lng: true, imageUrl: true } } }, orderBy: { savedAt: 'desc' }, take: 4 }).catch(() => []),
+    ]);
+    const vehicles = Array.isArray(user?.vehicles) ? user?.vehicles : [];
+    const identityReady = Boolean(user?.email && user?.name && (user?.phone || user?.address));
+    const vehicleReady = vehicles.length > 0;
+    const paymentReady = Boolean(user?.stripeCustomerId);
+    const checks = [identityReady, paymentReady, vehicleReady];
+    return {
+      mode: 'authenticated' as const,
+      user: user ? { id: user.id, email: user.email, name: user.name, isPremium: user.isPremium, createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : String(user.createdAt) } : null,
+      profileReadiness: readiness(checks, ['identity', 'payment', 'vehicle']),
+      paymentReadiness: { ready: paymentReady, hasStripeCustomer: paymentReady, savedMethodCount: paymentReady ? 1 : 0 },
+      savedPlaces: savedSpots.map((spot: any) => ({ id: spot.id, venueId: spot.venueId, title: spot.venue?.name ?? 'Saved place', subtitle: spot.venue?.address ?? '', category: spot.venue?.category ?? 'venue', imageUrl: spot.venue?.imageUrl ?? null, savedAt: spot.savedAt instanceof Date ? spot.savedAt.toISOString() : String(spot.savedAt) })),
+      activeBookings: { source: 'device_local' as const, count: 0, items: [] as any[], note: 'Native device wallet remains the arrival ledger until P3 server ledger sync.' },
+    };
+  } catch {
+    return nativeGuestAccount('authenticated_unavailable');
+  }
+}
+
+function nativeGuestAccount(mode: 'guest' | 'authenticated_unavailable' = 'guest') {
+  return { mode, user: null, profileReadiness: readiness([false, false, false], ['identity', 'payment', 'vehicle']), paymentReadiness: { ready: false, hasStripeCustomer: false, savedMethodCount: 0 }, savedPlaces: [] as any[], activeBookings: { source: 'device_local' as const, count: 0, items: [] as any[], note: 'Sign in to sync account state; native wallet entries remain on this device.' } };
+}
+
+function readiness(checks: boolean[], names: string[]) {
+  return { completed: checks.filter(Boolean).length, total: checks.length, checks: names.map((name, index) => ({ name, ready: checks[index] })), missing: names.filter((_, index) => !checks[index]) };
+}
+
+/**
+ * ── Native bootstrap sub-router ─────────────────────────────
+ */
+const nativeRouter = router({
+  /** GET /native/bootstrap → public shell data + optional signed-in account readiness */
+  bootstrap: publicProcedure
+    .input(z.object({ limit: z.number().min(1).max(30).optional().default(12) }).optional())
+    .query(async ({ ctx, input }) => {
+      const limit = input?.limit ?? 12;
+      const generatedAt = new Date().toISOString();
+      const [content, account] = await Promise.all([
+        loadNativePublicContent(limit),
+        loadNativeAccount(ctx.user?.userId),
+      ]);
+      return {
+        version: NATIVE_BOOTSTRAP_VERSION,
+        generatedAt,
+        freshness: { ttlSeconds: NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS, publicContentSource: content.source },
+        content: { venues: content.venues, discoverCards: content.discoverCards, events: content.events, source: content.source },
+        account,
+        concierge: { city: 'Midtown', starterPrompts: ['Find parking nearby', 'Check stay dates', 'Access my booking', 'What’s open now?'] },
+        featureFlags: { nativeBootstrap: true, appClipHandoff: true, stripeManualAuthorization: true, serverArrivalLedger: false },
+      };
     }),
 });
 
@@ -1132,6 +1319,7 @@ const cronRouter = router({
 export const appRouter = router({
   health: healthRouter,
   auth: authRouter,
+  native: nativeRouter,
   venues: venuesRouter,
   rides: ridesRouter,
   concierge: conciergeRouter,

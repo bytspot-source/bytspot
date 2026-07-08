@@ -49,6 +49,64 @@ describe('health', () => {
 });
 
 // ──────────────────────────────────────────────────────────
+// Native bootstrap
+// ──────────────────────────────────────────────────────────
+describe('native.bootstrap', () => {
+  it('returns a guest-safe shell payload with fallbacks when live venues are unavailable', async () => {
+    (db.venue.findMany as any).mockResolvedValueOnce([]);
+
+    const caller = createPublicCaller();
+    const result = await caller.native.bootstrap();
+
+    expect(result.version).toBe(1);
+    expect(result.content.source).toBe('fallback');
+    expect(result.content.venues.length).toBeGreaterThan(0);
+    expect(result.content.discoverCards.some((card) => card.id === 'service-valet-ride')).toBe(true);
+    expect(result.account.mode).toBe('guest');
+    expect(result.account.profileReadiness.completed).toBe(0);
+    expect(result.featureFlags.nativeBootstrap).toBe(true);
+  });
+
+  it('hydrates live venue cards when venues are available', async () => {
+    (db.venue.findMany as any).mockResolvedValueOnce([
+      {
+        id: 'venue-1', name: 'Test Garage', slug: 'test-garage', address: '1 Test Way', lat: 33.78, lng: -84.38,
+        category: 'parking', imageUrl: null, entryType: 'paid', entryPrice: '$9/hr', ticketUrl: null,
+        crowdLevels: [{ level: 1, label: 'Easy', waitMins: 0, recordedAt: new Date('2026-01-01T00:00:00Z') }],
+        parking: [{ name: 'Main Deck', type: 'garage', available: 12, totalSpots: 80, pricePerHr: 9 }],
+      },
+    ]);
+
+    const caller = createPublicCaller();
+    const result = await caller.native.bootstrap({ limit: 6 });
+
+    expect(result.content.source).toBe('live');
+    expect(result.content.venues[0].parking.totalAvailable).toBe(12);
+    expect(result.content.discoverCards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'venue-venue-1', type: 'parking', metadataLine: '$9/hr • 12 spots' }),
+    ]));
+  });
+
+  it('includes authenticated profile readiness and saved places when a token is attached', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce({
+      id: 'user-1', email: 'rider@test.com', name: 'Rider Test', phone: '+15551234567', address: null,
+      birthday: null, vehicles: [{ make: 'Tesla', model: 'Model 3' }], isPremium: true, stripeCustomerId: 'cus_test', createdAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    (db.savedSpot.findMany as any).mockResolvedValueOnce([
+      { id: 'saved-1', venueId: 'venue-1', savedAt: new Date('2026-01-02T00:00:00Z'), venue: { name: 'Colony Square', address: '1197 Peachtree', category: 'dining', imageUrl: null } },
+    ]);
+
+    const caller = createAuthenticatedCaller('user-1', 'rider@test.com');
+    const result = await caller.native.bootstrap();
+
+    expect(result.account.mode).toBe('authenticated');
+    expect(result.account.profileReadiness.completed).toBe(3);
+    expect(result.account.paymentReadiness.ready).toBe(true);
+    expect(result.account.savedPlaces[0]).toEqual(expect.objectContaining({ title: 'Colony Square' }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────
 // Auth
 // ──────────────────────────────────────────────────────────
 describe('auth', () => {

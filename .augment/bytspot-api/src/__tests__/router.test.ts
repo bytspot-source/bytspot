@@ -58,7 +58,7 @@ describe('native.bootstrap', () => {
     const caller = createPublicCaller();
     const result = await caller.native.bootstrap();
 
-    expect(result.version).toBe(1);
+    expect(result.version).toBe(2);
     expect(result.content.source).toBe('fallback');
     expect(result.content.venues.length).toBeGreaterThan(0);
     expect(result.content.discoverCards.some((card) => card.id === 'service-valet-ride')).toBe(true);

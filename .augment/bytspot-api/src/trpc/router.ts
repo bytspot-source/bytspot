@@ -20,8 +20,9 @@ import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
 
-const NATIVE_BOOTSTRAP_VERSION = 1;
+const NATIVE_BOOTSTRAP_VERSION = 2;
 const NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS = 20;
+const NATIVE_EVENTS_CACHE_SCHEMA_VERSION = 2;
 type NativeBootstrapSource = 'live' | 'fallback' | 'mixed';
 
 const NATIVE_SPECIAL_DISCOVER_CARDS = [
@@ -474,7 +475,7 @@ async function loadNativePublicContent(limit: number) {
 
 async function loadNativeEvents(limit: number) {
   if (!config.ticketmasterApiKey) return { events: NATIVE_FALLBACK_EVENTS.slice(0, Math.min(limit, NATIVE_FALLBACK_EVENTS.length)), source: 'fallback' as const };
-  return cached(`native:events:atl:${limit}`, 900, async () => {
+  return cached(`native:events:atl:v${NATIVE_EVENTS_CACHE_SCHEMA_VERSION}:${limit}`, 900, async () => {
     const params = new URLSearchParams({ apikey: config.ticketmasterApiKey, city: 'Atlanta', stateCode: 'GA', size: String(Math.min(limit, 20)), sort: 'date,asc' });
     const res = await fetch(`${TM_BASE}/events.json?${params}`, { signal: AbortSignal.timeout(3500) });
     if (!res.ok) return { events: NATIVE_FALLBACK_EVENTS, source: 'fallback' as const };

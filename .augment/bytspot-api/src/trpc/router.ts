@@ -22,6 +22,7 @@ import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH
 
 const NATIVE_BOOTSTRAP_VERSION = 1;
 const NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS = 20;
+type NativeBootstrapSource = 'live' | 'fallback' | 'mixed';
 
 const NATIVE_SPECIAL_DISCOVER_CARDS = [
   { id: 'service-valet-ride', type: 'mobility', title: 'Private Airport Transfer', subtitle: 'Airport pickup, driver review, and authorization-first checkout.', distance: 'Airport', rating: '4.9', icon: 'airplane.departure', verified: true, entryType: 'paid', cta: 'Request Transfer', imageUrl: null, categoryLabel: 'Mobility', badgeText: 'Mobility', metadataLine: 'Bytspot + Elife · Airport', features: ['Review estimate', 'Authorization request', 'My Access status'], vibeScore: 9, availability: 'Estimate + review', membershipRequired: true },
@@ -454,22 +455,32 @@ async function loadNativePublicContent(limit: number) {
 
     const liveVenues = venuesResult.status === 'fulfilled' ? venuesResult.value.map(mapNativeVenue) : [];
     const venues = liveVenues.length > 0 ? liveVenues : NATIVE_FALLBACK_VENUES;
-    const events = eventsResult.status === 'fulfilled' && eventsResult.value.length > 0 ? eventsResult.value : NATIVE_FALLBACK_EVENTS;
+    const eventPayload = eventsResult.status === 'fulfilled' ? eventsResult.value : { events: NATIVE_FALLBACK_EVENTS, source: 'fallback' as const };
+    const events = eventPayload.events.length > 0 ? eventPayload.events : NATIVE_FALLBACK_EVENTS;
     const discoverCards = [...NATIVE_SPECIAL_DISCOVER_CARDS, ...venues.slice(0, 8).map(nativeVenueToDiscoverCard)];
-    const source = liveVenues.length > 0 ? 'live' : 'fallback';
+    const venuesSource: NativeBootstrapSource = liveVenues.length > 0 ? 'live' : 'fallback';
+    const eventsSource: NativeBootstrapSource = eventPayload.source;
+    const discoverCardsSource: NativeBootstrapSource = liveVenues.length > 0 ? 'live' : 'fallback';
+    const sectionSources = [venuesSource, eventsSource, discoverCardsSource];
+    const source: NativeBootstrapSource = sectionSources.every((sectionSource) => sectionSource === 'live')
+      ? 'live'
+      : sectionSources.every((sectionSource) => sectionSource === 'fallback')
+        ? 'fallback'
+        : 'mixed';
 
-    return { venues, events, discoverCards, source };
+    return { venues, events, discoverCards, source, sectionSources: { venues: venuesSource, events: eventsSource, discoverCards: discoverCardsSource } };
   });
 }
 
 async function loadNativeEvents(limit: number) {
-  if (!config.ticketmasterApiKey) return NATIVE_FALLBACK_EVENTS.slice(0, Math.min(limit, NATIVE_FALLBACK_EVENTS.length));
+  if (!config.ticketmasterApiKey) return { events: NATIVE_FALLBACK_EVENTS.slice(0, Math.min(limit, NATIVE_FALLBACK_EVENTS.length)), source: 'fallback' as const };
   return cached(`native:events:atl:${limit}`, 900, async () => {
     const params = new URLSearchParams({ apikey: config.ticketmasterApiKey, city: 'Atlanta', stateCode: 'GA', size: String(Math.min(limit, 20)), sort: 'date,asc' });
     const res = await fetch(`${TM_BASE}/events.json?${params}`, { signal: AbortSignal.timeout(3500) });
-    if (!res.ok) return NATIVE_FALLBACK_EVENTS;
+    if (!res.ok) return { events: NATIVE_FALLBACK_EVENTS, source: 'fallback' as const };
     const data = (await res.json()) as { _embedded?: { events?: any[] } };
-    return (data._embedded?.events ?? []).map(mapTmEvent).map((event) => ({ ...event, imageUrl: event.image ?? null })).slice(0, limit);
+    const events = (data._embedded?.events ?? []).map(mapTmEvent).map((event) => ({ ...event, imageUrl: event.image ?? null })).slice(0, limit);
+    return events.length > 0 ? { events, source: 'live' as const } : { events: NATIVE_FALLBACK_EVENTS, source: 'fallback' as const };
   });
 }
 
@@ -483,13 +494,14 @@ async function loadNativeAccount(userId: string | undefined) {
     const vehicles = Array.isArray(user?.vehicles) ? user?.vehicles : [];
     const identityReady = Boolean(user?.email && user?.name && (user?.phone || user?.address));
     const vehicleReady = vehicles.length > 0;
-    const paymentReady = Boolean(user?.stripeCustomerId);
-    const checks = [identityReady, paymentReady, vehicleReady];
+    const hasStripeCustomer = Boolean(user?.stripeCustomerId);
+    const hasVerifiedPaymentMethod = false;
+    const checks = [identityReady, hasVerifiedPaymentMethod, vehicleReady];
     return {
       mode: 'authenticated' as const,
       user: user ? { id: user.id, email: user.email, name: user.name, isPremium: user.isPremium, createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : String(user.createdAt) } : null,
       profileReadiness: readiness(checks, ['identity', 'payment', 'vehicle']),
-      paymentReadiness: { ready: paymentReady, hasStripeCustomer: paymentReady, savedMethodCount: paymentReady ? 1 : 0 },
+      paymentReadiness: { ready: hasVerifiedPaymentMethod, hasStripeCustomer, savedMethodCount: 0, note: hasStripeCustomer ? 'Stripe customer exists; saved payment method verification is not wired yet.' : 'No Stripe customer on file.' },
       savedPlaces: savedSpots.map((spot: any) => ({ id: spot.id, venueId: spot.venueId, title: spot.venue?.name ?? 'Saved place', subtitle: spot.venue?.address ?? '', category: spot.venue?.category ?? 'venue', imageUrl: spot.venue?.imageUrl ?? null, savedAt: spot.savedAt instanceof Date ? spot.savedAt.toISOString() : String(spot.savedAt) })),
       activeBookings: { source: 'device_local' as const, count: 0, items: [] as any[], note: 'Native device wallet remains the arrival ledger until P3 server ledger sync.' },
     };
@@ -510,7 +522,7 @@ function readiness(checks: boolean[], names: string[]) {
  * ── Native bootstrap sub-router ─────────────────────────────
  */
 const nativeRouter = router({
-  /** GET /native/bootstrap → public shell data + optional signed-in account readiness */
+  /** /trpc/native.bootstrap → public shell data + optional signed-in account readiness */
   bootstrap: publicProcedure
     .input(z.object({ limit: z.number().min(1).max(30).optional().default(12) }).optional())
     .query(async ({ ctx, input }) => {
@@ -523,7 +535,7 @@ const nativeRouter = router({
       return {
         version: NATIVE_BOOTSTRAP_VERSION,
         generatedAt,
-        freshness: { ttlSeconds: NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS, publicContentSource: content.source },
+        freshness: { ttlSeconds: NATIVE_BOOTSTRAP_PUBLIC_TTL_SECONDS, publicContentSource: content.source, sections: content.sectionSources },
         content: { venues: content.venues, discoverCards: content.discoverCards, events: content.events, source: content.source },
         account,
         concierge: { city: 'Midtown', starterPrompts: ['Find parking nearby', 'Check stay dates', 'Access my booking', 'What’s open now?'] },

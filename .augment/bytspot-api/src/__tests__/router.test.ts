@@ -80,7 +80,8 @@ describe('native.bootstrap', () => {
     const caller = createPublicCaller();
     const result = await caller.native.bootstrap({ limit: 6 });
 
-    expect(result.content.source).toBe('live');
+    expect(result.content.source).toBe('mixed');
+    expect(result.freshness.sections).toEqual(expect.objectContaining({ venues: 'live', events: 'fallback', discoverCards: 'live' }));
     expect(result.content.venues[0].parking.totalAvailable).toBe(12);
     expect(result.content.discoverCards).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'venue-venue-1', type: 'parking', metadataLine: '$9/hr • 12 spots' }),
@@ -100,8 +101,10 @@ describe('native.bootstrap', () => {
     const result = await caller.native.bootstrap();
 
     expect(result.account.mode).toBe('authenticated');
-    expect(result.account.profileReadiness.completed).toBe(3);
-    expect(result.account.paymentReadiness.ready).toBe(true);
+    expect(result.account.profileReadiness.completed).toBe(2);
+    expect(result.account.paymentReadiness.ready).toBe(false);
+    expect(result.account.paymentReadiness.hasStripeCustomer).toBe(true);
+    expect(result.account.paymentReadiness.savedMethodCount).toBe(0);
     expect(result.account.savedPlaces[0]).toEqual(expect.objectContaining({ title: 'Colony Square' }));
   });
 });

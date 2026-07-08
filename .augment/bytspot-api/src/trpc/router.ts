@@ -528,7 +528,7 @@ function scoreLiveValueCandidate(candidate: LiveValueCandidate, constraints: Liv
   const priceParityScore = candidate.listedPriceCents == null ? 55 : candidate.listedPriceCents <= marketReferenceCents ? 100 : clampScore(100 - ((candidate.listedPriceCents - marketReferenceCents) / Math.max(marketReferenceCents, 1)) * 100);
   const budgetFit = constraints.maxBudgetCents == null ? null : estimatedTotalCents == null ? (constraints.strict ? false : null) : estimatedTotalCents <= constraints.maxBudgetCents;
   const distanceFit = constraints.maxDistanceMeters == null ? null : candidate.distanceMeters == null ? (constraints.strict ? false : null) : candidate.distanceMeters <= constraints.maxDistanceMeters;
-  const availabilityFit = candidate.available;
+  const availabilityFit = candidate.available == null ? (constraints.strict ? false : null) : candidate.available;
   const budgetScore = constraints.maxBudgetCents == null ? 78 : estimatedTotalCents == null ? 50 : estimatedTotalCents <= constraints.maxBudgetCents ? 100 : clampScore(100 - ((estimatedTotalCents - constraints.maxBudgetCents) / Math.max(constraints.maxBudgetCents, 1)) * 100);
   const distanceScore = constraints.maxDistanceMeters == null ? 70 : candidate.distanceMeters == null ? 50 : clampScore(100 - (candidate.distanceMeters / Math.max(constraints.maxDistanceMeters, 1)) * 100);
   const availabilityScore = candidate.available == null ? 60 : candidate.available ? 100 : 15;
@@ -825,7 +825,7 @@ const liveRouter = router({
     .input(liveValueInputSchema.optional())
     .query(async ({ input }) => {
       const constraints = liveValueInputSchema.parse(input ?? {});
-      const cacheKey = `live:bestValue:v1:${constraints.productType}:${constraints.lat.toFixed(3)}:${constraints.lng.toFixed(3)}:${constraints.durationHours}:${constraints.maxBudgetCents ?? 'any'}:${constraints.maxDistanceMeters ?? 'any'}:${constraints.limit}:${constraints.strict}`;
+      const cacheKey = `live:bestValue:v1:${constraints.productType}:${constraints.lat.toFixed(6)}:${constraints.lng.toFixed(6)}:${constraints.durationHours}:${constraints.maxBudgetCents ?? 'any'}:${constraints.maxDistanceMeters ?? 'any'}:${constraints.limit}:${constraints.strict}`;
       return cached(cacheKey, 45, async () => {
         const candidates = await buildLiveValueCandidates(constraints);
         const scored = candidates.map((candidate) => scoreLiveValueCandidate(candidate, constraints, candidates));

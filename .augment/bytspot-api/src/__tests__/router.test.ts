@@ -476,6 +476,25 @@ describe('live.bestValue', () => {
     expect(result.options.some((option) => option.explanation.some((line) => line.includes('Budget cannot be verified')))).toBe(false);
   });
 
+  it('strict mode excludes verifiable-price parking when availability is unknown', async () => {
+    (db.venue.findMany as any).mockResolvedValueOnce([
+      { id: 'venue-unknown', name: 'Unknown Availability Garage', lat: 33.7758, lng: -84.3964, parking: [{ id: 'spot-unknown', name: 'Deck', pricePerHr: 5 }] },
+    ]);
+    const caller = createPublicCaller();
+    const result = await caller.live.bestValue({ productType: 'parking', durationHours: 1, maxBudgetCents: 1000, strict: true });
+
+    expect(result.options).toHaveLength(0);
+    expect(result.bestValue).toBeNull();
+  });
+
+  it('strict distance excludes unknown-distance event options when a distance cap is supplied', async () => {
+    const caller = createPublicCaller();
+    const result = await caller.live.bestValue({ productType: 'event_pass', maxDistanceMeters: 1000, strict: true, limit: 6 });
+
+    expect(result.options).toHaveLength(0);
+    expect(result.bestValue).toBeNull();
+  });
+
   it('rejects out-of-range coordinates before scoring distance', async () => {
     const caller = createPublicCaller();
     await expect(caller.live.bestValue({ productType: 'parking', lat: 999, lng: -84.39 })).rejects.toThrow();

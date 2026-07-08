@@ -777,7 +777,9 @@ function checkoutLedgerStates(productType: string, metadata: Stripe.Metadata | n
   return { paymentState: 'paid', providerState: 'payment_confirmed' };
 }
 
-async function updateWalletLedgerForStripeObject(object: { id?: string; payment_intent?: unknown; metadata?: Stripe.Metadata | null }, states: { paymentState: string; providerState?: string }) {
+const CHECKOUT_MUTABLE_PAYMENT_STATES = ['unknown', 'checkout_pending', 'authorization_pending'];
+
+async function updateWalletLedgerForStripeObject(object: { id?: string; payment_intent?: unknown; metadata?: Stripe.Metadata | null }, states: { paymentState: string; providerState?: string }, options?: { onlyPaymentStates?: string[] }) {
   const sessionId = object.id;
   const paymentIntentId = stripePaymentIntentId(object.payment_intent) ?? stripeMetadataValue(object.metadata, 'stripePaymentIntentId');
   const or = [
@@ -785,7 +787,10 @@ async function updateWalletLedgerForStripeObject(object: { id?: string; payment_
     paymentIntentId ? { metadata: { path: ['stripePaymentIntentId'], equals: paymentIntentId } } : null,
   ].filter(Boolean) as any[];
   if (or.length === 0) return { count: 0 };
-  return db.walletLedgerEntry.updateMany({ where: { OR: or }, data: { paymentState: states.paymentState, ...(states.providerState ? { providerState: states.providerState } : {}) } });
+  return db.walletLedgerEntry.updateMany({
+    where: { OR: or, ...(options?.onlyPaymentStates ? { paymentState: { in: options.onlyPaymentStates } } : {}) },
+    data: { paymentState: states.paymentState, ...(states.providerState ? { providerState: states.providerState } : {}) },
+  });
 }
 
 export async function handleStripeWebhookEvent(event: { type: string; data: { object?: unknown } }) {
@@ -796,7 +801,7 @@ export async function handleStripeWebhookEvent(event: { type: string; data: { ob
     const userId = stripeMetadataValue(metadata, 'userId');
     if (userId && object.mode === 'subscription') await db.user.update({ where: { id: userId }, data: { isPremium: true } });
     const productType = stripeMetadataValue(metadata, 'productType');
-    if (productType) await updateWalletLedgerForStripeObject(object, checkoutLedgerStates(productType, metadata));
+    if (productType) await updateWalletLedgerForStripeObject(object, checkoutLedgerStates(productType, metadata), { onlyPaymentStates: CHECKOUT_MUTABLE_PAYMENT_STATES });
   } else if (event.type === 'customer.subscription.deleted') {
     const customerId = typeof object.customer === 'string' ? object.customer : undefined;
     if (customerId) await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: { isPremium: false } });

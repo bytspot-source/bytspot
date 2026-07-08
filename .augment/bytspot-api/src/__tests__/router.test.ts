@@ -384,7 +384,10 @@ describe('stripe webhook processing', () => {
     });
 
     expect(db.walletLedgerEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { OR: expect.arrayContaining([expect.objectContaining({ metadata: { path: ['stripeCheckoutSessionId'], equals: 'cs_parking_123' } })]) },
+      where: expect.objectContaining({
+        OR: expect.arrayContaining([expect.objectContaining({ metadata: { path: ['stripeCheckoutSessionId'], equals: 'cs_parking_123' } })]),
+        paymentState: { in: ['unknown', 'checkout_pending', 'authorization_pending'] },
+      }),
       data: expect.objectContaining({ paymentState: 'paid', providerState: 'payment_confirmed' }),
     }));
   });
@@ -397,7 +400,21 @@ describe('stripe webhook processing', () => {
     });
 
     expect(db.walletLedgerEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ paymentState: { in: ['unknown', 'checkout_pending', 'authorization_pending'] } }),
       data: expect.objectContaining({ paymentState: 'authorization_held', providerState: 'provider_review_pending' }),
+    }));
+  });
+
+  it('terminal payment intent events update ledger without checkout mutable-state guard', async () => {
+    const caller = createStripeWebhookCaller();
+    await caller.subscription.webhook({
+      type: 'payment_intent.canceled',
+      data: { object: { id: 'pi_airport_123', metadata: { productType: 'airport_transfer' } } },
+    });
+
+    expect(db.walletLedgerEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.not.objectContaining({ paymentState: expect.anything() }),
+      data: expect.objectContaining({ paymentState: 'canceled', providerState: 'canceled' }),
     }));
   });
 });

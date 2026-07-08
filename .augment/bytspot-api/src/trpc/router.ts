@@ -845,8 +845,8 @@ function pushConciergeAction(actions: ConciergeAction[], action: ConciergeAction
   if (!actions.some((existing) => existing.id === action.id)) actions.push(action);
 }
 
-function conciergeActionPriority(action: ConciergeAction, query: string, escalationRequired: boolean) {
-  if (action.id === 'provider-contact' && escalationRequired) return 0;
+function conciergeActionPriority(action: ConciergeAction, query: string) {
+  if (action.id === 'provider-contact') return 0;
   if (action.id === 'open-my-access' && /access|booking|reservation|receipt|wallet|my access/.test(query)) return 1;
   if (action.type === 'live_option_search') return 4;
   return 2;
@@ -888,9 +888,9 @@ function planConciergeActions(query: string, liveCtx?: LiveContext): { actions: 
     pushConciergeAction(actions, { id: 'show-map', type: 'live_option_search', title: 'Show on Map', subtitle: 'Compare verified zones, parking, and nearby access points.', status: 'curated_context', source: 'fallback', handoff: 'map', productType: 'live_search' });
   }
 
-  const escalationRequired = /human|specialist|refund|vip|host|provider|catering|private chef/.test(q);
+  const escalationRequired = /human|specialist|refund|vip|host|provider|contact|support|concierge|catering|private chef/.test(q);
   const prioritizedActions = actions
-    .map((action, index) => ({ action, index, priority: conciergeActionPriority(action, q, escalationRequired) }))
+    .map((action, index) => ({ action, index, priority: conciergeActionPriority(action, q) }))
     .sort((a, b) => a.priority - b.priority || a.index - b.index)
     .map(({ action }) => action);
   return { actions: prioritizedActions.slice(0, 4), escalationRequired };

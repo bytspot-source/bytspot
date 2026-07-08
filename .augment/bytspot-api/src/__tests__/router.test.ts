@@ -465,6 +465,21 @@ describe('live.bestValue', () => {
     expect(result.bestValue).toEqual(expect.objectContaining({ id: 'menu:broni-home-taste', productType: 'menu_order', eligible: true }));
     expect(result.bestValue?.explanation).toEqual(expect.arrayContaining([expect.stringContaining('estimated total')]));
   });
+
+  it('strict budget excludes unknown-price event options but keeps truly free options free', async () => {
+    const caller = createPublicCaller();
+    const result = await caller.live.bestValue({ productType: 'event_pass', maxBudgetCents: 0, strict: true, limit: 6 });
+
+    expect(result.options.length).toBeGreaterThan(0);
+    expect(result.options.every((option) => option.eligible && option.estimatedTotalCents !== null)).toBe(true);
+    expect(result.bestValue).toEqual(expect.objectContaining({ listedPriceCents: 0, estimatedFeesCents: 0, estimatedTotalCents: 0 }));
+    expect(result.options.some((option) => option.explanation.some((line) => line.includes('Budget cannot be verified')))).toBe(false);
+  });
+
+  it('rejects out-of-range coordinates before scoring distance', async () => {
+    const caller = createPublicCaller();
+    await expect(caller.live.bestValue({ productType: 'parking', lat: 999, lng: -84.39 })).rejects.toThrow();
+  });
 });
 
 // ──────────────────────────────────────────────────────────

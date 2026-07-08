@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 import Stripe from 'stripe';
-import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, stripeWebhookProcedure } from './trpc';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
@@ -754,6 +754,62 @@ async function createNativeWalletLedgerFromCheckout(userId: string, input: Nativ
   });
 }
 
+function stripeMetadataValue(metadata: Stripe.Metadata | null | undefined, key: string) {
+  const value = metadata?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stripePaymentIntentId(value: unknown) {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && 'id' in value && typeof (value as { id?: unknown }).id === 'string') return (value as { id: string }).id;
+  return undefined;
+}
+
+function checkoutLedgerStates(productType: string, metadata: Stripe.Metadata | null | undefined) {
+  const captureMode = stripeMetadataValue(metadata, 'captureMode') ?? '';
+  const manual = productType === 'boutique_stay' || productType === 'airport_transfer' || captureMode.startsWith('manual_');
+  if (manual) {
+    return {
+      paymentState: 'authorization_held',
+      providerState: productType === 'boutique_stay' ? 'host_review_pending' : 'provider_review_pending',
+    };
+  }
+  return { paymentState: 'paid', providerState: 'payment_confirmed' };
+}
+
+async function updateWalletLedgerForStripeObject(object: { id?: string; payment_intent?: unknown; metadata?: Stripe.Metadata | null }, states: { paymentState: string; providerState?: string }) {
+  const sessionId = object.id;
+  const paymentIntentId = stripePaymentIntentId(object.payment_intent) ?? stripeMetadataValue(object.metadata, 'stripePaymentIntentId');
+  const or = [
+    sessionId ? { metadata: { path: ['stripeCheckoutSessionId'], equals: sessionId } } : null,
+    paymentIntentId ? { metadata: { path: ['stripePaymentIntentId'], equals: paymentIntentId } } : null,
+  ].filter(Boolean) as any[];
+  if (or.length === 0) return { count: 0 };
+  return db.walletLedgerEntry.updateMany({ where: { OR: or }, data: { paymentState: states.paymentState, ...(states.providerState ? { providerState: states.providerState } : {}) } });
+}
+
+export async function handleStripeWebhookEvent(event: { type: string; data: { object?: unknown } }) {
+  const object = event.data.object as any;
+  if (!object) return { received: true as const };
+  if (event.type === 'checkout.session.completed') {
+    const metadata = object.metadata as Stripe.Metadata | null | undefined;
+    const userId = stripeMetadataValue(metadata, 'userId');
+    if (userId && object.mode === 'subscription') await db.user.update({ where: { id: userId }, data: { isPremium: true } });
+    const productType = stripeMetadataValue(metadata, 'productType');
+    if (productType) await updateWalletLedgerForStripeObject(object, checkoutLedgerStates(productType, metadata));
+  } else if (event.type === 'customer.subscription.deleted') {
+    const customerId = typeof object.customer === 'string' ? object.customer : undefined;
+    if (customerId) await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: { isPremium: false } });
+  } else if (event.type === 'payment_intent.succeeded') {
+    await updateWalletLedgerForStripeObject({ id: object.id, payment_intent: object.id, metadata: object.metadata }, { paymentState: 'paid', providerState: 'payment_confirmed' });
+  } else if (event.type === 'payment_intent.payment_failed') {
+    await updateWalletLedgerForStripeObject({ id: object.id, payment_intent: object.id, metadata: object.metadata }, { paymentState: 'payment_failed', providerState: 'payment_failed' });
+  } else if (event.type === 'payment_intent.canceled') {
+    await updateWalletLedgerForStripeObject({ id: object.id, payment_intent: object.id, metadata: object.metadata }, { paymentState: 'canceled', providerState: 'canceled' });
+  }
+  return { received: true as const };
+}
+
 /**
  * ── Native bootstrap sub-router ─────────────────────────────
  */
@@ -1273,34 +1329,19 @@ const subscriptionRouter = router({
   }),
 
   /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
-  webhook: publicProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 50, label: 'subscription:webhook' }))
+  webhook: stripeWebhookProcedure
     .input(z.object({
       type: z.string().max(100),
       data: z.object({
         object: z.object({
-          metadata: z.object({ userId: z.string().max(100).optional() }).optional(),
+          metadata: z.object({ userId: z.string().max(100).optional() }).passthrough().optional(),
           mode: z.string().max(50).optional(),
           customer: z.string().max(100).optional(),
         }).passthrough().optional(),
       }).passthrough(),
     }))
     .mutation(async ({ input }) => {
-      const { type, data } = input;
-      if (type === 'checkout.session.completed') {
-        const userId = data?.object?.metadata?.userId;
-        if (userId && data?.object?.mode === 'subscription') {
-          await db.user.update({ where: { id: userId }, data: { isPremium: true } });
-          console.log(`[subscription] User ${userId} upgraded to Premium`);
-        }
-      } else if (type === 'customer.subscription.deleted') {
-        const customerId = data?.object?.customer;
-        if (customerId) {
-          await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: { isPremium: false } });
-          console.log(`[subscription] Customer ${customerId} subscription cancelled`);
-        }
-      }
-      return { received: true };
+      return handleStripeWebhookEvent(input);
     }),
 });
 

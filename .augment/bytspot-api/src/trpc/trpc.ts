@@ -26,6 +26,14 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
+/** Internal-only procedure for events that were already verified by a signed REST route. */
+export const stripeWebhookProcedure = t.procedure.use(async ({ ctx, next }) => {
+  if (!ctx.internal?.stripeWebhook) {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Stripe webhook signature required' });
+  }
+  return next();
+});
+
 /**
  * Simple in-memory rate limiter for tRPC procedures.
  * Uses a fixed-window counter per key (userId or 'anon').

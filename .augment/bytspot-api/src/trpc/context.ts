@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
 
+export type Context = { user: AuthPayload | null; internal?: { stripeWebhook?: boolean } };
+
 /**
  * Creates the tRPC context from the Express request.
  * Extracts JWT auth if present (optional — procedures decide whether to require it).
@@ -22,8 +24,6 @@ export async function createContext({
     }
   }
 
-  return { user };
+  return { user } satisfies Context;
 }
-
-export type Context = Awaited<ReturnType<typeof createContext>>;
 

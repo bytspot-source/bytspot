@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TRPCError } from '@trpc/server';
-import { createPublicCaller, createAuthenticatedCaller } from './helpers';
+import { createPublicCaller, createAuthenticatedCaller, createStripeWebhookCaller } from './helpers';
 import { db } from '../lib/db';
 import { config } from '../config';
 import { appRouter } from '../trpc/router';
@@ -352,6 +352,52 @@ describe('payments', () => {
     }));
     expect(db.walletLedgerEntry.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ userId: 'user-stay-1', productType: 'boutique_stay', paymentState: 'authorization_pending', providerState: 'host_review_pending', windowLabel: '2 nights' }),
+    }));
+  });
+});
+
+describe('stripe webhook processing', () => {
+  it('rejects direct public subscription webhook calls without signed-route context', async () => {
+    const caller = createPublicCaller();
+    await expect(caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: { object: { mode: 'subscription', metadata: { userId: 'user-premium-1' } } },
+    })).rejects.toThrow(TRPCError);
+  });
+
+  it('allows verified Stripe webhook context to update premium subscription state', async () => {
+    const caller = createStripeWebhookCaller();
+    const result = await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: { object: { mode: 'subscription', metadata: { userId: 'user-premium-1' } } },
+    });
+
+    expect(result.received).toBe(true);
+    expect(db.user.update).toHaveBeenCalledWith({ where: { id: 'user-premium-1' }, data: { isPremium: true } });
+  });
+
+  it('updates wallet ledger to paid for automatic-capture checkout completion', async () => {
+    const caller = createStripeWebhookCaller();
+    await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: { object: { id: 'cs_parking_123', mode: 'payment', payment_intent: 'pi_parking_123', metadata: { productType: 'parking' } } },
+    });
+
+    expect(db.walletLedgerEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { OR: expect.arrayContaining([expect.objectContaining({ metadata: { path: ['stripeCheckoutSessionId'], equals: 'cs_parking_123' } })]) },
+      data: expect.objectContaining({ paymentState: 'paid', providerState: 'payment_confirmed' }),
+    }));
+  });
+
+  it('keeps manual-capture checkout completion in authorization review state', async () => {
+    const caller = createStripeWebhookCaller();
+    await caller.subscription.webhook({
+      type: 'checkout.session.completed',
+      data: { object: { id: 'cs_airport_123', mode: 'payment', payment_intent: 'pi_airport_123', metadata: { productType: 'airport_transfer', captureMode: 'manual_after_authorization' } } },
+    });
+
+    expect(db.walletLedgerEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paymentState: 'authorization_held', providerState: 'provider_review_pending' }),
     }));
   });
 });

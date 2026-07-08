@@ -15,6 +15,7 @@ import cronRouter from './routes/cron';             // external cron trigger (Be
 import pushRouter from './routes/push';             // VAPID public key + subscription endpoint
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
+import stripeWebhookRouter from './routes/stripeWebhook'; // Stripe signed raw-body webhook
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 
@@ -31,6 +32,9 @@ app.use(
     credentials: true,
   }),
 );
+
+// Stripe requires the exact raw body for signature verification. Mount before express.json().
+app.use(stripeWebhookRouter);
 app.use(express.json({ limit: '1mb' }));
 
 // Global rate limiting: 300 requests per 15 min per IP

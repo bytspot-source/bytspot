@@ -19,3 +19,9 @@ export function createAuthenticatedCaller(userId = 'test-user-id', email = 'test
   return factory(ctx);
 }
 
+/** Create an internal caller representing a verified Stripe webhook dispatch. */
+export function createStripeWebhookCaller() {
+  const ctx: Context = { user: null, internal: { stripeWebhook: true } };
+  return factory(ctx);
+}
+

@@ -3,6 +3,7 @@ import { TRPCError } from '@trpc/server';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
 import { config } from '../config';
+import { appRouter } from '../trpc/router';
 
 const stripeCheckoutSessionsCreate = vi.hoisted(() => vi.fn());
 vi.mock('stripe', () => ({
@@ -111,6 +112,11 @@ describe('native.bootstrap', () => {
 });
 
 describe('native.walletLedger', () => {
+  it('uses mutation transport so the native POST client can load the ledger', () => {
+    const procedure = (appRouter as any)._def.procedures['native.walletLedger'];
+    expect(procedure?._def?.type).toBe('mutation');
+  });
+
   it('returns server-authoritative wallet ledger entries for the signed-in user', async () => {
     (db.walletLedgerEntry.findMany as any).mockResolvedValueOnce([
       {

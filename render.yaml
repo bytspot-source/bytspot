@@ -38,8 +38,8 @@ services:
     runtime: node
     branch: main
     rootDir: .augment/bytspot-api
-    buildCommand: npm ci && npm run build
-    startCommand: node dist/index.js
+    buildCommand: npm ci && npm run db:generate && npm run build
+    startCommand: npm run db:migrate && node dist/index.js
     pullRequestPreviewsEnabled: false
     buildFilter:
       paths:

@@ -657,10 +657,10 @@ const nativeRouter = router({
         featureFlags: { nativeBootstrap: true, appClipHandoff: true, stripeManualAuthorization: true, serverArrivalLedger: true },
       };
     }),
-  /** /trpc/native.walletLedger → server-authoritative Profile/My Access ledger */
+  /** /trpc/native.walletLedger → server-authoritative Profile/My Access ledger. Mutation keeps native POST transport compatible. */
   walletLedger: protectedProcedure
     .input(z.object({ limit: z.number().min(1).max(50).optional().default(20) }).optional())
-    .query(async ({ ctx, input }) => loadNativeWalletLedger(ctx.user.userId, input?.limit ?? 20)),
+    .mutation(async ({ ctx, input }) => loadNativeWalletLedger(ctx.user.userId, input?.limit ?? 20)),
 });
 
 /**

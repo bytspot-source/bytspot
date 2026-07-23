@@ -1951,7 +1951,8 @@ const nativeRouter = router({
     .query(async ({ input }) => {
       const venues = await loadNativeVenueSummaries(input.limit);
       return {
-        source: 'backend',
+        source: 'live',
+        sourceDetail: 'backend',
         generatedAt: new Date().toISOString(),
         content: {
           venues,

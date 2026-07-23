@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPublicCaller } from '../__tests__/helpers';
 import { db } from '../lib/db';
+import { cached } from '../lib/redis';
 import { config } from '../config';
 
 const venueRow = {
@@ -16,6 +17,7 @@ function mockVenueFeed() {
 }
 
 afterEach(() => {
+  vi.clearAllMocks();
   vi.unstubAllGlobals();
   config.googlePlacesApiKey = '';
 });
@@ -27,7 +29,8 @@ describe('native live adapter routes', () => {
 
     const result = await caller.native.bootstrap({ limit: 4 });
 
-    expect(result.source).toBe('backend');
+    expect(result.source).toBe('live');
+    expect(result.sourceDetail).toBe('backend');
     expect(result.content.venues).toHaveLength(1);
     expect(result.content.discoverCards[0]).toMatchObject({ title: 'Test Bar', metadataLine: '5 arrival spots' });
     expect(result.content.events.length).toBeGreaterThan(0);
@@ -59,6 +62,17 @@ describe('native live adapter routes', () => {
     const result = await caller.places.nearbySearch({ lat: 33.7866, lng: -84.3833, type: 'parking', maxResults: 8 });
 
     expect(result).toEqual({ places: [], source: 'google_error' });
+  });
+
+  it('places.nearbySearch normalizes legacy cached place arrays to the route object shape', async () => {
+    const legacyPlace = { placeId: 'legacy', name: 'Legacy Cafe', address: '123 Main', lat: 1, lng: 2, rating: null, ratingCount: 0, priceLevel: null, types: [], primaryType: null, photoUrls: [], isOpen: null, websiteUri: null };
+    config.googlePlacesApiKey = 'test-google-key';
+    (cached as any).mockResolvedValueOnce([legacyPlace]);
+    const caller = createPublicCaller();
+
+    const result = await caller.places.nearbySearch({ lat: 33.7866, lng: -84.3833, maxResults: 1 });
+
+    expect(result).toEqual({ places: [legacyPlace], source: 'google' });
   });
 
   it('places.textSearch returns a 200-safe empty feed when Google config fails', async () => {

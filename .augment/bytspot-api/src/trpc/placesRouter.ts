@@ -30,6 +30,17 @@ export interface MappedPlace {
   isOpen: boolean | null; websiteUri: string | null;
 }
 
+type PlacesSearchResult = { places: MappedPlace[]; source: 'google' | 'google_error' | 'none' };
+
+function normalizePlacesSearchResult(value: unknown): PlacesSearchResult {
+  if (Array.isArray(value)) return { places: value as MappedPlace[], source: 'google' };
+  if (value && typeof value === 'object' && Array.isArray((value as { places?: unknown }).places)) {
+    const source = (value as { source?: string }).source;
+    return { places: (value as { places: MappedPlace[] }).places, source: source === 'google_error' || source === 'none' ? source : 'google' };
+  }
+  return { places: [], source: 'google_error' };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function mapPlace(p: any): MappedPlace {
   const photos: string[] = (p.photos ?? []).slice(0, 4).map((ph: any) =>
@@ -87,9 +98,9 @@ export const placesRouter = router({
     .query(async ({ input }) => {
       const { lat, lng, radius, type, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}:${type ?? 'all'}:${maxResults}`;
-      const result = await cached(cacheKey, 900, async () => {
-        try {
+      const cacheKey = `gp:v2:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}:${type ?? 'all'}:${maxResults}`;
+      try {
+        const result = await cached(cacheKey, 900, async () => {
           const body: Record<string, unknown> = {
             locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
             maxResultCount: maxResults, rankPreference: 'DISTANCE',
@@ -97,12 +108,12 @@ export const placesRouter = router({
           if (type) body.includedTypes = [type];
           const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
           return { places: (data.places ?? []).map(mapPlace), source: 'google' as const };
-        } catch (err: any) {
-          console.error('[places] Nearby Search failed:', err?.message);
-          return { places: [], source: 'google_error' as const };
-        }
-      });
-      return result;
+        });
+        return normalizePlacesSearchResult(result);
+      } catch (err: any) {
+        console.error('[places] Nearby Search failed:', err?.message);
+        return { places: [], source: 'google_error' as const };
+      }
     }),
 
   textSearch: publicProcedure
@@ -113,21 +124,21 @@ export const placesRouter = router({
     .query(async ({ input }) => {
       const { query, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:text:${query.toLowerCase().trim()}:${maxResults}`;
-      const result = await cached(cacheKey, 900, async () => {
-        try {
+      const cacheKey = `gp:v2:text:${query.toLowerCase().trim()}:${maxResults}`;
+      try {
+        const result = await cached(cacheKey, 900, async () => {
           const body = {
             textQuery: query, maxResultCount: maxResults,
             locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
           };
           const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
           return { places: (data.places ?? []).map(mapPlace), source: 'google' as const };
-        } catch (err: any) {
-          console.error('[places] Text Search failed:', err?.message);
-          return { places: [], source: 'google_error' as const };
-        }
-      });
-      return result;
+        });
+        return normalizePlacesSearchResult(result);
+      } catch (err: any) {
+        console.error('[places] Text Search failed:', err?.message);
+        return { places: [], source: 'google_error' as const };
+      }
     }),
 
   details: publicProcedure

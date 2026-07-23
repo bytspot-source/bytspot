@@ -1890,6 +1890,112 @@ const cronRouter = router({
     }),
 });
 
+async function loadNativeVenueSummaries(limit = 12): Promise<any[]> {
+  const ticketingColumnsAvailable = await hasVenueTicketingColumns();
+  const rows = ticketingColumnsAvailable
+    ? await db.venue.findMany({ select: publicVenueListSelectWithTicketing, orderBy: { name: 'asc' }, take: limit })
+    : await db.venue.findMany({ select: publicVenueListSelect, orderBy: { name: 'asc' }, take: limit });
+  return attachVenueHardwarePatches(rows.map(mapPublicVenueSummary));
+}
+
+function nativeDiscoverCardsFromVenues(venues: any[]) {
+  return venues.slice(0, 8).map((venue) => {
+    const spots = Number(venue.parking?.totalAvailable ?? 0);
+    return {
+      id: `venue-${venue.id}`,
+      type: venue.category ?? 'venue',
+      title: venue.name,
+      subtitle: venue.address ?? 'Nearby Bytspot venue',
+      distance: 'Nearby',
+      rating: venue.crowd?.label ?? 'Open',
+      icon: 'mappin.and.ellipse',
+      verified: Boolean(venue.hardwarePatch),
+      entryType: venue.entryType ?? 'free',
+      cta: 'View spot',
+      imageUrl: venue.imageUrl ?? null,
+      categoryLabel: venue.category ?? 'Venue',
+      badgeText: spots > 0 ? `${spots} spots` : 'LIVE',
+      metadataLine: spots > 0 ? `${spots} arrival spots` : 'Live venue feed',
+      features: [venue.crowd?.label, spots > 0 ? `${spots} spots nearby` : null, venue.entryPrice].filter(Boolean),
+      vibeScore: Math.max(1, Math.min(10, Number(venue.crowd?.level ?? 2) * 2)),
+      availability: spots > 0 ? `${spots} spots available` : 'Availability live',
+      membershipRequired: venue.entryType === 'paid',
+    };
+  });
+}
+
+function nativeCuratedEvents() {
+  const today = new Date().toISOString().slice(0, 10);
+  return [
+    { id: 'bytspot-midtown-tonight', title: 'Midtown Tonight', venue: 'Atlanta Midtown', date: today, time: '18:00', category: 'rooftop', emoji: '🌃', price: 'Member picks', image: 'https://images.unsplash.com/photo-1507676184212-d03ab07a01bf?w=600' },
+    { id: 'bytspot-arrival-window', title: 'Best Arrival Window', venue: 'Nearby venues', date: today, time: '19:30', category: 'food', emoji: '🍽️', price: 'Plan ahead', image: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=600' },
+    { id: 'bytspot-weekend-picks', title: 'Weekend Picks', venue: 'Bytspot Concierge', date: today, time: '20:00', category: 'concert', emoji: '🎵', price: 'See options', image: 'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=600' },
+  ];
+}
+
+function metersBetween(fromLat: number | undefined, fromLng: number | undefined, toLat: number, toLng: number): number | null {
+  if (fromLat === undefined || fromLng === undefined) return null;
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const earthMeters = 6_371_000;
+  const dLat = toRad(toLat - fromLat);
+  const dLng = toRad(toLng - fromLng);
+  const lat1 = toRad(fromLat);
+  const lat2 = toRad(toLat);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return Math.round(earthMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+const nativeRouter = router({
+  bootstrap: publicProcedure
+    .input(z.object({ limit: z.number().int().min(1).max(24).optional().default(12) }).optional().default({}))
+    .query(async ({ input }) => {
+      const venues = await loadNativeVenueSummaries(input.limit);
+      return {
+        source: 'backend',
+        generatedAt: new Date().toISOString(),
+        content: {
+          venues,
+          discoverCards: nativeDiscoverCardsFromVenues(venues),
+          events: nativeCuratedEvents(),
+        },
+      };
+    }),
+});
+
+const liveRouter = router({
+  bestValue: publicProcedure
+    .input(z.object({ productType: z.string().optional().default('any'), lat: z.number().optional(), lng: z.number().optional(), durationHours: z.number().min(0.5).max(24).optional().default(2), limit: z.number().int().min(1).max(12).optional().default(4), strict: z.boolean().optional().default(false) }).optional().default({}))
+    .query(async ({ input }) => {
+      const venues = await loadNativeVenueSummaries(Math.max(input.limit * 3, 12));
+      const options = venues.flatMap((venue) => (venue.parking?.spots ?? []).map((spot: any, index: number) => ({ venue, spot, index })))
+        .filter(({ spot }) => Number(spot.available ?? 0) > 0)
+        .sort((a, b) => Number(b.spot.available ?? 0) - Number(a.spot.available ?? 0))
+        .slice(0, input.limit)
+        .map(({ venue, spot, index }) => {
+          const estimatedTotalCents = spot.pricePerHr == null ? null : Math.max(0, Math.round(Number(spot.pricePerHr) * input.durationHours * 100));
+          const marketReferenceCents = estimatedTotalCents == null ? null : estimatedTotalCents + 500;
+          const priceParityScore = estimatedTotalCents == null ? 82 : Math.max(55, Math.min(100, 100 - Math.round(estimatedTotalCents / 500)));
+          const available = Number(spot.available ?? 0);
+          return {
+            id: `parking-${venue.id}-${index}`,
+            productType: 'parking',
+            title: `${venue.name} parking`,
+            providerName: spot.name ?? venue.name,
+            source: 'venues.parking',
+            estimatedTotalCents,
+            marketReferenceCents,
+            distanceMeters: metersBetween(input.lat, input.lng, Number(venue.lat), Number(venue.lng)),
+            availability: `${available} spots available`,
+            priceParityScore,
+            valueScore: Math.min(100, priceParityScore + Math.min(15, available)),
+            eligible: true,
+            explanation: ['Live venue inventory', `${available} nearby spots`, spot.type ?? 'arrival parking'],
+          };
+        });
+      return { source: 'backend', options };
+    }),
+});
+
 /**
  * ── Root app router ───────────────────────────────────
  * Merge all sub-routers here.
@@ -1908,6 +2014,8 @@ export const appRouter = router({
   push: pushRouter,
   betaSignup: betaSignupRouter,
   cron: cronRouter,
+  native: nativeRouter,
+  live: liveRouter,
   user: userRouter,
   social: socialRouter,
   reviews: reviewsRouter,

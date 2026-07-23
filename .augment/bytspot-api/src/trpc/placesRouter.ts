@@ -88,16 +88,21 @@ export const placesRouter = router({
       const { lat, lng, radius, type, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
       const cacheKey = `gp:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}:${type ?? 'all'}:${maxResults}`;
-      const places = await cached(cacheKey, 900, async () => {
-        const body: Record<string, unknown> = {
-          locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
-          maxResultCount: maxResults, rankPreference: 'DISTANCE',
-        };
-        if (type) body.includedTypes = [type];
-        const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
-        return (data.places ?? []).map(mapPlace);
+      const result = await cached(cacheKey, 900, async () => {
+        try {
+          const body: Record<string, unknown> = {
+            locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
+            maxResultCount: maxResults, rankPreference: 'DISTANCE',
+          };
+          if (type) body.includedTypes = [type];
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
+          return { places: (data.places ?? []).map(mapPlace), source: 'google' as const };
+        } catch (err: any) {
+          console.error('[places] Nearby Search failed:', err?.message);
+          return { places: [], source: 'google_error' as const };
+        }
       });
-      return { places, source: 'google' as const };
+      return result;
     }),
 
   textSearch: publicProcedure
@@ -109,15 +114,20 @@ export const placesRouter = router({
       const { query, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
       const cacheKey = `gp:text:${query.toLowerCase().trim()}:${maxResults}`;
-      const places = await cached(cacheKey, 900, async () => {
-        const body = {
-          textQuery: query, maxResultCount: maxResults,
-          locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
-        };
-        const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
-        return (data.places ?? []).map(mapPlace);
+      const result = await cached(cacheKey, 900, async () => {
+        try {
+          const body = {
+            textQuery: query, maxResultCount: maxResults,
+            locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
+          };
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
+          return { places: (data.places ?? []).map(mapPlace), source: 'google' as const };
+        } catch (err: any) {
+          console.error('[places] Text Search failed:', err?.message);
+          return { places: [], source: 'google_error' as const };
+        }
       });
-      return { places, source: 'google' as const };
+      return result;
     }),
 
   details: publicProcedure

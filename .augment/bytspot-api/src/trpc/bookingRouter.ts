@@ -112,6 +112,16 @@ type BookingRow = {
   priceCents: number;
   platformFeeCents: number;
   currency: string;
+  tier: string;
+  requestStatus: string;
+  requestExpiresAt: Date | null;
+  acceptedAt: Date | null;
+  declinedAt: Date | null;
+  counterOfferCents: number | null;
+  counterOfferCurrency: string | null;
+  counterOfferMessage: string | null;
+  guestNotes: string | null;
+  logisticsMode: string | null;
   stripeSessionId: string | null;
   stripePaymentIntentId: string | null;
   stripeTransferDestination: string | null;
@@ -398,7 +408,7 @@ export const bookingRouter = router({
           metadata,
         } as any,
         select: bookingSelect,
-      });
+      }) as unknown as BookingRow;
 
       const token = signICT(
         {
@@ -421,7 +431,7 @@ export const bookingRouter = router({
       );
 
       return {
-        booking: mapBooking(booking as any),
+        booking: mapBooking(booking),
         access: {
           token,
           kid: getActiveICTKid(),
@@ -553,7 +563,7 @@ export const bookingRouter = router({
           },
         } as any,
         select: bookingSelect,
-      });
+      }) as unknown as BookingRow;
 
       const sessionMetadata = { ...stripeMetadata, bookingId: booking.id };
       const session = await stripe.checkout.sessions.create({
@@ -593,7 +603,7 @@ export const bookingRouter = router({
           },
         },
         select: bookingSelect,
-      }) as any;
+      }) as unknown as BookingRow;
       await notifyVendorNewRequest({
         vendorId: service.vendor.id,
         bookingId: updatedBooking.id,
@@ -773,7 +783,7 @@ export const bookingRouter = router({
           },
         } as any,
         select: bookingSelect,
-      });
+      }) as unknown as BookingRow;
 
       const sessionMetadata = { ...stripeMetadata, bookingId: booking.id, secureHoldStatus: 'authorization_requested' };
       const paymentMethodData = input.stripeTokenId
@@ -814,7 +824,7 @@ export const bookingRouter = router({
           },
         } as any,
         select: bookingSelect,
-      }) as any;
+      }) as unknown as BookingRow;
       await notifyVendorNewRequest({
         vendorId: service.vendor.id,
         bookingId: updatedBooking.id,
@@ -882,12 +892,12 @@ export const bookingRouter = router({
     )
     .input(z.object({ bookingId: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
-      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect });
+      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect }) as unknown as BookingRow | null;
       if (!booking || booking.userId !== ctx.user.userId) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
       }
 
-      return mapBooking(booking as any);
+      return mapBooking(booking);
     }),
 
   cancel: protectedProcedure
@@ -902,7 +912,7 @@ export const bookingRouter = router({
     )
     .input(z.object({ bookingId: z.string().min(1), reason: z.string().trim().min(1).max(280).optional() }))
     .mutation(async ({ ctx, input }) => {
-      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect });
+      const booking = await db.booking.findUnique({ where: { id: input.bookingId }, select: bookingSelect }) as unknown as BookingRow | null;
       if (!booking || booking.userId !== ctx.user.userId) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found' });
       }
@@ -911,7 +921,7 @@ export const bookingRouter = router({
       }
       if (booking.status === 'canceled') {
         return {
-          booking: mapBooking(booking as any),
+          booking: mapBooking(booking),
           alreadyCanceled: true,
         };
       }
@@ -939,10 +949,10 @@ export const bookingRouter = router({
           },
         },
         select: bookingSelect,
-      });
+      }) as unknown as BookingRow;
 
       return {
-        booking: mapBooking(canceledBooking as any),
+        booking: mapBooking(canceledBooking),
         alreadyCanceled: false,
       };
     }),

@@ -110,6 +110,31 @@ const partyDraftInput = z.object({
 
 type PartyDraftInput = z.infer<typeof partyDraftInput>;
 
+type PublishedPartyRow = {
+  id: string;
+  hostId: string;
+  templateId: string;
+  title: string;
+  tagline: string;
+  startsAt: Date;
+  venueName: string;
+  capacity: number;
+  accessMode: string;
+  requiredMembershipTier: string;
+  audienceCircleIds: string[];
+  itinerary: unknown;
+  status: string;
+  passCode: string | null;
+};
+
+const templateLabels: Record<string, string> = {
+  'listening-party': 'Listening Party',
+  'comedy-night': 'Comedy Night',
+  premiere: 'Premiere',
+  'private-party': 'Private Party',
+  'fan-meetup': 'Fan Meetup',
+};
+
 function draftFingerprint(input: PartyDraftInput): string {
   const { idempotencyKey: _key, ...draft } = input;
   return createHash('sha256').update(JSON.stringify(draft)).digest('hex');
@@ -120,6 +145,22 @@ function partyPassCode(): string {
   return Array.from({ length: 8 }, () => alphabet[randomInt(alphabet.length)]).join('');
 }
 
+function partyTiming(startsAt: Date): 'now' | 'today' | 'thisWeek' {
+  const delta = startsAt.getTime() - Date.now();
+  if (Math.abs(delta) <= 2 * 60 * 60 * 1000) return 'now';
+  if (delta <= 24 * 60 * 60 * 1000) return 'today';
+  return 'thisWeek';
+}
+
+function itineraryTitles(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const title = (item as { title?: unknown }).title;
+    return typeof title === 'string' && title.trim() ? [title.trim()] : [];
+  });
+}
+
 function publishedParty(party: { id: string; status: string; passCode: string | null }) {
   if (party.status !== 'published' || !party.passCode) {
     throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Party Pass is unavailable.' });
@@ -127,8 +168,23 @@ function publishedParty(party: { id: string; status: string; passCode: string | 
   return {
     id: party.id,
     status: 'published' as const,
-    shareUrl: `https://bytspot.com/party/${encodeURIComponent(party.id)}`,
+    shareUrl: `https://bytspot.app/group/${encodeURIComponent(party.id)}`,
     passCode: party.passCode,
+  };
+}
+
+function groupEventProjection(party: PublishedPartyRow) {
+  return {
+    hostId: party.hostId,
+    title: party.title,
+    groupType: templateLabels[party.templateId] ?? 'Private Party',
+    tier: party.requiredMembershipTier,
+    timing: partyTiming(party.startsAt),
+    scheduledDate: party.startsAt.toISOString(),
+    location: party.venueName,
+    theme: party.tagline || null,
+    allowNearbyOffers: true,
+    approvalMode: party.accessMode === 'private-approval' ? 'approval' : 'open',
   };
 }
 
@@ -174,6 +230,45 @@ const partyDraftsRouter = router({
 export const eventsRouter = router({
   drafts: partyDraftsRouter,
 
+  /** Public invite details for an unguessable, published Party Pass URL. */
+  invite: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 120, label: 'events:invite' }))
+    .input(z.object({ partyId: z.string().min(1).max(200) }))
+    .query(async ({ input }) => {
+      const party = await db.party.findUnique({
+        where: { id: input.partyId },
+        include: { host: { select: { name: true } } },
+      });
+      if (!party || party.status !== 'published') {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Party invite not found.' });
+      }
+      const participantCount = await db.groupEventGuest.count({
+        where: { eventId: party.id, status: 'joined' },
+      });
+      const highlights = itineraryTitles(party.itinerary);
+      return {
+        id: party.id,
+        source: 'host-studio-party' as const,
+        title: party.title,
+        inviteNote: party.tagline || null,
+        tier: party.requiredMembershipTier,
+        timing: partyTiming(party.startsAt),
+        participantCount,
+        capacity: party.capacity,
+        accessMode: party.accessMode,
+        groupType: templateLabels[party.templateId] ?? 'Private Party',
+        scheduledDate: party.startsAt.toISOString(),
+        hostName: party.host.name ?? 'Bytspot Host',
+        locationLabel: party.venueName,
+        theme: party.tagline || (templateLabels[party.templateId] ?? 'Private Party'),
+        guestSummary: participantCount === 0 ? `Be first to join · ${party.capacity} spots` : `${participantCount} joined · ${party.capacity} spots`,
+        activityHighlights: highlights,
+        audienceCircle: party.audienceCircleIds.length > 0 ? 'Selected Circles' : 'Shared Party Pass',
+        privacyStatus: party.audienceCircleIds.length > 0 || party.accessMode === 'private-approval' ? 'privateInvite' : 'publicDiscovery',
+        requiresApproval: party.accessMode === 'private-approval',
+      };
+    }),
+
   /** Publish is an owner capability. Replays return the original Party Pass. */
   publish: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'events:publish' }))
@@ -187,17 +282,28 @@ export const eventsRouter = router({
       if (party.idempotencyKey !== input.idempotencyKey) {
         throw new TRPCError({ code: 'CONFLICT', message: 'The publish key does not match this party draft.' });
       }
-      if (party.status === 'published') return publishedParty(party);
       if (party.status !== 'draft') {
-        throw new TRPCError({ code: 'CONFLICT', message: 'Only draft parties can be published.' });
+        if (party.status !== 'published') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Only draft parties can be published.' });
+        }
       }
 
-      await tx.party.updateMany({
-        where: { id: party.id, hostId: ctx.user.userId, idempotencyKey: input.idempotencyKey, status: 'draft' },
-        data: { status: 'published', passCode: partyPassCode(), publishedAt: new Date() },
+      let published = party;
+      if (party.status === 'draft') {
+        await tx.party.updateMany({
+          where: { id: party.id, hostId: ctx.user.userId, idempotencyKey: input.idempotencyKey, status: 'draft' },
+          data: { status: 'published', passCode: partyPassCode(), publishedAt: new Date() },
+        });
+        const reloaded = await tx.party.findUnique({ where: { id: party.id } });
+        if (!reloaded) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Published party could not be loaded.' });
+        published = reloaded;
+      }
+      const projection = groupEventProjection(published);
+      await tx.groupEvent.upsert({
+        where: { id: published.id },
+        create: { id: published.id, ...projection },
+        update: projection,
       });
-      const published = await tx.party.findUnique({ where: { id: party.id } });
-      if (!published) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Published party could not be loaded.' });
       return publishedParty(published);
     })),
 

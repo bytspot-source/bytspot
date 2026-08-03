@@ -31,6 +31,10 @@ function party(overrides: Record<string, unknown> = {}) {
   return {
     id: 'party-1', hostId: HOST, idempotencyKey: KEY,
     draftFingerprint: FINGERPRINT, status: 'draft', passCode: null,
+    templateId: 'listening-party', title: 'First Listen', tagline: 'One moment. Your people.',
+    startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'The Loft', capacity: 80,
+    accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: ['circle-1'],
+    itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
     ...overrides,
   };
 }
@@ -101,10 +105,14 @@ describe('events party procedures', () => {
 
     const result = await createAuthenticatedCaller(HOST).events.publish({ partyId: 'party-1', idempotencyKey: KEY });
 
-    expect(result).toEqual({ id: 'party-1', status: 'published', shareUrl: 'https://bytspot.com/party/party-1', passCode: 'PARTY826' });
+    expect(result).toEqual({ id: 'party-1', status: 'published', shareUrl: 'https://bytspot.app/group/party-1', passCode: 'PARTY826' });
     expect(db.party.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ hostId: HOST, status: 'draft', idempotencyKey: KEY }),
       data: expect.objectContaining({ status: 'published', passCode: expect.stringMatching(/^[A-Z2-9]{8}$/) }),
+    }));
+    expect(db.groupEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'party-1' },
+      create: expect.objectContaining({ id: 'party-1', title: 'First Listen', tier: 'green', approvalMode: 'open' }),
     }));
   });
 
@@ -121,5 +129,25 @@ describe('events party procedures', () => {
 
     expect(result.passCode).toBe('LAUGH826');
     expect(db.party.updateMany).not.toHaveBeenCalled();
+    expect(db.groupEvent.upsert).toHaveBeenCalled();
+  });
+
+  it('returns the exact published Host Studio Party as a public invite', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published', passCode: 'PARTY826', host: { name: 'Avery Parker' } }));
+    (db.groupEventGuest.count as any).mockResolvedValueOnce(3);
+
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({
+      id: 'party-1', source: 'host-studio-party', title: 'First Listen', inviteNote: 'One moment. Your people.',
+      tier: 'green', participantCount: 3, capacity: 80, accessMode: 'free-rsvp',
+      hostName: 'Avery Parker', locationLabel: 'The Loft', activityHighlights: ['Doors open'],
+      audienceCircle: 'Selected Circles', privacyStatus: 'privateInvite', requiresApproval: false,
+    });
+  });
+
+  it('does not expose drafts through the public invite route', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party());
+    await expect(createPublicCaller().events.invite({ partyId: 'party-1' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });

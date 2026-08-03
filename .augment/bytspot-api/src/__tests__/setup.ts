@@ -142,6 +142,7 @@ vi.mock('../lib/db', () => {
     groupEventGuest: {
       findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn().mockResolvedValue(null),
+      count: vi.fn().mockResolvedValue(0),
       upsert: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },

@@ -101,6 +101,29 @@ describe('groupEvents router', () => {
     expect(res).toEqual({ status: 'pending' });
   });
 
+  it('join derives the Platinum gate from the persisted event', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ tier: 'platinum' }));
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+
+    await expect(createAuthenticatedCaller(GUEST).groupEvents.join({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.groupEventGuest.upsert).not.toHaveBeenCalled();
+  });
+
+  it('join allows an authoritative premium member into a Platinum event', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ tier: 'platinum' }));
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: true });
+    (db.groupEventGuest.upsert as any).mockResolvedValueOnce({ status: 'joined' });
+
+    await expect(createAuthenticatedCaller(GUEST).groupEvents.join({ eventId: SLUG })).resolves.toEqual({ status: 'joined' });
+  });
+
+  it('join fails closed for Black until a canonical Black entitlement exists', async () => {
+    (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ tier: 'black' }));
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: true });
+
+    await expect(createAuthenticatedCaller(GUEST).groupEvents.join({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
   it('join on a missing event throws NOT_FOUND', async () => {
     (db.groupEvent.findUnique as any).mockResolvedValueOnce(null);
     const caller = createAuthenticatedCaller(GUEST);

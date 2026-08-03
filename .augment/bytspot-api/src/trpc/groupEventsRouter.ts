@@ -105,6 +105,14 @@ const eventInput = z.object({
   approvalMode: z.enum(['open', 'approval']).optional().default('open'),
 });
 
+async function requireEventMembership(tier: string, userId: string): Promise<void> {
+  const normalized = tier.toLowerCase();
+  if (normalized === 'green') return;
+  const user = await db.user.findUnique({ where: { id: userId }, select: { isPremium: true } });
+  if (normalized === 'platinum' && user?.isPremium === true) return;
+  throw new TRPCError({ code: 'FORBIDDEN', message: `${normalized === 'black' ? 'Black' : 'Platinum'} membership required.` });
+}
+
 export const groupEventsRouter = router({
   /** Host: create (or update) an event keyed by its invite slug. */
   create: protectedProcedure
@@ -141,6 +149,7 @@ export const groupEventsRouter = router({
       const userId = ctx.user.userId;
       const event = await db.groupEvent.findUnique({ where: { id: input.eventId } });
       if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
+      await requireEventMembership(event.tier, userId);
 
       const status = event.approvalMode === 'approval' ? 'pending' : 'joined';
       const guest = await db.groupEventGuest.upsert({

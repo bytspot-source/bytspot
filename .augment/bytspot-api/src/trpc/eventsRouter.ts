@@ -10,6 +10,7 @@ import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from
 import { cached } from '../lib/redis';
 import { config } from '../config';
 import { db } from '../lib/db';
+import { uploadPartyImage } from '../lib/cloudinary';
 
 // ─── Ticketmaster Discovery API helpers ─────────────────────────────
 const TM_BASE = 'https://app.ticketmaster.com/discovery/v2';
@@ -108,6 +109,14 @@ const partyDraftInput = z.object({
   }
 });
 
+// Keep each JSON request below the server's 1 MB parser limit. The iOS client
+// downsizes and recompresses selected images before sending them.
+const imageDataUri = z.string().max(850_000).regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/);
+const partyMediaUploadInput = z.discriminatedUnion('kind', [
+  z.object({ partyId: z.string().min(1).max(200), kind: z.literal('cover'), dataUri: imageDataUri }),
+  z.object({ partyId: z.string().min(1).max(200), kind: z.literal('album'), index: z.number().int().min(0).max(5), dataUri: imageDataUri }),
+]);
+
 type PartyDraftInput = z.infer<typeof partyDraftInput>;
 
 type PublishedPartyRow = {
@@ -122,6 +131,8 @@ type PublishedPartyRow = {
   accessMode: string;
   requiredMembershipTier: string;
   audienceCircleIds: string[];
+  coverImageUrl: string | null;
+  photoUrls: string[];
   itinerary: unknown;
   status: string;
   passCode: string | null;
@@ -227,8 +238,45 @@ const partyDraftsRouter = router({
     }),
 });
 
+const partyMediaRouter = router({
+  reset: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'events:media:reset' }))
+    .input(z.object({ partyId: z.string().min(1).max(200) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findUnique({ where: { id: input.partyId } });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
+      if (party.hostId !== ctx.user.userId) throw new TRPCError({ code: 'FORBIDDEN', message: 'Only the party owner can reset media.' });
+      if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Published Party media is immutable.' });
+      await db.party.update({ where: { id: party.id }, data: { coverImageUrl: null, photoUrls: [] } });
+      return { status: 'ready' as const };
+    }),
+  upload: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'events:media:upload' }))
+    .input(partyMediaUploadInput)
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findUnique({ where: { id: input.partyId } });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
+      if (party.hostId !== ctx.user.userId) throw new TRPCError({ code: 'FORBIDDEN', message: 'Only the party owner can upload media.' });
+      if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Published Party media cannot be replaced here.' });
+      if (input.kind === 'album' && input.index > party.photoUrls.length) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Album photos must be uploaded in order.' });
+      }
+      const slot = input.kind === 'cover' ? 'cover' : `album-${input.index}`;
+      const url = await uploadPartyImage(input.dataUri, `bytspot/parties/${party.id}/${slot}`);
+      if (input.kind === 'cover') {
+        await db.party.update({ where: { id: party.id }, data: { coverImageUrl: url } });
+      } else {
+        const photoUrls = [...party.photoUrls];
+        photoUrls[input.index] = url;
+        await db.party.update({ where: { id: party.id }, data: { photoUrls } });
+      }
+      return { kind: input.kind, url, index: input.kind === 'album' ? input.index : null };
+    }),
+});
+
 export const eventsRouter = router({
   drafts: partyDraftsRouter,
+  media: partyMediaRouter,
 
   /** Public invite details for an unguessable, published Party Pass URL. */
   invite: publicProcedure
@@ -266,6 +314,9 @@ export const eventsRouter = router({
         audienceCircle: party.audienceCircleIds.length > 0 ? 'Selected Circles' : 'Shared Party Pass',
         privacyStatus: party.audienceCircleIds.length > 0 || party.accessMode === 'private-approval' ? 'privateInvite' : 'publicDiscovery',
         requiresApproval: party.accessMode === 'private-approval',
+        heroImageURL: party.coverImageUrl,
+        thumbnailURL: party.coverImageUrl,
+        photoURLs: party.photoUrls,
       };
     }),
 

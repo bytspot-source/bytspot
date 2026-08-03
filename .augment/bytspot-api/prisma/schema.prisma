@@ -741,6 +741,8 @@ model Party {
   accessMode              String    @map("access_mode")
   requiredMembershipTier String    @default("green") @map("required_membership_tier")
   audienceCircleIds      String[]  @default([]) @map("audience_circle_ids")
+  coverImageUrl          String?   @map("cover_image_url")
+  photoUrls              String[]  @default([]) @map("photo_urls")
   itinerary              Json
   ticketTiers            Json      @map("ticket_tiers")
   cohosts                Json

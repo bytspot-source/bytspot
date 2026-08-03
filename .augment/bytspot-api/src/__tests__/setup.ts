@@ -149,6 +149,7 @@ vi.mock('../lib/db', () => {
     party: {
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn(),
+      update: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     complianceLog: {
@@ -212,6 +213,7 @@ vi.mock('../config', () => ({
     ticketmasterApiKey: '',
     googlePlacesApiKey: '',
 	    googleClientIds: [],
+	    cloudinaryUrl: 'cloudinary://test',
 	    appleClientIds: [],
     apnsKeyId: '',
     apnsTeamId: '',
@@ -219,6 +221,11 @@ vi.mock('../config', () => ({
     apnsBundleId: 'com.bytspot.app',
   },
   printConfigDiagnostics: vi.fn(),
+}));
+
+vi.mock('../lib/cloudinary', () => ({
+  uploadPartyImage: vi.fn().mockImplementation(async (_dataUri: string, publicId: string) =>
+    `https://res.cloudinary.com/bytspot/image/upload/${publicId}.jpg`),
 }));
 
 // ── Mock email ────────────────────────────────────────────

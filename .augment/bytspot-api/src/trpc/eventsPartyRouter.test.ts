@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../lib/db';
 import { createAuthenticatedCaller, createPublicCaller } from '../__tests__/helpers';
 import { resetRateLimitBucketsForTests } from './trpc';
+import { uploadPartyImage } from '../lib/cloudinary';
 
 const HOST = 'host-1';
 const KEY = 'moment-12345678';
@@ -34,6 +35,7 @@ function party(overrides: Record<string, unknown> = {}) {
     templateId: 'listening-party', title: 'First Listen', tagline: 'One moment. Your people.',
     startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'The Loft', capacity: 80,
     accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: ['circle-1'],
+    coverImageUrl: null, photoUrls: [],
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
     ...overrides,
   };
@@ -80,6 +82,35 @@ describe('events party procedures', () => {
   it('rejects reuse of an idempotency key for a different draft', async () => {
     (db.party.upsert as any).mockResolvedValueOnce(party());
     await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft())).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('uploads owner-controlled cover and album media to deterministic Cloudinary slots', async () => {
+    const dataUri = 'data:image/jpeg;base64,QUJD';
+    (db.party.findUnique as any)
+      .mockResolvedValueOnce(party({ coverImageUrl: 'https://old.example/cover.jpg', photoUrls: ['https://old.example/photo.jpg'] }))
+      .mockResolvedValueOnce(party())
+      .mockResolvedValueOnce(party({ photoUrls: [] }));
+
+    const caller = createAuthenticatedCaller(HOST);
+    await caller.events.media.reset({ partyId: 'party-1' });
+    const cover = await caller.events.media.upload({ partyId: 'party-1', kind: 'cover', dataUri });
+    const photo = await caller.events.media.upload({ partyId: 'party-1', kind: 'album', index: 0, dataUri });
+
+    expect(cover.url).toContain('/bytspot/parties/party-1/cover.jpg');
+    expect(photo.url).toContain('/bytspot/parties/party-1/album-0.jpg');
+    expect(uploadPartyImage).toHaveBeenNthCalledWith(1, dataUri, 'bytspot/parties/party-1/cover');
+    expect(db.party.update).toHaveBeenCalledWith({ where: { id: 'party-1' }, data: { coverImageUrl: null, photoUrls: [] } });
+    expect(db.party.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: { photoUrls: [photo.url] } }));
+  });
+
+  it('rejects Party media uploads from non-owners and after publication', async () => {
+    const input = { partyId: 'party-1', kind: 'cover' as const, dataUri: 'data:image/png;base64,QUJD' };
+    (db.party.findUnique as any).mockResolvedValueOnce(party());
+    await expect(createAuthenticatedCaller('intruder').events.media.upload(input)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published' }));
+    await expect(createAuthenticatedCaller(HOST).events.media.upload(input)).rejects.toMatchObject({ code: 'CONFLICT' });
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published' }));
+    await expect(createAuthenticatedCaller(HOST).events.media.reset({ partyId: 'party-1' })).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 
   it('returns the original draft when the same create request is replayed', async () => {
@@ -133,7 +164,11 @@ describe('events party procedures', () => {
   });
 
   it('returns the exact published Host Studio Party as a public invite', async () => {
-    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published', passCode: 'PARTY826', host: { name: 'Avery Parker' } }));
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', passCode: 'PARTY826', host: { name: 'Avery Parker' },
+      coverImageUrl: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
+      photoUrls: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
+    }));
     (db.groupEventGuest.count as any).mockResolvedValueOnce(3);
 
     const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
@@ -143,6 +178,8 @@ describe('events party procedures', () => {
       tier: 'green', participantCount: 3, capacity: 80, accessMode: 'free-rsvp',
       hostName: 'Avery Parker', locationLabel: 'The Loft', activityHighlights: ['Doors open'],
       audienceCircle: 'Selected Circles', privacyStatus: 'privateInvite', requiresApproval: false,
+      heroImageURL: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
+      photoURLs: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
     });
   });
 

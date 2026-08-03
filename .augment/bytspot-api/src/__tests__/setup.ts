@@ -145,6 +145,11 @@ vi.mock('../lib/db', () => {
       upsert: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
+    party: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
     complianceLog: {
       create: vi.fn().mockResolvedValue({ id: 'cl-1' }),
     },

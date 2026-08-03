@@ -55,6 +55,7 @@ model User {
   passwordResetTokens PasswordResetToken[]
   hostedGroupEvents   GroupEvent[]      @relation("hostedGroupEvents")
   groupEventGuests    GroupEventGuest[]
+  hostedParties       Party[]           @relation("hostedParties")
 
   @@map("users")
 }
@@ -723,4 +724,37 @@ model GroupEventGuest {
   @@index([eventId, status])
   @@index([userId, createdAt(sort: Desc)])
   @@map("group_event_guests")
+}
+
+// ─── Party Operating System (Host Studio) ────────────────
+model Party {
+  id                     String    @id @default(cuid())
+  hostId                 String    @map("host_id")
+  idempotencyKey         String    @map("idempotency_key")
+  draftFingerprint       String    @map("draft_fingerprint")
+  templateId             String    @map("template_id")
+  title                   String
+  tagline                 String
+  startsAt                DateTime  @map("starts_at")
+  venueName               String    @map("venue_name")
+  capacity                Int
+  accessMode              String    @map("access_mode")
+  requiredMembershipTier String    @default("green") @map("required_membership_tier")
+  audienceCircleIds      String[]  @default([]) @map("audience_circle_ids")
+  itinerary              Json
+  ticketTiers            Json      @map("ticket_tiers")
+  cohosts                Json
+  source                 String    @default("host-studio")
+  status                 String    @default("draft")
+  passCode               String?   @unique @map("pass_code")
+  publishedAt            DateTime? @map("published_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  host User @relation("hostedParties", fields: [hostId], references: [id], onDelete: Cascade)
+
+  @@unique([hostId, idempotencyKey])
+  @@index([hostId, status, createdAt(sort: Desc)])
+  @@index([status, startsAt])
+  @@map("parties")
 }

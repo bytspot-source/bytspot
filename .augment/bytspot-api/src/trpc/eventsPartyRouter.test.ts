@@ -105,7 +105,7 @@ describe('events party procedures', () => {
 
     const result = await createAuthenticatedCaller(HOST).events.publish({ partyId: 'party-1', idempotencyKey: KEY });
 
-    expect(result).toEqual({ id: 'party-1', status: 'published', shareUrl: 'https://bytspot.app/group/party-1', passCode: 'PARTY826' });
+    expect(result).toEqual({ id: 'party-1', status: 'published', shareUrl: 'https://bytspot.app/party/party-1', passCode: 'PARTY826' });
     expect(db.party.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ hostId: HOST, status: 'draft', idempotencyKey: KEY }),
       data: expect.objectContaining({ status: 'published', passCode: expect.stringMatching(/^[A-Z2-9]{8}$/) }),

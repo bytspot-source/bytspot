@@ -168,7 +168,7 @@ function publishedParty(party: { id: string; status: string; passCode: string | 
   return {
     id: party.id,
     status: 'published' as const,
-    shareUrl: `https://bytspot.app/group/${encodeURIComponent(party.id)}`,
+    shareUrl: `https://bytspot.app/party/${encodeURIComponent(party.id)}`,
     passCode: party.passCode,
   };
 }

@@ -332,7 +332,7 @@ describe('auth', () => {
     fetchSpy.mockRestore();
   });
 
-	it('auth.appleSignIn creates an Apple user and returns a Bytspot JWT', async () => {
+	it('auth.appleSignIn uses the verified token email despite a conflicting client email', async () => {
 	  (config as any).appleClientIds = ['com.bytspot.app'];
 	  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 	  const jwk = publicKey.export({ format: 'jwk' }) as JsonWebKey;
@@ -355,11 +355,14 @@ describe('auth', () => {
 	  });
 
 	  const caller = createPublicCaller();
-	  const result = await caller.auth.appleSignIn({ identityToken, name: 'Apple User' });
+	  const result = await caller.auth.appleSignIn({ identityToken, email: 'victim@test.com', name: 'Apple User' });
 
 	  expect(result.isNewUser).toBe(true);
 	  expect(result.user.authProvider).toBe('apple');
 	  expect(result.token).toBeTruthy();
+	  expect(db.user.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+	    where: { OR: [{ appleSubject: 'apple-sub-1' }, { email: 'apple.user@test.com' }] },
+	  }));
 	  expect(db.user.create).toHaveBeenCalledWith(expect.objectContaining({
 	    data: expect.objectContaining({
 	      email: 'apple.user@test.com',

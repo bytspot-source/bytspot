@@ -72,7 +72,8 @@ function oauthPasswordSeed(): string {
 
 export async function completeAppleSignIn(input: { identityToken: string; email?: string | null; name?: string | null; ref?: string | null }): Promise<AppleAuthResult> {
   const apple = await verifyAppleIdentityToken(input.identityToken);
-  const email = (input.email || apple.email).toLowerCase();
+  // The verified Apple JWT, not mutable client profile data, owns account identity.
+  const email = apple.email;
   let isNewUser = false;
   let user = await db.user.findFirst({
     where: { OR: [{ appleSubject: apple.sub }, { email }] } as any,

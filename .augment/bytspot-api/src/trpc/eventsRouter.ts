@@ -61,6 +61,23 @@ const membershipTier = z.enum(['green', 'platinum', 'black']);
 const tierRank = { green: 0, platinum: 1, black: 2 } as const;
 const idempotencyKey = z.string().min(8).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const partyTemplateId = z.enum(['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up']);
+const partyTemplateConfig = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('standard') }).strict(),
+  z.object({ kind: z.literal('listening-party'), format: z.enum(['listening-session', 'dj-mix-premiere', 'live-performance', 'label-showcase']) }).strict(),
+  z.object({ kind: z.literal('fan-meetup'), format: z.enum(['meet-and-greet', 'creator-conversation', 'community-photo']) }).strict(),
+  z.object({ kind: z.literal('release-party'), releaseType: z.enum(['single', 'ep', 'album', 'mix', 'video']), releaseTitle: z.string().trim().min(1).max(120) }).strict(),
+  z.object({ kind: z.literal('pop-up'), locationDisclosure: z.enum(['public', 'after-approval']) }).strict(),
+  z.object({ kind: z.literal('private-party'), guestPolicy: z.enum(['named-guests', 'named-guests-plus-one']) }).strict(),
+]);
+const templateConfigKind: Record<z.infer<typeof partyTemplateId>, z.infer<typeof partyTemplateConfig>['kind']> = {
+  'listening-party': 'listening-party',
+  'fan-meetup': 'fan-meetup',
+  'release-party': 'release-party',
+  'pop-up': 'pop-up',
+  'private-party': 'private-party',
+  'comedy-night': 'standard',
+  premiere: 'standard',
+};
 const partyPassAction = z.enum(['rsvp', 'ticket', 'claim-invitation', 'unavailable']);
 const partyPassPolicy = z.object({
   version: z.literal(1),
@@ -95,8 +112,18 @@ const partyDraftInput = z.object({
     email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
     role: z.enum(['cohost', 'door', 'finance']),
   })).max(20),
+  templateConfig: partyTemplateConfig,
   source: z.literal('host-studio'),
 }).superRefine((input, ctx) => {
+  if (input.templateConfig.kind !== templateConfigKind[input.templateId]) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['templateConfig', 'kind'], message: 'The template configuration does not match this Party template.' });
+  }
+  if (input.templateConfig.kind === 'private-party' && input.accessMode !== 'private-approval') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'Private Parties require host approval.' });
+  }
+  if (input.templateConfig.kind === 'pop-up' && input.templateConfig.locationDisclosure === 'after-approval' && input.accessMode !== 'private-approval') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'A hidden Pop-Up location requires host approval.' });
+  }
   const paidTiers = input.ticketTiers.filter((tier) => tier.priceCents > 0);
   if (input.accessMode === 'paid-ticket' && paidTiers.length === 0) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ticketTiers'], message: 'Paid parties require a paid ticket tier.' });
@@ -145,6 +172,7 @@ type PublishedPartyRow = {
   coverImageUrl: string | null;
   photoUrls: string[];
   itinerary: unknown;
+  templateConfig: unknown;
   status: string;
   passCode: string | null;
 };
@@ -195,6 +223,17 @@ function readPartyPassPolicy(value: unknown): PartyPassPolicy {
     : { version: 1, before: { action: 'unavailable' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } };
 }
 
+function partyLocationForPublicInvite(party: { venueName: string; templateConfig: unknown }) {
+  const config = partyTemplateConfig.safeParse(party.templateConfig);
+  const locationDisclosure = config.success && config.data.kind === 'pop-up'
+    ? config.data.locationDisclosure
+    : 'public' as const;
+  return {
+    locationDisclosure,
+    locationLabel: locationDisclosure === 'after-approval' ? 'Location shared after approval' : party.venueName,
+  };
+}
+
 function partyTiming(startsAt: Date): 'now' | 'today' | 'thisWeek' {
   const delta = startsAt.getTime() - Date.now();
   if (Math.abs(delta) <= 2 * 60 * 60 * 1000) return 'now';
@@ -224,6 +263,7 @@ function publishedParty(party: { id: string; status: string; passCode: string | 
 }
 
 function groupEventProjection(party: PublishedPartyRow) {
+  const location = partyLocationForPublicInvite(party);
   return {
     hostId: party.hostId,
     title: party.title,
@@ -231,7 +271,7 @@ function groupEventProjection(party: PublishedPartyRow) {
     tier: party.requiredMembershipTier,
     timing: partyTiming(party.startsAt),
     scheduledDate: party.startsAt.toISOString(),
-    location: party.venueName,
+    location: location.locationLabel,
     theme: party.tagline || null,
     allowNearbyOffers: true,
     approvalMode: party.accessMode === 'private-approval' ? 'approval' : 'open',
@@ -266,6 +306,7 @@ const partyDraftsRouter = router({
           itinerary: input.itinerary,
           ticketTiers: input.ticketTiers,
           cohosts: input.cohosts,
+          templateConfig: input.templateConfig,
           source: input.source,
         },
         update: {},
@@ -333,6 +374,7 @@ export const eventsRouter = router({
         where: { eventId: party.id, status: 'joined' },
       });
       const highlights = itineraryTitles(party.itinerary);
+      const location = partyLocationForPublicInvite(party);
       return {
         id: party.id,
         source: 'host-studio-party' as const,
@@ -346,7 +388,8 @@ export const eventsRouter = router({
         groupType: templateLabels[party.templateId] ?? 'Private Party',
         scheduledDate: party.startsAt.toISOString(),
         hostName: party.host.name ?? 'Bytspot Host',
-        locationLabel: party.venueName,
+        locationLabel: location.locationLabel,
+        locationDisclosure: location.locationDisclosure,
         theme: party.tagline || (templateLabels[party.templateId] ?? 'Private Party'),
         guestSummary: participantCount === 0 ? `Be first to join · ${party.capacity} spots` : `${participantCount} joined · ${party.capacity} spots`,
         activityHighlights: highlights,

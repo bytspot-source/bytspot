@@ -23,6 +23,7 @@ function draft(overrides: Record<string, unknown> = {}) {
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
     ticketTiers: [],
     cohosts: [{ email: 'door@bytspot.com', role: 'door' as const }],
+    templateConfig: { kind: 'listening-party' as const, format: 'listening-session' as const },
     source: 'host-studio' as const,
     ...overrides,
   };
@@ -37,6 +38,7 @@ function party(overrides: Record<string, unknown> = {}) {
     accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: ['circle-1'],
     coverImageUrl: null, photoUrls: [],
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
+    templateConfig: { kind: 'listening-party', format: 'listening-session' },
     ...overrides,
   };
 }
@@ -53,7 +55,7 @@ describe('events party procedures', () => {
 
     expect(result).toEqual({ id: 'party-1', status: 'draft' });
     expect(db.party.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ hostId: HOST, requiredMembershipTier: 'green', cohosts: [{ email: 'door@bytspot.com', role: 'door' }] }),
+      create: expect.objectContaining({ hostId: HOST, requiredMembershipTier: 'green', cohosts: [{ email: 'door@bytspot.com', role: 'door' }], templateConfig: { kind: 'listening-party', format: 'listening-session' } }),
       update: {},
     }));
   });
@@ -66,6 +68,16 @@ describe('events party procedures', () => {
     await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
       accessMode: 'paid-ticket', requiredMembershipTier: 'black',
       ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+    }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(db.party.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects mismatched template configuration and hidden Pop-Ups without approval', async () => {
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
+      templateConfig: { kind: 'private-party', guestPolicy: 'named-guests' },
+    }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
+      templateId: 'pop-up', templateConfig: { kind: 'pop-up', locationDisclosure: 'after-approval' },
     }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
     expect(db.party.upsert).not.toHaveBeenCalled();
   });
@@ -185,6 +197,17 @@ describe('events party procedures', () => {
       heroImageURL: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
       photoURLs: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
     });
+  });
+
+  it('redacts a Pop-Up location from every public Party Pass projection', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      templateId: 'pop-up', templateConfig: { kind: 'pop-up', locationDisclosure: 'after-approval' }, status: 'published', host: { name: 'Avery Parker' },
+    }));
+    (db.groupEventGuest.count as any).mockResolvedValueOnce(0);
+
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });
   });
 
   it('resolves only the configured pre-party action for an active published touchpoint', async () => {

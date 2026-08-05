@@ -746,6 +746,7 @@ model Party {
   itinerary              Json
   ticketTiers            Json      @map("ticket_tiers")
   cohosts                Json
+  templateConfig         Json      @map("template_config")
   source                 String    @default("host-studio")
   status                 String    @default("draft")
   passCode               String?   @unique @map("pass_code")

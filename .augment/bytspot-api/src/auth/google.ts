@@ -5,7 +5,7 @@ import { db } from '../lib/db';
 import { sendWelcomeEmail } from '../lib/email';
 import { signAuthToken } from './vendorRbac';
 
-export type GoogleAuthSurface = 'parker' | 'provider-onboarding';
+export type GoogleAuthSurface = 'native_ios' | 'parker' | 'provider-onboarding';
 
 export type GoogleAuthResult = {
   token: string;

@@ -276,7 +276,7 @@ describe('auth', () => {
     }
   });
 
-  it('auth.googleSignIn creates a Google user and returns a Bytspot JWT', async () => {
+  it('auth.googleSignIn accepts the native iOS surface and returns a Bytspot JWT', async () => {
     (config as any).googleClientIds = ['google-web-client-id'];
     const fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockResolvedValueOnce({
       ok: true,
@@ -298,7 +298,7 @@ describe('auth', () => {
     });
 
     const caller = createPublicCaller();
-    const result = await caller.auth.googleSignIn({ idToken: 'valid-google-id-token-for-test', surface: 'parker' });
+    const result = await caller.auth.googleSignIn({ idToken: 'valid-google-id-token-for-test', surface: 'native_ios' });
 
     expect(result.isNewUser).toBe(true);
     expect(result.user.authProvider).toBe('google');
@@ -308,6 +308,7 @@ describe('auth', () => {
         email: 'google.user@test.com',
         googleSubject: 'google-sub-1',
         authProvider: 'google',
+        ref: 'native_ios',
       }),
     }));
     fetchSpy.mockRestore();

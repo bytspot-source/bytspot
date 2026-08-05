@@ -229,7 +229,7 @@ const authRouter = router({
     .input(z.object({
       idToken: z.string().min(20),
       ref: z.string().max(100).optional(),
-      surface: z.enum(['parker', 'provider-onboarding']).optional(),
+      surface: z.enum(['native_ios', 'parker', 'provider-onboarding']).optional(),
     }))
     .mutation(async ({ input }) => completeGoogleSignIn(input)),
 

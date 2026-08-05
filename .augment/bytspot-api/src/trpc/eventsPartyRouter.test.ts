@@ -153,10 +153,7 @@ describe('events party procedures', () => {
       where: expect.objectContaining({ hostId: HOST, status: 'draft', idempotencyKey: KEY }),
       data: expect.objectContaining({ status: 'published', passCode: expect.stringMatching(/^[A-Z2-9]{8}$/) }),
     }));
-    expect(db.groupEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 'party-1' },
-      create: expect.objectContaining({ id: 'party-1', title: 'First Listen', tier: 'green', approvalMode: 'open' }),
-    }));
+    expect(db.groupEvent.upsert).not.toHaveBeenCalled();
     expect(db.partyTouchpoint.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { partyId_kind: { partyId: 'party-1', kind: 'digital' } },
       create: expect.objectContaining({ partyId: 'party-1', kind: 'digital', reference: expect.stringMatching(/^p1_[A-Za-z0-9_-]+$/), lifecyclePolicy: expect.objectContaining({ before: { action: 'rsvp' } }) }),
@@ -176,7 +173,7 @@ describe('events party procedures', () => {
 
     expect(result.passCode).toBe('LAUGH826');
     expect(db.party.updateMany).not.toHaveBeenCalled();
-    expect(db.groupEvent.upsert).toHaveBeenCalled();
+    expect(db.groupEvent.upsert).not.toHaveBeenCalled();
   });
 
   it('returns the exact published Host Studio Party as a public invite', async () => {
@@ -185,13 +182,11 @@ describe('events party procedures', () => {
       coverImageUrl: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
       photoUrls: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
     }));
-    (db.groupEventGuest.count as any).mockResolvedValueOnce(3);
-
     const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
 
     expect(result).toMatchObject({
       id: 'party-1', source: 'host-studio-party', title: 'First Listen', inviteNote: 'One moment. Your people.',
-      tier: 'green', participantCount: 3, capacity: 80, accessMode: 'free-rsvp',
+      tier: 'green', participantCount: 0, capacity: 80, accessMode: 'free-rsvp',
       hostName: 'Avery Parker', locationLabel: 'The Loft', activityHighlights: ['Doors open'],
       audienceCircle: 'Selected Circles', privacyStatus: 'privateInvite', requiresApproval: false,
       heroImageURL: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
@@ -203,8 +198,6 @@ describe('events party procedures', () => {
     (db.party.findUnique as any).mockResolvedValueOnce(party({
       templateId: 'pop-up', templateConfig: { kind: 'pop-up', locationDisclosure: 'after-approval' }, status: 'published', host: { name: 'Avery Parker' },
     }));
-    (db.groupEventGuest.count as any).mockResolvedValueOnce(0);
-
     const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
 
     expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });

@@ -11,6 +11,16 @@ import { db } from '../lib/db';
 
 const guestUserSelect = { id: true, name: true, profileImage: true } as const;
 
+/** Party IDs are canonical Party Pass resources, never legacy Group Event IDs.
+ * Every legacy route fails closed so a projected or historic GroupEvent row
+ * cannot grant, alter, or expose Party participation. */
+async function rejectPartyID(eventId: string): Promise<void> {
+  const party = await db.party.findUnique({ where: { id: eventId }, select: { id: true } });
+  if (party) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Host Studio Party access is only available through its Party Pass.' });
+  }
+}
+
 type EventRow = {
   id: string;
   hostId: string;
@@ -75,6 +85,7 @@ function mapGuest(g: GuestRow) {
 
 /** Load an event and assert the caller is its host. */
 async function requireHostEvent(eventId: string, userId: string): Promise<EventRow> {
+  await rejectPartyID(eventId);
   const event = await db.groupEvent.findUnique({ where: { id: eventId } });
   if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
   if (event.hostId !== userId) {
@@ -120,6 +131,7 @@ export const groupEventsRouter = router({
     .input(eventInput)
     .mutation(async ({ ctx, input }) => {
       const hostId = ctx.user.userId;
+      await rejectPartyID(input.id);
       const existing = await db.groupEvent.findUnique({ where: { id: input.id } });
       if (existing && existing.hostId !== hostId) {
         throw new TRPCError({ code: 'CONFLICT', message: 'That invite link is already in use.' });
@@ -147,6 +159,7 @@ export const groupEventsRouter = router({
     .input(z.object({ eventId: z.string().min(1), message: z.string().max(280).optional() }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.user.userId;
+      await rejectPartyID(input.eventId);
       const event = await db.groupEvent.findUnique({ where: { id: input.eventId } });
       if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
       await requireEventMembership(event.tier, userId);
@@ -168,6 +181,7 @@ export const groupEventsRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'groupEvents:guests' }))
     .input(z.object({ eventId: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
+      await rejectPartyID(input.eventId);
       const event = await db.groupEvent.findUnique({ where: { id: input.eventId } });
       if (!event) throw new TRPCError({ code: 'NOT_FOUND', message: 'Event not found' });
       const userId = ctx.user.userId;

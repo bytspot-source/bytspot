@@ -91,6 +91,34 @@ describe('groupEvents router', () => {
     expect(res).toEqual({ status: 'joined' });
   });
 
+  it('fails closed for Party IDs before any legacy guest write, including paid-ticket Parties', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce({ id: SLUG, accessMode: 'paid-ticket', status: 'published' });
+
+    await expect(createAuthenticatedCaller(GUEST).groupEvents.join({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    expect(db.groupEvent.findUnique).not.toHaveBeenCalled();
+    expect(db.groupEventGuest.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects Party IDs from every legacy Group Event management and guest-list route', async () => {
+    (db.party.findUnique as any)
+      .mockResolvedValueOnce({ id: SLUG })
+      .mockResolvedValueOnce({ id: SLUG })
+      .mockResolvedValueOnce({ id: SLUG })
+      .mockResolvedValueOnce({ id: SLUG })
+      .mockResolvedValueOnce({ id: SLUG });
+    const caller = createAuthenticatedCaller(HOST);
+
+    await expect(caller.groupEvents.create({ id: SLUG, title: 'Party collision', groupType: 'friends' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(caller.groupEvents.guests({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(caller.groupEvents.host({ eventId: SLUG })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(caller.groupEvents.decide({ eventId: SLUG, userId: GUEST, decision: 'approve' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(caller.groupEvents.setApprovalMode({ eventId: SLUG, approvalMode: 'approval' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.groupEvent.upsert).not.toHaveBeenCalled();
+    expect(db.groupEventGuest.findMany).not.toHaveBeenCalled();
+    expect(db.groupEventGuest.updateMany).not.toHaveBeenCalled();
+  });
+
   it('join on an approval event marks the guest pending', async () => {
     (db.groupEvent.findUnique as any).mockResolvedValueOnce(eventRow({ approvalMode: 'approval' }));
     (db.groupEventGuest.upsert as any).mockImplementationOnce(({ create }: any) => ({ status: create.status }));

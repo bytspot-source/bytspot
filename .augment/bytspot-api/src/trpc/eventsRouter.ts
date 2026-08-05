@@ -157,26 +157,6 @@ type PartyDraftInput = z.infer<typeof partyDraftInput>;
 type PartyPassPolicy = z.infer<typeof partyPassPolicy>;
 type PartyPassAction = z.infer<typeof partyPassAction>;
 
-type PublishedPartyRow = {
-  id: string;
-  hostId: string;
-  templateId: string;
-  title: string;
-  tagline: string;
-  startsAt: Date;
-  venueName: string;
-  capacity: number;
-  accessMode: string;
-  requiredMembershipTier: string;
-  audienceCircleIds: string[];
-  coverImageUrl: string | null;
-  photoUrls: string[];
-  itinerary: unknown;
-  templateConfig: unknown;
-  status: string;
-  passCode: string | null;
-};
-
 const templateLabels: Record<string, string> = {
   'listening-party': 'Listening Party',
   'comedy-night': 'Comedy Night',
@@ -259,22 +239,6 @@ function publishedParty(party: { id: string; status: string; passCode: string | 
     status: 'published' as const,
     shareUrl: `https://bytspot.app/party/${encodeURIComponent(party.id)}`,
     passCode: party.passCode,
-  };
-}
-
-function groupEventProjection(party: PublishedPartyRow) {
-  const location = partyLocationForPublicInvite(party);
-  return {
-    hostId: party.hostId,
-    title: party.title,
-    groupType: templateLabels[party.templateId] ?? 'Private Party',
-    tier: party.requiredMembershipTier,
-    timing: partyTiming(party.startsAt),
-    scheduledDate: party.startsAt.toISOString(),
-    location: location.locationLabel,
-    theme: party.tagline || null,
-    allowNearbyOffers: true,
-    approvalMode: party.accessMode === 'private-approval' ? 'approval' : 'open',
   };
 }
 
@@ -370,9 +334,9 @@ export const eventsRouter = router({
       if (!party || party.status !== 'published') {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Party invite not found.' });
       }
-      const participantCount = await db.groupEventGuest.count({
-        where: { eventId: party.id, status: 'joined' },
-      });
+      // Legacy GroupEventGuest rows are not Party participation. Party-specific
+      // guest state is introduced only through Party Pass actions.
+      const participantCount = 0;
       const highlights = itineraryTitles(party.itinerary);
       const location = partyLocationForPublicInvite(party);
       return {
@@ -461,12 +425,6 @@ export const eventsRouter = router({
         if (!reloaded) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Published party could not be loaded.' });
         published = reloaded;
       }
-      const projection = groupEventProjection(published);
-      await tx.groupEvent.upsert({
-        where: { id: published.id },
-        create: { id: published.id, ...projection },
-        update: projection,
-      });
       await tx.partyTouchpoint.upsert({
         where: { partyId_kind: { partyId: published.id, kind: 'digital' } },
         create: {

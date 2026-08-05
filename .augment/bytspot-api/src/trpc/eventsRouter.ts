@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import { createHash, randomInt } from 'node:crypto';
+import { createHash, createHmac, randomInt } from 'node:crypto';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { cached } from '../lib/redis';
 import { config } from '../config';
@@ -60,6 +60,15 @@ function categoryEmoji(cat: string): string {
 const membershipTier = z.enum(['green', 'platinum', 'black']);
 const tierRank = { green: 0, platinum: 1, black: 2 } as const;
 const idempotencyKey = z.string().min(8).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+const partyTemplateId = z.enum(['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up']);
+const partyPassAction = z.enum(['rsvp', 'ticket', 'claim-invitation', 'unavailable']);
+const partyPassPolicy = z.object({
+  version: z.literal(1),
+  before: z.object({ action: partyPassAction }).strict(),
+  atDoor: z.object({ action: partyPassAction }).strict(),
+  during: z.object({ action: partyPassAction }).strict(),
+  after: z.object({ action: partyPassAction }).strict(),
+}).strict();
 const ticketTier = z.object({
   name: z.string().trim().min(1).max(80),
   priceCents: z.number().int().min(0).max(10_000_000),
@@ -68,7 +77,7 @@ const ticketTier = z.object({
 });
 const partyDraftInput = z.object({
   idempotencyKey,
-  templateId: z.enum(['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup']),
+  templateId: partyTemplateId,
   title: z.string().trim().min(3).max(200),
   tagline: z.string().trim().max(280),
   startsAt: z.string().datetime(),
@@ -118,6 +127,8 @@ const partyMediaUploadInput = z.discriminatedUnion('kind', [
 ]);
 
 type PartyDraftInput = z.infer<typeof partyDraftInput>;
+type PartyPassPolicy = z.infer<typeof partyPassPolicy>;
+type PartyPassAction = z.infer<typeof partyPassAction>;
 
 type PublishedPartyRow = {
   id: string;
@@ -144,6 +155,8 @@ const templateLabels: Record<string, string> = {
   premiere: 'Premiere',
   'private-party': 'Private Party',
   'fan-meetup': 'Fan Meetup',
+  'release-party': 'Release Party',
+  'pop-up': 'Pop-Up',
 };
 
 function draftFingerprint(input: PartyDraftInput): string {
@@ -154,6 +167,32 @@ function draftFingerprint(input: PartyDraftInput): string {
 function partyPassCode(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from({ length: 8 }, () => alphabet[randomInt(alphabet.length)]).join('');
+}
+
+function partyTouchpointReference(partyID: string): string {
+  return `p1_${createHmac('sha256', config.jwtSecret).update(`party-touchpoint:${partyID}`).digest('base64url')}`;
+}
+
+function defaultPartyPassPolicy(accessMode: string): PartyPassPolicy {
+  const action: PartyPassAction = accessMode === 'paid-ticket'
+    ? 'ticket'
+    : accessMode === 'private-approval'
+      ? 'claim-invitation'
+      : 'rsvp';
+  return {
+    version: 1,
+    before: { action },
+    atDoor: { action: 'unavailable' },
+    during: { action: 'unavailable' },
+    after: { action: 'unavailable' },
+  };
+}
+
+function readPartyPassPolicy(value: unknown): PartyPassPolicy {
+  const parsed = partyPassPolicy.safeParse(value);
+  return parsed.success
+    ? parsed.data
+    : { version: 1, before: { action: 'unavailable' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } };
 }
 
 function partyTiming(startsAt: Date): 'now' | 'today' | 'thisWeek' {
@@ -320,6 +359,36 @@ export const eventsRouter = router({
       };
     }),
 
+  /** Resolve a stable Living Party Pass touchpoint. Unknown or unconfigured states fail closed. */
+  pass: router({
+    resolve: publicProcedure
+      .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'events:pass:resolve' }))
+      .input(z.object({ touchpointRef: z.string().min(16).max(200) }))
+      .query(async ({ ctx, input }) => {
+        const touchpoint = await db.partyTouchpoint.findUnique({ where: { reference: input.touchpointRef }, include: { party: true } });
+        if (!touchpoint || touchpoint.status !== 'active' || touchpoint.party.status !== 'published') {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+        }
+
+        const lifecycle = touchpoint.party.startsAt.getTime() > Date.now() ? 'before' : 'at-door';
+        const policy = readPartyPassPolicy(touchpoint.lifecyclePolicy);
+        const action = lifecycle === 'before' ? policy.before.action : 'unavailable';
+        const canStartPrimaryAction = action === 'rsvp' || action === 'ticket';
+
+        return {
+          partyId: touchpoint.partyId,
+          touchpoint: { reference: touchpoint.reference, kind: touchpoint.kind },
+          lifecycle,
+          action,
+          guest: {
+            status: ctx.user ? 'authenticated-unverified' as const : 'anonymous' as const,
+            canStartPrimaryAction,
+            accessGranted: false,
+          },
+        };
+      }),
+  }),
+
   /** Publish is an owner capability. Replays return the original Party Pass. */
   publish: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'events:publish' }))
@@ -354,6 +423,16 @@ export const eventsRouter = router({
         where: { id: published.id },
         create: { id: published.id, ...projection },
         update: projection,
+      });
+      await tx.partyTouchpoint.upsert({
+        where: { partyId_kind: { partyId: published.id, kind: 'digital' } },
+        create: {
+          partyId: published.id,
+          reference: partyTouchpointReference(published.id),
+          kind: 'digital',
+          lifecyclePolicy: defaultPartyPassPolicy(published.accessMode),
+        },
+        update: {},
       });
       return publishedParty(published);
     })),

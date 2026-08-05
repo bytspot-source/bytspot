@@ -753,10 +753,28 @@ model Party {
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  host User @relation("hostedParties", fields: [hostId], references: [id], onDelete: Cascade)
+  host        User              @relation("hostedParties", fields: [hostId], references: [id], onDelete: Cascade)
+  touchpoints PartyTouchpoint[]
 
   @@unique([hostId, idempotencyKey])
   @@index([hostId, status, createdAt(sort: Desc)])
   @@index([status, startsAt])
   @@map("parties")
+}
+
+model PartyTouchpoint {
+  id              String   @id @default(cuid())
+  partyId         String   @map("party_id")
+  reference       String   @unique
+  kind            String
+  lifecyclePolicy Json     @map("lifecycle_policy")
+  status          String   @default("active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, kind])
+  @@index([partyId, status])
+  @@map("party_touchpoints")
 }

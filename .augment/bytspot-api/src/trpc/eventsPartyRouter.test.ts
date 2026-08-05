@@ -145,6 +145,10 @@ describe('events party procedures', () => {
       where: { id: 'party-1' },
       create: expect.objectContaining({ id: 'party-1', title: 'First Listen', tier: 'green', approvalMode: 'open' }),
     }));
+    expect(db.partyTouchpoint.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { partyId_kind: { partyId: 'party-1', kind: 'digital' } },
+      create: expect.objectContaining({ partyId: 'party-1', kind: 'digital', reference: expect.stringMatching(/^p1_[A-Za-z0-9_-]+$/), lifecyclePolicy: expect.objectContaining({ before: { action: 'rsvp' } }) }),
+    }));
   });
 
   it('rejects publish by a non-owner or with a mismatched key', async () => {
@@ -181,6 +185,23 @@ describe('events party procedures', () => {
       heroImageURL: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
       photoURLs: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
     });
+  });
+
+  it('resolves only the configured pre-party action for an active published touchpoint', async () => {
+    (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({
+      partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active',
+      lifecyclePolicy: { version: 1, before: { action: 'ticket' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } },
+      party: party({ status: 'published', startsAt: new Date('2099-08-10T20:00:00Z') }),
+    });
+
+    const result = await createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' });
+
+    expect(result).toEqual(expect.objectContaining({ partyId: 'party-1', lifecycle: 'before', action: 'ticket', guest: { status: 'anonymous', canStartPrimaryAction: true, accessGranted: false } }));
+  });
+
+  it('fails closed for inactive touchpoints', async () => {
+    (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({ partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'inactive', lifecyclePolicy: {}, party: party({ status: 'published' }) });
+    await expect(createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('does not expose drafts through the public invite route', async () => {

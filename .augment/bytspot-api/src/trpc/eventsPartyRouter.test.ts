@@ -203,6 +203,17 @@ describe('events party procedures', () => {
     expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });
   });
 
+  it('fails closed for a Pop-Up with malformed stored configuration', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      templateId: 'pop-up', templateConfig: { kind: 'standard' }, status: 'published', host: { name: 'Avery Parker' }, venueName: 'Secret rooftop',
+    }));
+
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });
+    expect(result.locationLabel).not.toContain('Secret rooftop');
+  });
+
   it('resolves only the configured pre-party action for an active published touchpoint', async () => {
     (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({
       partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active',

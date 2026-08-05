@@ -203,11 +203,12 @@ function readPartyPassPolicy(value: unknown): PartyPassPolicy {
     : { version: 1, before: { action: 'unavailable' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } };
 }
 
-function partyLocationForPublicInvite(party: { venueName: string; templateConfig: unknown }) {
+function partyLocationForPublicInvite(party: { venueName: string; templateId: string; templateConfig: unknown }) {
   const config = partyTemplateConfig.safeParse(party.templateConfig);
-  const locationDisclosure = config.success && config.data.kind === 'pop-up'
-    ? config.data.locationDisclosure
-    : 'public' as const;
+  const explicitlyPublicPopUp = config.success && config.data.kind === 'pop-up' && config.data.locationDisclosure === 'public';
+  // A Pop-Up must opt in to public disclosure. Historic or malformed JSON must
+  // never turn a hidden venue into a public one.
+  const locationDisclosure = party.templateId === 'pop-up' && !explicitlyPublicPopUp ? 'after-approval' : 'public';
   return {
     locationDisclosure,
     locationLabel: locationDisclosure === 'after-approval' ? 'Location shared after approval' : party.venueName,

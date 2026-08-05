@@ -859,6 +859,7 @@ model PartyTicketOrder {
   idempotencyKey        String    @map("idempotency_key")
   stripeSessionId       String?   @unique @map("stripe_session_id")
   stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  checkoutExpiresAt     DateTime? @map("checkout_expires_at")
   paidAt                DateTime? @map("paid_at")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
@@ -866,7 +867,7 @@ model PartyTicketOrder {
   party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([partyId, userId, idempotencyKey])
+  @@unique([partyId, userId])
   @@index([partyId, status])
   @@index([userId, updatedAt(sort: Desc)])
   @@map("party_ticket_orders")

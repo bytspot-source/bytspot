@@ -58,6 +58,7 @@ CREATE TABLE "party_ticket_orders" (
   "idempotency_key" TEXT NOT NULL,
   "stripe_session_id" TEXT,
   "stripe_payment_intent_id" TEXT,
+  "checkout_expires_at" TIMESTAMP(3),
   "paid_at" TIMESTAMP(3),
   "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" TIMESTAMP(3) NOT NULL,
@@ -65,7 +66,7 @@ CREATE TABLE "party_ticket_orders" (
 );
 CREATE UNIQUE INDEX "party_ticket_orders_stripe_session_id_key" ON "party_ticket_orders"("stripe_session_id");
 CREATE UNIQUE INDEX "party_ticket_orders_stripe_payment_intent_id_key" ON "party_ticket_orders"("stripe_payment_intent_id");
-CREATE UNIQUE INDEX "party_ticket_orders_party_id_user_id_idempotency_key_key" ON "party_ticket_orders"("party_id", "user_id", "idempotency_key");
+CREATE UNIQUE INDEX "party_ticket_orders_party_id_user_id_key" ON "party_ticket_orders"("party_id", "user_id");
 CREATE INDEX "party_ticket_orders_party_id_status_idx" ON "party_ticket_orders"("party_id", "status");
 CREATE INDEX "party_ticket_orders_user_id_updated_at_idx" ON "party_ticket_orders"("user_id", "updated_at" DESC);
 ALTER TABLE "party_ticket_orders" ADD CONSTRAINT "party_ticket_orders_party_id_fkey" FOREIGN KEY ("party_id") REFERENCES "parties"("id") ON DELETE CASCADE ON UPDATE CASCADE;

@@ -161,6 +161,7 @@ vi.mock('../lib/db', () => {
       findMany: vi.fn().mockResolvedValue([]),
       count: vi.fn().mockResolvedValue(0),
       upsert: vi.fn(),
+      create: vi.fn(),
       update: vi.fn(),
     },
     membershipEntitlement: {
@@ -172,8 +173,10 @@ vi.mock('../lib/db', () => {
     },
     partyTicketOrder: {
       findUnique: vi.fn().mockResolvedValue(null),
+      count: vi.fn().mockResolvedValue(0),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     complianceLog: {
       create: vi.fn().mockResolvedValue({ id: 'cl-1' }),

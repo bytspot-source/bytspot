@@ -517,15 +517,35 @@ export const eventsRouter = router({
       .input(z.object({ partyId: z.string().min(1).max(200), ticketTierName: z.string().min(1).max(80), idempotencyKey }))
       .mutation(async ({ ctx, input }) => {
         if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
-        const party = await db.party.findUnique({ where: { id: input.partyId } });
-        if (!party || party.status !== 'published' || party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'NOT_FOUND', message: 'Ticketed Party not found.' });
-        const viewerTier = await viewerPartyTier(ctx.user.userId);
-        if (!partyTierAllows(viewerTier, party.requiredMembershipTier) || partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'FORBIDDEN', message: 'Ticket checkout is not available for this Party.' });
-        const tier = paidTicketTier(party, input.ticketTierName);
-        if (!partyTierAllows(viewerTier, tier.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: 'Membership tier does not permit this ticket.' });
-        const existing = await (db as any).partyTicketOrder.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
-        if (existing?.status === 'paid') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket order is already paid.' });
-        const order = existing ?? await (db as any).partyTicketOrder.create({ data: { partyId: party.id, userId: ctx.user.userId, ticketTierName: tier.name, amountCents: tier.priceCents, currency: 'usd', idempotencyKey: input.idempotencyKey } });
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + 30 * 60 * 1000);
+        const prepared = await db.$transaction(async (tx) => {
+          const party = await tx.party.findUnique({ where: { id: input.partyId } });
+          if (!party || party.status !== 'published' || party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'NOT_FOUND', message: 'Ticketed Party not found.' });
+          const viewerTier = await viewerPartyTier(ctx.user.userId);
+          if (!partyTierAllows(viewerTier, party.requiredMembershipTier) || partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'FORBIDDEN', message: 'Ticket checkout is not available for this Party.' });
+          const tier = paidTicketTier(party, input.ticketTierName);
+          if (!partyTierAllows(viewerTier, tier.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: 'Membership tier does not permit this ticket.' });
+          const orders = (tx as any).partyTicketOrder;
+          const existing = await orders.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+          if (existing?.status === 'paid') throw new TRPCError({ code: 'CONFLICT', message: 'You already have a paid ticket for this Party.' });
+          if (existing && existing.checkoutExpiresAt && existing.checkoutExpiresAt > now) {
+            if (existing.ticketTierName !== tier.name || existing.amountCents !== tier.priceCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout is already reserved for a different ticket tier.' });
+            return { party, tier, order: existing, expiresAt: existing.checkoutExpiresAt };
+          }
+          const active = { status: { in: ['pending_checkout', 'paid'] }, OR: [{ checkoutExpiresAt: null }, { checkoutExpiresAt: { gt: now } }, { status: 'paid' }] };
+          const [partyReserved, tierReserved] = await Promise.all([
+            orders.count({ where: { partyId: party.id, ...active } }),
+            orders.count({ where: { partyId: party.id, ticketTierName: tier.name, ...active } }),
+          ]);
+          if (partyReserved >= party.capacity || tierReserved >= tier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'This ticket tier is sold out.' });
+          const data = { ticketTierName: tier.name, amountCents: tier.priceCents, currency: 'usd', status: 'pending_checkout', idempotencyKey: input.idempotencyKey, stripeSessionId: null, stripePaymentIntentId: null, checkoutExpiresAt: expiresAt, paidAt: null };
+          const order = existing
+            ? await orders.update({ where: { id: existing.id }, data })
+            : await orders.create({ data: { partyId: party.id, userId: ctx.user.userId, ...data } });
+          return { party, tier, order, expiresAt };
+        }, { isolationLevel: 'Serializable' });
+        const { party, tier, order } = prepared;
         const stripe = new Stripe(config.stripeSecretKey);
         if (order.stripeSessionId) {
           try {
@@ -541,9 +561,10 @@ export const eventsRouter = router({
           line_items: [{ price_data: { currency: 'usd', unit_amount: tier.priceCents, product_data: { name: `${party.title} — ${tier.name}` } }, quantity: 1 }],
           metadata: { flow: 'party.ticket', partyId: party.id, orderId: order.id, userId: ctx.user.userId },
           payment_intent_data: { metadata: { flow: 'party.ticket', partyId: party.id, orderId: order.id, userId: ctx.user.userId } },
+          expires_at: Math.floor(prepared.expiresAt.getTime() / 1000),
           success_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=success`,
           cancel_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=cancelled`,
-        }, { idempotencyKey: `party-ticket:${order.id}` });
+        }, { idempotencyKey: `party-ticket:${order.id}:${order.idempotencyKey}` });
         if (!session.url || !session.id) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Ticket checkout was not created.' });
         await (db as any).partyTicketOrder.update({ where: { id: order.id }, data: { stripeSessionId: session.id } });
         return { orderId: order.id, url: session.url, status: 'pending_checkout' as const };
@@ -558,8 +579,10 @@ export const eventsRouter = router({
         const order = await (db as any).partyTicketOrder.findUnique({ where: { id: session.metadata.orderId } });
         if (!order || order.status === 'paid' || order.stripeSessionId !== session.id) return { ignored: true };
         await db.$transaction(async (tx) => {
-          await (tx as any).partyTicketOrder.update({ where: { id: order.id }, data: { status: 'paid', stripePaymentIntentId: paymentIntent ?? null, paidAt: new Date() } });
-          await (tx as any).partyParticipation.upsert({ where: { partyId_userId: { partyId: order.partyId, userId: order.userId } }, create: { partyId: order.partyId, userId: order.userId, status: 'rsvp' }, update: { status: 'rsvp' } });
+          const transitioned = await (tx as any).partyTicketOrder.updateMany({ where: { id: order.id, status: 'pending_checkout', stripeSessionId: session.id }, data: { status: 'paid', stripePaymentIntentId: paymentIntent ?? null, paidAt: new Date() } });
+          if (transitioned.count !== 1) return;
+          const participation = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: order.partyId, userId: order.userId } }, select: { status: true } });
+          if (!participation) await (tx as any).partyParticipation.create({ data: { partyId: order.partyId, userId: order.userId, status: 'rsvp' } });
         });
         return { fulfilled: true };
       }),

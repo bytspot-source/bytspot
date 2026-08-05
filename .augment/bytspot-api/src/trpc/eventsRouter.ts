@@ -6,7 +6,8 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { createHash, createHmac, randomInt } from 'node:crypto';
-import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
+import Stripe from 'stripe';
+import { router, publicProcedure, protectedProcedure, rateLimitMiddleware, stripeWebhookProcedure } from './trpc';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 import { db } from '../lib/db';
@@ -78,7 +79,7 @@ const templateConfigKind: Record<z.infer<typeof partyTemplateId>, z.infer<typeof
   'comedy-night': 'standard',
   premiere: 'standard',
 };
-const partyPassAction = z.enum(['rsvp', 'ticket', 'claim-invitation', 'unavailable']);
+const partyPassAction = z.enum(['authenticate', 'rsvp', 'ticket', 'request-approval', 'view-pass', 'unavailable']);
 const partyPassPolicy = z.object({
   version: z.literal(1),
   before: z.object({ action: partyPassAction }).strict(),
@@ -185,7 +186,7 @@ function defaultPartyPassPolicy(accessMode: string): PartyPassPolicy {
   const action: PartyPassAction = accessMode === 'paid-ticket'
     ? 'ticket'
     : accessMode === 'private-approval'
-      ? 'claim-invitation'
+      ? 'request-approval'
       : 'rsvp';
   return {
     version: 1,
@@ -215,6 +216,31 @@ function partyLocationForPublicInvite(party: { venueName: string; templateId: st
   };
 }
 
+/**
+ * Template metadata controls App Clip presentation only. It must be parsed
+ * again at the public boundary: corrupt historic JSON may not select a
+ * privileged/incorrect Party layout.
+ */
+function publicPartyTemplate(party: { templateId: string; templateConfig: unknown }) {
+  const templateId = partyTemplateId.safeParse(party.templateId);
+  const templateConfig = partyTemplateConfig.safeParse(party.templateConfig);
+  const isMatchingConfiguration = templateId.success
+    && templateConfig.success
+    && templateConfigKind[templateId.data] === templateConfig.data.kind;
+  return {
+    templateId: templateId.success ? templateId.data : null,
+    templateConfig: isMatchingConfiguration ? templateConfig.data : null,
+  };
+}
+
+function publicPartyTicketTiers(party: { accessMode: string; ticketTiers: unknown }) {
+  if (party.accessMode !== 'paid-ticket') return [];
+  const tiers = z.array(ticketTier).safeParse(party.ticketTiers);
+  return tiers.success
+    ? tiers.data.filter((tier) => tier.priceCents > 0).map(({ name, priceCents, quantity, requiredMembershipTier }) => ({ name, priceCents, quantity, requiredMembershipTier }))
+    : [];
+}
+
 function partyTiming(startsAt: Date): 'now' | 'today' | 'thisWeek' {
   const delta = startsAt.getTime() - Date.now();
   if (Math.abs(delta) <= 2 * 60 * 60 * 1000) return 'now';
@@ -231,6 +257,68 @@ function itineraryTitles(value: unknown): string[] {
   });
 }
 
+type PartyTier = z.infer<typeof membershipTier>;
+const partyParticipationStatus = z.enum(['rsvp', 'pending', 'approved', 'declined', 'checked_in', 'cancelled']);
+
+async function viewerPartyTier(userId: string): Promise<PartyTier> {
+  const now = new Date();
+  const [user, black] = await Promise.all([
+    db.user.findUnique({ where: { id: userId }, select: { isPremium: true } }),
+    (db as any).membershipEntitlement.findFirst({
+      where: { userId, tier: 'black', status: 'active', revokedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+      select: { id: true },
+    }),
+  ]);
+  if (black) return 'black';
+  return user?.isPremium === true ? 'platinum' : 'green';
+}
+
+function partyTierAllows(viewerTier: PartyTier, requiredTier: string): boolean {
+  return requiredTier in tierRank && tierRank[viewerTier] >= tierRank[requiredTier as PartyTier];
+}
+
+function partyLifecycle(startsAt: Date): 'before' | 'at-door' {
+  return startsAt.getTime() > Date.now() ? 'before' : 'at-door';
+}
+
+function actionForPartyViewer(args: {
+  party: { startsAt: Date; accessMode: string; requiredMembershipTier: string };
+  viewerTier: PartyTier;
+  participation: { status: string } | null;
+  isAuthenticated: boolean;
+}): PartyPassAction {
+  const { party, viewerTier, participation, isAuthenticated } = args;
+  if (partyLifecycle(party.startsAt) !== 'before' || !partyTierAllows(viewerTier, party.requiredMembershipTier)) return 'unavailable';
+  if (participation?.status === 'checked_in' || participation?.status === 'approved' || participation?.status === 'rsvp') return 'view-pass';
+  if (participation?.status === 'pending' || participation?.status === 'declined' || participation?.status === 'cancelled') return 'unavailable';
+  if (!isAuthenticated) return 'authenticate';
+  if (party.accessMode === 'paid-ticket') return 'ticket';
+  return party.accessMode === 'private-approval' ? 'request-approval' : 'rsvp';
+}
+
+async function resolvePartyPass(party: any, touchpoint: any, userId?: string) {
+  if (!party || party.status !== 'published' || !touchpoint || touchpoint.status !== 'active') {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  }
+  const viewerTier = userId ? await viewerPartyTier(userId) : 'green';
+  const participation = userId
+    ? await (db as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: party.id, userId } }, select: { status: true, checkedInAt: true } })
+    : null;
+  const action = actionForPartyViewer({ party, viewerTier, participation, isAuthenticated: Boolean(userId) });
+  return {
+    partyId: party.id,
+    touchpoint: { reference: touchpoint.reference, kind: touchpoint.kind },
+    lifecycle: partyLifecycle(party.startsAt),
+    action,
+    entitlement: { tier: viewerTier, requiredTier: party.requiredMembershipTier, granted: partyTierAllows(viewerTier, party.requiredMembershipTier) },
+    guest: {
+      status: participation?.status ?? (userId ? 'authenticated-unverified' : 'anonymous'),
+      canStartPrimaryAction: action === 'rsvp' || action === 'ticket' || action === 'request-approval',
+      accessGranted: action === 'view-pass',
+    },
+  };
+}
+
 function publishedParty(party: { id: string; status: string; passCode: string | null }) {
   if (party.status !== 'published' || !party.passCode) {
     throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Party Pass is unavailable.' });
@@ -241,6 +329,15 @@ function publishedParty(party: { id: string; status: string; passCode: string | 
     shareUrl: `https://bytspot.app/party/${encodeURIComponent(party.id)}`,
     passCode: party.passCode,
   };
+}
+
+function paidTicketTier(party: { ticketTiers: unknown; requiredMembershipTier: string }, tierName: string) {
+  const tiers = z.array(ticketTier).safeParse(party.ticketTiers);
+  const tier = tiers.success ? tiers.data.find((candidate) => candidate.name === tierName && candidate.priceCents > 0) : undefined;
+  if (!tier || tierRank[tier.requiredMembershipTier] < tierRank[party.requiredMembershipTier as PartyTier]) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Ticket tier not found.' });
+  }
+  return tier;
 }
 
 const partyDraftsRouter = router({
@@ -340,6 +437,8 @@ export const eventsRouter = router({
       const participantCount = 0;
       const highlights = itineraryTitles(party.itinerary);
       const location = partyLocationForPublicInvite(party);
+      const template = publicPartyTemplate(party);
+      const ticketTiers = publicPartyTicketTiers(party);
       return {
         id: party.id,
         source: 'host-studio-party' as const,
@@ -350,6 +449,9 @@ export const eventsRouter = router({
         participantCount,
         capacity: party.capacity,
         accessMode: party.accessMode,
+        ticketTiers,
+        templateId: template.templateId,
+        templateConfig: template.templateConfig,
         groupType: templateLabels[party.templateId] ?? 'Private Party',
         scheduledDate: party.startsAt.toISOString(),
         hostName: party.host.name ?? 'Bytspot Host',
@@ -371,29 +473,95 @@ export const eventsRouter = router({
   pass: router({
     resolve: publicProcedure
       .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'events:pass:resolve' }))
-      .input(z.object({ touchpointRef: z.string().min(16).max(200) }))
+      .input(z.object({ touchpointRef: z.string().min(16).max(200).optional(), partyId: z.string().min(1).max(200).optional() }).refine((input) => Boolean(input.touchpointRef || input.partyId), 'A Party Pass reference is required.'))
       .query(async ({ ctx, input }) => {
-        const touchpoint = await db.partyTouchpoint.findUnique({ where: { reference: input.touchpointRef }, include: { party: true } });
-        if (!touchpoint || touchpoint.status !== 'active' || touchpoint.party.status !== 'published') {
-          throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+        if (input.touchpointRef) {
+          const touchpoint = await db.partyTouchpoint.findUnique({ where: { reference: input.touchpointRef }, include: { party: true } });
+          return resolvePartyPass(touchpoint?.party, touchpoint, ctx.user?.userId);
         }
+        const party = await db.party.findUnique({ where: { id: input.partyId! }, include: { touchpoints: { where: { kind: 'digital' } } } });
+        return resolvePartyPass(party, party?.touchpoints?.[0], ctx.user?.userId);
+      }),
+  }),
 
-        const lifecycle = touchpoint.party.startsAt.getTime() > Date.now() ? 'before' : 'at-door';
-        const policy = readPartyPassPolicy(touchpoint.lifecyclePolicy);
-        const action = lifecycle === 'before' ? policy.before.action : 'unavailable';
-        const canStartPrimaryAction = action === 'rsvp' || action === 'ticket';
+  /** Server-authorized RSVP or approval request. Party IDs never touch legacy guest rows. */
+  rsvp: router({
+    create: protectedProcedure
+      .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'events:rsvp:create' }))
+      .input(z.object({ partyId: z.string().min(1).max(200), idempotencyKey }))
+      .mutation(async ({ ctx, input }) => db.$transaction(async (tx) => {
+        const party = await tx.party.findUnique({ where: { id: input.partyId }, include: { touchpoints: { where: { kind: 'digital' } } } });
+        if (!party || party.status !== 'published') throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+        const tier = await viewerPartyTier(ctx.user.userId);
+        if (!partyTierAllows(tier, party.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: `${party.requiredMembershipTier === 'black' ? 'Black' : 'Platinum'} membership required.` });
+        if (partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'CONFLICT', message: 'This Party is no longer accepting RSVP requests.' });
+        if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'CONFLICT', message: 'A verified ticket checkout is required for this Party.' });
+        const current = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+        if (!current) {
+          const accepted = party.accessMode === 'private-approval' ? 'pending' : 'rsvp';
+          if (accepted === 'rsvp') {
+            const count = await (tx as any).partyParticipation.count({ where: { partyId: party.id, status: { in: ['rsvp', 'approved', 'checked_in'] } } });
+            if (count >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+          }
+          await (tx as any).partyParticipation.upsert({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } }, create: { partyId: party.id, userId: ctx.user.userId, status: accepted }, update: {} });
+        }
+        const refreshed = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } }, select: { status: true, checkedInAt: true } });
+        const action = actionForPartyViewer({ party, viewerTier: tier, participation: refreshed, isAuthenticated: true });
+        return { partyId: party.id, status: refreshed?.status ?? 'rsvp', action, accessGranted: action === 'view-pass' };
+      })),
+  }),
 
-        return {
-          partyId: touchpoint.partyId,
-          touchpoint: { reference: touchpoint.reference, kind: touchpoint.kind },
-          lifecycle,
-          action,
-          guest: {
-            status: ctx.user ? 'authenticated-unverified' as const : 'anonymous' as const,
-            canStartPrimaryAction,
-            accessGranted: false,
-          },
-        };
+  tickets: router({
+    createCheckout: protectedProcedure
+      .use(rateLimitMiddleware({ windowMs: 60_000, max: 8, label: 'events:tickets:createCheckout' }))
+      .input(z.object({ partyId: z.string().min(1).max(200), ticketTierName: z.string().min(1).max(80), idempotencyKey }))
+      .mutation(async ({ ctx, input }) => {
+        if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Payments are not configured.' });
+        const party = await db.party.findUnique({ where: { id: input.partyId } });
+        if (!party || party.status !== 'published' || party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'NOT_FOUND', message: 'Ticketed Party not found.' });
+        const viewerTier = await viewerPartyTier(ctx.user.userId);
+        if (!partyTierAllows(viewerTier, party.requiredMembershipTier) || partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'FORBIDDEN', message: 'Ticket checkout is not available for this Party.' });
+        const tier = paidTicketTier(party, input.ticketTierName);
+        if (!partyTierAllows(viewerTier, tier.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: 'Membership tier does not permit this ticket.' });
+        const existing = await (db as any).partyTicketOrder.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
+        if (existing?.status === 'paid') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket order is already paid.' });
+        const order = existing ?? await (db as any).partyTicketOrder.create({ data: { partyId: party.id, userId: ctx.user.userId, ticketTierName: tier.name, amountCents: tier.priceCents, currency: 'usd', idempotencyKey: input.idempotencyKey } });
+        const stripe = new Stripe(config.stripeSecretKey);
+        if (order.stripeSessionId) {
+          try {
+            const previous = await stripe.checkout.sessions.retrieve(order.stripeSessionId);
+            if (previous.url && previous.status === 'open') return { orderId: order.id, url: previous.url, status: 'pending_checkout' as const };
+          } catch {
+            // The stored session may have expired. Stripe's order-scoped
+            // idempotency key below still prevents a duplicate charge/session.
+          }
+        }
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment', payment_method_types: ['card'],
+          line_items: [{ price_data: { currency: 'usd', unit_amount: tier.priceCents, product_data: { name: `${party.title} — ${tier.name}` } }, quantity: 1 }],
+          metadata: { flow: 'party.ticket', partyId: party.id, orderId: order.id, userId: ctx.user.userId },
+          payment_intent_data: { metadata: { flow: 'party.ticket', partyId: party.id, orderId: order.id, userId: ctx.user.userId } },
+          success_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=success`,
+          cancel_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=cancelled`,
+        }, { idempotencyKey: `party-ticket:${order.id}` });
+        if (!session.url || !session.id) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Ticket checkout was not created.' });
+        await (db as any).partyTicketOrder.update({ where: { id: order.id }, data: { stripeSessionId: session.id } });
+        return { orderId: order.id, url: session.url, status: 'pending_checkout' as const };
+      }),
+    webhook: stripeWebhookProcedure
+      .input(z.object({ type: z.string(), data: z.object({ object: z.any() }) }))
+      .mutation(async ({ input }) => {
+        if (input.type !== 'checkout.session.completed') return { ignored: true };
+        const session = input.data.object as { id?: string; payment_intent?: string | { id?: string }; payment_status?: string; metadata?: Record<string, string> };
+        if (session.payment_status !== 'paid' || session.metadata?.flow !== 'party.ticket' || !session.metadata.orderId) return { ignored: true };
+        const paymentIntent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+        const order = await (db as any).partyTicketOrder.findUnique({ where: { id: session.metadata.orderId } });
+        if (!order || order.status === 'paid' || order.stripeSessionId !== session.id) return { ignored: true };
+        await db.$transaction(async (tx) => {
+          await (tx as any).partyTicketOrder.update({ where: { id: order.id }, data: { status: 'paid', stripePaymentIntentId: paymentIntent ?? null, paidAt: new Date() } });
+          await (tx as any).partyParticipation.upsert({ where: { partyId_userId: { partyId: order.partyId, userId: order.userId } }, create: { partyId: order.partyId, userId: order.userId, status: 'rsvp' }, update: { status: 'rsvp' } });
+        });
+        return { fulfilled: true };
       }),
   }),
 

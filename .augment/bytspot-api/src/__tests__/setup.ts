@@ -156,6 +156,25 @@ vi.mock('../lib/db', () => {
       findUnique: vi.fn().mockResolvedValue(null),
       upsert: vi.fn(),
     },
+    partyParticipation: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      count: vi.fn().mockResolvedValue(0),
+      upsert: vi.fn(),
+      update: vi.fn(),
+    },
+    membershipEntitlement: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
+    partyConnection: {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn(),
+    },
+    partyTicketOrder: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
     complianceLog: {
       create: vi.fn().mockResolvedValue({ id: 'cl-1' }),
     },

@@ -56,6 +56,11 @@ model User {
   hostedGroupEvents   GroupEvent[]      @relation("hostedGroupEvents")
   groupEventGuests    GroupEventGuest[]
   hostedParties       Party[]           @relation("hostedParties")
+  partyParticipations PartyParticipation[]
+  membershipEntitlements MembershipEntitlement[]
+  partyConnectionsFrom PartyConnection[] @relation("partyConnectionFrom")
+  partyConnectionsTo   PartyConnection[] @relation("partyConnectionTo")
+  partyTicketOrders    PartyTicketOrder[]
 
   @@map("users")
 }
@@ -756,6 +761,9 @@ model Party {
 
   host        User              @relation("hostedParties", fields: [hostId], references: [id], onDelete: Cascade)
   touchpoints PartyTouchpoint[]
+  participations PartyParticipation[]
+  connections    PartyConnection[]
+  ticketOrders   PartyTicketOrder[]
 
   @@unique([hostId, idempotencyKey])
   @@index([hostId, status, createdAt(sort: Desc)])
@@ -778,4 +786,88 @@ model PartyTouchpoint {
   @@unique([partyId, kind])
   @@index([partyId, status])
   @@map("party_touchpoints")
+}
+
+/// Party-native participation is deliberately separate from legacy
+/// GroupEventGuest eligibility and access state.
+model PartyParticipation {
+  id          String    @id @default(cuid())
+  partyId     String    @map("party_id")
+  userId      String    @map("user_id")
+  status      String    @default("rsvp") // rsvp | pending | approved | declined | checked_in | cancelled
+  checkedInAt DateTime? @map("checked_in_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, userId])
+  @@index([partyId, status])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("party_participations")
+}
+
+/// Explicit server authority for tiers beyond the legacy isPremium → Platinum
+/// compatibility mapping. Missing, revoked, or expired records grant nothing.
+model MembershipEntitlement {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tier      String
+  status    String    @default("active")
+  expiresAt DateTime? @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, tier, status])
+  @@map("membership_entitlements")
+}
+
+/// A retention edge is materialized only after two Party attendees have each
+/// been server-verified at check-in. User ids are stored in canonical order.
+model PartyConnection {
+  id          String   @id @default(cuid())
+  partyId     String   @map("party_id")
+  fromUserId  String   @map("from_user_id")
+  toUserId    String   @map("to_user_id")
+  verifiedAt  DateTime @default(now()) @map("verified_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  fromUser User @relation("partyConnectionFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("partyConnectionTo", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, fromUserId, toUserId])
+  @@index([fromUserId, verifiedAt(sort: Desc)])
+  @@index([toUserId, verifiedAt(sort: Desc)])
+  @@map("party_connections")
+}
+
+/// Stripe is the only authority that can transition a Party ticket order to
+/// paid. Browser/App Clip return URLs are intentionally not fulfillment input.
+model PartyTicketOrder {
+  id                    String    @id @default(cuid())
+  partyId               String    @map("party_id")
+  userId                String    @map("user_id")
+  ticketTierName        String    @map("ticket_tier_name")
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("usd")
+  status                String    @default("pending_checkout")
+  idempotencyKey        String    @map("idempotency_key")
+  stripeSessionId       String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  paidAt                DateTime? @map("paid_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, userId, idempotencyKey])
+  @@index([partyId, status])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("party_ticket_orders")
 }

@@ -187,11 +187,24 @@ describe('events party procedures', () => {
     expect(result).toMatchObject({
       id: 'party-1', source: 'host-studio-party', title: 'First Listen', inviteNote: 'One moment. Your people.',
       tier: 'green', participantCount: 0, capacity: 80, accessMode: 'free-rsvp',
+      ticketTiers: [],
+      templateId: 'listening-party', templateConfig: { kind: 'listening-party', format: 'listening-session' },
       hostName: 'Avery Parker', locationLabel: 'The Loft', activityHighlights: ['Doors open'],
       audienceCircle: 'Selected Circles', privacyStatus: 'privateInvite', requiresApproval: false,
       heroImageURL: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
       photoURLs: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
     });
+  });
+
+  it('projects only validated paid ticket tiers for a Party Pass', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', host: { name: 'Avery Parker' }, accessMode: 'paid-ticket',
+      ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+    }));
+
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result.ticketTiers).toEqual([{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }]);
   });
 
   it('redacts a Pop-Up location from every public Party Pass projection', async () => {
@@ -212,9 +225,10 @@ describe('events party procedures', () => {
 
     expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });
     expect(result.locationLabel).not.toContain('Secret rooftop');
+    expect(result.templateConfig).toBeNull();
   });
 
-  it('resolves only the configured pre-party action for an active published touchpoint', async () => {
+  it('requires authentication before exposing an active Party Pass action', async () => {
     (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({
       partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active',
       lifecyclePolicy: { version: 1, before: { action: 'ticket' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } },
@@ -223,7 +237,29 @@ describe('events party procedures', () => {
 
     const result = await createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' });
 
-    expect(result).toEqual(expect.objectContaining({ partyId: 'party-1', lifecycle: 'before', action: 'ticket', guest: { status: 'anonymous', canStartPrimaryAction: true, accessGranted: false } }));
+    expect(result).toEqual(expect.objectContaining({ partyId: 'party-1', lifecycle: 'before', action: 'authenticate', guest: { status: 'anonymous', canStartPrimaryAction: false, accessGranted: false } }));
+  });
+
+  it('creates Party-native RSVP state without reading or writing legacy guests', async () => {
+    const published = party({ status: 'published', startsAt: new Date('2099-08-10T20:00:00Z'), touchpoints: [{ reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active' }] });
+    (db.party.findUnique as any).mockResolvedValueOnce(published);
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+    (db.partyParticipation.findUnique as any).mockResolvedValueOnce(null).mockResolvedValueOnce({ status: 'rsvp', checkedInAt: null });
+    (db.partyParticipation.count as any).mockResolvedValueOnce(0);
+
+    const result = await createAuthenticatedCaller('guest-1').events.rsvp.create({ partyId: 'party-1', idempotencyKey: 'rsvp-12345678' });
+
+    expect(result).toMatchObject({ partyId: 'party-1', status: 'rsvp', action: 'view-pass', accessGranted: true });
+    expect(db.partyParticipation.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ partyId: 'party-1', userId: 'guest-1', status: 'rsvp' }) }));
+    expect(db.groupEventGuest.upsert).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a Platinum Party when the authenticated member lacks the server entitlement', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published', requiredMembershipTier: 'platinum', startsAt: new Date('2099-08-10T20:00:00Z') }));
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+
+    await expect(createAuthenticatedCaller('guest-1').events.rsvp.create({ partyId: 'party-1', idempotencyKey: 'rsvp-12345678' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(db.partyParticipation.upsert).not.toHaveBeenCalled();
   });
 
   it('fails closed for inactive touchpoints', async () => {

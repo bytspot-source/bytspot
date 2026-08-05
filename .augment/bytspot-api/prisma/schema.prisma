@@ -61,6 +61,7 @@ model User {
   partyConnectionsFrom PartyConnection[] @relation("partyConnectionFrom")
   partyConnectionsTo   PartyConnection[] @relation("partyConnectionTo")
   partyTicketOrders    PartyTicketOrder[]
+  checkoutAttempts     CheckoutAttempt[]
 
   @@map("users")
 }
@@ -764,6 +765,7 @@ model Party {
   participations PartyParticipation[]
   connections    PartyConnection[]
   ticketOrders   PartyTicketOrder[]
+  checkoutAttempts CheckoutAttempt[]
 
   @@unique([hostId, idempotencyKey])
   @@index([hostId, status, createdAt(sort: Desc)])
@@ -866,9 +868,38 @@ model PartyTicketOrder {
 
   party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkoutAttempts CheckoutAttempt[]
 
   @@unique([partyId, userId])
   @@index([partyId, status])
   @@index([userId, updatedAt(sort: Desc)])
   @@map("party_ticket_orders")
+}
+
+/// Immutable Stripe Checkout history. A row is never reused for a retry;
+/// reconciliation may only advance pending -> fulfilled | expired | failed.
+model CheckoutAttempt {
+  id                    String    @id @default(cuid())
+  partyTicketOrderId    String    @map("party_ticket_order_id")
+  partyId               String    @map("party_id")
+  userId                String    @map("user_id")
+  ticketTierName        String    @map("ticket_tier_name")
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("usd")
+  stripeSessionId       String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  reconciliationState   String    @default("pending") @map("reconciliation_state")
+  checkoutExpiresAt     DateTime  @map("checkout_expires_at")
+  reconciledAt          DateTime? @map("reconciled_at")
+  failureCode           String?   @map("failure_code")
+  createdAt             DateTime  @default(now()) @map("created_at")
+
+  order PartyTicketOrder @relation(fields: [partyTicketOrderId], references: [id], onDelete: Restrict)
+  party Party            @relation(fields: [partyId], references: [id], onDelete: Restrict)
+  user  User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([partyTicketOrderId, reconciliationState, createdAt(sort: Desc)])
+  @@index([partyId, ticketTierName, reconciliationState])
+  @@index([userId, reconciliationState, createdAt(sort: Desc)])
+  @@map("checkout_attempts")
 }

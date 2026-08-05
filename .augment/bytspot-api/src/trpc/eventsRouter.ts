@@ -529,62 +529,69 @@ export const eventsRouter = router({
           const orders = (tx as any).partyTicketOrder;
           const existing = await orders.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
           if (existing?.status === 'paid') throw new TRPCError({ code: 'CONFLICT', message: 'You already have a paid ticket for this Party.' });
-          if (existing && existing.checkoutExpiresAt && existing.checkoutExpiresAt > now) {
-            if (existing.ticketTierName !== tier.name || existing.amountCents !== tier.priceCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout is already reserved for a different ticket tier.' });
-            return { party, tier, order: existing, expiresAt: existing.checkoutExpiresAt };
+          if (existing) {
+            const pending = await (tx as any).checkoutAttempt.findFirst({ where: { partyTicketOrderId: existing.id, reconciliationState: 'pending' }, orderBy: { createdAt: 'desc' } });
+            if (pending) throw new TRPCError({ code: 'CONFLICT', message: 'Your previous checkout must be reconciled by Stripe before you can retry.' });
           }
-          const active = { status: { in: ['pending_checkout', 'paid'] }, OR: [{ checkoutExpiresAt: null }, { checkoutExpiresAt: { gt: now } }, { status: 'paid' }] };
+          const active = { reconciliationState: { in: ['pending', 'fulfilled'] } };
           const [partyReserved, tierReserved] = await Promise.all([
-            orders.count({ where: { partyId: party.id, ...active } }),
-            orders.count({ where: { partyId: party.id, ticketTierName: tier.name, ...active } }),
+            (tx as any).checkoutAttempt.count({ where: { partyId: party.id, ...active } }),
+            (tx as any).checkoutAttempt.count({ where: { partyId: party.id, ticketTierName: tier.name, ...active } }),
           ]);
           if (partyReserved >= party.capacity || tierReserved >= tier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'This ticket tier is sold out.' });
-          const data = { ticketTierName: tier.name, amountCents: tier.priceCents, currency: 'usd', status: 'pending_checkout', idempotencyKey: input.idempotencyKey, stripeSessionId: null, stripePaymentIntentId: null, checkoutExpiresAt: expiresAt, paidAt: null };
+          const data = { ticketTierName: tier.name, amountCents: tier.priceCents, currency: 'usd', status: 'pending_checkout', idempotencyKey: input.idempotencyKey, stripeSessionId: null, stripePaymentIntentId: null, checkoutExpiresAt: null, paidAt: null };
           const order = existing
             ? await orders.update({ where: { id: existing.id }, data })
             : await orders.create({ data: { partyId: party.id, userId: ctx.user.userId, ...data } });
-          return { party, tier, order, expiresAt };
+          const attempt = await (tx as any).checkoutAttempt.create({ data: { partyTicketOrderId: order.id, partyId: party.id, userId: ctx.user.userId, ticketTierName: tier.name, amountCents: tier.priceCents, currency: 'usd', checkoutExpiresAt: expiresAt } });
+          return { party, tier, order, attempt, expiresAt };
         }, { isolationLevel: 'Serializable' });
-        const { party, tier, order } = prepared;
+        const { party, tier, attempt } = prepared;
         const stripe = new Stripe(config.stripeSecretKey);
-        if (order.stripeSessionId) {
-          try {
-            const previous = await stripe.checkout.sessions.retrieve(order.stripeSessionId);
-            if (previous.url && previous.status === 'open') return { orderId: order.id, url: previous.url, status: 'pending_checkout' as const };
-          } catch {
-            // The stored session may have expired. Stripe's order-scoped
-            // idempotency key below still prevents a duplicate charge/session.
+        let stripeSessionCreated = false;
+        try {
+          const session = await stripe.checkout.sessions.create({
+            mode: 'payment', payment_method_types: ['card'],
+            line_items: [{ price_data: { currency: 'usd', unit_amount: tier.priceCents, product_data: { name: `${party.title} — ${tier.name}` } }, quantity: 1 }],
+            metadata: { flow: 'party.ticket', partyId: party.id, orderId: attempt.partyTicketOrderId, checkoutAttemptId: attempt.id, userId: ctx.user.userId },
+            payment_intent_data: { metadata: { flow: 'party.ticket', partyId: party.id, orderId: attempt.partyTicketOrderId, checkoutAttemptId: attempt.id, userId: ctx.user.userId } },
+            expires_at: Math.floor(prepared.expiresAt.getTime() / 1000),
+            success_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=success`, cancel_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=cancelled`,
+          }, { idempotencyKey: `party-ticket:${attempt.id}` });
+          if (!session.url || !session.id) throw new Error('Stripe omitted the checkout session URL or ID.');
+          stripeSessionCreated = true;
+          await (db as any).checkoutAttempt.update({ where: { id: attempt.id }, data: { stripeSessionId: session.id } });
+          return { orderId: attempt.partyTicketOrderId, checkoutAttemptId: attempt.id, url: session.url, status: 'pending_checkout' as const };
+        } catch (error) {
+          if (!stripeSessionCreated) {
+            await (db as any).checkoutAttempt.updateMany({ where: { id: attempt.id, reconciliationState: 'pending', stripeSessionId: null }, data: { reconciliationState: 'failed', reconciledAt: new Date(), failureCode: 'session_creation_failed' } });
           }
+          throw error;
         }
-        const session = await stripe.checkout.sessions.create({
-          mode: 'payment', payment_method_types: ['card'],
-          line_items: [{ price_data: { currency: 'usd', unit_amount: tier.priceCents, product_data: { name: `${party.title} — ${tier.name}` } }, quantity: 1 }],
-          metadata: { flow: 'party.ticket', partyId: party.id, orderId: order.id, userId: ctx.user.userId },
-          payment_intent_data: { metadata: { flow: 'party.ticket', partyId: party.id, orderId: order.id, userId: ctx.user.userId } },
-          expires_at: Math.floor(prepared.expiresAt.getTime() / 1000),
-          success_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=success`,
-          cancel_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=cancelled`,
-        }, { idempotencyKey: `party-ticket:${order.id}:${order.idempotencyKey}` });
-        if (!session.url || !session.id) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Ticket checkout was not created.' });
-        await (db as any).partyTicketOrder.update({ where: { id: order.id }, data: { stripeSessionId: session.id } });
-        return { orderId: order.id, url: session.url, status: 'pending_checkout' as const };
       }),
     webhook: stripeWebhookProcedure
       .input(z.object({ type: z.string(), data: z.object({ object: z.any() }) }))
       .mutation(async ({ input }) => {
-        if (input.type !== 'checkout.session.completed') return { ignored: true };
-        const session = input.data.object as { id?: string; payment_intent?: string | { id?: string }; payment_status?: string; metadata?: Record<string, string> };
-        if (session.payment_status !== 'paid' || session.metadata?.flow !== 'party.ticket' || !session.metadata.orderId) return { ignored: true };
+        const session = input.data.object as { id?: string; status?: string; payment_intent?: string | { id?: string }; payment_status?: string; metadata?: Record<string, string> };
+        if (!session.id || session.metadata?.flow !== 'party.ticket') return { ignored: true };
         const paymentIntent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
-        const order = await (db as any).partyTicketOrder.findUnique({ where: { id: session.metadata.orderId } });
-        if (!order || order.status === 'paid' || order.stripeSessionId !== session.id) return { ignored: true };
+        const state = (input.type === 'checkout.session.completed' || input.type === 'checkout.session.async_payment_succeeded') && session.payment_status === 'paid' ? 'fulfilled'
+          : input.type === 'checkout.session.expired' && session.status === 'expired' && session.payment_status !== 'paid' ? 'expired'
+            : input.type === 'checkout.session.async_payment_failed' ? 'failed' : null;
+        if (!state) return { ignored: true };
         await db.$transaction(async (tx) => {
-          const transitioned = await (tx as any).partyTicketOrder.updateMany({ where: { id: order.id, status: 'pending_checkout', stripeSessionId: session.id }, data: { status: 'paid', stripePaymentIntentId: paymentIntent ?? null, paidAt: new Date() } });
+          const transitioned = await (tx as any).checkoutAttempt.updateMany({ where: { stripeSessionId: session.id, reconciliationState: 'pending' }, data: { reconciliationState: state, stripePaymentIntentId: state === 'fulfilled' ? paymentIntent ?? null : undefined, reconciledAt: new Date(), failureCode: state === 'failed' ? 'async_payment_failed' : null } });
           if (transitioned.count !== 1) return;
+          if (state !== 'fulfilled') return;
+          const attempt = await (tx as any).checkoutAttempt.findUnique({ where: { stripeSessionId: session.id } });
+          if (!attempt) return;
+          const order = await (tx as any).partyTicketOrder.findUnique({ where: { id: attempt.partyTicketOrderId } });
+          if (!order) return;
+          await (tx as any).partyTicketOrder.updateMany({ where: { id: order.id, status: 'pending_checkout' }, data: { status: 'paid', stripePaymentIntentId: paymentIntent ?? null, paidAt: new Date() } });
           const participation = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: order.partyId, userId: order.userId } }, select: { status: true } });
           if (!participation) await (tx as any).partyParticipation.create({ data: { partyId: order.partyId, userId: order.userId, status: 'rsvp' } });
         });
-        return { fulfilled: true };
+        return { reconciled: state };
       }),
   }),
 

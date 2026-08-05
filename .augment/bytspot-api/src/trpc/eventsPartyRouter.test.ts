@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../lib/db';
-import { createAuthenticatedCaller, createPublicCaller } from '../__tests__/helpers';
+import { createAuthenticatedCaller, createPublicCaller, createStripeWebhookCaller } from '../__tests__/helpers';
 import { resetRateLimitBucketsForTests } from './trpc';
 import { uploadPartyImage } from '../lib/cloudinary';
 
@@ -265,6 +265,31 @@ describe('events party procedures', () => {
   it('fails closed for inactive touchpoints', async () => {
     (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({ partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'inactive', lifecyclePolicy: {}, party: party({ status: 'published' }) });
     await expect(createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('fulfills the immutable checkout attempt identified by the original Stripe session exactly once', async () => {
+    (db.checkoutAttempt.updateMany as any).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    (db.checkoutAttempt.findUnique as any).mockResolvedValueOnce({ partyTicketOrderId: 'order-1' });
+    (db.partyTicketOrder.findUnique as any).mockResolvedValueOnce({ id: 'order-1', partyId: 'party-1', userId: 'guest-1' });
+    (db.partyTicketOrder.updateMany as any).mockResolvedValueOnce({ count: 1 });
+    (db.partyParticipation.findUnique as any).mockResolvedValueOnce(null);
+    const caller = createStripeWebhookCaller();
+    const event = { type: 'checkout.session.completed', data: { object: { id: 'cs_test_original', payment_status: 'paid', payment_intent: 'pi_1', metadata: { flow: 'party.ticket', checkoutAttemptId: 'attempt-1' } } } };
+
+    await expect(caller.events.tickets.webhook(event)).resolves.toEqual({ reconciled: 'fulfilled' });
+    await expect(caller.events.tickets.webhook(event)).resolves.toEqual({ reconciled: 'fulfilled' });
+    expect(db.checkoutAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { stripeSessionId: 'cs_test_original', reconciliationState: 'pending' }, data: expect.objectContaining({ reconciliationState: 'fulfilled', stripePaymentIntentId: 'pi_1' }) }));
+    expect(db.partyParticipation.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a hold only when Stripe reports that the exact unpaid session expired', async () => {
+    (db.checkoutAttempt.updateMany as any).mockResolvedValueOnce({ count: 1 });
+    const caller = createStripeWebhookCaller();
+    const result = await caller.events.tickets.webhook({ type: 'checkout.session.expired', data: { object: { id: 'cs_test_expired', status: 'expired', payment_status: 'unpaid', metadata: { flow: 'party.ticket' } } } });
+
+    expect(result).toEqual({ reconciled: 'expired' });
+    expect(db.checkoutAttempt.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { stripeSessionId: 'cs_test_expired', reconciliationState: 'pending' }, data: expect.objectContaining({ reconciliationState: 'expired' }) }));
+    expect(db.partyTicketOrder.updateMany).not.toHaveBeenCalled();
   });
 
   it('does not expose drafts through the public invite route', async () => {

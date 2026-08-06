@@ -584,7 +584,8 @@ export const eventsRouter = router({
           const party = await tx.party.findUnique({ where: { id: input.partyId } });
           if (!party || party.status !== 'published' || party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'NOT_FOUND', message: 'Ticketed Party not found.' });
           const viewerTier = await viewerPartyTier(ctx.user.userId);
-          if (!partyTierAllows(viewerTier, party.requiredMembershipTier) || partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'FORBIDDEN', message: 'Ticket checkout is not available for this Party.' });
+          const participation = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } }, select: { status: true } });
+          if (actionForPartyViewer({ party, viewerTier, participation, isAuthenticated: true }) !== 'ticket') throw new TRPCError({ code: 'FORBIDDEN', message: 'Ticket checkout is not available for this Party.' });
           const tier = paidTicketTier(party, input.ticketTierName);
           if (!partyTierAllows(viewerTier, tier.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: 'Membership tier does not permit this ticket.' });
           const orders = (tx as any).partyTicketOrder;

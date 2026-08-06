@@ -3,6 +3,7 @@ import { db } from '../lib/db';
 import { createAuthenticatedCaller, createPublicCaller, createStripeWebhookCaller } from '../__tests__/helpers';
 import { resetRateLimitBucketsForTests } from './trpc';
 import { uploadPartyImage } from '../lib/cloudinary';
+import { config } from '../config';
 
 const HOST = 'host-1';
 const KEY = 'moment-12345678';
@@ -352,6 +353,28 @@ describe('events party procedures', () => {
     const result = await createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' });
 
     expect(result).toEqual(expect.objectContaining({ action: 'unavailable', guest: expect.objectContaining({ accessGranted: false }) }));
+  });
+
+  it('rejects direct ticket checkout unless the authoritative action is ticket', async () => {
+    const originalStripeKey = config.stripeSecretKey;
+    config.stripeSecretKey = 'sk_test_party_action_policy';
+    try {
+      (db.party.findUnique as any).mockResolvedValue(party({ status: 'published', accessMode: 'paid-ticket', startsAt: new Date('2099-08-10T20:00:00Z') }));
+      (db.user.findUnique as any).mockResolvedValue({ isPremium: false });
+      ((db as any).membershipEntitlement.findFirst as any).mockResolvedValue(null);
+      (db.partyParticipation.findUnique as any)
+        .mockResolvedValueOnce({ status: 'pending' })
+        .mockResolvedValueOnce({ status: 'declined' })
+        .mockResolvedValueOnce({ status: 'cancelled' });
+
+      for (const status of ['pending', 'declined', 'cancelled']) {
+        await expect(createAuthenticatedCaller('guest-1').events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey: `ticket-${status}-12345678` })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      }
+      expect(db.partyTicketOrder.create).not.toHaveBeenCalled();
+      expect(db.checkoutAttempt.create).not.toHaveBeenCalled();
+    } finally {
+      config.stripeSecretKey = originalStripeKey;
+    }
   });
 
   it('fails closed for a Platinum Party when the authenticated member lacks the server entitlement', async () => {

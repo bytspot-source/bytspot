@@ -749,6 +749,7 @@ model Party {
   audienceCircleIds      String[]  @default([]) @map("audience_circle_ids")
   coverImageUrl          String?   @map("cover_image_url")
   photoUrls              String[]  @default([]) @map("photo_urls")
+  creatorLinks           Json      @map("creator_links")
   itinerary              Json
   ticketTiers            Json      @map("ticket_tiers")
   cohosts                Json

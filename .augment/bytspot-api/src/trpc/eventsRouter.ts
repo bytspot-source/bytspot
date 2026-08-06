@@ -93,6 +93,32 @@ const ticketTier = z.object({
   quantity: z.number().int().min(1).max(100_000),
   requiredMembershipTier: membershipTier,
 });
+const partyCreatorLinkKind = z.enum(['music', 'merchandise', 'website', 'social']);
+const partyCreatorLink = z.object({
+  kind: partyCreatorLinkKind,
+  title: z.string().trim().min(1).max(80),
+  url: z.string().trim().min(1).max(2_048).url(),
+}).strict().superRefine((link, ctx) => {
+  try {
+    const url = new URL(link.url);
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'Creator links must be credential-free HTTPS URLs.' });
+    }
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['url'], message: 'Creator links must be valid HTTPS URLs.' });
+  }
+});
+const partyCreatorLinks = z.array(partyCreatorLink).max(8).superRefine((links, ctx) => {
+  const seen = new Set<string>();
+  links.forEach((link, index) => {
+    let canonical = link.url;
+    try { canonical = new URL(link.url).href; } catch { /* link-level validation reports malformed URLs */ }
+    if (seen.has(canonical)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, 'url'], message: 'Each creator link may be added only once.' });
+    }
+    seen.add(canonical);
+  });
+});
 const partyDraftInput = z.object({
   idempotencyKey,
   templateId: partyTemplateId,
@@ -108,6 +134,7 @@ const partyDraftInput = z.object({
     title: z.string().trim().min(1).max(160),
     offsetMinutes: z.number().int().min(0).max(10_080),
   })).max(50),
+  creatorLinks: partyCreatorLinks.default([]),
   ticketTiers: z.array(ticketTier).max(20),
   cohosts: z.array(z.object({
     email: z.string().trim().email().max(320).transform((email) => email.toLowerCase()),
@@ -340,6 +367,11 @@ function paidTicketTier(party: { ticketTiers: unknown; requiredMembershipTier: s
   return tier;
 }
 
+function publicPartyCreatorLinks(value: unknown) {
+  const parsed = partyCreatorLinks.safeParse(value);
+  return parsed.success ? parsed.data : [];
+}
+
 const partyDraftsRouter = router({
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'events:drafts:create' }))
@@ -365,6 +397,7 @@ const partyDraftsRouter = router({
           accessMode: input.accessMode,
           requiredMembershipTier: input.requiredMembershipTier,
           audienceCircleIds: input.audienceCircleIds,
+          creatorLinks: input.creatorLinks,
           itinerary: input.itinerary,
           ticketTiers: input.ticketTiers,
           cohosts: input.cohosts,
@@ -439,6 +472,7 @@ export const eventsRouter = router({
       const location = partyLocationForPublicInvite(party);
       const template = publicPartyTemplate(party);
       const ticketTiers = publicPartyTicketTiers(party);
+      const creatorLinks = publicPartyCreatorLinks(party.creatorLinks);
       return {
         id: party.id,
         source: 'host-studio-party' as const,
@@ -450,6 +484,7 @@ export const eventsRouter = router({
         capacity: party.capacity,
         accessMode: party.accessMode,
         ticketTiers,
+        creatorLinks,
         templateId: template.templateId,
         templateConfig: template.templateConfig,
         groupType: templateLabels[party.templateId] ?? 'Private Party',

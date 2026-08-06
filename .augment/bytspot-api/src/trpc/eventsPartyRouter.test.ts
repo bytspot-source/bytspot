@@ -21,6 +21,7 @@ function draft(overrides: Record<string, unknown> = {}) {
     requiredMembershipTier: 'green' as const,
     audienceCircleIds: ['circle-1'],
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
+    creatorLinks: [{ kind: 'music' as const, title: 'Listen now', url: 'https://music.example/first-listen' }],
     ticketTiers: [],
     cohosts: [{ email: 'door@bytspot.com', role: 'door' as const }],
     templateConfig: { kind: 'listening-party' as const, format: 'listening-session' as const },
@@ -37,6 +38,7 @@ function party(overrides: Record<string, unknown> = {}) {
     startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'The Loft', capacity: 80,
     accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: ['circle-1'],
     coverImageUrl: null, photoUrls: [],
+    creatorLinks: [{ kind: 'music', title: 'Listen now', url: 'https://music.example/first-listen' }],
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
     templateConfig: { kind: 'listening-party', format: 'listening-session' },
     ...overrides,
@@ -55,9 +57,21 @@ describe('events party procedures', () => {
 
     expect(result).toEqual({ id: 'party-1', status: 'draft' });
     expect(db.party.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ hostId: HOST, requiredMembershipTier: 'green', cohosts: [{ email: 'door@bytspot.com', role: 'door' }], templateConfig: { kind: 'listening-party', format: 'listening-session' } }),
+      create: expect.objectContaining({ hostId: HOST, requiredMembershipTier: 'green', creatorLinks: [{ kind: 'music', title: 'Listen now', url: 'https://music.example/first-listen' }], cohosts: [{ email: 'door@bytspot.com', role: 'door' }], templateConfig: { kind: 'listening-party', format: 'listening-session' } }),
       update: {},
     }));
+  });
+
+  it('rejects non-HTTPS, credentialed, duplicate, or excessive creator links', async () => {
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
+      creatorLinks: [{ kind: 'music', title: 'Unsafe', url: 'http://music.example/release' }],
+    }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
+      creatorLinks: [{ kind: 'merchandise', title: 'Unsafe', url: 'https://creator:secret@shop.example/drop' }],
+    }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    const duplicate = { kind: 'social', title: 'Follow', url: 'https://social.example/creator' };
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({ creatorLinks: [duplicate, duplicate] }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(db.party.upsert).not.toHaveBeenCalled();
   });
 
   it('rejects unauthenticated draft creation', async () => {
@@ -188,12 +202,23 @@ describe('events party procedures', () => {
       id: 'party-1', source: 'host-studio-party', title: 'First Listen', inviteNote: 'One moment. Your people.',
       tier: 'green', participantCount: 0, capacity: 80, accessMode: 'free-rsvp',
       ticketTiers: [],
+      creatorLinks: [{ kind: 'music', title: 'Listen now', url: 'https://music.example/first-listen' }],
       templateId: 'listening-party', templateConfig: { kind: 'listening-party', format: 'listening-session' },
       hostName: 'Avery Parker', locationLabel: 'The Loft', activityHighlights: ['Doors open'],
       audienceCircle: 'Selected Circles', privacyStatus: 'privateInvite', requiresApproval: false,
       heroImageURL: 'https://res.cloudinary.com/bytspot/image/upload/cover.jpg',
       photoURLs: ['https://res.cloudinary.com/bytspot/image/upload/album-0.jpg'],
     });
+  });
+
+  it('fails closed by omitting malformed stored creator links from a public Party Pass', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', host: { name: 'Avery Parker' }, creatorLinks: [{ kind: 'music', title: 'Unsafe', url: 'http://music.example/release' }],
+    }));
+
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result.creatorLinks).toEqual([]);
   });
 
   it('projects only validated paid ticket tiers for a Party Pass', async () => {

@@ -745,6 +745,7 @@ model Party {
   venueName               String    @map("venue_name")
   capacity                Int
   accessMode              String    @map("access_mode")
+  cashDoorPriceCents      Int?      @map("cash_door_price_cents")
   requiredMembershipTier String    @default("green") @map("required_membership_tier")
   audienceCircleIds      String[]  @default([]) @map("audience_circle_ids")
   coverImageUrl          String?   @map("cover_image_url")

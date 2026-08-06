@@ -18,6 +18,7 @@ function draft(overrides: Record<string, unknown> = {}) {
     venueName: 'The Loft',
     capacity: 80,
     accessMode: 'free-rsvp' as const,
+    cashDoorPriceCents: null,
     requiredMembershipTier: 'green' as const,
     audienceCircleIds: ['circle-1'],
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
@@ -37,6 +38,7 @@ function party(overrides: Record<string, unknown> = {}) {
     templateId: 'listening-party', title: 'First Listen', tagline: 'One moment. Your people.',
     startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'The Loft', capacity: 80,
     accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: ['circle-1'],
+    cashDoorPriceCents: null,
     coverImageUrl: null, photoUrls: [],
     creatorLinks: [{ kind: 'music', title: 'Listen now', url: 'https://music.example/first-listen' }],
     itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
@@ -84,6 +86,14 @@ describe('events party procedures', () => {
       ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
     }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
     expect(db.party.upsert).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit cash amount only for cash-at-door Parties', async () => {
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({ accessMode: 'cash-at-door' }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({ accessMode: 'free-rsvp', cashDoorPriceCents: 2500 }) as any)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    (db.party.upsert as any).mockImplementationOnce(({ create }: any) => party({ ...create, draftFingerprint: create.draftFingerprint }));
+    await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({ accessMode: 'cash-at-door', cashDoorPriceCents: 2500 }) as any)).resolves.toEqual({ id: 'party-1', status: 'draft' });
+    expect(db.party.upsert).toHaveBeenLastCalledWith(expect.objectContaining({ create: expect.objectContaining({ accessMode: 'cash-at-door', cashDoorPriceCents: 2500, ticketTiers: [] }) }));
   });
 
   it('rejects mismatched template configuration and hidden Pop-Ups without approval', async () => {
@@ -232,6 +242,17 @@ describe('events party procedures', () => {
     expect(result.ticketTiers).toEqual([{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }]);
   });
 
+  it('projects a cash-door amount without exposing Stripe ticket tiers', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', host: { name: 'Avery Parker' }, accessMode: 'cash-at-door', cashDoorPriceCents: 2500,
+      ticketTiers: [{ name: 'Must not publish', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+    }));
+
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({ accessMode: 'cash-at-door', cashDoorPriceCents: 2500, ticketTiers: [] });
+  });
+
   it('redacts a Pop-Up location from every public Party Pass projection', async () => {
     (db.party.findUnique as any).mockResolvedValueOnce(party({
       templateId: 'pop-up', templateConfig: { kind: 'pop-up', locationDisclosure: 'after-approval' }, status: 'published', host: { name: 'Avery Parker' },
@@ -253,7 +274,7 @@ describe('events party procedures', () => {
     expect(result.templateConfig).toBeNull();
   });
 
-  it('requires authentication before exposing an active Party Pass action', async () => {
+  it('requires authentication before exposing an RSVP, cash reservation, or ticket action', async () => {
     (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({
       partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active',
       lifecyclePolicy: { version: 1, before: { action: 'ticket' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } },
@@ -263,6 +284,18 @@ describe('events party procedures', () => {
     const result = await createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' });
 
     expect(result).toEqual(expect.objectContaining({ partyId: 'party-1', lifecycle: 'before', action: 'authenticate', guest: { status: 'anonymous', canStartPrimaryAction: false, accessGranted: false } }));
+  });
+
+  it('lets an anonymous viewer open an open-entry Party without a reservation or payment', async () => {
+    (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({
+      partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active',
+      lifecyclePolicy: { version: 1, before: { action: 'view-pass' }, atDoor: { action: 'view-pass' }, during: { action: 'view-pass' }, after: { action: 'view-pass' } },
+      party: party({ status: 'published', accessMode: 'open-entry', startsAt: new Date('2099-08-10T20:00:00Z') }),
+    });
+
+    const result = await createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' });
+
+    expect(result).toEqual(expect.objectContaining({ action: 'view-pass', guest: { status: 'anonymous', canStartPrimaryAction: false, accessGranted: true } }));
   });
 
   it('creates Party-native RSVP state without reading or writing legacy guests', async () => {
@@ -277,6 +310,20 @@ describe('events party procedures', () => {
     expect(result).toMatchObject({ partyId: 'party-1', status: 'rsvp', action: 'view-pass', accessGranted: true });
     expect(db.partyParticipation.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ partyId: 'party-1', userId: 'guest-1', status: 'rsvp' }) }));
     expect(db.groupEventGuest.upsert).not.toHaveBeenCalled();
+  });
+
+  it('reserves a cash-at-door Party without starting Stripe checkout', async () => {
+    const published = party({ status: 'published', accessMode: 'cash-at-door', cashDoorPriceCents: 2500, startsAt: new Date('2099-08-10T20:00:00Z'), touchpoints: [{ reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active' }] });
+    (db.party.findUnique as any).mockResolvedValueOnce(published);
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+    (db.partyParticipation.findUnique as any).mockResolvedValueOnce(null).mockResolvedValueOnce({ status: 'rsvp', checkedInAt: null });
+    (db.partyParticipation.count as any).mockResolvedValueOnce(0);
+
+    const result = await createAuthenticatedCaller('guest-1').events.rsvp.create({ partyId: 'party-1', idempotencyKey: 'rsvp-12345678' });
+
+    expect(result).toMatchObject({ partyId: 'party-1', status: 'rsvp', action: 'view-pass', accessGranted: true });
+    expect(db.partyParticipation.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ status: 'rsvp' }) }));
+    expect(db.partyTicketOrder.create).not.toHaveBeenCalled();
   });
 
   it('fails closed for a Platinum Party when the authenticated member lacks the server entitlement', async () => {

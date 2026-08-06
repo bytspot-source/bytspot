@@ -79,7 +79,7 @@ const templateConfigKind: Record<z.infer<typeof partyTemplateId>, z.infer<typeof
   'comedy-night': 'standard',
   premiere: 'standard',
 };
-const partyPassAction = z.enum(['authenticate', 'rsvp', 'ticket', 'request-approval', 'view-pass', 'unavailable']);
+const partyPassAction = z.enum(['authenticate', 'rsvp', 'reserve-cash', 'ticket', 'request-approval', 'view-pass', 'unavailable']);
 const partyPassPolicy = z.object({
   version: z.literal(1),
   before: z.object({ action: partyPassAction }).strict(),
@@ -127,7 +127,8 @@ const partyDraftInput = z.object({
   startsAt: z.string().datetime(),
   venueName: z.string().trim().min(1).max(200),
   capacity: z.number().int().min(2).max(100_000),
-  accessMode: z.enum(['free-rsvp', 'paid-ticket', 'private-approval']),
+  accessMode: z.enum(['open-entry', 'free-rsvp', 'cash-at-door', 'paid-ticket', 'private-approval']),
+  cashDoorPriceCents: z.number().int().min(1).max(10_000_000).nullable().optional(),
   requiredMembershipTier: membershipTier,
   audienceCircleIds: z.array(z.string().min(1).max(200)).max(100),
   itinerary: z.array(z.object({
@@ -158,6 +159,12 @@ const partyDraftInput = z.object({
   }
   if (input.accessMode !== 'paid-ticket' && paidTiers.length > 0) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ticketTiers'], message: 'Only paid parties may include paid ticket tiers.' });
+  }
+  if (input.accessMode === 'cash-at-door' && !input.cashDoorPriceCents) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cashDoorPriceCents'], message: 'Cash-at-door parties require a cash amount.' });
+  }
+  if (input.accessMode !== 'cash-at-door' && input.cashDoorPriceCents != null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cashDoorPriceCents'], message: 'Only cash-at-door parties may include a cash amount.' });
   }
   if (input.ticketTiers.reduce((total, tier) => total + tier.quantity, 0) > input.capacity) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ticketTiers'], message: 'Ticket inventory cannot exceed party capacity.' });
@@ -212,15 +219,19 @@ function partyTouchpointReference(partyID: string): string {
 function defaultPartyPassPolicy(accessMode: string): PartyPassPolicy {
   const action: PartyPassAction = accessMode === 'paid-ticket'
     ? 'ticket'
+    : accessMode === 'cash-at-door'
+      ? 'reserve-cash'
     : accessMode === 'private-approval'
       ? 'request-approval'
+      : accessMode === 'open-entry'
+        ? 'view-pass'
       : 'rsvp';
   return {
     version: 1,
     before: { action },
-    atDoor: { action: 'unavailable' },
-    during: { action: 'unavailable' },
-    after: { action: 'unavailable' },
+    atDoor: { action: accessMode === 'open-entry' ? 'view-pass' : 'unavailable' },
+    during: { action: accessMode === 'open-entry' ? 'view-pass' : 'unavailable' },
+    after: { action: accessMode === 'open-entry' ? 'view-pass' : 'unavailable' },
   };
 }
 
@@ -315,11 +326,14 @@ function actionForPartyViewer(args: {
   isAuthenticated: boolean;
 }): PartyPassAction {
   const { party, viewerTier, participation, isAuthenticated } = args;
-  if (partyLifecycle(party.startsAt) !== 'before' || !partyTierAllows(viewerTier, party.requiredMembershipTier)) return 'unavailable';
+  if (!partyTierAllows(viewerTier, party.requiredMembershipTier)) return 'unavailable';
+  if (party.accessMode === 'open-entry') return 'view-pass';
+  if (partyLifecycle(party.startsAt) !== 'before') return 'unavailable';
   if (participation?.status === 'checked_in' || participation?.status === 'approved' || participation?.status === 'rsvp') return 'view-pass';
   if (participation?.status === 'pending' || participation?.status === 'declined' || participation?.status === 'cancelled') return 'unavailable';
   if (!isAuthenticated) return 'authenticate';
   if (party.accessMode === 'paid-ticket') return 'ticket';
+  if (party.accessMode === 'cash-at-door') return 'reserve-cash';
   return party.accessMode === 'private-approval' ? 'request-approval' : 'rsvp';
 }
 
@@ -340,7 +354,7 @@ async function resolvePartyPass(party: any, touchpoint: any, userId?: string) {
     entitlement: { tier: viewerTier, requiredTier: party.requiredMembershipTier, granted: partyTierAllows(viewerTier, party.requiredMembershipTier) },
     guest: {
       status: participation?.status ?? (userId ? 'authenticated-unverified' : 'anonymous'),
-      canStartPrimaryAction: action === 'rsvp' || action === 'ticket' || action === 'request-approval',
+      canStartPrimaryAction: action === 'rsvp' || action === 'reserve-cash' || action === 'ticket' || action === 'request-approval',
       accessGranted: action === 'view-pass',
     },
   };
@@ -395,6 +409,7 @@ const partyDraftsRouter = router({
           venueName: input.venueName,
           capacity: input.capacity,
           accessMode: input.accessMode,
+          cashDoorPriceCents: input.cashDoorPriceCents ?? null,
           requiredMembershipTier: input.requiredMembershipTier,
           audienceCircleIds: input.audienceCircleIds,
           creatorLinks: input.creatorLinks,
@@ -483,6 +498,7 @@ export const eventsRouter = router({
         participantCount,
         capacity: party.capacity,
         accessMode: party.accessMode,
+        cashDoorPriceCents: party.accessMode === 'cash-at-door' ? party.cashDoorPriceCents : null,
         ticketTiers,
         creatorLinks,
         templateId: template.templateId,
@@ -531,6 +547,7 @@ export const eventsRouter = router({
         if (!partyTierAllows(tier, party.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: `${party.requiredMembershipTier === 'black' ? 'Black' : 'Platinum'} membership required.` });
         if (partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'CONFLICT', message: 'This Party is no longer accepting RSVP requests.' });
         if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'CONFLICT', message: 'A verified ticket checkout is required for this Party.' });
+        if (party.accessMode === 'open-entry') throw new TRPCError({ code: 'CONFLICT', message: 'This Party does not require a reservation.' });
         const current = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (!current) {
           const accepted = party.accessMode === 'private-approval' ? 'pending' : 'rsvp';

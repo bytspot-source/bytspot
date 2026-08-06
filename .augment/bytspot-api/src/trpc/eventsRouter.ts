@@ -319,14 +319,19 @@ function partyLifecycle(startsAt: Date): 'before' | 'at-door' {
   return startsAt.getTime() > Date.now() ? 'before' : 'at-door';
 }
 
+function hasValidCashDoorAmount(party: { accessMode: string; cashDoorPriceCents?: unknown }): boolean {
+  return party.accessMode !== 'cash-at-door' || (typeof party.cashDoorPriceCents === 'number' && Number.isInteger(party.cashDoorPriceCents) && party.cashDoorPriceCents > 0);
+}
+
 function actionForPartyViewer(args: {
-  party: { startsAt: Date; accessMode: string; requiredMembershipTier: string };
+  party: { startsAt: Date; accessMode: string; cashDoorPriceCents?: unknown; requiredMembershipTier: string };
   viewerTier: PartyTier;
   participation: { status: string } | null;
   isAuthenticated: boolean;
 }): PartyPassAction {
   const { party, viewerTier, participation, isAuthenticated } = args;
   if (!partyTierAllows(viewerTier, party.requiredMembershipTier)) return 'unavailable';
+  if (!hasValidCashDoorAmount(party)) return 'unavailable';
   if (party.accessMode === 'open-entry') return 'view-pass';
   if (partyLifecycle(party.startsAt) !== 'before') return 'unavailable';
   if (participation?.status === 'checked_in' || participation?.status === 'approved' || participation?.status === 'rsvp') return 'view-pass';
@@ -480,6 +485,9 @@ export const eventsRouter = router({
       if (!party || party.status !== 'published') {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Party invite not found.' });
       }
+      if (!hasValidCashDoorAmount(party)) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Party invite not found.' });
+      }
       // Legacy GroupEventGuest rows are not Party participation. Party-specific
       // guest state is introduced only through Party Pass actions.
       const participantCount = 0;
@@ -543,6 +551,7 @@ export const eventsRouter = router({
       .mutation(async ({ ctx, input }) => db.$transaction(async (tx) => {
         const party = await tx.party.findUnique({ where: { id: input.partyId }, include: { touchpoints: { where: { kind: 'digital' } } } });
         if (!party || party.status !== 'published') throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+        if (!hasValidCashDoorAmount(party)) throw new TRPCError({ code: 'CONFLICT', message: 'Cash-at-door pricing is unavailable for this Party.' });
         const tier = await viewerPartyTier(ctx.user.userId);
         if (!partyTierAllows(tier, party.requiredMembershipTier)) throw new TRPCError({ code: 'FORBIDDEN', message: `${party.requiredMembershipTier === 'black' ? 'Black' : 'Platinum'} membership required.` });
         if (partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'CONFLICT', message: 'This Party is no longer accepting RSVP requests.' });

@@ -253,6 +253,14 @@ describe('events party procedures', () => {
     expect(result).toMatchObject({ accessMode: 'cash-at-door', cashDoorPriceCents: 2500, ticketTiers: [] });
   });
 
+  it('fails closed when a stored cash-at-door Party has no valid cash amount', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', host: { name: 'Avery Parker' }, accessMode: 'cash-at-door', cashDoorPriceCents: null,
+    }));
+
+    await expect(createPublicCaller().events.invite({ partyId: 'party-1' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
   it('redacts a Pop-Up location from every public Party Pass projection', async () => {
     (db.party.findUnique as any).mockResolvedValueOnce(party({
       templateId: 'pop-up', templateConfig: { kind: 'pop-up', locationDisclosure: 'after-approval' }, status: 'published', host: { name: 'Avery Parker' },
@@ -324,6 +332,26 @@ describe('events party procedures', () => {
     expect(result).toMatchObject({ partyId: 'party-1', status: 'rsvp', action: 'view-pass', accessGranted: true });
     expect(db.partyParticipation.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ status: 'rsvp' }) }));
     expect(db.partyTicketOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a cash reservation when the persisted cash amount is invalid', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', accessMode: 'cash-at-door', cashDoorPriceCents: 0, startsAt: new Date('2099-08-10T20:00:00Z'),
+    }));
+
+    await expect(createAuthenticatedCaller('guest-1').events.rsvp.create({ partyId: 'party-1', idempotencyKey: 'rsvp-12345678' })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.partyParticipation.upsert).not.toHaveBeenCalled();
+  });
+
+  it('returns an unavailable pass action for a cash Party with a malformed amount', async () => {
+    (db.partyTouchpoint.findUnique as any).mockResolvedValueOnce({
+      partyId: 'party-1', reference: 'p1_0123456789abcdefghijklmnop', kind: 'digital', status: 'active', lifecyclePolicy: {},
+      party: party({ status: 'published', accessMode: 'cash-at-door', cashDoorPriceCents: null, startsAt: new Date('2099-08-10T20:00:00Z') }),
+    });
+
+    const result = await createPublicCaller().events.pass.resolve({ touchpointRef: 'p1_0123456789abcdefghijklmnop' });
+
+    expect(result).toEqual(expect.objectContaining({ action: 'unavailable', guest: expect.objectContaining({ accessGranted: false }) }));
   });
 
   it('fails closed for a Platinum Party when the authenticated member lacks the server entitlement', async () => {

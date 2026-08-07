@@ -1,4 +1,22 @@
 node_modules/
 dist/
-.env
 *.log
+
+# Local environment configuration. Commit only the redacted .env.example template.
+.env
+.env.*
+!.env.example
+
+# Private keys, certificates, and service-account exports must remain local.
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+service-account*.json
+credentials*.json
+secrets/
+.secrets/

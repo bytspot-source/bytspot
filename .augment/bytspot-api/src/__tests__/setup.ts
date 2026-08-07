@@ -133,6 +133,54 @@ vi.mock('../lib/db', () => {
       upsert: vi.fn().mockResolvedValue({ id: 'f-1' }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    // Legacy write sentinels: Party tests assert these stores are untouched.
+    groupEvent: { upsert: vi.fn() },
+    groupEventGuest: { upsert: vi.fn() },
+    party: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    partyTouchpoint: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+    },
+    partyParticipation: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      count: vi.fn().mockResolvedValue(0),
+      upsert: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
+    membershipEntitlement: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
+    partyConnection: {
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn(),
+    },
+    partyTicketOrder: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      count: vi.fn().mockResolvedValue(0),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    partyAppleDiscoveryJob: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      update: vi.fn(),
+    },
+    checkoutAttempt: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
+      count: vi.fn().mockResolvedValue(0),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
     complianceLog: {
       create: vi.fn().mockResolvedValue({ id: 'cl-1' }),
     },
@@ -194,6 +242,8 @@ vi.mock('../config', () => ({
     ticketmasterApiKey: '',
     googlePlacesApiKey: '',
 	    googleClientIds: [],
+    cloudinaryUrl: 'cloudinary://test',
+    appleAdvancedAppClipProvisioningEnabled: false,
 	    appleClientIds: [],
     apnsKeyId: '',
     apnsTeamId: '',
@@ -201,6 +251,11 @@ vi.mock('../config', () => ({
     apnsBundleId: 'com.bytspot.app',
   },
   printConfigDiagnostics: vi.fn(),
+}));
+
+vi.mock('../lib/cloudinary', () => ({
+  uploadPartyImage: vi.fn().mockImplementation(async (_dataUri: string, publicId: string) =>
+    `https://res.cloudinary.com/bytspot/image/upload/${publicId}.jpg`),
 }));
 
 // ── Mock email ────────────────────────────────────────────

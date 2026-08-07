@@ -23,6 +23,14 @@ async function dispatchStripeEvent(event: Stripe.Event) {
     });
   }
 
+  const object = event.data.object as { metadata?: Record<string, string> };
+  if (object.metadata?.flow === 'party.ticket') {
+    return caller.events.tickets.webhook({
+      type: event.type,
+      data: { object: event.data.object as any },
+    });
+  }
+
   return caller.subscription.webhook({
     type: event.type,
     data: { object: event.data.object as any },

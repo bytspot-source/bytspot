@@ -48,6 +48,8 @@ const envSchema = z.object({
   GOOGLE_PLACES_API_KEY:  z.string().default(''),
   GOOGLE_CLIENT_IDS:      z.string().default(''),
   GOOGLE_CLIENT_ID:       z.string().default(''),
+  CLOUDINARY_URL:         z.string().default(''),
+  APPLE_ADVANCED_APP_CLIP_PROVISIONING_ENABLED: z.enum(['true', 'false']).default('false'),
 	  APPLE_CLIENT_IDS:       z.string().default(''),
 	  APPLE_CLIENT_ID:        z.string().default('com.bytspot.app'),
   APNS_KEY_ID:            z.string().default(''),
@@ -108,6 +110,8 @@ export const config = {
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
   googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY,
   googleClientIds: [...parseCsv(env.GOOGLE_CLIENT_IDS), env.GOOGLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
+  cloudinaryUrl: env.CLOUDINARY_URL,
+  appleAdvancedAppClipProvisioningEnabled: env.APPLE_ADVANCED_APP_CLIP_PROVISIONING_ENABLED === 'true',
 	  appleClientIds: [...parseCsv(env.APPLE_CLIENT_IDS), env.APPLE_CLIENT_ID].map((id) => id.trim()).filter(Boolean),
   apnsKeyId: env.APNS_KEY_ID,
   apnsTeamId: env.APNS_TEAM_ID,
@@ -133,6 +137,8 @@ export function printConfigDiagnostics(): void {
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed disabled');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.googleClientIds.length ? 'ok' : '', 'Google Sign-In', 'Google auth disabled');
+  check(config.cloudinaryUrl, 'Cloudinary', 'Host Studio media uploads disabled');
+  check(config.appleAdvancedAppClipProvisioningEnabled ? 'ok' : '', 'Apple Discovery worker', 'advanced App Clip provisioning queued safely');
 	  check(config.appleClientIds.length ? 'ok' : '', 'Sign in with Apple', 'Apple auth disabled');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
   check(config.bytspotAdminEmails.length || config.bytspotInternalOpsEmails.length ? 'ok' : '', 'Admin approval groups', 'provider approvals require admin email allowlist');

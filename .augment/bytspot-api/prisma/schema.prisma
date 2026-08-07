@@ -53,6 +53,14 @@ model User {
   savedVehicles  Vehicle[]
   complianceLogs ComplianceLog[]
   passwordResetTokens PasswordResetToken[]
+  hostedParties       Party[]           @relation("hostedParties")
+  partyParticipations PartyParticipation[]
+  membershipEntitlements MembershipEntitlement[]
+  partyConnectionsFrom PartyConnection[] @relation("partyConnectionFrom")
+  partyConnectionsTo   PartyConnection[] @relation("partyConnectionTo")
+  partyTicketOrders    PartyTicketOrder[]
+  checkoutAttempts     CheckoutAttempt[]
+  appleDiscoveryJobs   PartyAppleDiscoveryJob[] @relation("requestedAppleDiscoveryJobs")
 
   @@map("users")
 }
@@ -679,4 +687,209 @@ model RevokedPatch {
   @@index([vendorId, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
   @@map("revoked_patches")
+}
+
+// ─── Party Operating System (Host Studio) ────────────────
+model Party {
+  id                     String    @id @default(cuid())
+  hostId                 String    @map("host_id")
+  idempotencyKey         String    @map("idempotency_key")
+  draftFingerprint       String    @map("draft_fingerprint")
+  templateId             String    @map("template_id")
+  title                   String
+  tagline                 String
+  startsAt                DateTime  @map("starts_at")
+  venueName               String    @map("venue_name")
+  capacity                Int
+  accessMode              String    @map("access_mode")
+  cashDoorPriceCents      Int?      @map("cash_door_price_cents")
+  requiredMembershipTier String    @default("green") @map("required_membership_tier")
+  audienceCircleIds      String[]  @default([]) @map("audience_circle_ids")
+  coverImageUrl          String?   @map("cover_image_url")
+  photoUrls              String[]  @default([]) @map("photo_urls")
+  creatorLinks           Json      @map("creator_links")
+  itinerary              Json
+  ticketTiers            Json      @map("ticket_tiers")
+  cohosts                Json
+  templateConfig         Json      @map("template_config")
+  source                 String    @default("host-studio")
+  status                 String    @default("draft")
+  passCode               String?   @unique @map("pass_code")
+  publishedAt            DateTime? @map("published_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  host        User              @relation("hostedParties", fields: [hostId], references: [id], onDelete: Cascade)
+  touchpoints PartyTouchpoint[]
+  participations PartyParticipation[]
+  connections    PartyConnection[]
+  ticketOrders   PartyTicketOrder[]
+  checkoutAttempts CheckoutAttempt[]
+  appleDiscoveryJob PartyAppleDiscoveryJob?
+
+  @@unique([hostId, idempotencyKey])
+  @@index([hostId, status, createdAt(sort: Desc)])
+  @@index([status, startsAt])
+  @@map("parties")
+}
+
+/// Durable, server-authoritative record of a premium Apple Advanced App Clip
+/// Experience request. Only a configured worker may transition this record
+/// beyond configuration_required; hosts never receive Apple credentials.
+model PartyAppleDiscoveryJob {
+  id                String   @id @default(cuid())
+  partyId           String   @unique @map("party_id")
+  requestedByUserId String   @map("requested_by_user_id")
+  idempotencyKey    String   @map("idempotency_key")
+  requestFingerprint String  @map("request_fingerprint")
+  hostTier          String   @map("host_tier")
+  status            String   @default("queued")
+  request           Json
+  appleExperienceId String?  @map("apple_experience_id")
+  failureCode       String?  @map("failure_code")
+  attemptCount      Int      @default(0) @map("attempt_count")
+  queuedAt          DateTime @default(now()) @map("queued_at")
+  lastAttemptAt     DateTime? @map("last_attempt_at")
+  completedAt       DateTime? @map("completed_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  party       Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  requestedBy User  @relation("requestedAppleDiscoveryJobs", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, idempotencyKey])
+  @@index([status, updatedAt(sort: Desc)])
+  @@index([requestedByUserId, createdAt(sort: Desc)])
+  @@map("party_apple_discovery_jobs")
+}
+
+model PartyTouchpoint {
+  id              String   @id @default(cuid())
+  partyId         String   @map("party_id")
+  reference       String   @unique
+  kind            String
+  lifecyclePolicy Json     @map("lifecycle_policy")
+  status          String   @default("active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, kind])
+  @@index([partyId, status])
+  @@map("party_touchpoints")
+}
+
+/// Party-native participation is deliberately separate from legacy
+/// GroupEventGuest eligibility and access state.
+model PartyParticipation {
+  id          String    @id @default(cuid())
+  partyId     String    @map("party_id")
+  userId      String    @map("user_id")
+  status      String    @default("rsvp") // rsvp | pending | approved | declined | checked_in | cancelled
+  checkedInAt DateTime? @map("checked_in_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, userId])
+  @@index([partyId, status])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("party_participations")
+}
+
+/// Explicit server authority for tiers beyond the legacy isPremium → Platinum
+/// compatibility mapping. Missing, revoked, or expired records grant nothing.
+model MembershipEntitlement {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tier      String
+  status    String    @default("active")
+  expiresAt DateTime? @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, tier, status])
+  @@map("membership_entitlements")
+}
+
+/// A retention edge is materialized only after two Party attendees have each
+/// been server-verified at check-in. User ids are stored in canonical order.
+model PartyConnection {
+  id          String   @id @default(cuid())
+  partyId     String   @map("party_id")
+  fromUserId  String   @map("from_user_id")
+  toUserId    String   @map("to_user_id")
+  verifiedAt  DateTime @default(now()) @map("verified_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  fromUser User @relation("partyConnectionFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("partyConnectionTo", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, fromUserId, toUserId])
+  @@index([fromUserId, verifiedAt(sort: Desc)])
+  @@index([toUserId, verifiedAt(sort: Desc)])
+  @@map("party_connections")
+}
+
+/// Stripe is the only authority that can transition a Party ticket order to
+/// paid. Browser/App Clip return URLs are intentionally not fulfillment input.
+model PartyTicketOrder {
+  id                    String    @id @default(cuid())
+  partyId               String    @map("party_id")
+  userId                String    @map("user_id")
+  ticketTierName        String    @map("ticket_tier_name")
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("usd")
+  status                String    @default("pending_checkout")
+  idempotencyKey        String    @map("idempotency_key")
+  stripeSessionId       String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  checkoutExpiresAt     DateTime? @map("checkout_expires_at")
+  paidAt                DateTime? @map("paid_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkoutAttempts CheckoutAttempt[]
+
+  @@unique([partyId, userId])
+  @@index([partyId, status])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("party_ticket_orders")
+}
+
+/// Immutable Stripe Checkout history. A row is never reused for a retry;
+/// reconciliation may only advance pending -> fulfilled | expired | failed.
+model CheckoutAttempt {
+  id                    String    @id @default(cuid())
+  partyTicketOrderId    String    @map("party_ticket_order_id")
+  partyId               String    @map("party_id")
+  userId                String    @map("user_id")
+  ticketTierName        String    @map("ticket_tier_name")
+  amountCents           Int       @map("amount_cents")
+  currency              String    @default("usd")
+  stripeSessionId       String?   @unique @map("stripe_session_id")
+  stripePaymentIntentId String?   @unique @map("stripe_payment_intent_id")
+  reconciliationState   String    @default("pending") @map("reconciliation_state")
+  checkoutExpiresAt     DateTime  @map("checkout_expires_at")
+  reconciledAt          DateTime? @map("reconciled_at")
+  failureCode           String?   @map("failure_code")
+  createdAt             DateTime  @default(now()) @map("created_at")
+
+  order PartyTicketOrder @relation(fields: [partyTicketOrderId], references: [id], onDelete: Restrict)
+  party Party            @relation(fields: [partyId], references: [id], onDelete: Restrict)
+  user  User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([partyTicketOrderId, reconciliationState, createdAt(sort: Desc)])
+  @@index([partyId, ticketTierName, reconciliationState])
+  @@index([userId, reconciliationState, createdAt(sort: Desc)])
+  @@map("checkout_attempts")
 }

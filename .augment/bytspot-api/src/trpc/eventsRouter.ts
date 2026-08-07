@@ -253,12 +253,15 @@ function readPartyPassPolicy(value: unknown): PartyPassPolicy {
     : { version: 1, before: { action: 'unavailable' }, atDoor: { action: 'unavailable' }, during: { action: 'unavailable' }, after: { action: 'unavailable' } };
 }
 
-function partyLocationForPublicInvite(party: { venueName: string; templateId: string; templateConfig: unknown }) {
+function partyLocationForPublicInvite(party: { venueName: string; templateId: string; accessMode: string; templateConfig: unknown }) {
   const config = partyTemplateConfig.safeParse(party.templateConfig);
   const explicitlyPublicPopUp = config.success && config.data.kind === 'pop-up' && config.data.locationDisclosure === 'public';
-  // A Pop-Up must opt in to public disclosure. Historic or malformed JSON must
-  // never turn a hidden venue into a public one.
-  const locationDisclosure = party.templateId === 'pop-up' && !explicitlyPublicPopUp ? 'after-approval' : 'public';
+  // Approval-gated and Private Party locations are never public. A Pop-Up must
+  // opt in explicitly; malformed historic data must fail closed as well.
+  const locationIsPrivate = party.accessMode === 'private-approval'
+    || party.templateId === 'private-party'
+    || (party.templateId === 'pop-up' && !explicitlyPublicPopUp);
+  const locationDisclosure = locationIsPrivate ? 'after-approval' : 'public';
   return {
     locationDisclosure,
     locationLabel: locationDisclosure === 'after-approval' ? 'Location shared after approval' : party.venueName,

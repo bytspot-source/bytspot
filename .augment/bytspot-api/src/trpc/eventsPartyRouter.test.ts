@@ -133,6 +133,21 @@ describe('events party procedures', () => {
     expect(db.partyAppleDiscoveryJob.upsert).not.toHaveBeenCalled();
   });
 
+  it('refuses Apple Discovery for an approval-only Private Party even for a Platinum host', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', templateId: 'private-party', accessMode: 'private-approval',
+      templateConfig: { kind: 'private-party', guestPolicy: 'named-guests' },
+    }));
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: true });
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'venue-1', name: 'The Loft', lat: 33.749, lng: -84.388 });
+
+    await expect(createAuthenticatedCaller(HOST).events.discovery.request({
+      partyId: 'party-1', idempotencyKey: 'apple-discovery-12345678', venueId: 'venue-1',
+      card: { title: 'First Listen', subtitle: 'One moment. Your people.' },
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.partyAppleDiscoveryJob.upsert).not.toHaveBeenCalled();
+  });
+
   it('rejects a ticket tier that bypasses the party membership gate', async () => {
     await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
       accessMode: 'paid-ticket', requiredMembershipTier: 'black',
@@ -321,6 +336,28 @@ describe('events party procedures', () => {
     const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
 
     expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });
+  });
+
+  it('redacts an approval-only Private Party location from every public Party Pass projection', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      templateId: 'private-party', accessMode: 'private-approval',
+      templateConfig: { kind: 'private-party', guestPolicy: 'named-guests' },
+      status: 'published', host: { name: 'Avery Parker' }, venueName: 'Secret loft',
+    }));
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval' });
+    expect(result.locationLabel).not.toContain('Secret loft');
+  });
+
+  it('redacts a non-Pop-Up Party location whenever host approval is required', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      accessMode: 'private-approval', status: 'published', host: { name: 'Avery Parker' }, venueName: 'Secret listening room',
+    }));
+    const result = await createPublicCaller().events.invite({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({ locationLabel: 'Location shared after approval', locationDisclosure: 'after-approval', requiresApproval: true });
+    expect(result.locationLabel).not.toContain('Secret listening room');
   });
 
   it('fails closed for a Pop-Up with malformed stored configuration', async () => {

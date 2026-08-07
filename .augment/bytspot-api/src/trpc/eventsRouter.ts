@@ -197,6 +197,11 @@ const partyAppleDiscoveryInput = z.object({
     subtitle: z.string().trim().min(1).max(60),
   }).strict(),
 }).strict();
+const partyArrivalDestinationInput = z.object({
+  partyId: z.string().min(1).max(200),
+  // Hosts bind an existing verified Venue; guest devices never supply a destination.
+  venueId: z.string().min(1).max(200),
+}).strict();
 
 type PartyDraftInput = z.infer<typeof partyDraftInput>;
 type PartyPassPolicy = z.infer<typeof partyPassPolicy>;
@@ -335,6 +340,20 @@ function canProvisionAppleDiscovery(tier: PartyTier): boolean {
 
 function normalizedVenueName(value: string): string {
   return value.trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+}
+
+function isValidVenueCoordinate(latitude: number, longitude: number): boolean {
+  return Number.isFinite(latitude) && Number.isFinite(longitude)
+    && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+}
+
+function appleMapsDirectionsUrl(venue: { name: string; lat: number; lng: number }): string {
+  const query = new URLSearchParams({
+    daddr: `${venue.lat},${venue.lng}`,
+    dirflg: 'd',
+    q: venue.name,
+  });
+  return `http://maps.apple.com/?${query.toString()}`;
 }
 
 function appleDiscoveryFingerprint(value: Record<string, unknown>): string {
@@ -612,6 +631,62 @@ export const eventsRouter = router({
           data: { status, failureCode: status === 'configuration_required' ? 'apple_discovery_worker_unconfigured' : null, queuedAt: new Date() },
         });
         return appleDiscoveryJobResponse(updated, `https://bytspot.app/party/${encodeURIComponent(party.id)}`);
+      }),
+  }),
+
+  /** Verified, consent-free destination guidance. Never accepts or stores guest pickup coordinates. */
+  arrival: router({
+    bindDestination: protectedProcedure
+      .use(rateLimitMiddleware({ windowMs: 60_000, max: 6, label: 'events:arrival:bind-destination' }))
+      .input(partyArrivalDestinationInput)
+      .mutation(async ({ ctx, input }) => {
+        const [party, venue] = await Promise.all([
+          db.party.findUnique({ where: { id: input.partyId } }),
+          db.venue.findUnique({ where: { id: input.venueId }, select: { id: true, name: true, address: true, lat: true, lng: true } }),
+        ]);
+        if (!party || party.hostId !== ctx.user.userId) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+        if (!venue || normalizedVenueName(venue.name) !== normalizedVenueName(party.venueName) || !isValidVenueCoordinate(venue.lat, venue.lng)) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'Select the verified Venue that matches this Party.' });
+        }
+        const destination = await (db as any).partyArrivalDestination.upsert({
+          where: { partyId: party.id },
+          create: { partyId: party.id, venueId: venue.id, boundByUserId: ctx.user.userId },
+          update: {},
+        });
+        if (destination.venueId !== venue.id) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Party already has an immutable arrival destination.' });
+        }
+        return { partyId: party.id, venueId: venue.id, boundAt: destination.boundAt?.toISOString?.() ?? null };
+      }),
+
+    context: protectedProcedure
+      .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'events:arrival:context' }))
+      .input(z.object({ partyId: z.string().min(1).max(200) }))
+      .query(async ({ ctx, input }) => {
+        const party = await db.party.findUnique({
+          where: { id: input.partyId },
+          include: {
+            arrivalDestination: { include: { venue: { select: { id: true, name: true, address: true, lat: true, lng: true } } } },
+            participations: { where: { userId: ctx.user.userId }, select: { status: true } },
+          },
+        });
+        if (!party || party.status !== 'published') throw new TRPCError({ code: 'NOT_FOUND', message: 'Party arrival is unavailable.' });
+        const participation = party.participations[0];
+        const hasPartyAccess = party.hostId === ctx.user.userId
+          || party.accessMode === 'open-entry'
+          || ['rsvp', 'approved', 'checked_in'].includes(participation?.status ?? '');
+        if (!hasPartyAccess) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
+        const venue = party.arrivalDestination?.venue;
+        if (!venue || !isValidVenueCoordinate(venue.lat, venue.lng)) {
+          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'A verified arrival destination has not been configured for this Party.' });
+        }
+        return {
+          partyId: party.id,
+          destination: { venueId: venue.id, name: venue.name, address: venue.address, latitude: venue.lat, longitude: venue.lng },
+          map: { provider: 'apple-maps' as const, directionsUrl: appleMapsDirectionsUrl(venue) },
+          traffic: { source: 'device' as const, status: 'unavailable' as const, message: 'Live traffic is managed by Apple Maps on this device.' },
+          ride: { status: 'unconfigured' as const, message: 'Ride dispatch is not configured for this Party.' },
+        };
       }),
   }),
 

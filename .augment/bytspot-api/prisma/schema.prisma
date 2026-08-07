@@ -61,6 +61,7 @@ model User {
   partyTicketOrders    PartyTicketOrder[]
   checkoutAttempts     CheckoutAttempt[]
   appleDiscoveryJobs   PartyAppleDiscoveryJob[] @relation("requestedAppleDiscoveryJobs")
+  boundPartyArrivalDestinations PartyArrivalDestination[] @relation("boundPartyArrivalDestinations")
 
   @@map("users")
 }
@@ -155,6 +156,7 @@ model Venue {
   checkIns    CheckIn[]
   savedBy     SavedSpot[]
   reviews     Review[]
+  partyArrivalDestinations PartyArrivalDestination[]
 
   @@map("venues")
 }
@@ -726,11 +728,31 @@ model Party {
   ticketOrders   PartyTicketOrder[]
   checkoutAttempts CheckoutAttempt[]
   appleDiscoveryJob PartyAppleDiscoveryJob?
+  arrivalDestination PartyArrivalDestination?
 
   @@unique([hostId, idempotencyKey])
   @@index([hostId, status, createdAt(sort: Desc)])
   @@index([status, startsAt])
   @@map("parties")
+}
+
+/// Immutable, host-bound verified destination for Party arrival guidance.
+/// Guest pickup coordinates are never stored on this record.
+model PartyArrivalDestination {
+  id            String   @id @default(cuid())
+  partyId       String   @unique @map("party_id")
+  venueId       String   @map("venue_id")
+  boundByUserId String   @map("bound_by_user_id")
+  boundAt       DateTime @default(now()) @map("bound_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  party   Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  venue   Venue @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  boundBy User  @relation("boundPartyArrivalDestinations", fields: [boundByUserId], references: [id], onDelete: Restrict)
+
+  @@index([venueId])
+  @@index([boundByUserId, boundAt(sort: Desc)])
+  @@map("party_arrival_destinations")
 }
 
 /// Durable, server-authoritative record of a premium Apple Advanced App Clip

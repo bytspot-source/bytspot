@@ -161,6 +161,63 @@ describe('events party procedures', () => {
     expect(db.partyAppleDiscoveryJob.update).not.toHaveBeenCalled();
   });
 
+  it('binds an immutable verified Venue as the host-only Party arrival destination', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published' }));
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'venue-1', name: 'The Loft', address: '100 Peachtree St', lat: 33.749, lng: -84.388 });
+    (db.partyArrivalDestination.upsert as any).mockImplementationOnce(({ create }: any) => ({ id: 'arrival-1', ...create, boundAt: new Date('2026-08-08T12:00:00Z') }));
+
+    await expect(createAuthenticatedCaller(HOST).events.arrival.bindDestination({ partyId: 'party-1', venueId: 'venue-1' }))
+      .resolves.toMatchObject({ partyId: 'party-1', venueId: 'venue-1', boundAt: '2026-08-08T12:00:00.000Z' });
+    expect(db.partyArrivalDestination.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { partyId: 'party-1' },
+      create: expect.objectContaining({ partyId: 'party-1', venueId: 'venue-1', boundByUserId: HOST }),
+      update: {},
+    }));
+  });
+
+  it('rejects a mismatched or changed Party arrival destination without writing it', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published' }));
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'venue-2', name: 'Other Loft', address: '200 Peachtree St', lat: 33.75, lng: -84.39 });
+
+    await expect(createAuthenticatedCaller(HOST).events.arrival.bindDestination({ partyId: 'party-1', venueId: 'venue-2' }))
+      .rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(db.partyArrivalDestination.upsert).not.toHaveBeenCalled();
+  });
+
+  it('returns only the verified destination and device-managed traffic label to an access-granted guest', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', arrivalDestination: {
+        venue: { id: 'venue-1', name: 'The Loft', address: '100 Peachtree St', lat: 33.749, lng: -84.388 },
+      },
+      participations: [{ status: 'approved' }],
+    }));
+
+    const result = await createAuthenticatedCaller('guest-1').events.arrival.context({ partyId: 'party-1' });
+
+    expect(result).toMatchObject({
+      partyId: 'party-1',
+      destination: { venueId: 'venue-1', name: 'The Loft', address: '100 Peachtree St', latitude: 33.749, longitude: -84.388 },
+      map: { provider: 'apple-maps' },
+      traffic: { source: 'device', status: 'unavailable' },
+      ride: { status: 'unconfigured' },
+    });
+    expect(result.map.directionsUrl).toContain('daddr=33.749%2C-84.388');
+    expect(result).not.toHaveProperty('pickup');
+    expect(result).not.toHaveProperty('origin');
+  });
+
+  it('does not reveal an arrival destination to a pending private-approval guest', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', accessMode: 'private-approval',
+      templateId: 'private-party', templateConfig: { kind: 'private-party', guestPolicy: 'named-guests' },
+      arrivalDestination: { venue: { id: 'venue-1', name: 'The Loft', address: '100 Peachtree St', lat: 33.749, lng: -84.388 } },
+      participations: [{ status: 'pending' }],
+    }));
+
+    await expect(createAuthenticatedCaller('guest-1').events.arrival.context({ partyId: 'party-1' }))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
   it('rejects a ticket tier that bypasses the party membership gate', async () => {
     await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
       accessMode: 'paid-ticket', requiredMembershipTier: 'black',

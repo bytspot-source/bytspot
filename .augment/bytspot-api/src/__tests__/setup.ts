@@ -173,6 +173,9 @@ vi.mock('../lib/db', () => {
       upsert: vi.fn(),
       update: vi.fn(),
     },
+    partyArrivalDestination: {
+      upsert: vi.fn(),
+    },
     checkoutAttempt: {
       findUnique: vi.fn().mockResolvedValue(null),
       findFirst: vi.fn().mockResolvedValue(null),

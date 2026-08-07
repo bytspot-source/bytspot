@@ -595,8 +595,12 @@ export const eventsRouter = router({
       .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'events:discovery:retry' }))
       .input(z.object({ partyId: z.string().min(1).max(200), idempotencyKey }))
       .mutation(async ({ ctx, input }) => {
-        const party = await db.party.findUnique({ where: { id: input.partyId }, select: { id: true, hostId: true } });
+        const party = await db.party.findUnique({ where: { id: input.partyId } });
         if (!party || party.hostId !== ctx.user.userId) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+        if (party.status !== 'published') throw new TRPCError({ code: 'CONFLICT', message: 'Publish the Party Pass before retrying Apple Discovery.' });
+        if (partyLocationForPublicInvite(party).locationDisclosure !== 'public') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Hidden Party locations cannot be submitted to Apple Discovery.' });
+        }
         const tier = await viewerPartyTier(ctx.user.userId);
         if (!canProvisionAppleDiscovery(tier)) throw new TRPCError({ code: 'FORBIDDEN', message: 'Apple Discovery is available to Platinum and Black hosts.' });
         const job = await (db as any).partyAppleDiscoveryJob.findUnique({ where: { partyId: party.id } });

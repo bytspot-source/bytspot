@@ -148,6 +148,19 @@ describe('events party procedures', () => {
     expect(db.partyAppleDiscoveryJob.upsert).not.toHaveBeenCalled();
   });
 
+  it('does not requeue a legacy Discovery job after a Party location becomes private', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({
+      status: 'published', templateId: 'private-party', accessMode: 'private-approval',
+      templateConfig: { kind: 'private-party', guestPolicy: 'named-guests' },
+    }));
+
+    await expect(createAuthenticatedCaller(HOST).events.discovery.retry({
+      partyId: 'party-1', idempotencyKey: 'apple-discovery-12345678',
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.partyAppleDiscoveryJob.findUnique).not.toHaveBeenCalled();
+    expect(db.partyAppleDiscoveryJob.update).not.toHaveBeenCalled();
+  });
+
   it('rejects a ticket tier that bypasses the party membership gate', async () => {
     await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
       accessMode: 'paid-ticket', requiredMembershipTier: 'black',

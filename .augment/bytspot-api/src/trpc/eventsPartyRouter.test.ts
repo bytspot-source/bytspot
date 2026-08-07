@@ -164,6 +164,7 @@ describe('events party procedures', () => {
   it('binds an immutable verified Venue as the host-only Party arrival destination', async () => {
     (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published' }));
     (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'venue-1', name: 'The Loft', address: '100 Peachtree St', lat: 33.749, lng: -84.388 });
+    (db.hardwarePatch.findFirst as any).mockResolvedValueOnce({ id: 'venue-patch-1' });
     (db.partyArrivalDestination.upsert as any).mockImplementationOnce(({ create }: any) => ({ id: 'arrival-1', ...create, boundAt: new Date('2026-08-08T12:00:00Z') }));
 
     await expect(createAuthenticatedCaller(HOST).events.arrival.bindDestination({ partyId: 'party-1', venueId: 'venue-1' }))
@@ -173,6 +174,29 @@ describe('events party procedures', () => {
       create: expect.objectContaining({ partyId: 'party-1', venueId: 'venue-1', boundByUserId: HOST }),
       update: {},
     }));
+    expect(db.hardwarePatch.findFirst).toHaveBeenCalledWith({
+      where: { status: 'bound', bindingType: 'venue', bindingId: 'venue-1' }, select: { id: true },
+    });
+  });
+
+  it('rejects an exact-name, valid-coordinate Venue without a verified hardware patch', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'published' }));
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'venue-1', name: 'The Loft', address: '100 Peachtree St', lat: 33.749, lng: -84.388 });
+    (db.hardwarePatch.findFirst as any).mockResolvedValueOnce(null);
+
+    await expect(createAuthenticatedCaller(HOST).events.arrival.bindDestination({ partyId: 'party-1', venueId: 'venue-1' }))
+      .rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(db.partyArrivalDestination.upsert).not.toHaveBeenCalled();
+  });
+
+  it('does not bind an arrival destination before the Party is published', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce(party({ status: 'draft' }));
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'venue-1', name: 'The Loft', address: '100 Peachtree St', lat: 33.749, lng: -84.388 });
+
+    await expect(createAuthenticatedCaller(HOST).events.arrival.bindDestination({ partyId: 'party-1', venueId: 'venue-1' }))
+      .rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.hardwarePatch.findFirst).not.toHaveBeenCalled();
+    expect(db.partyArrivalDestination.upsert).not.toHaveBeenCalled();
   });
 
   it('rejects a mismatched or changed Party arrival destination without writing it', async () => {

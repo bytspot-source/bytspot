@@ -645,9 +645,15 @@ export const eventsRouter = router({
           db.venue.findUnique({ where: { id: input.venueId }, select: { id: true, name: true, address: true, lat: true, lng: true } }),
         ]);
         if (!party || party.hostId !== ctx.user.userId) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+        if (party.status !== 'published') throw new TRPCError({ code: 'CONFLICT', message: 'Publish the Party Pass before enabling arrival guidance.' });
         if (!venue || normalizedVenueName(venue.name) !== normalizedVenueName(party.venueName) || !isValidVenueCoordinate(venue.lat, venue.lng)) {
           throw new TRPCError({ code: 'BAD_REQUEST', message: 'Select the verified Venue that matches this Party.' });
         }
+        const verifiedVenuePatch = await db.hardwarePatch.findFirst({
+          where: { status: 'bound', bindingType: 'venue', bindingId: venue.id },
+          select: { id: true },
+        });
+        if (!verifiedVenuePatch) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Select a verified Venue for arrival guidance.' });
         const destination = await (db as any).partyArrivalDestination.upsert({
           where: { partyId: party.id },
           create: { partyId: party.id, venueId: venue.id, boundByUserId: ctx.user.userId },

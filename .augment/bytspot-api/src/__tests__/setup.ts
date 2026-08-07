@@ -33,6 +33,7 @@ vi.mock('../lib/db', () => {
     },
     hardwarePatch: {
       findUnique: vi.fn(),
+      findFirst: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
       update: vi.fn(),

@@ -202,6 +202,8 @@ const partyArrivalDestinationInput = z.object({
   // Hosts bind an existing verified Venue; guest devices never supply a destination.
   venueId: z.string().min(1).max(200),
 }).strict();
+const blackPartyOperationsInput = z.object({ partyId: z.string().min(1).max(200) }).strict();
+const blackAnalyticsMinimumPartyCohort = 5;
 
 type PartyDraftInput = z.infer<typeof partyDraftInput>;
 type PartyPassPolicy = z.infer<typeof partyPassPolicy>;
@@ -386,6 +388,14 @@ function hasValidCashDoorAmount(party: { accessMode: string; cashDoorPriceCents?
 /** PostgreSQL transaction lock: serialize capacity admissions for one Party across all API instances. */
 async function lockPartyAdmission(tx: any, partyId: string): Promise<void> {
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${partyId}))`;
+}
+
+function roundedAggregateCount(value: number): number {
+  return Math.floor(Math.max(0, value) / 5) * 5;
+}
+
+function blackHostRequired(tier: PartyTier): void {
+  if (tier !== 'black') throw new TRPCError({ code: 'FORBIDDEN', message: 'Active Black membership is required for Party operations analytics.' });
 }
 
 function actionForPartyViewer(args: {
@@ -637,6 +647,69 @@ export const eventsRouter = router({
         });
         return appleDiscoveryJobResponse(updated, `https://bytspot.app/party/${encodeURIComponent(party.id)}`);
       }),
+  }),
+
+  /** Black host readiness and privacy-safe, all-time aggregate Party funnel. */
+  black: router({
+    operations: router({
+      readiness: protectedProcedure
+        .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'events:black:operations:readiness' }))
+        .input(blackPartyOperationsInput)
+        .query(async ({ ctx, input }) => {
+          const [party, tier] = await Promise.all([
+            db.party.findUnique({
+              where: { id: input.partyId },
+              select: { id: true, hostId: true, status: true, accessMode: true, capacity: true, cohosts: true, arrivalDestination: { select: { id: true } } },
+            }),
+            viewerPartyTier(ctx.user.userId),
+          ]);
+          if (!party || party.hostId !== ctx.user.userId) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+          blackHostRequired(tier);
+          return {
+            partyId: party.id,
+            tier: 'black' as const,
+            status: party.status,
+            readiness: {
+              accessMode: party.accessMode,
+              capacity: party.capacity,
+              verifiedArrivalConfigured: Boolean(party.arrivalDestination),
+              teamAssignments: Array.isArray(party.cohosts) ? party.cohosts.length : 0,
+            },
+          };
+        }),
+    }),
+
+    analytics: router({
+      funnel: protectedProcedure
+        .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'events:black:analytics:funnel' }))
+        .query(async ({ ctx }) => {
+          const tier = await viewerPartyTier(ctx.user.userId);
+          blackHostRequired(tier);
+          const parties = await db.party.findMany({ where: { hostId: ctx.user.userId, status: 'published' }, select: { id: true } });
+          if (parties.length < blackAnalyticsMinimumPartyCohort) {
+            return { state: 'suppressed' as const, privacy: { minimumPartyCohort: blackAnalyticsMinimumPartyCohort, rounding: 'nearest-5' as const }, funnel: null };
+          }
+          const partyIds = parties.map((party) => party.id);
+          const [participations, paidTickets, verifiedConnections] = await Promise.all([
+            (db as any).partyParticipation.groupBy({ by: ['status'], where: { partyId: { in: partyIds } }, _count: { status: true } }),
+            (db as any).partyTicketOrder.count({ where: { partyId: { in: partyIds }, status: 'paid' } }),
+            (db as any).partyConnection.count({ where: { partyId: { in: partyIds } } }),
+          ]);
+          const participationCounts = new Map((participations as Array<{ status: string; _count: { status: number } }>).map((entry) => [entry.status, entry._count.status]));
+          const admitted = ['rsvp', 'approved', 'checked_in'].reduce((total, status) => total + (participationCounts.get(status) ?? 0), 0);
+          return {
+            state: 'available' as const,
+            privacy: { minimumPartyCohort: blackAnalyticsMinimumPartyCohort, rounding: 'nearest-5' as const },
+            funnel: {
+              publishedParties: roundedAggregateCount(parties.length),
+              admitted: roundedAggregateCount(admitted),
+              checkedIn: roundedAggregateCount(participationCounts.get('checked_in') ?? 0),
+              paidTickets: roundedAggregateCount(paidTickets),
+              verifiedConnections: roundedAggregateCount(verifiedConnections),
+            },
+          };
+        }),
+    }),
   }),
 
   /** Verified, consent-free destination guidance. Never accepts or stores guest pickup coordinates. */

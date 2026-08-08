@@ -139,6 +139,7 @@ vi.mock('../lib/db', () => {
     groupEventGuest: { upsert: vi.fn() },
     party: {
       findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
@@ -151,6 +152,7 @@ vi.mock('../lib/db', () => {
       findUnique: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([]),
       count: vi.fn().mockResolvedValue(0),
+      groupBy: vi.fn().mockResolvedValue([]),
       upsert: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
@@ -160,6 +162,7 @@ vi.mock('../lib/db', () => {
     },
     partyConnection: {
       findMany: vi.fn().mockResolvedValue([]),
+      count: vi.fn().mockResolvedValue(0),
       create: vi.fn(),
     },
     partyTicketOrder: {

@@ -242,6 +242,52 @@ describe('events party procedures', () => {
       .rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
+  it('requires an active Black entitlement for Party operations readiness', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce({ id: 'party-1', hostId: HOST, status: 'published', accessMode: 'free-rsvp', capacity: 80, cohosts: [], arrivalDestination: null });
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: true });
+    (db.membershipEntitlement.findFirst as any).mockResolvedValueOnce(null);
+
+    await expect(createAuthenticatedCaller(HOST).events.black.operations.readiness({ partyId: 'party-1' }))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('returns Black operations readiness without participant identities', async () => {
+    (db.party.findUnique as any).mockResolvedValueOnce({ id: 'party-1', hostId: HOST, status: 'published', accessMode: 'private-approval', capacity: 80, cohosts: [{ role: 'cohost' }, { role: 'door' }], arrivalDestination: { id: 'arrival-1' } });
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+    (db.membershipEntitlement.findFirst as any).mockResolvedValueOnce({ id: 'black-entitlement' });
+
+    await expect(createAuthenticatedCaller(HOST).events.black.operations.readiness({ partyId: 'party-1' }))
+      .resolves.toEqual({ partyId: 'party-1', tier: 'black', status: 'published', readiness: { accessMode: 'private-approval', capacity: 80, verifiedArrivalConfigured: true, teamAssignments: 2 } });
+  });
+
+  it('suppresses Black funnel metrics below the minimum Party cohort', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+    (db.membershipEntitlement.findFirst as any).mockResolvedValueOnce({ id: 'black-entitlement' });
+    (db.party.findMany as any).mockResolvedValueOnce([{ id: 'party-1' }, { id: 'party-2' }, { id: 'party-3' }, { id: 'party-4' }]);
+
+    await expect(createAuthenticatedCaller(HOST).events.black.analytics.funnel())
+      .resolves.toEqual({ state: 'suppressed', privacy: { minimumPartyCohort: 5, rounding: 'nearest-5' }, funnel: null });
+    expect(db.partyParticipation.groupBy).not.toHaveBeenCalled();
+    expect(db.partyTicketOrder.count).not.toHaveBeenCalled();
+    expect(db.partyConnection.count).not.toHaveBeenCalled();
+  });
+
+  it('returns only rounded aggregate Black funnel counts for a qualifying Party cohort', async () => {
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+    (db.membershipEntitlement.findFirst as any).mockResolvedValueOnce({ id: 'black-entitlement' });
+    (db.party.findMany as any).mockResolvedValueOnce([{ id: 'party-1' }, { id: 'party-2' }, { id: 'party-3' }, { id: 'party-4' }, { id: 'party-5' }, { id: 'party-6' }]);
+    (db.partyParticipation.groupBy as any).mockResolvedValueOnce([{ status: 'rsvp', _count: { status: 7 } }, { status: 'approved', _count: { status: 4 } }, { status: 'checked_in', _count: { status: 6 } }]);
+    (db.partyTicketOrder.count as any).mockResolvedValueOnce(9);
+    (db.partyConnection.count as any).mockResolvedValueOnce(3);
+
+    await expect(createAuthenticatedCaller(HOST).events.black.analytics.funnel())
+      .resolves.toEqual({
+        state: 'available',
+        privacy: { minimumPartyCohort: 5, rounding: 'nearest-5' },
+        funnel: { publishedParties: 5, admitted: 15, checkedIn: 5, paidTickets: 5, verifiedConnections: 0 },
+      });
+  });
+
   it('rejects a ticket tier that bypasses the party membership gate', async () => {
     await expect(createAuthenticatedCaller(HOST).events.drafts.create(draft({
       accessMode: 'paid-ticket', requiredMembershipTier: 'black',

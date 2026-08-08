@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const isDev = (process.env.NODE_ENV || 'development') === 'development';
+const httpsUrl = z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Must use HTTPS');
 
 /**
  * Env var schema — parsed and validated at import time.
@@ -40,8 +41,8 @@ const envSchema = z.object({
   APNS_TEAM_ID:           z.string().default(''),
   APNS_KEY_PATH:          z.string().default(''),
   APNS_BUNDLE_ID:         z.string().default('com.bytspot.app'),
-  PUBLIC_API_URL:         z.string().url().default('https://bytspot-api.onrender.com'),
-  PARTY_SHARE_BASE_URL:   z.string().url().default('https://bytspot.app'),
+  PUBLIC_API_URL:         httpsUrl.default('https://bytspot-api.onrender.com'),
+  PARTY_SHARE_BASE_URL:   httpsUrl.default('https://bytspot.app'),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks

@@ -37,6 +37,7 @@ beforeEach(() => {
   party.findUnique = async () => null;
   party.findFirst = async () => null;
   party.create = async () => ({ id: 'party-1' });
+  party.update = async () => ({ id: 'party-1' });
   party.updateMany = async () => ({ count: 1 });
   partyMedia.deleteMany = async () => ({ count: 0 });
   partyMedia.upsert = async () => ({ id: 'media-1' });
@@ -47,7 +48,7 @@ test('Party draft creation requires authentication', async () => {
   await assert.rejects(() => publicCaller.events.drafts.create(draftInput), { code: 'UNAUTHORIZED' });
 });
 
-test('Party draft creation persists the authenticated host and is idempotent', async () => {
+test('Party draft creation persists the authenticated host and refreshes a retryable draft', async () => {
   let createData: any;
   party.create = async ({ data }: any) => {
     createData = data;
@@ -57,15 +58,30 @@ test('Party draft creation persists the authenticated host and is idempotent', a
   assert.equal(createData.hostUserId, 'test-user-id');
   assert.equal(createData.idempotencyKey, idempotencyKey);
 
-  party.findUnique = async () => ({ id: 'party-1' });
+  party.findUnique = async () => partyDraft;
   party.create = async () => { throw new Error('must not create duplicate draft'); };
-  assert.deepEqual(await caller().events.drafts.create(draftInput), { id: 'party-1' });
+  let updated: any;
+  party.update = async ({ data }: any) => {
+    updated = data;
+    return { id: 'party-1' };
+  };
+  assert.deepEqual(await caller().events.drafts.create({ ...draftInput, title: 'Edited First Listen' }), { id: 'party-1' });
+  assert.equal(updated.title, 'Edited First Listen');
+});
+
+test('Party draft creation accepts iOS standard templates and Black tier', async () => {
+  await assert.doesNotReject(() => caller().events.drafts.create({
+    ...draftInput, templateId: 'comedy-night', requiredMembershipTier: 'black', templateConfig: { kind: 'standard' },
+  }));
+  await assert.doesNotReject(() => caller().events.drafts.create({
+    ...draftInput, templateId: 'premiere', templateConfig: { kind: 'standard' },
+  }));
 });
 
 test('Party draft creation rejects mismatched template configuration', async () => {
   await assert.rejects(() => caller().events.drafts.create({
     ...draftInput,
-    templateConfig: { kind: 'pop-up' as const },
+    templateConfig: { kind: 'standard' as const },
   }));
 });
 
@@ -85,16 +101,19 @@ test('Party media reset and upload require a host-owned draft', async () => {
     return { id: 'media-1' };
   };
   assert.deepEqual(await caller().events.media.upload({
-    partyId: 'party-1', kind: 'cover', dataUri: 'data:image/jpeg;base64,QUJD',
+    partyId: 'party-1', kind: 'cover', dataUri: 'data:image/jpeg;base64,/9j/',
   }), { url: 'https://bytspot-api.onrender.com/media/parties/media-1' });
   assert.equal(uploaded.create.mimeType, 'image/jpeg');
   assert.equal(uploaded.create.byteSize, 3);
 });
 
-test('Party media upload rejects unsupported content and non-owners', async () => {
+test('Party media upload rejects unsupported, mislabeled, and non-owner content', async () => {
   party.findFirst = async () => partyDraft;
   await assert.rejects(() => caller().events.media.upload({
     partyId: 'party-1', kind: 'cover', dataUri: 'data:text/plain;base64,QUJD',
+  }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => caller().events.media.upload({
+    partyId: 'party-1', kind: 'cover', dataUri: 'data:image/jpeg;base64,QUJD',
   }), { code: 'BAD_REQUEST' });
 
   party.findFirst = async () => null;
@@ -125,4 +144,17 @@ test('A concurrent publish returns the already-issued Party Pass', async () => {
   assert.deepEqual(await caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
     id: 'party-1', shareUrl: 'https://bytspot.app/party/party-1', passCode: 'BYT-EXISTING',
   });
+});
+
+test('Party publishing retries a pass-code uniqueness collision', async () => {
+  party.findFirst = async () => partyDraft;
+  let attempts = 0;
+  party.updateMany = async () => {
+    attempts += 1;
+    if (attempts === 1) throw { code: 'P2002' };
+    return { count: 1 };
+  };
+  const result = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.match(result.passCode, /^BYT-[A-F0-9]{10}$/);
+  assert.equal(attempts, 2);
 });

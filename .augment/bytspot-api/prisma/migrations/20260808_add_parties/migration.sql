@@ -35,7 +35,10 @@ BEGIN
   END IF;
 END $$;
 
-ALTER TABLE "parties" ADD COLUMN IF NOT EXISTS "template_config" JSONB NOT NULL DEFAULT '{"kind":"standard"}'::JSONB;
+ALTER TABLE "parties" ADD COLUMN IF NOT EXISTS "template_config" JSONB;
+UPDATE "parties" SET "template_config" = '{"kind":"standard"}'::JSONB WHERE "template_config" IS NULL;
+ALTER TABLE "parties" ALTER COLUMN "template_config" SET NOT NULL;
+ALTER TABLE "parties" ALTER COLUMN "template_config" DROP DEFAULT;
 
 DO $$
 BEGIN

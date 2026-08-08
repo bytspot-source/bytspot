@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
 import { cached } from '../lib/redis';
 import { config } from '../config';
+import { partyDraftsRouter, partyMediaRouter, partyPublish } from './partyRouter';
 
 // ─── Ticketmaster Discovery API helpers ─────────────────────────────
 const TM_BASE = 'https://app.ticketmaster.com/discovery/v2';
@@ -109,5 +110,8 @@ export const eventsRouter = router({
 
       return { events: events ?? FALLBACK_EVENTS, source: 'ticketmaster' as const };
     }),
+  drafts: partyDraftsRouter,
+  media: partyMediaRouter,
+  publish: partyPublish,
 });
 

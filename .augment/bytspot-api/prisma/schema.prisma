@@ -40,6 +40,7 @@ model User {
   following      Follow[]          @relation("follower")  // users I follow
   reviews        Review[]
   tipsGiven      Tip[]             @relation("tipFrom")
+  hostedParties  Party[]           @relation("partyHost")
 
   @@map("users")
 }
@@ -123,6 +124,59 @@ model HostProfile {
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("host_profiles")
+}
+
+// ─── Host Studio Parties ────────────────────────────────
+// Party media is deliberately bounded and stored in Postgres for the beta
+// release. Move this to object storage/CDN before high-volume rollout.
+model Party {
+  id                     String       @id @default(cuid())
+  hostUserId             String       @map("host_user_id")
+  idempotencyKey         String       @map("idempotency_key")
+  templateId             String       @map("template_id")
+  title                  String
+  tagline                String
+  startsAt               DateTime     @map("starts_at")
+  venueName              String       @map("venue_name")
+  capacity               Int
+  accessMode             String       @map("access_mode")
+  requiredMembershipTier String       @map("required_membership_tier")
+  audienceCircleIds      String[]     @default([]) @map("audience_circle_ids")
+  itinerary              Json
+  ticketTiers            Json         @map("ticket_tiers")
+  cohosts                Json
+  templateConfig         Json         @map("template_config")
+  status                 String       @default("draft")
+  passCode               String?      @unique @map("pass_code")
+  publishedAt            DateTime?    @map("published_at")
+  createdAt              DateTime     @default(now()) @map("created_at")
+  updatedAt              DateTime     @updatedAt @map("updated_at")
+
+  host                   User         @relation("partyHost", fields: [hostUserId], references: [id], onDelete: Cascade)
+  media                  PartyMedia[]
+
+  @@unique([hostUserId, idempotencyKey])
+  @@index([hostUserId, status])
+  @@index([status, startsAt])
+  @@map("parties")
+}
+
+model PartyMedia {
+  id        String   @id @default(cuid())
+  partyId   String   @map("party_id")
+  kind      String
+  position  Int      @default(0)
+  mimeType  String   @map("mime_type")
+  bytes     Bytes
+  byteSize  Int      @map("byte_size")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  party     Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, kind, position])
+  @@index([partyId])
+  @@map("party_media")
 }
 
 model ValetProfile {

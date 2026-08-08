@@ -40,6 +40,8 @@ const envSchema = z.object({
   APNS_TEAM_ID:           z.string().default(''),
   APNS_KEY_PATH:          z.string().default(''),
   APNS_BUNDLE_ID:         z.string().default('com.bytspot.app'),
+  PUBLIC_API_URL:         z.string().url().default('https://bytspot-api.onrender.com'),
+  PARTY_SHARE_BASE_URL:   z.string().url().default('https://bytspot.app'),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
@@ -92,6 +94,8 @@ export const config = {
   apnsTeamId: env.APNS_TEAM_ID,
   apnsKeyPath: env.APNS_KEY_PATH,
   apnsBundleId: env.APNS_BUNDLE_ID,
+  publicApiUrl: env.PUBLIC_API_URL.replace(/\/$/, ''),
+  partyShareBaseUrl: env.PARTY_SHARE_BASE_URL.replace(/\/$/, ''),
 } as const;
 
 /**

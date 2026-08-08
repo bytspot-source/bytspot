@@ -15,6 +15,7 @@ import cronRouter from './routes/cron';             // external cron trigger (Be
 import pushRouter from './routes/push';             // VAPID public key + subscription endpoint
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
+import partyMediaRouter from './routes/partyMedia';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 
@@ -60,6 +61,7 @@ app.use(cronRouter);
 app.use(pushRouter);
 app.use(betaSignupRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
+app.use(partyMediaRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

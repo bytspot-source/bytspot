@@ -38,7 +38,8 @@ services:
     runtime: node
     branch: main
     rootDir: .augment/bytspot-api
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci && npx prisma generate && npm run build
+    preDeployCommand: npx prisma migrate deploy
     startCommand: node dist/index.js
     pullRequestPreviewsEnabled: false
     buildFilter:

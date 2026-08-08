@@ -518,6 +518,22 @@ describe('events party procedures', () => {
     expect(db.partyTicketOrder.create).not.toHaveBeenCalled();
   });
 
+  it('serializes cash admissions before checking capacity and rejects a full Party without writing', async () => {
+    const published = party({ status: 'published', capacity: 1, accessMode: 'cash-at-door', cashDoorPriceCents: 2500, startsAt: new Date('2099-08-10T20:00:00Z') });
+    (db.party.findUnique as any).mockResolvedValueOnce(published);
+    (db.user.findUnique as any).mockResolvedValueOnce({ isPremium: false });
+    (db.partyParticipation.findUnique as any).mockResolvedValueOnce(null);
+    (db.partyParticipation.count as any).mockResolvedValueOnce(1);
+
+    await expect(createAuthenticatedCaller('guest-2').events.rsvp.create({ partyId: 'party-1', idempotencyKey: 'cash-full-12345678' }))
+      .rejects.toMatchObject({ code: 'CONFLICT' });
+
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    expect((db.$queryRaw as any).mock.invocationCallOrder[0]).toBeLessThan((db.partyParticipation.findUnique as any).mock.invocationCallOrder[0]);
+    expect((db.$queryRaw as any).mock.invocationCallOrder[0]).toBeLessThan((db.partyParticipation.count as any).mock.invocationCallOrder[0]);
+    expect(db.partyParticipation.upsert).not.toHaveBeenCalled();
+  });
+
   it('rejects a cash reservation when the persisted cash amount is invalid', async () => {
     (db.party.findUnique as any).mockResolvedValueOnce(party({
       status: 'published', accessMode: 'cash-at-door', cashDoorPriceCents: 0, startsAt: new Date('2099-08-10T20:00:00Z'),

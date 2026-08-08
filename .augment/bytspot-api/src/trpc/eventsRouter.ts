@@ -383,6 +383,11 @@ function hasValidCashDoorAmount(party: { accessMode: string; cashDoorPriceCents?
   return party.accessMode !== 'cash-at-door' || (typeof party.cashDoorPriceCents === 'number' && Number.isInteger(party.cashDoorPriceCents) && party.cashDoorPriceCents > 0);
 }
 
+/** PostgreSQL transaction lock: serialize capacity admissions for one Party across all API instances. */
+async function lockPartyAdmission(tx: any, partyId: string): Promise<void> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${partyId}))`;
+}
+
 function actionForPartyViewer(args: {
   party: { startsAt: Date; accessMode: string; cashDoorPriceCents?: unknown; requiredMembershipTier: string };
   viewerTier: PartyTier;
@@ -780,9 +785,12 @@ export const eventsRouter = router({
         if (partyLifecycle(party.startsAt) !== 'before') throw new TRPCError({ code: 'CONFLICT', message: 'This Party is no longer accepting RSVP requests.' });
         if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'CONFLICT', message: 'A verified ticket checkout is required for this Party.' });
         if (party.accessMode === 'open-entry') throw new TRPCError({ code: 'CONFLICT', message: 'This Party does not require a reservation.' });
+        const accepted = party.accessMode === 'private-approval' ? 'pending' : 'rsvp';
+        // Acquire before checking existing participation so same-user retries remain idempotent
+        // after waiting, while different guests cannot both pass the capacity count.
+        if (accepted === 'rsvp') await lockPartyAdmission(tx, party.id);
         const current = await (tx as any).partyParticipation.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (!current) {
-          const accepted = party.accessMode === 'private-approval' ? 'pending' : 'rsvp';
           if (accepted === 'rsvp') {
             const count = await (tx as any).partyParticipation.count({ where: { partyId: party.id, status: { in: ['rsvp', 'approved', 'checked_in'] } } });
             if (count >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });

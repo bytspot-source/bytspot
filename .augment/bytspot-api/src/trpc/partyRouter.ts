@@ -91,13 +91,6 @@ function hasImageSignature(bytes: Buffer, mimeType: string): boolean {
   return bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
 }
 
-async function ownedDraft(partyId: string, userId: string) {
-  const party = await db.party.findFirst({ where: { id: partyId, hostUserId: userId } });
-  if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
-  if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Published Parties cannot be changed.' });
-  return party;
-}
-
 function newPassCode(): string {
   return `BYT-${randomBytes(5).toString('hex').toUpperCase()}`;
 }
@@ -119,6 +112,37 @@ function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   };
 }
 
+async function refreshDraftContent(partyId: string, userId: string, input: z.infer<typeof draftInput>): Promise<void> {
+  const updated = await db.party.updateMany({
+    where: { id: partyId, hostUserId: userId, status: 'draft' },
+    data: partyContent(input),
+  });
+  if (updated.count === 1) return;
+
+  const party = await db.party.findFirst({ where: { id: partyId, hostUserId: userId } });
+  if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
+  if (party.status !== 'published') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be updated from its current state.' });
+}
+
+async function mutateDraftMedia<T>(
+  partyId: string,
+  userId: string,
+  mutation: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T | null> {
+  return db.$transaction(async (tx) => {
+    const lockedDraft = await tx.party.updateMany({
+      where: { id: partyId, hostUserId: userId, status: 'draft' },
+      data: { updatedAt: new Date() },
+    });
+    if (lockedDraft.count === 1) return mutation(tx);
+
+    const party = await tx.party.findFirst({ where: { id: partyId, hostUserId: userId } });
+    if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
+    if (party.status === 'published') return null;
+    throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be changed from its current state.' });
+  });
+}
+
 export const partyDraftsRouter = router({
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-draft-create' }))
@@ -126,7 +150,7 @@ export const partyDraftsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const existing = await db.party.findUnique({ where: { hostUserId_idempotencyKey: { hostUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
       if (existing) {
-        if (existing.status === 'draft') await db.party.update({ where: { id: existing.id }, data: partyContent(input) });
+        await refreshDraftContent(existing.id, ctx.user.userId, input);
         return { id: existing.id };
       }
       try {
@@ -141,7 +165,7 @@ export const partyDraftsRouter = router({
         if (!isUniqueConstraint(error)) throw error;
         const concurrent = await db.party.findUnique({ where: { hostUserId_idempotencyKey: { hostUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
         if (concurrent) {
-          if (concurrent.status === 'draft') await db.party.update({ where: { id: concurrent.id }, data: partyContent(input) });
+          await refreshDraftContent(concurrent.id, ctx.user.userId, input);
           return { id: concurrent.id };
         }
         throw error;
@@ -153,23 +177,26 @@ export const partyMediaRouter = router({
   reset: protectedProcedure
     .input(z.object({ partyId: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
-      await ownedDraft(input.partyId, ctx.user.userId);
-      await db.partyMedia.deleteMany({ where: { partyId: input.partyId } });
-      return { status: 'ready' as const };
+      const deleted = await mutateDraftMedia(input.partyId, ctx.user.userId, (tx) => tx.partyMedia.deleteMany({ where: { partyId: input.partyId } }));
+      return { status: deleted === null ? 'published' as const : 'ready' as const };
     }),
   upload: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'party-media-upload' }))
     .input(mediaInput)
     .mutation(async ({ ctx, input }) => {
-      await ownedDraft(input.partyId, ctx.user.userId);
       const { bytes, mimeType } = parseImageDataUri(input.dataUri);
       const imageBytes = Uint8Array.from(bytes);
       const position = input.kind === 'cover' ? 0 : input.index!;
-      const media = await db.partyMedia.upsert({
+      const media = await mutateDraftMedia(input.partyId, ctx.user.userId, (tx) => tx.partyMedia.upsert({
         where: { partyId_kind_position: { partyId: input.partyId, kind: input.kind, position } },
         create: { partyId: input.partyId, kind: input.kind, position, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
         update: { mimeType, bytes: imageBytes, byteSize: imageBytes.length },
-      });
+      }));
+      if (media === null) {
+        const existing = await db.partyMedia.findUnique({ where: { partyId_kind_position: { partyId: input.partyId, kind: input.kind, position } } });
+        if (!existing) throw new TRPCError({ code: 'CONFLICT', message: 'Published Party media cannot be changed.' });
+        return { url: partyMediaUrl(existing.id) };
+      }
       return { url: partyMediaUrl(media.id) };
     }),
 });

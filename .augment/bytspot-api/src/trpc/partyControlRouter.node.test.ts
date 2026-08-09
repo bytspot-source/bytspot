@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { beforeEach, test } from 'node:test';
+import { afterEach, beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
 import { db } from '../lib/db';
+import { config } from '../config';
+import { setPartyTicketStripeClientFactoryForTests } from './partyControlRouter';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
@@ -13,6 +15,9 @@ const partyStore = db.party as any;
 const guestStore = db.partyGuest as any;
 const userStore = db.user as any;
 const circleMemberStore = db.socialCircleMember as any;
+const ticketKey = '00000000-0000-4000-8000-000000000002';
+const renewedTicketKey = '00000000-0000-4000-8000-000000000003';
+const originalStripeSettings = { secretKey: config.stripeSecretKey, webhookSecret: config.stripeWebhookSecret };
 
 function caller() { return createCaller(hostContext); }
 function transaction(overrides: Record<string, unknown> = {}) {
@@ -27,12 +32,28 @@ beforeEach(() => {
   guestStore.findFirst = async () => null;
   guestStore.findUnique = async () => null;
   guestStore.updateMany = async () => ({ count: 1 });
+  guestStore.count = async () => 0;
   guestStore.update = async () => ({ id: 'guest-1' });
   guestStore.create = async (input: any) => ({ id: 'guest-1', ...input.data });
   userStore.findUnique = async () => ({ email: 'guest@example.com', membershipTier: 'green' });
   circleMemberStore.findFirst = async () => null;
   prisma.$transaction = async (callback: any) => typeof callback === 'function' ? callback(transaction()) : Promise.all(callback);
 });
+
+afterEach(() => {
+  (config as any).stripeSecretKey = originalStripeSettings.secretKey;
+  (config as any).stripeWebhookSecret = originalStripeSettings.webhookSecret;
+  setPartyTicketStripeClientFactoryForTests();
+});
+
+function configureTicketCheckout() {
+  (config as any).stripeSecretKey = 'test-stripe-key';
+  (config as any).stripeWebhookSecret = 'test-webhook-key';
+  partyStore.findFirst = async () => ({
+    ...party, accessMode: 'paid-ticket', requiredMembershipTier: 'green',
+    ticketTiers: [{ name: 'General', priceCents: 2500, quantity: 3, requiredMembershipTier: 'green' }],
+  });
+}
 
 test('host summary separates confirmed capacity from pending work', async () => {
   const summary = await caller().events.control.summary({ partyId: 'party-1' });
@@ -84,4 +105,48 @@ test('an existing guest cannot resolve or mint a pass after Circle access is rem
   guestStore.findUnique = async () => ({ id: 'guest-1', status: 'confirmed' });
   await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
   await assert.rejects(() => caller().events.pass.mine({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+});
+
+test('an expired checkout rejects reuse of its Stripe idempotency key', async () => {
+  configureTicketCheckout();
+  guestStore.findUnique = async () => ({ id: 'guest-1', status: 'expired', checkoutIdempotencyKey: ticketKey, ticketTierName: 'General' });
+  setPartyTicketStripeClientFactoryForTests(() => ({ checkout: { sessions: { create: async () => { throw new Error('Stripe must not be called'); } } } } as any));
+  await assert.rejects(
+    () => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'General', idempotencyKey: ticketKey }),
+    { code: 'CONFLICT' },
+  );
+});
+
+test('an expired checkout renews only with a new key after capacity and tier checks', async () => {
+  configureTicketCheckout();
+  guestStore.findUnique = async () => ({ id: 'guest-1', status: 'expired', checkoutIdempotencyKey: ticketKey, ticketTierName: 'General' });
+  let capacityChecks = 0;
+  let tierChecks = 0;
+  guestStore.groupBy = async () => { capacityChecks += 1; return []; };
+  guestStore.count = async () => { tierChecks += 1; return 0; };
+  let renewal: any;
+  guestStore.update = async ({ data }: any) => { renewal = data; return { id: 'guest-1' }; };
+  let stripeOptions: any;
+  setPartyTicketStripeClientFactoryForTests(() => ({ checkout: { sessions: { create: async (_params: any, options: any) => { stripeOptions = options; return { id: 'cs_renewed', url: 'https://checkout.stripe.test/renewed' }; } } } } as any));
+  const result = await caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'General', idempotencyKey: renewedTicketKey });
+  assert.equal(result.url, 'https://checkout.stripe.test/renewed');
+  assert.ok(capacityChecks >= 1);
+  assert.equal(tierChecks, 1);
+  assert.deepEqual(stripeOptions, { idempotencyKey: renewedTicketKey });
+  assert.deepEqual(renewal, { status: 'pending-payment', source: 'ticket', ticketTierName: 'General', checkoutIdempotencyKey: renewedTicketKey, stripeCheckoutSessionId: null });
+});
+
+test('a Stripe-reported expired session marks its pending reservation expired', async () => {
+  configureTicketCheckout();
+  guestStore.findUnique = async () => ({ id: 'guest-1', status: 'pending-payment', checkoutIdempotencyKey: ticketKey, ticketTierName: 'General', stripeCheckoutSessionId: 'cs_expired' });
+  let updateWhere: any;
+  let updateData: any;
+  guestStore.updateMany = async ({ where, data }: any) => { updateWhere = where; updateData = data; return { count: 1 }; };
+  setPartyTicketStripeClientFactoryForTests(() => ({ checkout: { sessions: { retrieve: async () => ({ status: 'expired', url: null }) } } } as any));
+  await assert.rejects(
+    () => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'General', idempotencyKey: ticketKey }),
+    { code: 'CONFLICT' },
+  );
+  assert.equal(updateWhere.stripeCheckoutSessionId, 'cs_expired');
+  assert.deepEqual(updateData, { status: 'expired' });
 });

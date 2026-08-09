@@ -12,6 +12,14 @@ const guestStates = ['confirmed', 'approved', 'checked-in'] as const;
 const capacityReservationStates = [...guestStates, 'pending-payment'];
 const passBaseUrl = 'https://bytspot.app/party-pass';
 type DbClient = typeof db | Prisma.TransactionClient;
+type PartyTicketStripeClient = Pick<Stripe, 'checkout'>;
+
+const defaultPartyTicketStripeClientFactory = (secretKey: string): PartyTicketStripeClient => new Stripe(secretKey);
+let partyTicketStripeClientFactory = defaultPartyTicketStripeClientFactory;
+
+export function setPartyTicketStripeClientFactoryForTests(factory?: (secretKey: string) => PartyTicketStripeClient): void {
+  partyTicketStripeClientFactory = factory ?? defaultPartyTicketStripeClientFactory;
+}
 
 function passSecret(): string { return randomBytes(32).toString('base64url'); }
 function passHash(secret: string): string { return createHash('sha256').update(secret).digest('hex'); }
@@ -185,7 +193,7 @@ export const partyTicketsRouter = router({
         }
       });
       const durableCheckoutKey = checkoutIdempotencyKey ?? input.idempotencyKey;
-      const stripe = new Stripe(config.stripeSecretKey);
+      const stripe = partyTicketStripeClientFactory(config.stripeSecretKey);
       if (existingCheckoutId) {
         const session = await stripe.checkout.sessions.retrieve(existingCheckoutId);
         if (session.url && session.status === 'open') return { url: session.url, status: 'pending-payment' as const };

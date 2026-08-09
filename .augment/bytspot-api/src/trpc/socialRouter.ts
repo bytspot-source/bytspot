@@ -5,8 +5,12 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, publicProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
+import { socialGroupsRouter, socialInvitesRouter, socialNetworkRouter } from './socialNetworkRouter';
 
 export const socialRouter = router({
+  groups: socialGroupsRouter,
+  invites: socialInvitesRouter,
+  network: socialNetworkRouter,
   /** Follow a user */
   follow: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:follow' }))

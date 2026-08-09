@@ -8,6 +8,7 @@ import { router, publicProcedure } from './trpc';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 import { partyDraftsRouter, partyMediaRouter, partyPublish } from './partyRouter';
+import { creatorLinksRouter, partyControlRouter, partyInviteRouter, partyPassRouter, partyRsvpRouter, partyTicketsRouter } from './partyControlRouter';
 
 // ─── Ticketmaster Discovery API helpers ─────────────────────────────
 const TM_BASE = 'https://app.ticketmaster.com/discovery/v2';
@@ -113,5 +114,11 @@ export const eventsRouter = router({
   drafts: partyDraftsRouter,
   media: partyMediaRouter,
   publish: partyPublish,
+  invite: partyInviteRouter.get,
+  rsvp: partyRsvpRouter,
+  tickets: partyTicketsRouter,
+  pass: partyPassRouter,
+  control: partyControlRouter,
+  creatorLinks: creatorLinksRouter,
 });
 

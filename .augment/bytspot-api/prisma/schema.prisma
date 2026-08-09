@@ -26,6 +26,7 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   isPremium  Boolean  @default(false) @map("is_premium")
+  membershipTier String @default("green") @map("membership_tier")
   stripeCustomerId String? @unique @map("stripe_customer_id")
 
   hostProfile    HostProfile?
@@ -41,6 +42,14 @@ model User {
   reviews        Review[]
   tipsGiven      Tip[]             @relation("tipFrom")
   hostedParties  Party[]           @relation("partyHost")
+  partyGuests    PartyGuest[]
+  ownedSocialCircles SocialCircle[] @relation("socialCircleOwner")
+  socialCircleMemberships SocialCircleMember[]
+  sentSocialInvitations SocialInvitation[] @relation("socialInviteSender")
+  receivedSocialInvitations SocialInvitation[] @relation("socialInviteRecipient")
+  socialConnectionsLow SocialConnection[] @relation("socialConnectionLow")
+  socialConnectionsHigh SocialConnection[] @relation("socialConnectionHigh")
+  creatorLinks CreatorLink[]
 
   @@map("users")
 }
@@ -149,11 +158,14 @@ model Party {
   status                 String       @default("draft")
   passCode               String?      @unique @map("pass_code")
   publishedAt            DateTime?    @map("published_at")
+  admissionPausedAt      DateTime?    @map("admission_paused_at")
   createdAt              DateTime     @default(now()) @map("created_at")
   updatedAt              DateTime     @updatedAt @map("updated_at")
 
   host                   User         @relation("partyHost", fields: [hostUserId], references: [id], onDelete: Cascade)
   media                  PartyMedia[]
+  guests                 PartyGuest[]
+  creatorLinks           PartyCreatorLink[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -177,6 +189,141 @@ model PartyMedia {
   @@unique([partyId, kind, position])
   @@index([partyId])
   @@map("party_media")
+}
+
+model PartyGuest {
+  id                     String    @id @default(cuid())
+  partyId                String    @map("party_id")
+  userId                 String    @map("user_id")
+  status                 String    @default("pending")
+  source                 String
+  ticketTierName         String?   @map("ticket_tier_name")
+  stripeCheckoutSessionId String?  @unique @map("stripe_checkout_session_id")
+  attendeePassHash       String?   @unique @map("attendee_pass_hash")
+  attendeePassIssuedAt   DateTime? @map("attendee_pass_issued_at")
+  checkedInAt            DateTime? @map("checked_in_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  party                  Party     @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, userId])
+  @@index([partyId, status])
+  @@index([partyId, checkedInAt])
+  @@index([userId, status])
+  @@map("party_guests")
+}
+
+model CreatorLink {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  kind      String
+  url       String
+  label     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  partyLinks PartyCreatorLink[]
+  clicks     CreatorLinkClick[]
+
+  @@unique([userId, kind])
+  @@index([userId])
+  @@map("creator_links")
+}
+
+model PartyCreatorLink {
+  id            String      @id @default(cuid())
+  partyId       String      @map("party_id")
+  creatorLinkId String      @map("creator_link_id")
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  party         Party       @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  creatorLink   CreatorLink @relation(fields: [creatorLinkId], references: [id], onDelete: Cascade)
+  clicks        CreatorLinkClick[]
+
+  @@unique([partyId, creatorLinkId])
+  @@index([partyId])
+  @@map("party_creator_links")
+}
+
+model CreatorLinkClick {
+  id            String           @id @default(cuid())
+  creatorLinkId String           @map("creator_link_id")
+  partyLinkId   String?          @map("party_link_id")
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  creatorLink   CreatorLink      @relation(fields: [creatorLinkId], references: [id], onDelete: Cascade)
+  partyLink     PartyCreatorLink? @relation(fields: [partyLinkId], references: [id], onDelete: SetNull)
+
+  @@index([creatorLinkId, createdAt])
+  @@index([partyLinkId, createdAt])
+  @@map("creator_link_clicks")
+}
+
+model SocialConnection {
+  id         String   @id @default(cuid())
+  userLowId  String   @map("user_low_id")
+  userHighId String   @map("user_high_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  userLow    User     @relation("socialConnectionLow", fields: [userLowId], references: [id], onDelete: Cascade)
+  userHigh   User     @relation("socialConnectionHigh", fields: [userHighId], references: [id], onDelete: Cascade)
+
+  @@unique([userLowId, userHighId])
+  @@index([userLowId])
+  @@index([userHighId])
+  @@map("social_connections")
+}
+
+model SocialCircle {
+  id          String               @id @default(cuid())
+  ownerUserId String               @map("owner_user_id")
+  name        String
+  privacy     String               @default("private")
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+
+  owner       User                 @relation("socialCircleOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  members     SocialCircleMember[]
+  invitations SocialInvitation[]
+
+  @@index([ownerUserId])
+  @@map("social_circles")
+}
+
+model SocialCircleMember {
+  id        String       @id @default(cuid())
+  circleId  String       @map("circle_id")
+  userId    String       @map("user_id")
+  role      String       @default("member")
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  circle    SocialCircle @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([circleId, userId])
+  @@index([userId])
+  @@map("social_circle_members")
+}
+
+model SocialInvitation {
+  id              String        @id @default(cuid())
+  senderUserId    String        @map("sender_user_id")
+  recipientUserId String        @map("recipient_user_id")
+  circleId        String?       @map("circle_id")
+  status          String        @default("pending")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  respondedAt     DateTime?     @map("responded_at")
+
+  sender          User          @relation("socialInviteSender", fields: [senderUserId], references: [id], onDelete: Cascade)
+  recipient       User          @relation("socialInviteRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  circle          SocialCircle? @relation(fields: [circleId], references: [id], onDelete: SetNull)
+
+  @@index([recipientUserId, status])
+  @@index([senderUserId, status])
+  @@map("social_invitations")
 }
 
 model ValetProfile {

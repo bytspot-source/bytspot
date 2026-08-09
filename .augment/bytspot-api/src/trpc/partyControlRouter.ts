@@ -9,6 +9,7 @@ import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from
 
 const partyId = z.string().trim().min(1).max(128);
 const guestStates = ['confirmed', 'approved', 'checked-in'] as const;
+const capacityReservationStates = [...guestStates, 'pending-payment'];
 const passBaseUrl = 'https://bytspot.app/party-pass';
 type DbClient = typeof db | Prisma.TransactionClient;
 
@@ -27,11 +28,12 @@ async function capacitySummary(client: DbClient, partyIdValue: string, capacity:
   const grouped = await client.partyGuest.groupBy({ by: ['status'], where: { partyId: partyIdValue }, _count: { _all: true } });
   const counts = Object.fromEntries(grouped.map((row) => [row.status, row._count._all]));
   const confirmed = guestStates.reduce((sum, status) => sum + (counts[status] ?? 0), 0);
+  const pendingPayment = counts['pending-payment'] ?? 0;
   return {
     capacity,
     confirmed,
-    spacesRemaining: Math.max(capacity - confirmed, 0),
-    pending: (counts.pending ?? 0) + (counts['pending-payment'] ?? 0),
+    spacesRemaining: Math.max(capacity - confirmed - pendingPayment, 0),
+    pending: (counts.pending ?? 0) + pendingPayment,
     checkedIn: counts['checked-in'] ?? 0,
   };
 }
@@ -39,7 +41,25 @@ async function capacitySummary(client: DbClient, partyIdValue: string, capacity:
 async function requireCapacity(client: DbClient, partyIdValue: string, capacity: number) {
   await client.$queryRaw`SELECT "id" FROM "parties" WHERE "id" = ${partyIdValue} FOR UPDATE`;
   const summary = await capacitySummary(client, partyIdValue, capacity);
-  if (summary.confirmed + summary.pending >= capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+  if (summary.spacesRemaining <= 0) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+}
+
+async function requireTicketTierCapacity(client: DbClient, partyIdValue: string, name: string, quantity: number) {
+  const reserved = await client.partyGuest.count({
+    where: { partyId: partyIdValue, ticketTierName: name, status: { in: capacityReservationStates } },
+  });
+  if (reserved >= quantity) throw new TRPCError({ code: 'CONFLICT', message: 'This ticket tier is sold out.' });
+}
+
+function audienceCircleIds(party: { audienceCircleIds?: string[] | null }): string[] {
+  return [...new Set(party.audienceCircleIds ?? [])];
+}
+
+async function requireAudience(client: DbClient, party: { audienceCircleIds?: string[] | null }, userId: string) {
+  const circleIds = audienceCircleIds(party);
+  if (circleIds.length === 0) return;
+  const membership = await client.socialCircleMember.findFirst({ where: { userId, circleId: { in: circleIds } }, select: { id: true } });
+  if (!membership) throw new TRPCError({ code: 'FORBIDDEN', message: 'This Party is for the host’s selected Circle audience.' });
 }
 
 async function issuePass(client: DbClient, partyIdValue: string, userId: string) {
@@ -106,6 +126,7 @@ export const partyRsvpRouter = router({
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
       if (party.admissionPausedAt) throw new TRPCError({ code: 'CONFLICT', message: 'New RSVPs are paused.' });
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party requires a paid ticket.' });
+      await requireAudience(tx, party, ctx.user.userId);
       await requireMembership(ctx.user.userId, party.requiredMembershipTier);
       const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       if (existing) return { status: existing.status, attendeePassUrl: null as string | null };
@@ -132,17 +153,25 @@ export const partyTicketsRouter = router({
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Paid Party not found.' });
       if (party.admissionPausedAt) throw new TRPCError({ code: 'CONFLICT', message: 'New tickets are paused.' });
       const tier = ticketTier(party, input.ticketTierName);
+      await requireAudience(db, party, ctx.user.userId);
       const user = await requireMembership(ctx.user.userId, tier.requiredMembershipTier);
       let existingCheckoutId: string | null = null;
+      let checkoutIdempotencyKey: string | null = null;
       await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "parties" WHERE "id" = ${party.id} FOR UPDATE`;
         const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (existing && existing.status !== 'pending-payment') throw new TRPCError({ code: 'CONFLICT', message: 'You already have a Party guest record.' });
+        if (existing?.ticketTierName && existing.ticketTierName !== tier.name) throw new TRPCError({ code: 'CONFLICT', message: 'A checkout for another ticket tier is already in progress.' });
+        if (existing?.checkoutIdempotencyKey && existing.checkoutIdempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'A ticket checkout is already being processed.' });
         if (existing?.stripeCheckoutSessionId) existingCheckoutId = existing.stripeCheckoutSessionId;
+        checkoutIdempotencyKey = existing?.checkoutIdempotencyKey ?? input.idempotencyKey;
         if (!existing) {
           await requireCapacity(tx, party.id, party.capacity);
-          await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, source: 'ticket', status: 'pending-payment', ticketTierName: tier.name } });
+          await requireTicketTierCapacity(tx, party.id, tier.name, tier.quantity);
+          await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, source: 'ticket', status: 'pending-payment', ticketTierName: tier.name, checkoutIdempotencyKey } });
         }
       });
+      const durableCheckoutKey = checkoutIdempotencyKey ?? input.idempotencyKey;
       const stripe = new Stripe(config.stripeSecretKey);
       if (existingCheckoutId) {
         const session = await stripe.checkout.sessions.retrieve(existingCheckoutId);
@@ -156,14 +185,13 @@ export const partyTicketsRouter = router({
           metadata: { purchaseType: 'party-ticket', partyId: party.id, userId: ctx.user.userId, ticketTierName: tier.name },
           success_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${config.frontendUrl}/party/${encodeURIComponent(party.id)}?checkout=cancelled`,
-        });
+        }, { idempotencyKey: durableCheckoutKey });
+        await db.partyGuest.updateMany({ where: { partyId: party.id, userId: ctx.user.userId, status: 'pending-payment', checkoutIdempotencyKey: durableCheckoutKey, stripeCheckoutSessionId: null }, data: { stripeCheckoutSessionId: session.id } });
         if (!session.url) throw new Error('Stripe did not return a checkout URL.');
-        await db.partyGuest.update({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } }, data: { stripeCheckoutSessionId: session.id } });
         return { url: session.url, status: 'pending-payment' as const };
       } catch (error) {
-        await db.partyGuest.deleteMany({ where: { partyId: party.id, userId: ctx.user.userId, status: 'pending-payment', stripeCheckoutSessionId: null } });
         if (error instanceof TRPCError) throw error;
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Ticket checkout could not be started.' });
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Ticket checkout could not be started. Retry with the same request key.' });
       }
     }),
 });
@@ -173,6 +201,7 @@ export const partyPassRouter = router({
     const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' } });
     if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
     const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+    if (!guest) await requireAudience(db, party, ctx.user.userId);
     const action = isConfirmed(guest?.status ?? '') ? 'view-pass' : party.accessMode === 'paid-ticket' ? 'buy-ticket' : party.accessMode === 'private-approval' ? 'request-approval' : 'rsvp';
     return { partyId: party.id, action, guest: { status: guest?.status ?? 'none', accessGranted: isConfirmed(guest?.status ?? '') } };
   }),
@@ -213,10 +242,18 @@ export const partyControlRouter = router({
   })),
   checkIn: protectedProcedure.input(z.object({ partyId, attendeePassSecret: z.string().min(20).max(200) })).mutation(async ({ ctx, input }) => {
     await hostParty(input.partyId, ctx.user.userId);
-    const guest = await db.partyGuest.findFirst({ where: { partyId: input.partyId, attendeePassHash: passHash(input.attendeePassSecret) } });
-    if (!guest || !isConfirmed(guest.status)) throw new TRPCError({ code: 'NOT_FOUND', message: 'Valid confirmed attendee pass not found.' });
-    if (guest.checkedInAt) throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already checked in.' });
-    await db.partyGuest.update({ where: { id: guest.id }, data: { status: 'checked-in', checkedInAt: new Date() } });
+    const attendeePassHash = passHash(input.attendeePassSecret);
+    const updated = await db.partyGuest.updateMany({
+      where: { partyId: input.partyId, attendeePassHash, checkedInAt: null, status: { in: ['confirmed', 'approved'] } },
+      data: { status: 'checked-in', checkedInAt: new Date() },
+    });
+    if (updated.count !== 1) {
+      const guest = await db.partyGuest.findFirst({ where: { partyId: input.partyId, attendeePassHash } });
+      if (guest?.checkedInAt) throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already checked in.' });
+      throw new TRPCError({ code: 'NOT_FOUND', message: 'Valid confirmed attendee pass not found.' });
+    }
+    const guest = await db.partyGuest.findFirst({ where: { partyId: input.partyId, attendeePassHash } });
+    if (!guest) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Checked-in attendee could not be resolved.' });
     return { checkedIn: true, guestId: guest.id };
   }),
 });
@@ -233,7 +270,7 @@ export const creatorLinksRouter = router({
     await db.$transaction([db.partyCreatorLink.deleteMany({ where: { partyId: input.partyId } }), db.partyCreatorLink.createMany({ data: input.creatorLinkIds.map((creatorLinkId) => ({ partyId: input.partyId, creatorLinkId })) })]);
     return { selected: input.creatorLinkIds.length };
   }),
-  recordClick: publicProcedure.input(z.object({ partyLinkId: partyId })).mutation(async ({ input }) => {
+  recordClick: publicProcedure.use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'creator-link-click' })).input(z.object({ partyLinkId: partyId })).mutation(async ({ input }) => {
     const link = await db.partyCreatorLink.findUnique({ where: { id: input.partyLinkId } });
     if (!link) throw new TRPCError({ code: 'NOT_FOUND', message: 'Creator Link not found.' });
     await db.creatorLinkClick.create({ data: { creatorLinkId: link.creatorLinkId, partyLinkId: link.id } });

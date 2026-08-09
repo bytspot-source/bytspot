@@ -144,6 +144,16 @@ export const socialInvitesRouter = router({
       const invite = await tx.socialInvitation.findFirst({ where: { id: input.inviteId, recipientUserId: ctx.user.userId } });
       if (!invite) throw new TRPCError({ code: 'NOT_FOUND', message: 'Invitation not found.' });
       if (invite.status !== 'pending') throw new TRPCError({ code: 'CONFLICT', message: 'Invitation has already been answered.' });
+      if (input.response === 'accepted' && invite.circleId) {
+        const circle = await tx.socialCircle.findUnique({
+          where: { id: invite.circleId },
+          include: { members: { where: { userId: invite.senderUserId }, select: { role: true } } },
+        });
+        const senderRole = circle?.ownerUserId === invite.senderUserId ? 'owner' : circle?.members[0]?.role;
+        if (senderRole !== 'owner' && senderRole !== 'admin') {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'This Circle invitation is no longer valid.' });
+        }
+      }
       const now = new Date();
       await tx.socialInvitation.update({ where: { id: invite.id }, data: { status: input.response, respondedAt: now } });
       if (input.response === 'accepted') {

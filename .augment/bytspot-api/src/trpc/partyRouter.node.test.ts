@@ -16,7 +16,7 @@ const draftInput = {
   capacity: 80,
   accessMode: 'free-rsvp' as const,
   requiredMembershipTier: 'green' as const,
-  audienceCircleIds: ['circle-1'],
+  audienceCircleIds: [],
   itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
   ticketTiers: [],
   cohosts: [],
@@ -28,6 +28,7 @@ const createCaller = createCallerFactory(appRouter);
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' } };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
+const socialCircle = db.socialCircle as any;
 const prisma = db as any;
 
 function caller() {
@@ -42,6 +43,7 @@ beforeEach(() => {
   partyMedia.deleteMany = async () => ({ count: 0 });
   partyMedia.upsert = async () => ({ id: 'media-1' });
   partyMedia.findUnique = async () => null;
+  socialCircle.count = async () => 0;
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia });
 });
 
@@ -87,6 +89,13 @@ test('Party draft creation accepts iOS standard templates and Black tier', async
   await assert.doesNotReject(() => caller().events.drafts.create({
     ...draftInput, templateId: 'premiere', templateConfig: { kind: 'standard' },
   }));
+});
+
+test('Party draft selection accepts only Circles managed by the host', async () => {
+  socialCircle.count = async () => 1;
+  await assert.doesNotReject(() => caller().events.drafts.create({ ...draftInput, audienceCircleIds: ['circle-1'] }));
+  socialCircle.count = async () => 0;
+  await assert.rejects(() => caller().events.drafts.create({ ...draftInput, audienceCircleIds: ['circle-1'] }), { code: 'FORBIDDEN' });
 });
 
 test('Party draft creation rejects mismatched template configuration', async () => {

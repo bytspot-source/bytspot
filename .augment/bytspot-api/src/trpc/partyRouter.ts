@@ -112,6 +112,25 @@ function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   };
 }
 
+async function validateAudienceCircles(circleIds: string[], userId: string): Promise<void> {
+  if (new Set(circleIds).size !== circleIds.length) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'An audience Circle can only be selected once.' });
+  }
+  if (circleIds.length === 0) return;
+  const managedCount = await db.socialCircle.count({
+    where: {
+      id: { in: circleIds },
+      OR: [
+        { ownerUserId: userId },
+        { members: { some: { userId, role: { in: ['owner', 'admin'] } } } },
+      ],
+    },
+  });
+  if (managedCount !== circleIds.length) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Only Circles you manage can be selected for a Party audience.' });
+  }
+}
+
 async function refreshDraftContent(partyId: string, userId: string, input: z.infer<typeof draftInput>): Promise<void> {
   const updated = await db.party.updateMany({
     where: { id: partyId, hostUserId: userId, status: 'draft' },
@@ -148,6 +167,7 @@ export const partyDraftsRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-draft-create' }))
     .input(draftInput)
     .mutation(async ({ ctx, input }) => {
+      await validateAudienceCircles(input.audienceCircleIds, ctx.user.userId);
       const existing = await db.party.findUnique({ where: { hostUserId_idempotencyKey: { hostUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
       if (existing) {
         await refreshDraftContent(existing.id, ctx.user.userId, input);

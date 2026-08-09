@@ -198,6 +198,7 @@ model PartyGuest {
   status                 String    @default("pending")
   source                 String
   ticketTierName         String?   @map("ticket_tier_name")
+  checkoutIdempotencyKey String?   @unique @map("checkout_idempotency_key")
   stripeCheckoutSessionId String?  @unique @map("stripe_checkout_session_id")
   attendeePassHash       String?   @unique @map("attendee_pass_hash")
   attendeePassIssuedAt   DateTime? @map("attendee_pass_issued_at")

@@ -163,6 +163,22 @@ export const socialInvitesRouter = router({
 });
 
 export const socialNetworkRouter = router({
+  listConnections: protectedProcedure.query(async ({ ctx }) => {
+    const connections = await db.socialConnection.findMany({
+      where: { OR: [{ userLowId: ctx.user.userId }, { userHighId: ctx.user.userId }] },
+      include: {
+        userLow: { select: { id: true, name: true, profileImage: true } },
+        userHigh: { select: { id: true, name: true, profileImage: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    return {
+      connections: connections.map((connection) => {
+        const person = connection.userLowId === ctx.user.userId ? connection.userHigh : connection.userLow;
+        return { userId: person.id, name: person.name ?? 'Bytspot member', profileImage: person.profileImage, connectedAt: connection.createdAt.toISOString() };
+      }),
+    };
+  }),
   summary: protectedProcedure.query(async ({ ctx }) => {
     const [connectionCount, circleCount] = await Promise.all([
       db.socialConnection.count({ where: { OR: [{ userLowId: ctx.user.userId }, { userHighId: ctx.user.userId }] } }),

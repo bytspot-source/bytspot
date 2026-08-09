@@ -112,21 +112,22 @@ function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   };
 }
 
-async function validateAudienceCircles(circleIds: string[], userId: string): Promise<void> {
-  if (new Set(circleIds).size !== circleIds.length) {
+async function validateAudienceCircles(circleIds: string[] | null | undefined, userId: string): Promise<void> {
+  const selectedCircleIds = circleIds ?? [];
+  if (new Set(selectedCircleIds).size !== selectedCircleIds.length) {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'An audience Circle can only be selected once.' });
   }
-  if (circleIds.length === 0) return;
+  if (selectedCircleIds.length === 0) return;
   const managedCount = await db.socialCircle.count({
     where: {
-      id: { in: circleIds },
+      id: { in: selectedCircleIds },
       OR: [
         { ownerUserId: userId },
         { members: { some: { userId, role: { in: ['owner', 'admin'] } } } },
       ],
     },
   });
-  if (managedCount !== circleIds.length) {
+  if (managedCount !== selectedCircleIds.length) {
     throw new TRPCError({ code: 'FORBIDDEN', message: 'Only Circles you manage can be selected for a Party audience.' });
   }
 }
@@ -230,6 +231,7 @@ export const partyPublish = protectedProcedure
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
     if (party.status === 'published' && party.passCode) return { id: party.id, shareUrl: partyShareUrl(party.id), passCode: party.passCode };
     if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be published from its current state.' });
+    await validateAudienceCircles(party.audienceCircleIds, ctx.user.userId);
     const shareUrl = partyShareUrl(party.id);
     const redis = getRedis();
     if (redis) {

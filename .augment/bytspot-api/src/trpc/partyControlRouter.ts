@@ -160,6 +160,19 @@ export const partyTicketsRouter = router({
       await db.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT "id" FROM "parties" WHERE "id" = ${party.id} FOR UPDATE`;
         const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+        if (existing?.status === 'expired') {
+          if (existing.checkoutIdempotencyKey === input.idempotencyKey) {
+            throw new TRPCError({ code: 'CONFLICT', message: 'This checkout expired. Start a new ticket request.' });
+          }
+          await requireCapacity(tx, party.id, party.capacity);
+          await requireTicketTierCapacity(tx, party.id, tier.name, tier.quantity);
+          await tx.partyGuest.update({
+            where: { id: existing.id },
+            data: { status: 'pending-payment', source: 'ticket', ticketTierName: tier.name, checkoutIdempotencyKey: input.idempotencyKey, stripeCheckoutSessionId: null },
+          });
+          checkoutIdempotencyKey = input.idempotencyKey;
+          return;
+        }
         if (existing && existing.status !== 'pending-payment') throw new TRPCError({ code: 'CONFLICT', message: 'You already have a Party guest record.' });
         if (existing?.ticketTierName && existing.ticketTierName !== tier.name) throw new TRPCError({ code: 'CONFLICT', message: 'A checkout for another ticket tier is already in progress.' });
         if (existing?.checkoutIdempotencyKey && existing.checkoutIdempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'A ticket checkout is already being processed.' });
@@ -176,6 +189,10 @@ export const partyTicketsRouter = router({
       if (existingCheckoutId) {
         const session = await stripe.checkout.sessions.retrieve(existingCheckoutId);
         if (session.url && session.status === 'open') return { url: session.url, status: 'pending-payment' as const };
+        if (session.status === 'expired') {
+          await db.partyGuest.updateMany({ where: { partyId: party.id, userId: ctx.user.userId, status: 'pending-payment', stripeCheckoutSessionId: existingCheckoutId }, data: { status: 'expired' } });
+          throw new TRPCError({ code: 'CONFLICT', message: 'This checkout expired. Start a new ticket request.' });
+        }
         throw new TRPCError({ code: 'CONFLICT', message: 'A ticket checkout is already being processed.' });
       }
       try {
@@ -200,12 +217,15 @@ export const partyPassRouter = router({
   resolve: protectedProcedure.input(z.object({ partyId })).query(async ({ ctx, input }) => {
     const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' } });
     if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+    await requireAudience(db, party, ctx.user.userId);
     const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
-    if (!guest) await requireAudience(db, party, ctx.user.userId);
     const action = isConfirmed(guest?.status ?? '') ? 'view-pass' : party.accessMode === 'paid-ticket' ? 'buy-ticket' : party.accessMode === 'private-approval' ? 'request-approval' : 'rsvp';
     return { partyId: party.id, action, guest: { status: guest?.status ?? 'none', accessGranted: isConfirmed(guest?.status ?? '') } };
   }),
   mine: protectedProcedure.input(z.object({ partyId })).query(async ({ ctx, input }) => {
+    const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' } });
+    if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+    await requireAudience(db, party, ctx.user.userId);
     const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: input.partyId, userId: ctx.user.userId } } });
     if (!guest || !isConfirmed(guest.status)) throw new TRPCError({ code: 'FORBIDDEN', message: 'A confirmed Party pass is required.' });
     const secret = passSecret();

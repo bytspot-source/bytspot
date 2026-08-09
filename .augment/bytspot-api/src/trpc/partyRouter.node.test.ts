@@ -155,6 +155,12 @@ test('Party publishing atomically produces one allowed share link and pass code'
   assert.deepEqual(updateWhere, { id: 'party-1', hostUserId: 'test-user-id', status: 'draft' });
 });
 
+test('Party publishing revalidates Circle management before it targets that audience', async () => {
+  party.findFirst = async () => ({ ...partyDraft, audienceCircleIds: ['circle-1'] });
+  socialCircle.count = async () => 0;
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN' });
+});
+
 test('A concurrent publish returns the already-issued Party Pass', async () => {
   let calls = 0;
   party.findFirst = async () => {

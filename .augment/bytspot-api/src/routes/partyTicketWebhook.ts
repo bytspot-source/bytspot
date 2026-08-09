@@ -48,7 +48,7 @@ router.post('/party-ticket', async (req, res) => {
   try {
     if (event.type === 'checkout.session.completed') await fulfillTicket(session);
     if (event.type === 'checkout.session.expired') {
-      await db.partyGuest.deleteMany({ where: { stripeCheckoutSessionId: session.id, status: 'pending-payment' } });
+      await db.partyGuest.updateMany({ where: { stripeCheckoutSessionId: session.id, status: 'pending-payment' }, data: { status: 'expired' } });
     }
     res.json({ received: true });
   } catch (error) {

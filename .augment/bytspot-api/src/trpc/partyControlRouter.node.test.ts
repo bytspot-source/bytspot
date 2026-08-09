@@ -78,3 +78,10 @@ test('a restricted Circle audience cannot be bypassed by a known Party ID', asyn
     { code: 'FORBIDDEN' },
   );
 });
+
+test('an existing guest cannot resolve or mint a pass after Circle access is removed', async () => {
+  partyStore.findFirst = async () => ({ ...party, accessMode: 'free-rsvp', audienceCircleIds: ['circle-1'] });
+  guestStore.findUnique = async () => ({ id: 'guest-1', status: 'confirmed' });
+  await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+  await assert.rejects(() => caller().events.pass.mine({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+});

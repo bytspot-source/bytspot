@@ -134,7 +134,7 @@ test('Party mutations reject host-declined guests even when invoked directly', a
 });
 
 test('Free RSVP capacity is enforced inside a serializable transaction', async () => {
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 1 });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 1 });
   partyGuest.count = async () => 1;
   let transactionOptions: any;
   prisma.$transaction = async (callback: any, options: any) => {
@@ -147,7 +147,7 @@ test('Free RSVP capacity is enforced inside a serializable transaction', async (
 });
 
 test('Free RSVP maps serialization conflicts to retryable capacity conflicts', async () => {
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 2 });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 2 });
   prisma.$transaction = async () => { throw { code: 'P2034' }; };
 
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'CONFLICT' });
@@ -155,7 +155,7 @@ test('Free RSVP maps serialization conflicts to retryable capacity conflicts', a
 
 test('Paid checkout retries return the persisted pending reservation', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', status: 'published', accessMode: 'paid-ticket', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.',
     ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
   });
   (config as any).stripeSecretKey = 'test-only-key';
@@ -170,7 +170,7 @@ test('Paid checkout retries return the persisted pending reservation', async () 
 
 test('Paid checkout rejects an idempotent retry that changes tier and a second active reservation', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', status: 'published', accessMode: 'paid-ticket', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.',
     ticketTiers: [
       { name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' },
       { name: 'Late Drop', priceCents: 3000, quantity: 40, requiredMembershipTier: 'green' },
@@ -243,6 +243,39 @@ test('Party handoff derives its destination from the bound venue and enforces pr
   assert.equal(url.searchParams.get('dropoff[nickname]'), 'Sample Venue');
   assert.equal(url.searchParams.get('dropoff[formatted_address]'), '1 Example Way');
   assert.equal(handoff.trackingMode, 'handoff-only');
+});
+
+test('Party pass advertises premium handoff only when its host has bound an arrival venue', async () => {
+  party.findFirst = async () => ({ id: 'party-1', accessMode: 'free-rsvp', requiredMembershipTier: 'green', arrivalVenueId: null });
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+  assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).premiumMobilityEligible, false);
+
+  party.findFirst = async () => ({ id: 'party-1', accessMode: 'free-rsvp', requiredMembershipTier: 'green', arrivalVenueId: 'venue-1' });
+  assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).premiumMobilityEligible, true);
+});
+
+test('Party pass and RSVP enforce the Party required membership tier', async () => {
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'black', capacity: 40, arrivalVenueId: null });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+  assert.deepEqual(await caller().events.pass.resolve({ partyId: 'party-1' }), {
+    partyId: 'party-1', action: 'unavailable', guest: { status: 'membership-required', accessGranted: false }, premiumMobilityEligible: false,
+  });
+  await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN' });
+
+  user.findUnique = async () => ({ membershipTier: 'black' });
+  const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
+  assert.equal(pass.action, 'rsvp');
+  assert.equal((await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey })).accessGranted, true);
+});
+
+test('Paid ticket checkout enforces its required membership tier', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,
+    ticketTiers: [{ name: 'Black Table', priceCents: 2500, quantity: 40, requiredMembershipTier: 'black' }],
+  });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+  await assert.rejects(() => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'Black Table', idempotencyKey }), { code: 'FORBIDDEN' });
 });
 
 test('Party draft creation rejects mismatched template configuration', async () => {

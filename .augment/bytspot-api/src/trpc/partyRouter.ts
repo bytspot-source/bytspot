@@ -286,8 +286,27 @@ async function publishedParty(partyId: string) {
   return party;
 }
 
-function passAction(party: { accessMode: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean) {
+const membershipTierRank = { green: 0, platinum: 1, black: 2 } as const;
+type MembershipTier = keyof typeof membershipTierRank;
+
+function isMembershipTier(value: unknown): value is MembershipTier {
+  return typeof value === 'string' && value in membershipTierRank;
+}
+
+function meetsRequiredMembershipTier(membershipTier: unknown, requiredMembershipTier: unknown): boolean {
+  return isMembershipTier(membershipTier)
+    && isMembershipTier(requiredMembershipTier)
+    && membershipTierRank[membershipTier] >= membershipTierRank[requiredMembershipTier];
+}
+
+async function membershipTierFor(userId: string): Promise<MembershipTier | null> {
+  const user = await db.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
+  return isMembershipTier(user?.membershipTier) ? user.membershipTier : null;
+}
+
+function passAction(party: { accessMode: string; requiredMembershipTier: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean, membershipEligible: boolean) {
   if (!isAuthenticated) return { action: 'authenticate', status: 'anonymous', accessGranted: false } as const;
+  if (!membershipEligible) return { action: 'unavailable', status: 'membership-required', accessGranted: false } as const;
   if (guest?.accessGranted) return { action: 'view-pass', status: guest.status, accessGranted: true } as const;
   if (guest?.status === 'pending') return { action: 'unavailable', status: 'pending', accessGranted: false } as const;
   if (guest?.status === 'declined') return { action: 'unavailable', status: 'declined', accessGranted: false } as const;
@@ -314,8 +333,7 @@ async function authorizedPartyArrival(partyId: string, userId: string) {
 }
 
 async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {
-  const user = await db.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
-  return user?.membershipTier === 'platinum' || user?.membershipTier === 'black';
+  return meetsRequiredMembershipTier(await membershipTierFor(userId), 'platinum');
 }
 
 function isReservationConflict(error: unknown): boolean {
@@ -369,8 +387,9 @@ export const partyPassRouter = router({
       const guest = ctx.user
         ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
         : null;
-      const state = passAction(party, guest, Boolean(ctx.user));
-      const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && await hasPremiumMobilityEntitlement(ctx.user.userId));
+      const membershipTier = ctx.user ? await membershipTierFor(ctx.user.userId) : null;
+      const state = passAction(party, guest, Boolean(ctx.user), meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier));
+      const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
       return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };
     }),
 });
@@ -429,6 +448,9 @@ export const partyRsvpRouter = router({
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
+      if (!meetsRequiredMembershipTier(await membershipTierFor(ctx.user.userId), party.requiredMembershipTier)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
+      }
       const approvalRequired = party.accessMode === 'private-approval';
       const status = approvalRequired ? 'pending' : 'rsvp';
       const accessGranted = !approvalRequired;
@@ -459,6 +481,10 @@ export const partyTicketsRouter = router({
       if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
       const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
       if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+      const membershipTier = await membershipTierFor(ctx.user.userId);
+      if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier) || !meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party ticket requirement.' });
+      }
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       if (knownGuest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
       if (knownGuest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });

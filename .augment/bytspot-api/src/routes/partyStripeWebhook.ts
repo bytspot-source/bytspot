@@ -12,7 +12,7 @@ function metadataValue(metadata: Stripe.Metadata | null, key: string): string | 
 
 export class PartyCheckoutValidationError extends Error {}
 
-export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Session, checkoutId: string, partyId: string, userId: string): Promise<void> {
+export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Session, checkoutId: string, partyId: string, userId: string, paymentOccurredAt: Date): Promise<void> {
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
   if (!checkout) throw new Error('Party Checkout reservation was not found.');
   const expectedTier = metadataValue(session.metadata, 'ticketTierName');
@@ -23,16 +23,16 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
   await db.$transaction(async (tx) => {
     const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
     if (!current || current.status === 'completed' || current.status === 'refund-required') return;
-    if (current.status === 'expired' || current.reservationExpiresAt <= new Date()) throw new Error('Party Checkout reservation expired before payment confirmation.');
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
     const guest = await tx.partyGuest.findUnique({ where: { id: current.partyGuestId } });
     if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
+    const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt;
     const updated = await tx.partyCheckout.updateMany({
-      where: { id: current.id, status: { in: ['creating', 'pending'] } },
-      data: { stripeSessionId: session.id, status: guest.status === 'declined' ? 'refund-required' : 'completed', completedAt: new Date() },
+      where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
+      data: { stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt },
     });
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
-    if (guest.status === 'declined') {
+    if (requiresRefund) {
       await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
       return;
     }
@@ -92,7 +92,7 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   }
 
   try {
-    await reconcilePartyCheckoutPayment(session, checkoutId, partyId, userId);
+    await reconcilePartyCheckoutPayment(session, checkoutId, partyId, userId, new Date(event.created * 1000));
     res.json({ received: true });
   } catch (error) {
     if (error instanceof PartyCheckoutValidationError) {

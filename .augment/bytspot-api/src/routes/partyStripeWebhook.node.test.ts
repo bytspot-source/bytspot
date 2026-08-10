@@ -17,10 +17,10 @@ function session(overrides: Record<string, unknown> = {}): Stripe.Checkout.Sessi
   } as Stripe.Checkout.Session;
 }
 
-function reservation(status = 'pending') {
+function reservation(status = 'pending', reservationExpiresAt = future()) {
   return {
     id: 'checkout-1', partyId: 'party-1', userId: 'user-1', partyGuestId: 'guest-1', ticketTierName: 'First Drop',
-    amountCents: 2500, currency: 'usd', status, reservationExpiresAt: future(), stripeSessionId: null,
+    amountCents: 2500, currency: 'usd', status, reservationExpiresAt, stripeSessionId: null,
   };
 }
 
@@ -38,7 +38,7 @@ test('Party webhook confirms only a matching paid reservation and grants the pas
   partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
   partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1' }; };
 
-  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1');
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
 
   assert.equal(checkoutUpdate.data.status, 'completed');
   assert.equal(checkoutUpdate.data.stripeSessionId, 'cs_test_1');
@@ -49,7 +49,7 @@ test('Party webhook rejects a mismatched amount before changing Party access', a
   let transactionCalled = false;
   prisma.$transaction = async () => { transactionCalled = true; };
 
-  await assert.rejects(() => reconcilePartyCheckoutPayment(session({ amount_total: 2501 }), 'checkout-1', 'party-1', 'user-1'), PartyCheckoutValidationError);
+  await assert.rejects(() => reconcilePartyCheckoutPayment(session({ amount_total: 2501 }), 'checkout-1', 'party-1', 'user-1', new Date()), PartyCheckoutValidationError);
   assert.equal(transactionCalled, false);
 });
 
@@ -60,13 +60,49 @@ test('Party webhook marks paid-after-decline reservations refund-required and ac
   partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
   partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1' }; };
 
-  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1');
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
   assert.equal(checkoutUpdate.data.status, 'refund-required');
   assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
 
   partyCheckout.findUnique = async () => reservation('refund-required');
   let retryUpdates = 0;
   partyCheckout.updateMany = async () => { retryUpdates += 1; return { count: 1 }; };
-  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1');
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
   assert.equal(retryUpdates, 0);
+});
+
+test('Party webhook grants a valid payment event delivered after the local hold expires', async () => {
+  const paymentOccurredAt = new Date(Date.now() - 120_000);
+  partyCheckout.findUnique = async () => reservation('pending', new Date(Date.now() - 60_000));
+  let checkoutUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', paymentOccurredAt);
+
+  assert.equal(checkoutUpdate.data.status, 'completed');
+  assert.equal(checkoutUpdate.data.completedAt, paymentOccurredAt);
+});
+
+test('Party webhook makes a payment event created after hold expiry refund-required', async () => {
+  partyCheckout.findUnique = async () => reservation('pending', new Date(Date.now() - 60_000));
+  let checkoutUpdate: any;
+  let guestUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1' }; };
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
+});
+
+test('Party webhook makes an out-of-order paid event for an expired reservation refund-required', async () => {
+  partyCheckout.findUnique = async () => reservation('expired');
+  let checkoutUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date(Date.now() - 120_000));
+
+  assert.deepEqual(checkoutUpdate.where.status.in, ['creating', 'pending', 'expired']);
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
 });

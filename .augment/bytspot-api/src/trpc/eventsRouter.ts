@@ -5,9 +5,9 @@
  */
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
+import { partyArrivalRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { config } from '../config';
-import { partyDraftsRouter, partyMediaRouter, partyPublish } from './partyRouter';
 
 // ─── Ticketmaster Discovery API helpers ─────────────────────────────
 const TM_BASE = 'https://app.ticketmaster.com/discovery/v2';
@@ -65,6 +65,14 @@ const FALLBACK_EVENTS = [
 ];
 
 export const eventsRouter = router({
+  drafts: partyDraftsRouter,
+  media: partyMediaRouter,
+  publish: partyPublish,
+  invite: partyInvite,
+  pass: partyPassRouter,
+  arrival: partyArrivalRouter,
+  rsvp: partyRsvpRouter,
+  tickets: partyTicketsRouter,
   /** List events near Atlanta (cached 15 min) */
   list: publicProcedure
     .input(z.object({
@@ -110,8 +118,5 @@ export const eventsRouter = router({
 
       return { events: events ?? FALLBACK_EVENTS, source: 'ticketmaster' as const };
     }),
-  drafts: partyDraftsRouter,
-  media: partyMediaRouter,
-  publish: partyPublish,
 });
 

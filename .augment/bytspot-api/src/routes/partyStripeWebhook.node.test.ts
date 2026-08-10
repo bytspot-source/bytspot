@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import type Stripe from 'stripe';
 import { db } from '../lib/db';
-import { PartyCheckoutValidationError, reconcilePartyCheckoutPayment } from './partyStripeWebhook';
+import { partyCheckoutMetadata, PartyCheckoutValidationError, reconcilePartyCheckoutPayment } from './partyStripeWebhook';
 
 const partyCheckout = db.partyCheckout as any;
 const partyGuest = db.partyGuest as any;
@@ -34,6 +34,24 @@ beforeEach(() => {
   party.findUnique = async () => ({ requiredMembershipTier: 'black', ticketTiers: [{ name: 'First Drop', requiredMembershipTier: 'black' }] });
   user.findUnique = async () => ({ membershipTier: 'black' });
   prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, party, user });
+});
+
+test('Party webhook classifies complete authoritative metadata even without the kind marker', () => {
+  const metadata = partyCheckoutMetadata(session({
+    metadata: { checkoutId: 'checkout-1', partyId: 'party-1', userId: 'user-1', ticketTierName: 'First Drop' },
+  }));
+
+  assert.equal(metadata.hasPartyIdentifiers, true);
+  assert.equal(metadata.kind, null);
+});
+
+test('Party webhook does not classify partial Party metadata as a checkout', () => {
+  const metadata = partyCheckoutMetadata(session({
+    metadata: { kind: 'party-ticket', checkoutId: 'checkout-1', partyId: 'party-1' },
+  }));
+
+  assert.equal(metadata.hasPartyIdentifiers, false);
+  assert.equal(metadata.kind, 'party-ticket');
 });
 
 test('Party webhook confirms only a matching paid reservation and grants the pass', async () => {

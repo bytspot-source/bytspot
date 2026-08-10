@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
+import { handoffUrl } from './mobilityRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
 const maxMediaBytes = 600_000;
@@ -296,6 +297,27 @@ function passAction(party: { accessMode: string }, guest: { status: string; acce
   return { action: 'rsvp', status: guest?.status ?? 'eligible', accessGranted: false } as const;
 }
 
+function normalizedVenueName(value: string): string {
+  return value.trim().toLocaleLowerCase().split(/\s+/).join(' ');
+}
+
+async function authorizedPartyArrival(partyId: string, userId: string) {
+  const party = await db.party.findFirst({
+    where: { id: partyId, status: 'published' },
+    include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true } } },
+  });
+  if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId } } });
+  if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
+  if (!party.arrivalVenue) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Arrival guidance is not enabled for this Party.' });
+  return party;
+}
+
+async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {
+  const user = await db.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
+  return user?.membershipTier === 'platinum' || user?.membershipTier === 'black';
+}
+
 function isReservationConflict(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && ['P2002', 'P2034'].includes((error as { code?: string }).code ?? ''));
 }
@@ -348,7 +370,55 @@ export const partyPassRouter = router({
         ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
         : null;
       const state = passAction(party, guest, Boolean(ctx.user));
-      return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted } };
+      const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && await hasPremiumMobilityEntitlement(ctx.user.userId));
+      return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };
+    }),
+});
+
+export const partyArrivalRouter = router({
+  bindDestination: protectedProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128), venueId: z.string().min(1).max(128) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' }, select: { id: true, venueName: true } });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      const venue = await db.venue.findUnique({ where: { id: input.venueId }, select: { id: true, name: true, address: true } });
+      if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Registered arrival venue not found.' });
+      if (normalizedVenueName(venue.name) !== normalizedVenueName(party.venueName)) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'The registered venue must match the Party venue name.' });
+      }
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published' },
+        data: { arrivalVenueId: venue.id },
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'The Party changed before its arrival destination could be saved.' });
+      return { partyId: party.id, venue: { id: venue.id, name: venue.name, address: venue.address } };
+    }),
+
+  context: protectedProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .query(async ({ ctx, input }) => {
+      const party = await authorizedPartyArrival(input.partyId, ctx.user.userId);
+      const venue = party.arrivalVenue!;
+      const directions = new URL('https://maps.apple.com/');
+      directions.searchParams.set('daddr', `${venue.lat},${venue.lng}`);
+      directions.searchParams.set('q', venue.name);
+      directions.searchParams.set('dirflg', 'd');
+      return {
+        partyId: party.id,
+        destination: { venueId: venue.id, name: venue.name, address: venue.address, latitude: venue.lat, longitude: venue.lng },
+        map: { provider: 'apple-maps', directionsUrl: directions.toString() },
+      };
+    }),
+
+  handoff: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 6, label: 'party-arrival-handoff' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), provider: z.enum(['uber', 'lyft']) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await authorizedPartyArrival(input.partyId, ctx.user.userId);
+      if (!await hasPremiumMobilityEntitlement(ctx.user.userId)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Premium Party arrival handoff is available to Black and Platinum members only.' });
+      }
+      return { partyId: party.id, provider: input.provider, handoffUrl: handoffUrl(input.provider, party.arrivalVenue!), trackingMode: 'handoff-only' as const };
     }),
 });
 

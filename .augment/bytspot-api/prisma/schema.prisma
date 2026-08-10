@@ -78,6 +78,7 @@ model Venue {
   savedBy     SavedSpot[]
   reviews     Review[]
   mobilityQuotes MobilityQuote[]
+  arrivalParties Party[] @relation("partyArrivalVenue")
 
   @@map("venues")
 }
@@ -144,6 +145,7 @@ model Party {
   tagline                String
   startsAt               DateTime     @map("starts_at")
   venueName              String       @map("venue_name")
+  arrivalVenueId         String?      @map("arrival_venue_id")
   locationDisclosure     String       @default("public") @map("location_disclosure")
   capacity               Int
   accessMode             String       @map("access_mode")
@@ -161,6 +163,7 @@ model Party {
   updatedAt              DateTime     @updatedAt @map("updated_at")
 
   host                   User         @relation("partyHost", fields: [hostUserId], references: [id], onDelete: Cascade)
+  arrivalVenue           Venue?       @relation("partyArrivalVenue", fields: [arrivalVenueId], references: [id], onDelete: Restrict)
   media                  PartyMedia[]
   guests                 PartyGuest[]
   checkouts              PartyCheckout[]
@@ -168,6 +171,7 @@ model Party {
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
   @@index([status, startsAt])
+  @@index([arrivalVenueId])
   @@map("parties")
 }
 

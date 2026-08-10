@@ -13,7 +13,7 @@ const draftInput = {
   title: 'First Listen',
   tagline: 'One moment. Your people.',
   startsAt: '2026-08-10T20:00:00Z',
-  venueName: 'The Loft',
+  venueName: 'Sample Venue',
   locationDisclosure: 'public' as const,
   capacity: 80,
   accessMode: 'free-rsvp' as const,
@@ -33,6 +33,8 @@ const party = db.party as any;
 const partyMedia = db.partyMedia as any;
 const partyGuest = db.partyGuest as any;
 const partyCheckout = db.partyCheckout as any;
+const venue = db.venue as any;
+const user = db.user as any;
 const prisma = db as any;
 
 function caller() {
@@ -58,6 +60,8 @@ beforeEach(() => {
   partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data });
   partyCheckout.update = async () => ({ id: 'checkout-1' });
   partyCheckout.updateMany = async () => ({ count: 0 });
+  venue.findUnique = async () => null;
+  user.findUnique = async () => ({ membershipTier: 'green' });
   (config as any).stripeSecretKey = '';
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
@@ -195,6 +199,50 @@ test('Public Party invitations redact protected venues and project only official
   assert.equal(invite.locationDisclosure, 'withheld');
   assert.equal(invite.locationLabel, null);
   assert.deepEqual(invite.host.destinations, { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } });
+});
+
+test('Only the host can bind a matching registered arrival venue to a published Party', async () => {
+  party.findFirst = async ({ where }: any) => where.hostUserId
+    ? { id: 'party-1', venueName: 'Sample Venue' }
+    : null;
+  venue.findUnique = async () => ({ id: 'venue-1', name: '  sample   venue ', address: '1 Example Way' });
+  let update: any;
+  party.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  const result = await caller().events.arrival.bindDestination({ partyId: 'party-1', venueId: 'venue-1' });
+  assert.deepEqual(result, { partyId: 'party-1', venue: { id: 'venue-1', name: '  sample   venue ', address: '1 Example Way' } });
+  assert.deepEqual(update.where, { id: 'party-1', hostUserId: 'test-user-id', status: 'published' });
+  assert.deepEqual(update.data, { arrivalVenueId: 'venue-1' });
+});
+
+test('Party arrival guidance requires an access-granted guest and a bound venue', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
+  });
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: false });
+  await assert.rejects(() => caller().events.arrival.context({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  const context = await caller().events.arrival.context({ partyId: 'party-1' });
+  assert.equal(context.destination.venueId, 'venue-1');
+  assert.match(context.map.directionsUrl, /^https:\/\/maps\.apple\.com\//);
+});
+
+test('Party handoff derives its destination from the bound venue and enforces premium membership', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
+  });
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  await assert.rejects(() => caller().events.arrival.handoff({ partyId: 'party-1', provider: 'uber' }), { code: 'FORBIDDEN' });
+
+  user.findUnique = async () => ({ membershipTier: 'black' });
+  const handoff = await caller().events.arrival.handoff({ partyId: 'party-1', provider: 'uber' });
+  const url = new URL(handoff.handoffUrl);
+  assert.equal(url.host, 'm.uber.com');
+  assert.equal(url.searchParams.get('dropoff[nickname]'), 'Sample Venue');
+  assert.equal(url.searchParams.get('dropoff[formatted_address]'), '1 Example Way');
+  assert.equal(handoff.trackingMode, 'handoff-only');
 });
 
 test('Party draft creation rejects mismatched template configuration', async () => {

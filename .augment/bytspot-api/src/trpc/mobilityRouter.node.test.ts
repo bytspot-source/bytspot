@@ -24,13 +24,13 @@ beforeEach(() => {
   venue.findUnique = async () => ({ id: 'venue-1', name: 'Private Venue', address: '1 Safe Street', lat: 33.749, lng: -84.388 });
   mobilityQuote.create = async ({ data }: any) => ({
     id: quoteId, providerQuoteId: null, priceLabel: null, etaLabel: null, createdAt: now, updatedAt: now,
-    ...data, venue: { lat: 33.749, lng: -84.388 },
+    ...data, venue: { lat: 33.749, lng: -84.388, name: 'Private Venue', address: '1 Safe Street' },
   });
   mobilityQuote.findFirst = async () => ({
     id: quoteId, userId: 'platinum-user', providerQuoteId: null, provider: 'handoff', serviceClass: 'premium',
     serviceTitle: 'Premium ride handoff', priceLabel: null, etaLabel: null, pickupLabel: 'Current location',
     dropoffLabel: '1 Safe Street', bookingMode: 'handoff', status: 'ready', expiresAt: new Date(Date.now() + 60_000),
-    venue: { lat: 33.749, lng: -84.388 },
+    venue: { lat: 33.749, lng: -84.388, name: 'Private Venue', address: '1 Safe Street' },
   });
   mobilityTrip.findUnique = async () => null;
   mobilityTrip.findFirst = async () => null;
@@ -53,7 +53,7 @@ test('Platinum quote resolves its destination from the server-owned venue', asyn
   let created: any;
   mobilityQuote.create = async ({ data }: any) => {
     created = data;
-    return { id: quoteId, providerQuoteId: null, priceLabel: null, etaLabel: null, createdAt: now, updatedAt: now, ...data, venue: { lat: 33.749, lng: -84.388 } };
+    return { id: quoteId, providerQuoteId: null, priceLabel: null, etaLabel: null, createdAt: now, updatedAt: now, ...data, venue: { lat: 33.749, lng: -84.388, name: 'Private Venue', address: '1 Safe Street' } };
   };
 
   const result = await caller().mobility.quotes.create({
@@ -64,8 +64,18 @@ test('Platinum quote resolves its destination from the server-owned venue', asyn
   assert.equal(created.dropoffLabel, '1 Safe Street');
   assert.equal(result.providerBookingMode, 'handoff');
   assert.equal(result.aggregatorReadiness, 'handoff');
-  assert.match(result.handoffOptions[0].url, /33\.749/);
-  assert.doesNotMatch(result.handoffOptions[0].url, /33\.78/);
+  const uber = new URL(result.handoffOptions.find((option) => option.provider === 'uber')!.url);
+  const lyft = new URL(result.handoffOptions.find((option) => option.provider === 'lyft')!.url);
+  assert.equal(uber.host, 'm.uber.com');
+  assert.equal(uber.pathname, '/ul/');
+  assert.equal(uber.searchParams.get('dropoff[latitude]'), '33.749');
+  assert.equal(uber.searchParams.get('dropoff[nickname]'), 'Private Venue');
+  assert.equal(uber.searchParams.get('dropoff[formatted_address]'), '1 Safe Street');
+  assert.equal(lyft.host, 'ride.lyft.com');
+  assert.equal(lyft.pathname, '/u');
+  assert.equal(lyft.searchParams.get('id'), 'lyft');
+  assert.equal(lyft.searchParams.get('destination[latitude]'), '33.749');
+  assert.equal(lyft.searchParams.get('destination[longitude]'), '-84.388');
 });
 
 test('Black members receive an idempotent HTTPS Uber handoff, not a Bytspot booking', async () => {
@@ -74,9 +84,12 @@ test('Black members receive an idempotent HTTPS Uber handoff, not a Bytspot book
 
   assert.equal(result.status, 'handoff_pending');
   assert.equal(result.providerReservationId, null);
-  assert.match(result.trackingUrl ?? '', /^https:\/\/m\.uber\.com\/ul\//);
-  assert.match(result.trackingUrl ?? '', /33\.749/);
-  assert.doesNotMatch(result.trackingUrl ?? '', /33\.78/);
+  const handoff = new URL(result.handoffUrl ?? '');
+  assert.equal(handoff.host, 'm.uber.com');
+  assert.equal(handoff.searchParams.get('dropoff[latitude]'), '33.749');
+  assert.equal(handoff.searchParams.get('dropoff[nickname]'), 'Private Venue');
+  assert.equal(result.trackingUrl, null);
+  assert.equal(result.trackingMode, 'handoff-only');
 });
 
 test('Cancelling a handoff only updates Bytspot tracking and does not imply provider cancellation', async () => {

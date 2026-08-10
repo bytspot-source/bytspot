@@ -31,7 +31,10 @@ CREATE TABLE "mobility_quotes" (
   "provider_payload" JSONB,
   "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" TIMESTAMP(3) NOT NULL,
-  CONSTRAINT "mobility_quotes_pkey" PRIMARY KEY ("id")
+  CONSTRAINT "mobility_quotes_pkey" PRIMARY KEY ("id"),
+  CONSTRAINT "mobility_quotes_provider_check" CHECK ("provider" IN ('handoff', 'aggregator')),
+  CONSTRAINT "mobility_quotes_booking_mode_check" CHECK ("booking_mode" IN ('handoff', 'provider-booking')),
+  CONSTRAINT "mobility_quotes_status_check" CHECK ("status" IN ('ready', 'expired', 'consumed', 'cancelled'))
 );
 
 CREATE TABLE "mobility_trips" (
@@ -46,7 +49,9 @@ CREATE TABLE "mobility_trips" (
   "cancellation_reason" TEXT,
   "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" TIMESTAMP(3) NOT NULL,
-  CONSTRAINT "mobility_trips_pkey" PRIMARY KEY ("id")
+  CONSTRAINT "mobility_trips_pkey" PRIMARY KEY ("id"),
+  CONSTRAINT "mobility_trips_provider_check" CHECK ("provider" IN ('uber', 'lyft', 'aggregator')),
+  CONSTRAINT "mobility_trips_status_check" CHECK ("status" IN ('handoff_pending', 'cancelled', 'provider_pending', 'confirmed', 'failed'))
 );
 
 CREATE UNIQUE INDEX "mobility_trips_quote_id_key" ON "mobility_trips"("quote_id");

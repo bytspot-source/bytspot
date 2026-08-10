@@ -16,6 +16,7 @@ const quoteInput = z.object({
 });
 
 type HandoffProvider = typeof handoffProviders[number];
+type HandoffDestination = { lat: number; lng: number; name: string; address: string };
 
 function isPremiumMobilityTier(tier: string): boolean {
   return premiumMobilityTiers.has(tier);
@@ -34,14 +35,20 @@ function isUniqueConstraint(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'P2002');
 }
 
-function handoffUrl(provider: HandoffProvider, destination: { lat: number; lng: number }): string {
-  const url = new URL(provider === 'uber' ? 'https://m.uber.com/ul/' : 'https://www.lyft.com/rider');
+function handoffUrl(provider: HandoffProvider, destination: HandoffDestination): string {
+  const formattedAddress = destination.address.trim() || destination.name;
+  const url = new URL(provider === 'uber' ? 'https://m.uber.com/ul/' : 'https://ride.lyft.com/u');
   if (provider === 'uber') {
     url.searchParams.set('action', 'setPickup');
     url.searchParams.set('pickup', 'my_location');
     url.searchParams.set('dropoff[latitude]', String(destination.lat));
     url.searchParams.set('dropoff[longitude]', String(destination.lng));
+    // Uber requires one of these labels for the destination pin to appear.
+    url.searchParams.set('dropoff[nickname]', destination.name);
+    url.searchParams.set('dropoff[formatted_address]', formattedAddress);
   } else {
+    // Lyft's documented mobile-web handoff uses /u and a ride type id.
+    url.searchParams.set('id', 'lyft');
     url.searchParams.set('destination[latitude]', String(destination.lat));
     url.searchParams.set('destination[longitude]', String(destination.lng));
   }
@@ -51,7 +58,7 @@ function handoffUrl(provider: HandoffProvider, destination: { lat: number; lng: 
 function quoteResponse(quote: {
   id: string; provider: string; providerQuoteId: string | null; serviceClass: string; serviceTitle: string;
   priceLabel: string | null; etaLabel: string | null; pickupLabel: string; dropoffLabel: string; expiresAt: Date;
-  venue: { lat: number; lng: number };
+  venue: HandoffDestination;
 }) {
   return {
     id: quote.id,
@@ -90,7 +97,9 @@ function tripResponse(trip: {
     etaLabel: trip.quote.etaLabel,
     pickupLabel: trip.quote.pickupLabel,
     dropoffLabel: trip.quote.dropoffLabel,
-    trackingUrl: trip.handoffUrl,
+    handoffUrl: trip.handoffUrl,
+    trackingUrl: null,
+    trackingMode: 'handoff-only',
     createdAt: trip.createdAt.toISOString(),
     updatedAt: trip.updatedAt.toISOString(),
   };
@@ -120,7 +129,7 @@ export const mobilityRouter = router({
             bookingMode: 'handoff',
             expiresAt: new Date(Date.now() + 5 * 60 * 1000),
           },
-          include: { venue: { select: { lat: true, lng: true } } },
+          include: { venue: { select: { lat: true, lng: true, name: true, address: true } } },
         });
         return quoteResponse(quote);
       }),
@@ -145,7 +154,7 @@ export const mobilityRouter = router({
 
         const quote = await db.mobilityQuote.findFirst({
           where: { id: input.quoteId, userId: ctx.user.userId, status: 'ready', expiresAt: { gt: new Date() } },
-          include: { venue: { select: { lat: true, lng: true } } },
+          include: { venue: { select: { lat: true, lng: true, name: true, address: true } } },
         });
         if (!quote) throw new TRPCError({ code: 'NOT_FOUND', message: 'This ride handoff has expired or is unavailable.' });
         if (quote.bookingMode !== 'handoff') throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This provider booking mode is not enabled.' });

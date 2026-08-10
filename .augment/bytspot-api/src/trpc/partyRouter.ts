@@ -22,8 +22,8 @@ const hostDestinationsInput = z.object({
   musicUrl: httpsUrl.optional(),
   merchUrl: httpsUrl.optional(),
   websiteUrl: httpsUrl.optional(),
-  primarySocial: z.object({ platform: z.string().trim().min(1).max(40), url: httpsUrl }).optional(),
-}).default({});
+  primarySocial: z.object({ platform: z.string().trim().min(1).max(40), url: httpsUrl }),
+});
 
 const draftInput = z.object({
   idempotencyKey: z.string().uuid(),
@@ -268,9 +268,9 @@ function activityHighlights(value: Prisma.JsonValue): string[] {
   return parsed.success ? parsed.data.map((item) => item.title) : [];
 }
 
-function safeDestinations(value: Prisma.JsonValue | null): z.infer<typeof hostDestinationsInput> {
+function safeDestinations(value: Prisma.JsonValue | null): z.infer<typeof hostDestinationsInput> | null {
   const parsed = hostDestinationsInput.safeParse(value ?? {});
-  return parsed.success ? parsed.data : {};
+  return parsed.success ? parsed.data : null;
 }
 
 async function publishedParty(partyId: string) {
@@ -310,7 +310,7 @@ export const partyInvite = publicProcedure
       templateId: party.templateId,
       tier: party.requiredMembershipTier,
       hostName: party.host.name ?? 'Bytspot Host',
-      host: { name: party.host.name ?? 'Bytspot Host', destinations },
+      host: { name: party.host.name ?? 'Bytspot Host', destinations: destinations ?? {} },
       scheduledDate: party.startsAt.toISOString(),
       locationLabel: party.locationDisclosure === 'public' ? party.venueName : null,
       locationDisclosure: party.locationDisclosure,
@@ -345,9 +345,16 @@ export const partyRsvpRouter = router({
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
+      const existing = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+      if (existing?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
+      if (existing?.accessGranted) return { status: existing.status, accessGranted: true };
       const approvalRequired = party.accessMode === 'private-approval';
       const status = approvalRequired ? 'pending' : 'rsvp';
       const accessGranted = !approvalRequired;
+      if (accessGranted && !existing) {
+        const grantedCount = await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
+        if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+      }
       const guest = await db.partyGuest.upsert({
         where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } },
         create: { partyId: party.id, userId: ctx.user.userId, status, accessGranted },
@@ -366,8 +373,51 @@ export const partyTicketsRouter = router({
       if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
       const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
       if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+      const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+      if (knownGuest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
+      if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
 
+      const now = new Date();
+      const reservation = await db.$transaction(async (tx) => {
+        const existing = await tx.partyCheckout.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
+        if (existing) {
+          if (existing.status === 'completed') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket is already confirmed.' });
+          if (existing.status === 'expired') throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout expired. Start a new checkout.' });
+          return existing;
+        }
+
+        const guest = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+        if (guest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
+        if (guest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
+
+        const activeReservationWhere = {
+          partyId: party.id,
+          OR: [
+            { status: 'completed' },
+            { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: now } },
+          ],
+        };
+        const [activePartyReservations, activeTierReservations] = await Promise.all([
+          tx.partyCheckout.count({ where: activeReservationWhere }),
+          tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }),
+        ]);
+        if (activePartyReservations >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+        if (activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
+
+        const partyGuest = guest
+          ? await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } })
+          : await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } });
+        return tx.partyCheckout.create({
+          data: {
+            partyId: party.id, partyGuestId: partyGuest.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey,
+            ticketTierName: ticketTier.name, amountCents: ticketTier.priceCents, currency: 'usd', status: 'creating',
+            reservationExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
+          },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
       const stripe = new Stripe(config.stripeSecretKey);
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -380,15 +430,17 @@ export const partyTicketsRouter = router({
           },
           quantity: 1,
         }],
-        metadata: { kind: 'party-ticket', partyId: party.id, userId: ctx.user.userId, ticketTierName: ticketTier.name, idempotencyKey: input.idempotencyKey },
+        metadata: { kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId, ticketTierName: ticketTier.name, idempotencyKey: input.idempotencyKey },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
       }, { idempotencyKey: input.idempotencyKey });
       if (!session.url) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Stripe Checkout did not return a hosted URL.' });
-      await db.partyGuest.upsert({
-        where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } },
-        create: { partyId: party.id, userId: ctx.user.userId, status: 'checkout-pending', ticketTierName: ticketTier.name, stripeSessionId: session.id },
-        update: { status: 'checkout-pending', ticketTierName: ticketTier.name, stripeSessionId: session.id },
+      await db.partyCheckout.update({
+        where: { id: reservation.id },
+        data: {
+          stripeSessionId: session.id, checkoutUrl: session.url, status: 'pending',
+          reservationExpiresAt: session.expires_at ? new Date(session.expires_at * 1000) : reservation.reservationExpiresAt,
+        },
       });
       return { url: session.url };
     }),

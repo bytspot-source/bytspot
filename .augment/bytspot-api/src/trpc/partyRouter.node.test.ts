@@ -17,7 +17,7 @@ const draftInput = {
   capacity: 80,
   accessMode: 'free-rsvp' as const,
   requiredMembershipTier: 'green' as const,
-  hostDestinations: { musicUrl: 'https://music.example.com/host' },
+  hostDestinations: { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } },
   audienceCircleIds: ['circle-1'],
   itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
   ticketTiers: [],
@@ -64,7 +64,7 @@ test('Party draft creation persists the authenticated host and refreshes a retry
   assert.equal(createData.hostUserId, 'test-user-id');
   assert.equal(createData.idempotencyKey, idempotencyKey);
   assert.equal(createData.locationDisclosure, 'public');
-  assert.deepEqual(createData.hostDestinations, { musicUrl: 'https://music.example.com/host' });
+  assert.deepEqual(createData.hostDestinations, { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } });
 
   party.findUnique = async () => partyDraft;
   party.create = async () => { throw new Error('must not create duplicate draft'); };
@@ -105,6 +105,15 @@ test('Party draft creation accepts withheld locations and rejects insecure offic
   await assert.rejects(() => caller().events.drafts.create({
     ...draftInput, locationDisclosure: 'after-approval', accessMode: 'free-rsvp',
   }));
+});
+
+test('Party mutations reject host-declined guests even when invoked directly', async () => {
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'paid-ticket', ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }] });
+  partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'declined', accessGranted: false });
+  await assert.rejects(() => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'FORBIDDEN' });
+
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 40 });
+  await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN' });
 });
 
 test('Public Party invitations redact protected venues and project only official destinations', async () => {

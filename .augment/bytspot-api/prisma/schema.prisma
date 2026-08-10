@@ -42,6 +42,7 @@ model User {
   tipsGiven      Tip[]             @relation("tipFrom")
   hostedParties  Party[]           @relation("partyHost")
   partyGuests    PartyGuest[]
+  partyCheckouts PartyCheckout[]
 
   @@map("users")
 }
@@ -158,6 +159,7 @@ model Party {
   host                   User         @relation("partyHost", fields: [hostUserId], references: [id], onDelete: Cascade)
   media                  PartyMedia[]
   guests                 PartyGuest[]
+  checkouts              PartyCheckout[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -172,17 +174,44 @@ model PartyGuest {
   status            String   @default("pending")
   accessGranted     Boolean  @default(false) @map("access_granted")
   ticketTierName    String?  @map("ticket_tier_name")
-  stripeSessionId   String?  @unique @map("stripe_session_id")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
   party             Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkouts         PartyCheckout[]
 
   @@unique([partyId, userId])
   @@index([partyId, status])
   @@index([userId, updatedAt(sort: Desc)])
   @@map("party_guests")
+}
+
+model PartyCheckout {
+  id                    String   @id @default(cuid())
+  partyId               String   @map("party_id")
+  partyGuestId          String   @map("party_guest_id")
+  userId                String   @map("user_id")
+  idempotencyKey        String   @map("idempotency_key")
+  stripeSessionId       String?  @unique @map("stripe_session_id")
+  checkoutUrl           String?  @map("checkout_url")
+  ticketTierName        String   @map("ticket_tier_name")
+  amountCents           Int      @map("amount_cents")
+  currency              String   @default("usd")
+  status                String   @default("creating")
+  reservationExpiresAt  DateTime @map("reservation_expires_at")
+  completedAt           DateTime? @map("completed_at")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  party                 Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  guest                 PartyGuest @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
+  user                  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, userId, idempotencyKey])
+  @@index([partyId, ticketTierName, status, reservationExpiresAt])
+  @@index([partyGuestId, updatedAt(sort: Desc)])
+  @@map("party_checkouts")
 }
 
 model PartyMedia {

@@ -26,6 +26,7 @@ model User {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   isPremium  Boolean  @default(false) @map("is_premium")
+  membershipTier String @default("green") @map("membership_tier")
   stripeCustomerId String? @unique @map("stripe_customer_id")
 
   hostProfile    HostProfile?
@@ -43,6 +44,8 @@ model User {
   hostedParties  Party[]           @relation("partyHost")
   partyGuests    PartyGuest[]
   partyCheckouts PartyCheckout[]
+  mobilityQuotes MobilityQuote[]
+  mobilityTrips  MobilityTrip[]
 
   @@map("users")
 }
@@ -74,6 +77,7 @@ model Venue {
   checkIns    CheckIn[]
   savedBy     SavedSpot[]
   reviews     Review[]
+  mobilityQuotes MobilityQuote[]
 
   @@map("venues")
 }
@@ -212,6 +216,60 @@ model PartyCheckout {
   @@index([partyId, ticketTierName, status, reservationExpiresAt])
   @@index([partyGuestId, updatedAt(sort: Desc)])
   @@map("party_checkouts")
+}
+
+// ─── Premium Mobility ───────────────────────────────────
+// Quotes and handoffs are owned by the authenticated rider. A destination is
+// always a registered Venue; clients cannot submit arbitrary drop-off points.
+model MobilityQuote {
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  venueId         String   @map("venue_id")
+  provider        String
+  providerQuoteId String?  @map("provider_quote_id")
+  serviceClass    String   @map("service_class")
+  serviceTitle    String   @map("service_title")
+  priceLabel      String?  @map("price_label")
+  etaLabel        String?  @map("eta_label")
+  pickupLat       Float    @map("pickup_lat")
+  pickupLng       Float    @map("pickup_lng")
+  pickupLabel     String   @map("pickup_label")
+  dropoffLabel    String   @map("dropoff_label")
+  bookingMode     String   @default("handoff") @map("booking_mode")
+  status          String   @default("ready")
+  expiresAt       DateTime @map("expires_at")
+  providerPayload Json?    @map("provider_payload")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue           Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  trip            MobilityTrip?
+
+  @@index([userId, expiresAt])
+  @@index([venueId, createdAt(sort: Desc)])
+  @@map("mobility_quotes")
+}
+
+model MobilityTrip {
+  id                    String   @id @default(cuid())
+  userId                String   @map("user_id")
+  quoteId               String   @unique @map("quote_id")
+  idempotencyKey        String   @map("idempotency_key")
+  provider              String
+  providerReservationId String?  @map("provider_reservation_id")
+  handoffUrl            String?  @map("handoff_url")
+  status                String   @default("handoff_pending")
+  cancellationReason    String?  @map("cancellation_reason")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quote                 MobilityQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("mobility_trips")
 }
 
 model PartyMedia {

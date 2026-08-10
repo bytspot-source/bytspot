@@ -11,6 +11,37 @@ function metadataValue(metadata: Stripe.Metadata | null, key: string): string | 
   return value || null;
 }
 
+type PartyCheckoutMetadata =
+  | { checkoutId: string; partyId: string; userId: string; kind: string | null; hasPartyIdentifiers: true }
+  | { checkoutId: string | null; partyId: string | null; userId: string | null; kind: string | null; hasPartyIdentifiers: false };
+
+export function partyCheckoutMetadata(session: Pick<Stripe.Checkout.Session, 'metadata'>): PartyCheckoutMetadata {
+  const checkoutId = metadataValue(session.metadata, 'checkoutId');
+  const partyId = metadataValue(session.metadata, 'partyId');
+  const userId = metadataValue(session.metadata, 'userId');
+  const kind = metadataValue(session.metadata, 'kind');
+  if (checkoutId && partyId && userId) {
+    return { checkoutId, partyId, userId, kind, hasPartyIdentifiers: true };
+  }
+  return {
+    checkoutId,
+    partyId,
+    userId,
+    kind,
+    hasPartyIdentifiers: false,
+  };
+}
+
+function logIgnoredEvent(event: Stripe.Event, session: Stripe.Checkout.Session, metadata: ReturnType<typeof partyCheckoutMetadata>) {
+  console.info('[party-stripe-webhook] ignored signed event', {
+    eventType: event.type,
+    hasPartyIdentifiers: metadata.hasPartyIdentifiers,
+    hasPartyKind: metadata.kind === 'party-ticket',
+    mode: session.mode ?? null,
+    paymentStatus: session.payment_status ?? null,
+  });
+}
+
 export class PartyCheckoutValidationError extends Error {}
 
 function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: string): unknown {
@@ -74,18 +105,24 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   }
 
   const session = event.data.object as Stripe.Checkout.Session;
-  const checkoutId = metadataValue(session.metadata, 'checkoutId');
-  const partyId = metadataValue(session.metadata, 'partyId');
-  const userId = metadataValue(session.metadata, 'userId');
-  const isPartyCheckout = metadataValue(session.metadata, 'kind') === 'party-ticket';
-  if (!isPartyCheckout) {
+  const metadata = partyCheckoutMetadata(session);
+  if (!metadata.hasPartyIdentifiers) {
+    if (metadata.kind === 'party-ticket') {
+      res.status(400).json({ error: 'Incomplete Party Checkout metadata.' });
+      return;
+    }
+    logIgnoredEvent(event, session, metadata);
     res.json({ received: true });
     return;
   }
-  if (!checkoutId || !partyId || !userId) {
-    res.status(400).json({ error: 'Incomplete Party Checkout metadata.' });
-    return;
+  if (metadata.kind !== 'party-ticket') {
+    console.warn('[party-stripe-webhook] reconciling Party checkout without expected kind marker', {
+      eventType: event.type,
+      mode: session.mode ?? null,
+      paymentStatus: session.payment_status ?? null,
+    });
   }
+  const { checkoutId, partyId, userId } = metadata;
 
   if (event.type === 'checkout.session.expired') {
     await db.partyCheckout.updateMany({
@@ -96,10 +133,12 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
     return;
   }
   if (!['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type)) {
+    logIgnoredEvent(event, session, metadata);
     res.json({ received: true });
     return;
   }
   if (session.mode !== 'payment' || session.payment_status !== 'paid') {
+    logIgnoredEvent(event, session, metadata);
     res.json({ received: true });
     return;
   }

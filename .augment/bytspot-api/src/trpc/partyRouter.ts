@@ -1,11 +1,12 @@
 import { randomBytes } from 'crypto';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
+import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
-import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
+import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
 const maxMediaBytes = 600_000;
 const maxAlbumImages = 6;
@@ -14,6 +15,15 @@ const templateConfigKinds = [...partyKinds, 'standard'] as const;
 const accessModes = ['free-rsvp', 'paid-ticket', 'private-approval'] as const;
 const tiers = ['green', 'platinum', 'black'] as const;
 const hostRoles = ['cohost', 'door', 'finance'] as const;
+const locationDisclosures = ['public', 'after-approval', 'withheld'] as const;
+const httpsUrl = z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Official destinations must use HTTPS.');
+const ticketTierInput = z.object({ name: z.string().trim().min(1).max(100), priceCents: z.number().int().min(0).max(10_000_000), quantity: z.number().int().min(1).max(10_000), requiredMembershipTier: z.enum(tiers) });
+const hostDestinationsInput = z.object({
+  musicUrl: httpsUrl.optional(),
+  merchUrl: httpsUrl.optional(),
+  websiteUrl: httpsUrl.optional(),
+  primarySocial: z.object({ platform: z.string().trim().min(1).max(40), url: httpsUrl }).optional(),
+}).default({});
 
 const draftInput = z.object({
   idempotencyKey: z.string().uuid(),
@@ -22,12 +32,14 @@ const draftInput = z.object({
   tagline: z.string().trim().max(280),
   startsAt: z.string().datetime({ offset: true }),
   venueName: z.string().trim().min(1).max(200),
+  locationDisclosure: z.enum(locationDisclosures).default('public'),
   capacity: z.number().int().min(2).max(10_000),
   accessMode: z.enum(accessModes),
   requiredMembershipTier: z.enum(tiers),
+  hostDestinations: hostDestinationsInput,
   audienceCircleIds: z.array(z.string().min(1).max(128)).max(100),
   itinerary: z.array(z.object({ title: z.string().trim().min(1).max(160), offsetMinutes: z.number().int().min(0).max(10_080) })).max(30),
-  ticketTiers: z.array(z.object({ name: z.string().trim().min(1).max(100), priceCents: z.number().int().min(0).max(10_000_000), quantity: z.number().int().min(1).max(10_000), requiredMembershipTier: z.enum(tiers) })).max(10),
+  ticketTiers: z.array(ticketTierInput).max(10),
   cohosts: z.array(z.object({ email: z.string().email().max(255), role: z.enum(hostRoles) })).max(20),
   templateConfig: z.object({ kind: z.enum(templateConfigKinds) }).passthrough(),
   source: z.literal('host-studio'),
@@ -40,6 +52,12 @@ const draftInput = z.object({
   }
   if (input.templateId === 'private-party' && input.accessMode !== 'private-approval') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'Private Parties require approval access.' });
+  }
+  if (input.locationDisclosure === 'after-approval' && input.accessMode !== 'private-approval') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'Locations revealed after approval require approval access.' });
+  }
+  if (input.templateConfig.kind === 'pop-up' && input.templateConfig.locationDisclosure !== 'public' && input.locationDisclosure === 'public') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['locationDisclosure'], message: 'Protected Pop-Up locations cannot be public.' });
   }
   const hasPaidTier = input.ticketTiers.some((tier) => tier.priceCents > 0);
   if (input.accessMode === 'paid-ticket' && !hasPaidTier) {
@@ -100,14 +118,14 @@ function isUniqueConstraint(error: unknown): boolean {
 }
 
 type PartyContent = Pick<Prisma.PartyUncheckedCreateInput,
-  'templateId' | 'title' | 'tagline' | 'startsAt' | 'venueName' | 'capacity' | 'accessMode' |
-  'requiredMembershipTier' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig'>;
+  'templateId' | 'title' | 'tagline' | 'startsAt' | 'venueName' | 'locationDisclosure' | 'capacity' | 'accessMode' |
+  'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig'>;
 
 function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   return {
-    templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), venueName: input.venueName,
+    templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), venueName: input.venueName, locationDisclosure: input.locationDisclosure,
     capacity: input.capacity, accessMode: input.accessMode, requiredMembershipTier: input.requiredMembershipTier,
-    audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
+    hostDestinations: input.hostDestinations as Prisma.InputJsonValue, audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
     cohosts: input.cohosts, templateConfig: input.templateConfig as Prisma.InputJsonValue,
   };
 }
@@ -239,3 +257,139 @@ export const partyPublish = protectedProcedure
     }
     throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Party pass generation failed.' });
   });
+
+function parsedTicketTiers(value: Prisma.JsonValue): z.infer<typeof ticketTierInput>[] {
+  const parsed = z.array(ticketTierInput).safeParse(value);
+  return parsed.success ? parsed.data : [];
+}
+
+function activityHighlights(value: Prisma.JsonValue): string[] {
+  const parsed = z.array(z.object({ title: z.string() })).safeParse(value);
+  return parsed.success ? parsed.data.map((item) => item.title) : [];
+}
+
+function safeDestinations(value: Prisma.JsonValue | null): z.infer<typeof hostDestinationsInput> {
+  const parsed = hostDestinationsInput.safeParse(value ?? {});
+  return parsed.success ? parsed.data : {};
+}
+
+async function publishedParty(partyId: string) {
+  const party = await db.party.findFirst({
+    where: { id: partyId, status: 'published' },
+    include: {
+      host: { select: { name: true } },
+      media: { orderBy: { position: 'asc' } },
+    },
+  });
+  if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  return party;
+}
+
+function passAction(party: { accessMode: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean) {
+  if (!isAuthenticated) return { action: 'authenticate', status: 'anonymous', accessGranted: false } as const;
+  if (guest?.accessGranted) return { action: 'view-pass', status: guest.status, accessGranted: true } as const;
+  if (guest?.status === 'pending') return { action: 'unavailable', status: 'pending', accessGranted: false } as const;
+  if (guest?.status === 'declined') return { action: 'unavailable', status: 'declined', accessGranted: false } as const;
+  if (party.accessMode === 'paid-ticket') return { action: 'ticket', status: guest?.status ?? 'eligible', accessGranted: false } as const;
+  if (party.accessMode === 'private-approval') return { action: 'request-approval', status: guest?.status ?? 'eligible', accessGranted: false } as const;
+  return { action: 'rsvp', status: guest?.status ?? 'eligible', accessGranted: false } as const;
+}
+
+export const partyInvite = publicProcedure
+  .input(z.object({ partyId: z.string().min(1).max(128) }))
+  .query(async ({ input }) => {
+    const party = await publishedParty(input.partyId);
+    const destinations = safeDestinations(party.hostDestinations);
+    const cover = party.media.find((media) => media.kind === 'cover');
+    const album = party.media.filter((media) => media.kind === 'album');
+    return {
+      id: party.id,
+      source: 'host-studio-party' as const,
+      title: party.title,
+      inviteNote: party.tagline,
+      templateId: party.templateId,
+      tier: party.requiredMembershipTier,
+      hostName: party.host.name ?? 'Bytspot Host',
+      host: { name: party.host.name ?? 'Bytspot Host', destinations },
+      scheduledDate: party.startsAt.toISOString(),
+      locationLabel: party.locationDisclosure === 'public' ? party.venueName : null,
+      locationDisclosure: party.locationDisclosure,
+      accessMode: party.accessMode,
+      capacity: party.capacity,
+      participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
+      ticketTiers: parsedTicketTiers(party.ticketTiers),
+      activityHighlights: activityHighlights(party.itinerary),
+      heroImageURL: cover ? partyMediaUrl(cover.id) : null,
+      thumbnailURL: cover ? partyMediaUrl(cover.id) : null,
+      photoURLs: album.map((media) => partyMediaUrl(media.id)),
+    };
+  });
+
+export const partyPassRouter = router({
+  resolve: publicProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .query(async ({ ctx, input }) => {
+      const party = await publishedParty(input.partyId);
+      const guest = ctx.user
+        ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
+        : null;
+      const state = passAction(party, guest, Boolean(ctx.user));
+      return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted } };
+    }),
+});
+
+export const partyRsvpRouter = router({
+  create: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-rsvp-create' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), idempotencyKey: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await publishedParty(input.partyId);
+      if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
+      const approvalRequired = party.accessMode === 'private-approval';
+      const status = approvalRequired ? 'pending' : 'rsvp';
+      const accessGranted = !approvalRequired;
+      const guest = await db.partyGuest.upsert({
+        where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } },
+        create: { partyId: party.id, userId: ctx.user.userId, status, accessGranted },
+        update: { status, accessGranted },
+      });
+      return { status: guest.status, accessGranted: guest.accessGranted };
+    }),
+});
+
+export const partyTicketsRouter = router({
+  createCheckout: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'party-ticket-checkout' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), ticketTierName: z.string().trim().min(1).max(100), idempotencyKey: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await publishedParty(input.partyId);
+      if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
+      const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
+      if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+      if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
+
+      const stripe = new Stripe(config.stripeSecretKey);
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        payment_method_types: ['card'],
+        line_items: [{
+          price_data: {
+            currency: 'usd',
+            unit_amount: ticketTier.priceCents,
+            product_data: { name: `${party.title} · ${ticketTier.name}`, description: party.tagline },
+          },
+          quantity: 1,
+        }],
+        metadata: { kind: 'party-ticket', partyId: party.id, userId: ctx.user.userId, ticketTierName: ticketTier.name, idempotencyKey: input.idempotencyKey },
+        success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
+      }, { idempotencyKey: input.idempotencyKey });
+      if (!session.url) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Stripe Checkout did not return a hosted URL.' });
+      await db.partyGuest.upsert({
+        where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } },
+        create: { partyId: party.id, userId: ctx.user.userId, status: 'checkout-pending', ticketTierName: ticketTier.name, stripeSessionId: session.id },
+        update: { status: 'checkout-pending', ticketTierName: ticketTier.name, stripeSessionId: session.id },
+      });
+      return { url: session.url };
+    }),
+});

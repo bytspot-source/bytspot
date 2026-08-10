@@ -13,9 +13,11 @@ const draftInput = {
   tagline: 'One moment. Your people.',
   startsAt: '2026-08-10T20:00:00Z',
   venueName: 'The Loft',
+  locationDisclosure: 'public' as const,
   capacity: 80,
   accessMode: 'free-rsvp' as const,
   requiredMembershipTier: 'green' as const,
+  hostDestinations: { musicUrl: 'https://music.example.com/host' },
   audienceCircleIds: ['circle-1'],
   itinerary: [{ title: 'Doors open', offsetMinutes: 0 }],
   ticketTiers: [],
@@ -28,6 +30,7 @@ const createCaller = createCallerFactory(appRouter);
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' } };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
+const partyGuest = db.partyGuest as any;
 const prisma = db as any;
 
 function caller() {
@@ -42,6 +45,7 @@ beforeEach(() => {
   partyMedia.deleteMany = async () => ({ count: 0 });
   partyMedia.upsert = async () => ({ id: 'media-1' });
   partyMedia.findUnique = async () => null;
+  partyGuest.count = async () => 0;
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia });
 });
 
@@ -59,6 +63,8 @@ test('Party draft creation persists the authenticated host and refreshes a retry
   assert.deepEqual(await caller().events.drafts.create(draftInput), { id: 'party-1' });
   assert.equal(createData.hostUserId, 'test-user-id');
   assert.equal(createData.idempotencyKey, idempotencyKey);
+  assert.equal(createData.locationDisclosure, 'public');
+  assert.deepEqual(createData.hostDestinations, { musicUrl: 'https://music.example.com/host' });
 
   party.findUnique = async () => partyDraft;
   party.create = async () => { throw new Error('must not create duplicate draft'); };
@@ -87,6 +93,32 @@ test('Party draft creation accepts iOS standard templates and Black tier', async
   await assert.doesNotReject(() => caller().events.drafts.create({
     ...draftInput, templateId: 'premiere', templateConfig: { kind: 'standard' },
   }));
+});
+
+test('Party draft creation accepts withheld locations and rejects insecure official destinations', async () => {
+  await assert.doesNotReject(() => caller().events.drafts.create({
+    ...draftInput, locationDisclosure: 'withheld', templateId: 'comedy-night', templateConfig: { kind: 'standard' },
+  }));
+  await assert.rejects(() => caller().events.drafts.create({
+    ...draftInput, hostDestinations: { websiteUrl: 'http://not-secure.example.com' },
+  }));
+  await assert.rejects(() => caller().events.drafts.create({
+    ...draftInput, locationDisclosure: 'after-approval', accessMode: 'free-rsvp',
+  }));
+});
+
+test('Public Party invitations redact protected venues and project only official destinations', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', title: 'Secret Set', tagline: 'See you there.', templateId: 'pop-up', requiredMembershipTier: 'black',
+    startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'Never Return This Venue', locationDisclosure: 'withheld',
+    accessMode: 'paid-ticket', capacity: 40, hostDestinations: { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } },
+    itinerary: [{ title: 'Doors', offsetMinutes: 0 }], ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+    host: { name: 'Host' }, media: [],
+  });
+  const invite = await createCaller({ user: null }).events.invite({ partyId: 'party-1' });
+  assert.equal(invite.locationDisclosure, 'withheld');
+  assert.equal(invite.locationLabel, null);
+  assert.deepEqual(invite.host.destinations, { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } });
 });
 
 test('Party draft creation rejects mismatched template configuration', async () => {

@@ -16,6 +16,7 @@ import pushRouter from './routes/push';             // VAPID public key + subscr
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import partyMediaRouter from './routes/partyMedia';
+import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 
@@ -32,6 +33,9 @@ app.use(
     credentials: true,
   }),
 );
+// Stripe signatures are calculated over the exact raw request body. This route
+// must remain before express.json(), which would otherwise consume that body.
+app.use(partyStripeWebhookRouter);
 app.use(express.json({ limit: '1mb' }));
 
 // Global rate limiting: 300 requests per 15 min per IP

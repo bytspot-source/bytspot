@@ -290,9 +290,23 @@ function passAction(party: { accessMode: string }, guest: { status: string; acce
   if (guest?.accessGranted) return { action: 'view-pass', status: guest.status, accessGranted: true } as const;
   if (guest?.status === 'pending') return { action: 'unavailable', status: 'pending', accessGranted: false } as const;
   if (guest?.status === 'declined') return { action: 'unavailable', status: 'declined', accessGranted: false } as const;
+  if (guest?.status === 'refund-required') return { action: 'unavailable', status: 'refund-required', accessGranted: false } as const;
   if (party.accessMode === 'paid-ticket') return { action: 'ticket', status: guest?.status ?? 'eligible', accessGranted: false } as const;
   if (party.accessMode === 'private-approval') return { action: 'request-approval', status: guest?.status ?? 'eligible', accessGranted: false } as const;
   return { action: 'rsvp', status: guest?.status ?? 'eligible', accessGranted: false } as const;
+}
+
+function isReservationConflict(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && ['P2002', 'P2034'].includes((error as { code?: string }).code ?? ''));
+}
+
+async function serializableTransaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>, conflictMessage: string): Promise<T> {
+  try {
+    return await db.$transaction(operation, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  } catch (error) {
+    if (isReservationConflict(error)) throw new TRPCError({ code: 'CONFLICT', message: conflictMessage });
+    throw error;
+  }
 }
 
 export const partyInvite = publicProcedure
@@ -345,22 +359,24 @@ export const partyRsvpRouter = router({
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
-      const existing = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
-      if (existing?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
-      if (existing?.accessGranted) return { status: existing.status, accessGranted: true };
       const approvalRequired = party.accessMode === 'private-approval';
       const status = approvalRequired ? 'pending' : 'rsvp';
       const accessGranted = !approvalRequired;
-      if (accessGranted && !existing) {
-        const grantedCount = await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
-        if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
-      }
-      const guest = await db.partyGuest.upsert({
-        where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } },
-        create: { partyId: party.id, userId: ctx.user.userId, status, accessGranted },
-        update: { status, accessGranted },
-      });
-      return { status: guest.status, accessGranted: guest.accessGranted };
+      return serializableTransaction(async (tx) => {
+        const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+        if (existing?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
+        if (existing?.accessGranted) return { status: existing.status, accessGranted: true };
+        if (accessGranted) {
+          const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
+          if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+        }
+        const guest = await tx.partyGuest.upsert({
+          where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } },
+          create: { partyId: party.id, userId: ctx.user.userId, status, accessGranted },
+          update: { status, accessGranted },
+        });
+        return { status: guest.status, accessGranted: guest.accessGranted };
+      }, 'Party capacity changed. Please retry.');
     }),
 });
 
@@ -375,13 +391,15 @@ export const partyTicketsRouter = router({
       if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       if (knownGuest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
+      if (knownGuest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });
       if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
 
       const now = new Date();
-      const reservation = await db.$transaction(async (tx) => {
+      const reservation = await serializableTransaction(async (tx) => {
         const existing = await tx.partyCheckout.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
         if (existing) {
+          if (existing.ticketTierName !== ticketTier.name || existing.amountCents !== ticketTier.priceCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match its original ticket tier.' });
           if (existing.status === 'completed') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket is already confirmed.' });
           if (existing.status === 'expired') throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout expired. Start a new checkout.' });
           return existing;
@@ -389,7 +407,17 @@ export const partyTicketsRouter = router({
 
         const guest = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (guest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
+        if (guest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });
         if (guest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
+        await tx.partyCheckout.updateMany({
+          where: { partyId: party.id, userId: ctx.user.userId, status: { in: ['creating', 'pending'] }, reservationExpiresAt: { lte: now } },
+          data: { status: 'expired' },
+        });
+        const existingActiveCheckout = await tx.partyCheckout.findFirst({
+          where: { partyId: party.id, userId: ctx.user.userId, status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: now } },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (existingActiveCheckout) throw new TRPCError({ code: 'CONFLICT', message: 'An active checkout already exists for this Party.' });
 
         const activeReservationWhere = {
           partyId: party.id,
@@ -415,7 +443,7 @@ export const partyTicketsRouter = router({
             reservationExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
           },
         });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }, 'Party ticket inventory changed. Please retry.');
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
       const stripe = new Stripe(config.stripeSecretKey);
@@ -425,12 +453,12 @@ export const partyTicketsRouter = router({
         line_items: [{
           price_data: {
             currency: 'usd',
-            unit_amount: ticketTier.priceCents,
-            product_data: { name: `${party.title} · ${ticketTier.name}`, description: party.tagline },
+            unit_amount: reservation.amountCents,
+            product_data: { name: `${party.title} · ${reservation.ticketTierName}`, description: party.tagline },
           },
           quantity: 1,
         }],
-        metadata: { kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId, ticketTierName: ticketTier.name, idempotencyKey: input.idempotencyKey },
+        metadata: { kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId, ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
       }, { idempotencyKey: input.idempotencyKey });

@@ -4,6 +4,7 @@ import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
 import { db } from '../lib/db';
 import type { Context } from './context';
+import { config } from '../config';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000001';
 const draftInput = {
@@ -31,6 +32,7 @@ const authenticatedContext: Context = { user: { userId: 'test-user-id', email: '
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
 const partyGuest = db.partyGuest as any;
+const partyCheckout = db.partyCheckout as any;
 const prisma = db as any;
 
 function caller() {
@@ -46,7 +48,18 @@ beforeEach(() => {
   partyMedia.upsert = async () => ({ id: 'media-1' });
   partyMedia.findUnique = async () => null;
   partyGuest.count = async () => 0;
-  prisma.$transaction = async (callback: any) => callback({ party, partyMedia });
+  partyGuest.findUnique = async () => null;
+  partyGuest.upsert = async ({ create }: any) => ({ id: 'guest-1', ...create });
+  partyGuest.create = async ({ data }: any) => ({ id: 'guest-1', ...data });
+  partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', ...data });
+  partyCheckout.findUnique = async () => null;
+  partyCheckout.findFirst = async () => null;
+  partyCheckout.count = async () => 0;
+  partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data });
+  partyCheckout.update = async () => ({ id: 'checkout-1' });
+  partyCheckout.updateMany = async () => ({ count: 0 });
+  (config as any).stripeSecretKey = '';
+  prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
 
 test('Party draft creation requires authentication', async () => {
@@ -114,6 +127,60 @@ test('Party mutations reject host-declined guests even when invoked directly', a
 
   party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 40 });
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN' });
+});
+
+test('Free RSVP capacity is enforced inside a serializable transaction', async () => {
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 1 });
+  partyGuest.count = async () => 1;
+  let transactionOptions: any;
+  prisma.$transaction = async (callback: any, options: any) => {
+    transactionOptions = options;
+    return callback({ partyGuest });
+  };
+
+  await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'CONFLICT' });
+  assert.equal(transactionOptions.isolationLevel, 'Serializable');
+});
+
+test('Free RSVP maps serialization conflicts to retryable capacity conflicts', async () => {
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 2 });
+  prisma.$transaction = async () => { throw { code: 'P2034' }; };
+
+  await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'CONFLICT' });
+});
+
+test('Paid checkout retries return the persisted pending reservation', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+  (config as any).stripeSecretKey = 'test-only-key';
+  partyCheckout.findUnique = async () => ({
+    id: 'checkout-1', ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', status: 'pending', checkoutUrl: 'https://checkout.stripe.test/session',
+  });
+
+  assert.deepEqual(await caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), {
+    url: 'https://checkout.stripe.test/session',
+  });
+});
+
+test('Paid checkout rejects an idempotent retry that changes tier and a second active reservation', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    ticketTiers: [
+      { name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' },
+      { name: 'Late Drop', priceCents: 3000, quantity: 40, requiredMembershipTier: 'green' },
+    ],
+  });
+  (config as any).stripeSecretKey = 'test-only-key';
+  partyCheckout.findUnique = async () => ({ id: 'checkout-1', ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', status: 'creating' });
+  await assert.rejects(() => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'Late Drop', idempotencyKey }), { code: 'CONFLICT' });
+
+  partyCheckout.findUnique = async () => null;
+  partyCheckout.findFirst = async () => ({ id: 'checkout-active' });
+  await assert.rejects(() => caller().events.tickets.createCheckout({
+    partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey: '00000000-0000-4000-8000-000000000002',
+  }), { code: 'CONFLICT' });
 });
 
 test('Public Party invitations redact protected venues and project only official destinations', async () => {

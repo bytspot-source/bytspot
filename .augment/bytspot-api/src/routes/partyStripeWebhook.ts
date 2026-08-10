@@ -10,6 +10,36 @@ function metadataValue(metadata: Stripe.Metadata | null, key: string): string | 
   return value || null;
 }
 
+export class PartyCheckoutValidationError extends Error {}
+
+export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Session, checkoutId: string, partyId: string, userId: string): Promise<void> {
+  const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
+  if (!checkout) throw new Error('Party Checkout reservation was not found.');
+  const expectedTier = metadataValue(session.metadata, 'ticketTierName');
+  if (checkout.partyId !== partyId || checkout.userId !== userId || checkout.ticketTierName !== expectedTier || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
+    throw new PartyCheckoutValidationError('Party Checkout values did not match the reservation.');
+  }
+
+  await db.$transaction(async (tx) => {
+    const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
+    if (!current || current.status === 'completed' || current.status === 'refund-required') return;
+    if (current.status === 'expired' || current.reservationExpiresAt <= new Date()) throw new Error('Party Checkout reservation expired before payment confirmation.');
+    if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
+    const guest = await tx.partyGuest.findUnique({ where: { id: current.partyGuestId } });
+    if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
+    const updated = await tx.partyCheckout.updateMany({
+      where: { id: current.id, status: { in: ['creating', 'pending'] } },
+      data: { stripeSessionId: session.id, status: guest.status === 'declined' ? 'refund-required' : 'completed', completedAt: new Date() },
+    });
+    if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
+    if (guest.status === 'declined') {
+      await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+      return;
+    }
+    await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
+  });
+}
+
 partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application/json' }), async (req, res) => {
   if (!config.stripeSecretKey || !config.stripeWebhookSecret) {
     res.status(503).json({ error: 'Party payment confirmation is unavailable.' });
@@ -62,33 +92,13 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   }
 
   try {
-    const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
-    if (!checkout) {
-      res.status(500).json({ error: 'Party Checkout reservation was not found.' });
-      return;
-    }
-    const expectedTier = metadataValue(session.metadata, 'ticketTierName');
-    if (checkout.partyId !== partyId || checkout.userId !== userId || checkout.ticketTierName !== expectedTier || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
-      res.status(400).json({ error: 'Party Checkout values did not match the reservation.' });
-      return;
-    }
-
-    await db.$transaction(async (tx) => {
-      const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
-      if (!current || current.status === 'completed') return;
-      if (current.status === 'expired' || current.reservationExpiresAt <= new Date()) throw new Error('Party Checkout reservation expired before payment confirmation.');
-      if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
-      const updated = await tx.partyCheckout.updateMany({
-        where: { id: current.id, status: { in: ['creating', 'pending'] } },
-        data: { stripeSessionId: session.id, status: 'completed', completedAt: new Date() },
-      });
-      if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
-      const guest = await tx.partyGuest.findUnique({ where: { id: current.partyGuestId } });
-      if (!guest || guest.status === 'declined') throw new Error('Party guest is not eligible for payment confirmation.');
-      await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
-    });
+    await reconcilePartyCheckoutPayment(session, checkoutId, partyId, userId);
     res.json({ received: true });
   } catch (error) {
+    if (error instanceof PartyCheckoutValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
     console.error('[party-stripe-webhook] payment confirmation failed', error);
     res.status(500).json({ error: 'Party payment confirmation will be retried.' });
   }

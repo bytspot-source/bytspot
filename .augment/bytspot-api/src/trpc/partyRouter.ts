@@ -5,6 +5,7 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
 import { db } from '../lib/db';
+import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
@@ -286,19 +287,6 @@ async function publishedParty(partyId: string) {
   return party;
 }
 
-const membershipTierRank = { green: 0, platinum: 1, black: 2 } as const;
-type MembershipTier = keyof typeof membershipTierRank;
-
-function isMembershipTier(value: unknown): value is MembershipTier {
-  return typeof value === 'string' && value in membershipTierRank;
-}
-
-function meetsRequiredMembershipTier(membershipTier: unknown, requiredMembershipTier: unknown): boolean {
-  return isMembershipTier(membershipTier)
-    && isMembershipTier(requiredMembershipTier)
-    && membershipTierRank[membershipTier] >= membershipTierRank[requiredMembershipTier];
-}
-
 async function membershipTierFor(userId: string): Promise<MembershipTier | null> {
   const user = await db.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
   return isMembershipTier(user?.membershipTier) ? user.membershipTier : null;
@@ -326,6 +314,9 @@ async function authorizedPartyArrival(partyId: string, userId: string) {
     include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true } } },
   });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  if (!meetsRequiredMembershipTier(await membershipTierFor(userId), party.requiredMembershipTier)) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
+  }
   const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId } } });
   if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
   if (!party.arrivalVenue) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Arrival guidance is not enabled for this Party.' });

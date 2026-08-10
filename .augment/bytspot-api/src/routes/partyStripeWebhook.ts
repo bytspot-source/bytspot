@@ -2,6 +2,7 @@ import { raw, Router } from 'express';
 import Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
+import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 
 const partyStripeWebhookRouter = Router();
 
@@ -11,6 +12,11 @@ function metadataValue(metadata: Stripe.Metadata | null, key: string): string | 
 }
 
 export class PartyCheckoutValidationError extends Error {}
+
+function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: string): unknown {
+  if (!Array.isArray(ticketTiers)) return null;
+  return ticketTiers.find((tier): tier is { name: unknown; requiredMembershipTier: unknown } => Boolean(tier) && typeof tier === 'object' && 'name' in tier && 'requiredMembershipTier' in tier && (tier as { name: unknown }).name === ticketTierName)?.requiredMembershipTier ?? null;
+}
 
 export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Session, checkoutId: string, partyId: string, userId: string, paymentOccurredAt: Date): Promise<void> {
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
@@ -24,9 +30,16 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
     if (!current || current.status === 'completed' || current.status === 'refund-required') return;
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
-    const guest = await tx.partyGuest.findUnique({ where: { id: current.partyGuestId } });
+    const [guest, party, user] = await Promise.all([
+      tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
+      tx.party.findUnique({ where: { id: current.partyId }, select: { requiredMembershipTier: true, ticketTiers: true } }),
+      tx.user.findUnique({ where: { id: current.userId }, select: { membershipTier: true } }),
+    ]);
     if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
-    const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt;
+    const ticketTierRequirement = ticketRequiredMembershipTier(party?.ticketTiers, current.ticketTierName);
+    const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
+      && meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement);
+    const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible;
     const updated = await tx.partyCheckout.updateMany({
       where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
       data: { stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt },

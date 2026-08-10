@@ -6,6 +6,8 @@ import { PartyCheckoutValidationError, reconcilePartyCheckoutPayment } from './p
 
 const partyCheckout = db.partyCheckout as any;
 const partyGuest = db.partyGuest as any;
+const party = db.party as any;
+const user = db.user as any;
 const prisma = db as any;
 const future = () => new Date(Date.now() + 60_000);
 
@@ -29,7 +31,9 @@ beforeEach(() => {
   partyCheckout.updateMany = async () => ({ count: 1 });
   partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'checkout-pending' });
   partyGuest.update = async () => ({ id: 'guest-1' });
-  prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest });
+  party.findUnique = async () => ({ requiredMembershipTier: 'black', ticketTiers: [{ name: 'First Drop', requiredMembershipTier: 'black' }] });
+  user.findUnique = async () => ({ membershipTier: 'black' });
+  prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, party, user });
 });
 
 test('Party webhook confirms only a matching paid reservation and grants the pass', async () => {
@@ -105,4 +109,17 @@ test('Party webhook makes an out-of-order paid event for an expired reservation 
 
   assert.deepEqual(checkoutUpdate.where.status.in, ['creating', 'pending', 'expired']);
   assert.equal(checkoutUpdate.data.status, 'refund-required');
+});
+
+test('Party webhook refunds a checkout when the user is downgraded before payment completes', async () => {
+  let checkoutUpdate: any;
+  let guestUpdate: any;
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1' }; };
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
 });

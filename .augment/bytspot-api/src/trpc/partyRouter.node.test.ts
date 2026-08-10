@@ -217,7 +217,7 @@ test('Only the host can bind a matching registered arrival venue to a published 
 
 test('Party arrival guidance requires an access-granted guest and a bound venue', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
+    id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
   });
   partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: false });
   await assert.rejects(() => caller().events.arrival.context({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
@@ -230,7 +230,7 @@ test('Party arrival guidance requires an access-granted guest and a bound venue'
 
 test('Party handoff derives its destination from the bound venue and enforces premium membership', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
+    id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
   });
   partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
   user.findUnique = async () => ({ membershipTier: 'green' });
@@ -243,6 +243,17 @@ test('Party handoff derives its destination from the bound venue and enforces pr
   assert.equal(url.searchParams.get('dropoff[nickname]'), 'Sample Venue');
   assert.equal(url.searchParams.get('dropoff[formatted_address]'), '1 Example Way');
   assert.equal(handoff.trackingMode, 'handoff-only');
+});
+
+test('Party arrival context and handoff deny an access-granted guest downgraded below the Party tier', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', requiredMembershipTier: 'black', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
+  });
+  partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+
+  await assert.rejects(() => caller().events.arrival.context({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+  await assert.rejects(() => caller().events.arrival.handoff({ partyId: 'party-1', provider: 'uber' }), { code: 'FORBIDDEN' });
 });
 
 test('Party pass advertises premium handoff only when its host has bound an arrival venue', async () => {

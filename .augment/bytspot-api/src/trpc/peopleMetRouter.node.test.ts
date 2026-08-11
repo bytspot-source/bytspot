@@ -46,12 +46,16 @@ beforeEach(() => {
   prisma.$transaction = async (operation: any) => operation({ partyGuest, partyMeetConsent: consent, partyMeetExchange: exchange, partyMeetConnection: connection, userBlock: block, partyMeetReport: report, $executeRaw: async () => 1 });
 });
 
-test('People You Met migration never silently accepts a partial table schema', () => {
-  const migration = readFileSync(new URL('../../prisma/migrations/20260815_add_party_people_met/migration.sql', import.meta.url), 'utf8');
-  assert.doesNotMatch(migration, /CREATE TABLE IF NOT EXISTS/);
-  assert.match(migration, /party_meet_connections_canonical_pair_check/);
-  assert.match(migration, /party_meet_exchanges_code_hash_key/);
-  assert.match(migration, /user_blocks_not_self_check/);
+test('People You Met forward repair migration asserts the complete privacy constraint contract', () => {
+  const migration = readFileSync(new URL('../../prisma/migrations/20260816_repair_party_people_met_constraints/migration.sql', import.meta.url), 'utf8');
+  assert.match(migration, /People You Met repair requires table/);
+  for (const constraint of [
+    'party_meet_exchanges_code_hash_key',
+    'party_meet_connections_canonical_pair_check',
+    'party_meet_connections_party_id_user_low_id_user_high_id_key',
+    'user_blocks_not_self_check',
+    'user_blocks_blocker_user_id_blocked_user_id_key',
+  ]) assert.match(migration, new RegExp(`ADD CONSTRAINT "${constraint}"`));
 });
 
 test('People You Met opt-in requires a confirmed Party check-in and expiry is fixed to that check-in', async () => {

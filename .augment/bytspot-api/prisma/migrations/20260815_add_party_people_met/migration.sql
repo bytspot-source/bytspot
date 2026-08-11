@@ -1,13 +1,12 @@
 -- People You Met is party-scoped and consent-only. It is not an attendee
--- directory or a social/follow graph. Do not silently accept partial schemas:
--- a prior failed/manual partial deployment must fail this migration loudly so
--- required privacy and race-safety constraints cannot be skipped.
+-- directory or a social/follow graph. This migration is safe to reconcile on
+-- production databases where a partial deploy may already have created objects.
 DO $$ BEGIN
   CREATE TYPE "PartyMeetReportReason" AS ENUM ('harassment', 'safety', 'impersonation', 'spam', 'other');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
-CREATE TABLE "party_meet_consents" (
+CREATE TABLE IF NOT EXISTS "party_meet_consents" (
   "id" TEXT NOT NULL,
   "party_id" TEXT NOT NULL,
   "user_id" TEXT NOT NULL,
@@ -23,7 +22,7 @@ CREATE TABLE "party_meet_consents" (
   CONSTRAINT "party_meet_consents_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE TABLE "party_meet_exchanges" (
+CREATE TABLE IF NOT EXISTS "party_meet_exchanges" (
   "id" TEXT NOT NULL,
   "party_id" TEXT NOT NULL,
   "issuer_user_id" TEXT NOT NULL,
@@ -42,7 +41,7 @@ CREATE TABLE "party_meet_exchanges" (
   CONSTRAINT "party_meet_exchanges_redeemed_by_id_fkey" FOREIGN KEY ("redeemed_by_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
-CREATE TABLE "party_meet_connections" (
+CREATE TABLE IF NOT EXISTS "party_meet_connections" (
   "id" TEXT NOT NULL,
   "party_id" TEXT NOT NULL,
   "user_low_id" TEXT NOT NULL,
@@ -60,7 +59,7 @@ CREATE TABLE "party_meet_connections" (
   CONSTRAINT "party_meet_connections_user_high_id_fkey" FOREIGN KEY ("user_high_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE TABLE "user_blocks" (
+CREATE TABLE IF NOT EXISTS "user_blocks" (
   "id" TEXT NOT NULL,
   "blocker_user_id" TEXT NOT NULL,
   "blocked_user_id" TEXT NOT NULL,
@@ -72,7 +71,7 @@ CREATE TABLE "user_blocks" (
   CONSTRAINT "user_blocks_blocked_user_id_fkey" FOREIGN KEY ("blocked_user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE TABLE "party_meet_reports" (
+CREATE TABLE IF NOT EXISTS "party_meet_reports" (
   "id" TEXT NOT NULL,
   "connection_id" TEXT NOT NULL,
   "reporter_user_id" TEXT NOT NULL,
@@ -86,12 +85,12 @@ CREATE TABLE "party_meet_reports" (
   CONSTRAINT "party_meet_reports_reported_user_id_fkey" FOREIGN KEY ("reported_user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE INDEX "party_meet_consents_user_id_expires_at_idx" ON "party_meet_consents"("user_id", "expires_at");
-CREATE INDEX "party_meet_consents_party_id_expires_at_idx" ON "party_meet_consents"("party_id", "expires_at");
-CREATE INDEX "party_meet_exchanges_party_id_issuer_user_id_expires_at_idx" ON "party_meet_exchanges"("party_id", "issuer_user_id", "expires_at");
-CREATE INDEX "party_meet_exchanges_consent_id_expires_at_idx" ON "party_meet_exchanges"("consent_id", "expires_at");
-CREATE INDEX "party_meet_connections_user_low_id_expires_at_idx" ON "party_meet_connections"("user_low_id", "expires_at");
-CREATE INDEX "party_meet_connections_user_high_id_expires_at_idx" ON "party_meet_connections"("user_high_id", "expires_at");
-CREATE INDEX "user_blocks_blocked_user_id_idx" ON "user_blocks"("blocked_user_id");
-CREATE INDEX "party_meet_reports_reporter_user_id_created_at_idx" ON "party_meet_reports"("reporter_user_id", "created_at");
-CREATE INDEX "party_meet_reports_reported_user_id_created_at_idx" ON "party_meet_reports"("reported_user_id", "created_at");
+CREATE INDEX IF NOT EXISTS "party_meet_consents_user_id_expires_at_idx" ON "party_meet_consents"("user_id", "expires_at");
+CREATE INDEX IF NOT EXISTS "party_meet_consents_party_id_expires_at_idx" ON "party_meet_consents"("party_id", "expires_at");
+CREATE INDEX IF NOT EXISTS "party_meet_exchanges_party_id_issuer_user_id_expires_at_idx" ON "party_meet_exchanges"("party_id", "issuer_user_id", "expires_at");
+CREATE INDEX IF NOT EXISTS "party_meet_exchanges_consent_id_expires_at_idx" ON "party_meet_exchanges"("consent_id", "expires_at");
+CREATE INDEX IF NOT EXISTS "party_meet_connections_user_low_id_expires_at_idx" ON "party_meet_connections"("user_low_id", "expires_at");
+CREATE INDEX IF NOT EXISTS "party_meet_connections_user_high_id_expires_at_idx" ON "party_meet_connections"("user_high_id", "expires_at");
+CREATE INDEX IF NOT EXISTS "user_blocks_blocked_user_id_idx" ON "user_blocks"("blocked_user_id");
+CREATE INDEX IF NOT EXISTS "party_meet_reports_reporter_user_id_created_at_idx" ON "party_meet_reports"("reporter_user_id", "created_at");
+CREATE INDEX IF NOT EXISTS "party_meet_reports_reported_user_id_created_at_idx" ON "party_meet_reports"("reported_user_id", "created_at");

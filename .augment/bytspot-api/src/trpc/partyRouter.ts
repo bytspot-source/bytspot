@@ -5,7 +5,7 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
+import { isMembershipTier, membershipTierRank, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
@@ -313,6 +313,21 @@ function currentPartyMembershipEligible(
   return Boolean(ticketTier && meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier));
 }
 
+function eligibleMembershipTiersForPartyGuest(
+  party: { requiredMembershipTier: string; ticketTiers: Prisma.JsonValue },
+  ticketTierName: string | null,
+): MembershipTier[] {
+  if (!isMembershipTier(party.requiredMembershipTier)) return [];
+  const ticketTier = ticketTierName
+    ? parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === ticketTierName)
+    : null;
+  if (ticketTierName && !ticketTier) return [];
+  const requiredTier = ticketTier && membershipTierRank[ticketTier.requiredMembershipTier] > membershipTierRank[party.requiredMembershipTier]
+    ? ticketTier.requiredMembershipTier
+    : party.requiredMembershipTier;
+  return (Object.keys(membershipTierRank) as MembershipTier[]).filter((tier) => membershipTierRank[tier] >= membershipTierRank[requiredTier]);
+}
+
 function passAction(party: { accessMode: string; requiredMembershipTier: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean, membershipEligible: boolean) {
   if (!isAuthenticated) return { action: 'authenticate', status: 'anonymous', accessGranted: false } as const;
   if (!membershipEligible) return { action: 'unavailable', status: 'membership-required', accessGranted: false } as const;
@@ -330,16 +345,21 @@ function normalizedVenueName(value: string): string {
 }
 
 async function authorizedPartyArrival(partyId: string, userId: string) {
-  const party = await db.party.findFirst({
-    where: { id: partyId, status: 'published' },
-    include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true } } },
-  });
+  const [party, guest, membershipTier] = await Promise.all([
+    db.party.findFirst({
+      where: { id: partyId, status: 'published' },
+      include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true } } },
+    }),
+    db.partyGuest.findUnique({
+      where: { partyId_userId: { partyId, userId } },
+      select: { accessGranted: true, ticketTierName: true },
+    }),
+    membershipTierFor(userId),
+  ]);
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
-  if (!meetsRequiredMembershipTier(await membershipTierFor(userId), party.requiredMembershipTier)) {
-    throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
+  if (!guest?.accessGranted || !currentPartyMembershipEligible(party, membershipTier, guest.ticketTierName)) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Current Party and ticket membership eligibility is required before arrival guidance is available.' });
   }
-  const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId } } });
-  if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
   if (!party.arrivalVenue) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Arrival guidance is not enabled for this Party.' });
   return party;
 }
@@ -487,10 +507,19 @@ export const partyControlRouter = router({
       }
       if (guest.checkedInAt) throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
 
-      // The null predicate is the replay guard: concurrent scans allow only
-      // one update to succeed.
+      // The null predicate is the replay guard. The related-user predicate
+      // rechecks membership in the same SQL write, so a downgrade committed
+      // before this statement cannot be admitted between the read and write.
+      const eligibleMembershipTiers = eligibleMembershipTiersForPartyGuest(party, guest.ticketTierName);
       const checkedIn = await db.partyGuest.updateMany({
-        where: { id: guest.id, partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest, checkedInAt: null },
+        where: {
+          id: guest.id,
+          partyId: input.partyId,
+          accessGranted: true,
+          attendeeCredentialHash: digest,
+          checkedInAt: null,
+          user: { is: { membershipTier: { in: eligibleMembershipTiers } } },
+        },
         data: { checkedInAt: new Date() },
       });
       if (checkedIn.count !== 1) {
@@ -499,10 +528,13 @@ export const partyControlRouter = router({
         // not label a rotated credential as a completed check-in.
         const current = await db.partyGuest.findUnique({
           where: { id: guest.id },
-          select: { checkedInAt: true },
+          select: { checkedInAt: true, ticketTierName: true, user: { select: { membershipTier: true } } },
         });
         if (current?.checkedInAt) {
           throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
+        }
+        if (!current || !currentPartyMembershipEligible(party, current.user.membershipTier, current.ticketTierName)) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee credential not recognized.' });
         }
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee credential expired. Ask the guest to refresh their pass.' });
       }

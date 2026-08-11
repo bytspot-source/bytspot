@@ -128,7 +128,7 @@ test('Door Mode reports a rotated credential as expired instead of already check
   party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [] });
   partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: null, user: { name: 'Door Guest', membershipTier: 'green' } });
   partyGuest.updateMany = async () => ({ count: 0 });
-  partyGuest.findUnique = async () => ({ checkedInAt: null });
+  partyGuest.findUnique = async () => ({ checkedInAt: null, ticketTierName: null, user: { membershipTier: 'green' } });
 
   await assert.rejects(
     () => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }),
@@ -140,6 +140,16 @@ test('Door Mode rejects a stale credential after the guest is downgraded below t
   party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }] });
   partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: 'Black Table', user: { name: 'Door Guest', membershipTier: 'platinum' } });
   await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'NOT_FOUND' });
+});
+
+test('Door Mode rechecks membership in the atomic check-in write', async () => {
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }] });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: 'Black Table', user: { name: 'Door Guest', membershipTier: 'black' } });
+  let update: any;
+  partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) });
+  assert.deepEqual(update.where.user, { is: { membershipTier: { in: ['black'] } } });
 });
 
 test('Party draft creation requires authentication', async () => {
@@ -345,6 +355,18 @@ test('Party arrival context and handoff deny an access-granted guest downgraded 
     id: 'party-1', requiredMembershipTier: 'black', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
   });
   partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+
+  await assert.rejects(() => caller().events.arrival.context({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+  await assert.rejects(() => caller().events.arrival.handoff({ partyId: 'party-1', provider: 'uber' }), { code: 'FORBIDDEN' });
+});
+
+test('Party arrival context and handoff deny an access-granted guest downgraded below their recorded ticket tier', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }],
+    arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
+  });
+  partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true, ticketTierName: 'Black Table' });
   user.findUnique = async () => ({ membershipTier: 'platinum' });
 
   await assert.rejects(() => caller().events.arrival.context({ partyId: 'party-1' }), { code: 'FORBIDDEN' });

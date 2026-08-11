@@ -33,6 +33,7 @@ model User {
   valetProfile   ValetProfile?
   checkIns       CheckIn[]
   savedSpots     SavedSpot[]
+  providerIdentities ProviderIdentity[]
   collections    SpotCollection[]
   pointTxns      PointTransaction[]
   achievements   UserAchievement[]
@@ -48,6 +49,27 @@ model User {
   mobilityTrips  MobilityTrip[]
 
   @@map("users")
+}
+
+// ─── Provider identities ─────────────────────────────
+enum AuthProvider {
+  apple
+  google
+}
+
+model ProviderIdentity {
+  id        String       @id @default(cuid())
+  provider  AuthProvider
+  subject   String
+  userId    String       @map("user_id")
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([userId])
+  @@map("provider_identities")
 }
 
 // ─── Venues ──────────────────────────────────────────

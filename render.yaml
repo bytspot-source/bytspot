@@ -62,4 +62,8 @@ services:
         sync: false
       - key: VAPID_PRIVATE_KEY
         sync: false
+      - key: APPLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_SERVER_CLIENT_ID
+        sync: false
 

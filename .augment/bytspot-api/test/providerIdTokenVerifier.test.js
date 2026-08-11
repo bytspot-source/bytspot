@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { generateKeyPairSync, sign } = require('node:crypto');
 const test = require('node:test');
-const { verifyProviderIdToken } = require('../dist/services/providerIdTokenVerifier');
+const { verifyProviderIdToken, resetProviderJwksCacheForTests } = require('../dist/services/providerIdTokenVerifier');
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'test-key', use: 'sig' };
@@ -44,10 +44,13 @@ for (const [name, options] of [
   ['rejects an audience mismatch', { audience: 'wrong-client' }],
   ['rejects an expired token', { claims: { exp: 1 } }],
   ['rejects an unverified Google email', { claims: { email_verified: false } }],
+  ['rejects an unverified Apple email', { provider: 'apple', audience: 'apple-client', claims: { email_verified: false } }],
+  ['rejects a multi-audience token without an unambiguous authorized party', { claims: { aud: ['google-client', 'other-client'] } }],
 ]) {
   test(name, async () => {
-    const expectedAudience = options.audience === 'wrong-client' ? 'google-client' : 'google-client';
-    await assert.rejects(() => verifyProviderIdToken('google', makeToken(options), expectedAudience, jwks));
+    const provider = options.provider ?? 'google';
+    const expectedAudience = options.audience === 'wrong-client' ? 'google-client' : (options.audience ?? 'google-client');
+    await assert.rejects(() => verifyProviderIdToken(provider, makeToken(options), expectedAudience, jwks));
   });
 }
 
@@ -55,4 +58,17 @@ test('allows Apple identity without email after it is already linked', async () 
   const result = await verifyProviderIdToken('apple', makeToken({ provider: 'apple', audience: 'apple-client', claims: { email: undefined } }), 'apple-client', jwks);
   assert.equal(result.email, undefined);
   assert.equal(result.subject, 'provider-subject');
+});
+
+test('limits unknown signing-key refreshes per provider endpoint', async () => {
+  resetProviderJwksCacheForTests();
+  let calls = 0;
+  const unknownKidToken = makeToken();
+  const [header, payload] = unknownKidToken.split('.');
+  const tokenWithUnknownKid = `${base64url({ alg: 'RS256', kid: 'unknown-key', typ: 'JWT' })}.${payload}.${sign('RSA-SHA256', Buffer.from(`${base64url({ alg: 'RS256', kid: 'unknown-key', typ: 'JWT' })}.${payload}`), privateKey).toString('base64url')}`;
+  const fetchUnknown = async () => { calls += 1; return { keys: [jwk] }; };
+  await assert.rejects(() => verifyProviderIdToken('google', tokenWithUnknownKid, 'google-client', fetchUnknown));
+  await assert.rejects(() => verifyProviderIdToken('google', tokenWithUnknownKid, 'google-client', fetchUnknown));
+  assert.equal(calls, 3); // initial lookup twice, then one cached lookup; no second refresh
+  resetProviderJwksCacheForTests();
 });

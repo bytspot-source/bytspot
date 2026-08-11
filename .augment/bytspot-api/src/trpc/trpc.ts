@@ -1,4 +1,5 @@
 import { initTRPC, TRPCError } from '@trpc/server';
+import { getRedis } from '../lib/redis';
 import type { Context } from './context';
 
 /**
@@ -27,9 +28,8 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
 });
 
 /**
- * Simple in-memory rate limiter for tRPC procedures.
- * Uses a fixed-window counter per key (userId or 'anon').
- * Includes periodic cleanup to prevent memory leaks from stale buckets.
+ * Fixed-window rate limiter for tRPC procedures. Redis counters provide a
+ * shared production limit; the bounded in-memory map is a failure fallback.
  */
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -49,24 +49,45 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL_MS).unref(); // .unref() so this timer doesn't prevent graceful shutdown
 
+export function rateLimitSubject(userId: string | undefined, clientKey: string): string {
+  // Public procedures are keyed to a hashed, proxy-aware client IP; protected
+  // procedures retain a stable per-user key. Never use a shared `anon` bucket.
+  return userId ? `user:${userId}` : `client:${clientKey}`;
+}
+
 export function rateLimitMiddleware(opts: { windowMs: number; max: number; label: string }) {
   return t.middleware(async ({ ctx, next }) => {
-    const key = `${opts.label}:${ctx.user?.userId ?? 'anon'}`;
-    const now = Date.now();
-    const bucket = rateBuckets.get(key);
-
-    if (bucket && bucket.resetAt > now) {
-      if (bucket.count >= opts.max) {
-        throw new TRPCError({
-          code: 'TOO_MANY_REQUESTS',
-          message: `Rate limit exceeded for ${opts.label}. Try again later.`,
-        });
+    const key = `${opts.label}:${rateLimitSubject(ctx.user?.userId, ctx.clientRateLimitKey)}`;
+    let count: number | null = null;
+    const redis = getRedis();
+    if (redis) {
+      try {
+        count = await redis.incr(`rate-limit:${key}`);
+        if (count === 1) await redis.pexpire(`rate-limit:${key}`, opts.windowMs);
+      } catch {
+        // Redis unavailability must not take down the API; use local fallback.
+        count = null;
       }
-      bucket.count++;
-    } else {
-      rateBuckets.set(key, { count: 1, resetAt: now + opts.windowMs });
     }
 
+    if (count === null) {
+      const now = Date.now();
+      const bucket = rateBuckets.get(key);
+      if (bucket && bucket.resetAt > now) {
+        bucket.count++;
+        count = bucket.count;
+      } else {
+        rateBuckets.set(key, { count: 1, resetAt: now + opts.windowMs });
+        count = 1;
+      }
+    }
+
+    if (count > opts.max) {
+      throw new TRPCError({
+        code: 'TOO_MANY_REQUESTS',
+        message: `Rate limit exceeded for ${opts.label}. Try again later.`,
+      });
+    }
     return next();
   });
 }

@@ -1,4 +1,5 @@
 import * as trpcExpress from '@trpc/server/adapters/express';
+import { createHash } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
@@ -7,6 +8,13 @@ import { AuthPayload } from '../middleware/auth';
  * Creates the tRPC context from the Express request.
  * Extracts JWT auth if present (optional — procedures decide whether to require it).
  */
+export function clientRateLimitKey(ipAddress: string | undefined): string {
+  // `req.ip` is proxy-aware because index.ts trusts the Cloudflare → Render
+  // chain. Hash it so neither context nor Redis contains raw IP addresses.
+  const normalized = ipAddress?.trim() || 'unknown';
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
 export async function createContext({
   req,
 }: trpcExpress.CreateExpressContextOptions) {
@@ -22,7 +30,7 @@ export async function createContext({
     }
   }
 
-  return { user };
+  return { user, clientRateLimitKey: clientRateLimitKey(req.ip) };
 }
 
 export type Context = Awaited<ReturnType<typeof createContext>>;

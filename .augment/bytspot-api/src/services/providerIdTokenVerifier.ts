@@ -29,7 +29,8 @@ const providerOptions: Record<ProviderName, Omit<ProviderVerificationOptions, 'a
     provider: 'apple',
     issuer: 'https://appleid.apple.com',
     jwksURL: 'https://appleid.apple.com/auth/keys',
-    requireVerifiedEmail: false,
+    // Apple IDs created with a token email must prove that email claim too.
+    requireVerifiedEmail: true,
   },
   google: {
     provider: 'google',
@@ -40,7 +41,9 @@ const providerOptions: Record<ProviderName, Omit<ProviderVerificationOptions, 'a
 };
 
 const jwksCache = new Map<string, { expiresAt: number; keys: JsonRecord[] }>();
+const unknownKidRefreshAt = new Map<string, number>();
 const JWKS_CACHE_MS = 60 * 60 * 1000;
+const UNKNOWN_KID_REFRESH_COOLDOWN_MS = 60_000;
 
 function parseJwtPart(value: string): JsonRecord {
   try {
@@ -59,7 +62,9 @@ function stringClaim(claims: JsonRecord, name: string): string | undefined {
 }
 
 function audienceMatches(value: unknown, expected: string): boolean {
-  return value === expected || (Array.isArray(value) && value.includes(expected));
+  // Native flows expect exactly one configured client audience. Rejecting
+  // multi-audience tokens avoids accepting a token without an unambiguous azp.
+  return value === expected;
 }
 
 function emailIsVerified(value: unknown): boolean {
@@ -117,8 +122,10 @@ export async function verifyProviderIdToken(
   let keys = keysFrom(await getJwks(options.jwksURL));
   let jwk = keys.find((key) => key.kid === kid && key.kty === 'RSA' && key.use !== 'enc');
   // Providers rotate signing keys. An unknown key may be newer than a cached
-  // JWKS, so invalidate and refresh once before failing closed.
-  if (!jwk) {
+  // JWKS, but rate-limit cache refreshes so random kids cannot amplify requests.
+  const lastRefresh = unknownKidRefreshAt.get(options.jwksURL) ?? 0;
+  if (!jwk && Date.now() - lastRefresh >= UNKNOWN_KID_REFRESH_COOLDOWN_MS) {
+    unknownKidRefreshAt.set(options.jwksURL, Date.now());
     jwksCache.delete(options.jwksURL);
     keys = keysFrom(await getJwks(options.jwksURL));
     jwk = keys.find((key) => key.kid === kid && key.kty === 'RSA' && key.use !== 'enc');
@@ -148,9 +155,13 @@ export async function verifyProviderIdToken(
   const subject = stringClaim(claims, 'sub');
   if (!subject || subject.length > 255) throw new Error('Invalid provider identity token');
   const email = normalizedEmail(stringClaim(claims, 'email'));
-  if (options.requireVerifiedEmail && (!email || !emailIsVerified(claims.email_verified))) {
+  // Existing Apple identities may sign in after Apple's one-time email claim
+  // has disappeared. When any provider email is present and used, require it
+  // to be provider-verified before it can create a Bytspot account.
+  if (email && options.requireVerifiedEmail && !emailIsVerified(claims.email_verified)) {
     throw new Error('Invalid provider identity token');
   }
+  if (provider === 'google' && !email) throw new Error('Invalid provider identity token');
   const name = stringClaim(claims, 'name')?.slice(0, 100);
   return {
     provider,
@@ -163,4 +174,5 @@ export async function verifyProviderIdToken(
 /** Test-only cache reset; provider tokens and signing keys are never exposed. */
 export function resetProviderJwksCacheForTests(): void {
   jwksCache.clear();
+  unknownKidRefreshAt.clear();
 }

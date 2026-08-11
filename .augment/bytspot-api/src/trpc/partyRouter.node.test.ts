@@ -28,7 +28,7 @@ const draftInput = {
 };
 const partyDraft = { id: 'party-1', hostUserId: 'test-user-id', idempotencyKey, status: 'draft' };
 const createCaller = createCallerFactory(appRouter);
-const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' } };
+const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
 const partyGuest = db.partyGuest as any;

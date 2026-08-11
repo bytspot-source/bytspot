@@ -6,13 +6,18 @@ import { VerifiedProviderIdentity } from './providerIdTokenVerifier';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
+type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user'>;
+
 /**
  * Resolves a verified provider subject to exactly one user. We deliberately do
  * not auto-link an existing password account by email: identity linking must be
  * an authenticated, explicit future operation to prevent account takeover.
  */
-export async function resolveProviderIdentity(identity: VerifiedProviderIdentity): Promise<{ user: ProviderUser; isNewUser: boolean }> {
-  const existing = await db.providerIdentity.findUnique({
+export async function resolveProviderIdentity(
+  identity: VerifiedProviderIdentity,
+  database: ProviderIdentityDatabase = db,
+): Promise<{ user: ProviderUser; isNewUser: boolean }> {
+  const existing = await database.providerIdentity.findUnique({
     where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
     include: { user: { select: { id: true, email: true, name: true } } },
   });
@@ -25,7 +30,7 @@ export async function resolveProviderIdentity(identity: VerifiedProviderIdentity
     });
   }
 
-  const emailOwner = await db.user.findUnique({ where: { email: identity.email }, select: { id: true } });
+  const emailOwner = await database.user.findUnique({ where: { email: identity.email }, select: { id: true } });
   if (emailOwner) {
     throw new TRPCError({
       code: 'CONFLICT',
@@ -37,7 +42,7 @@ export async function resolveProviderIdentity(identity: VerifiedProviderIdentity
   // password-setting flow is completed. Never persist the generated secret.
   const password = await bcrypt.hash(randomBytes(32).toString('hex'), 12);
   try {
-    return await db.$transaction(async (tx) => {
+    return await database.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: { email: identity.email!, password, name: identity.name },
         select: { id: true, email: true, name: true },
@@ -50,7 +55,7 @@ export async function resolveProviderIdentity(identity: VerifiedProviderIdentity
   } catch (error: unknown) {
     // A concurrent first sign-in may have created this identity. Re-read by
     // immutable provider subject; do not fall back to email matching.
-    const concurrent = await db.providerIdentity.findUnique({
+    const concurrent = await database.providerIdentity.findUnique({
       where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
       include: { user: { select: { id: true, email: true, name: true } } },
     });

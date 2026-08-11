@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { clientRateLimitKey } = require('../dist/trpc/context');
+const { entersPacked } = require('../dist/services/crowdTransition');
 const {
   incrementLocalRateLimit,
   incrementRedisRateLimit,
@@ -55,4 +56,12 @@ test('local fallback fails closed when its bucket capacity is exhausted', () => 
   assert.equal(incrementLocalRateLimit('new-client-after-capacity', 60_000, 0), null);
   assert.equal(incrementLocalRateLimit('client-0', 60_000, 0), 2);
   resetLocalRateLimitForTests();
+});
+
+test('crowd alerts fire only when a venue transitions into Packed', () => {
+  assert.equal(entersPacked(3, 4), true);
+  assert.equal(entersPacked(undefined, 4), true);
+  assert.equal(entersPacked(4, 4), false);
+  assert.equal(entersPacked(4, 3), false);
+  assert.equal(entersPacked(2, 3), false);
 });

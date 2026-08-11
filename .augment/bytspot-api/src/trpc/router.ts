@@ -13,6 +13,7 @@ import { getAllSubscriptions, storeSubscription } from '../routes/push';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
+import { entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice } from '../services/iosPushDevices';
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
@@ -384,7 +385,7 @@ const venuesRouter = router({
 
       const result = { success: true, newCrowdLevel: newLevel, pointsEarned };
 
-      if (newLevel === 4) {
+      if (entersPacked(latest?.level, newLevel)) {
         sendVenueCrowdAlert({
           venueId,
           venueName: venue.name,

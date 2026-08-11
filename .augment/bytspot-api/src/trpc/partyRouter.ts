@@ -302,6 +302,17 @@ async function membershipTierFor(userId: string): Promise<MembershipTier | null>
   return isMembershipTier(user?.membershipTier) ? user.membershipTier : null;
 }
 
+function currentPartyMembershipEligible(
+  party: { requiredMembershipTier: string; ticketTiers: Prisma.JsonValue },
+  membershipTier: unknown,
+  ticketTierName: string | null,
+): boolean {
+  if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)) return false;
+  if (!ticketTierName) return true;
+  const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === ticketTierName);
+  return Boolean(ticketTier && meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier));
+}
+
 function passAction(party: { accessMode: string; requiredMembershipTier: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean, membershipEligible: boolean) {
   if (!isAuthenticated) return { action: 'authenticate', status: 'anonymous', accessGranted: false } as const;
   if (!membershipEligible) return { action: 'unavailable', status: 'membership-required', accessGranted: false } as const;
@@ -385,9 +396,24 @@ export const partyPassRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-attendee-credential' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .mutation(async ({ ctx, input }) => {
+      const [party, guest, membershipTier] = await Promise.all([
+        db.party.findFirst({
+          where: { id: input.partyId, status: 'published' },
+          select: { requiredMembershipTier: true, ticketTiers: true },
+        }),
+        db.partyGuest.findUnique({
+          where: { partyId_userId: { partyId: input.partyId, userId: ctx.user.userId } },
+          select: { accessGranted: true, checkedInAt: true, ticketTierName: true },
+        }),
+        membershipTierFor(ctx.user.userId),
+      ]);
+      if (!party || !guest?.accessGranted || guest.checkedInAt || !currentPartyMembershipEligible(party, membershipTier, guest.ticketTierName)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'An active Party Pass and current membership eligibility are required to display an attendee credential.' });
+      }
+
       const credential = newAttendeeCredential();
-      // The conditional update both verifies current access and prevents a
-      // checked-in guest from rotating a credential back into circulation.
+      // The conditional update verifies current access and prevents a checked-in
+      // guest from rotating a credential back into circulation.
       const updated = await db.partyGuest.updateMany({
         where: {
           partyId: input.partyId,
@@ -413,7 +439,8 @@ export const partyPassRouter = router({
         ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
         : null;
       const membershipTier = ctx.user ? await membershipTierFor(ctx.user.userId) : null;
-      const state = passAction(party, guest, Boolean(ctx.user), meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier));
+      const membershipEligible = Boolean(ctx.user && currentPartyMembershipEligible(party, membershipTier, guest?.ticketTierName ?? null));
+      const state = passAction(party, guest, Boolean(ctx.user), membershipEligible);
       const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
       return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };
     }),
@@ -443,11 +470,21 @@ export const partyControlRouter = router({
     .mutation(async ({ ctx, input }) => {
       await requirePartyDoorAuthority(input.partyId, ctx.user.userId);
       const digest = attendeeCredentialHash(input.attendeeCredential);
-      const guest = await db.partyGuest.findFirst({
-        where: { partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest },
-        select: { id: true, checkedInAt: true, user: { select: { name: true } } },
-      });
-      if (!guest) throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee credential not recognized.' });
+      const [party, guest] = await Promise.all([
+        db.party.findFirst({
+          where: { id: input.partyId, status: 'published' },
+          select: { requiredMembershipTier: true, ticketTiers: true },
+        }),
+        db.partyGuest.findFirst({
+          where: { partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest },
+          select: { id: true, checkedInAt: true, ticketTierName: true, user: { select: { name: true, membershipTier: true } } },
+        }),
+      ]);
+      // Treat a stale membership as an unrecognized credential to avoid
+      // confirming either attendance or a membership downgrade to Door Mode.
+      if (!party || !guest || !currentPartyMembershipEligible(party, guest.user.membershipTier, guest.ticketTierName)) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee credential not recognized.' });
+      }
       if (guest.checkedInAt) throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
 
       // The null predicate is the replay guard: concurrent scans allow only

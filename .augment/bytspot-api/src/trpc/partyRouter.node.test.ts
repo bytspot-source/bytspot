@@ -69,7 +69,9 @@ beforeEach(() => {
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
 
-test('Attendee credential is issued only to an access-granted guest and only its digest is persisted', async () => {
+test('Attendee credential is issued only to a currently eligible access-granted guest and only its digest is persisted', async () => {
+  party.findFirst = async () => ({ requiredMembershipTier: 'green', ticketTiers: [] });
+  partyGuest.findUnique = async () => ({ accessGranted: true, checkedInAt: null, ticketTierName: null });
   let update: any;
   partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
 
@@ -83,14 +85,21 @@ test('Attendee credential is issued only to an access-granted guest and only its
   assert.notEqual(update.data.attendeeCredentialHash, result.attendeeCredential);
 });
 
-test('Attendee credential rejects users without an active Party Pass', async () => {
+test('Attendee credential rejects users without an active Party Pass or current membership eligibility', async () => {
+  party.findFirst = async () => ({ requiredMembershipTier: 'green', ticketTiers: [] });
+  partyGuest.findUnique = async () => ({ accessGranted: false, checkedInAt: null, ticketTierName: null });
   partyGuest.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.pass.attendeeCredential({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+
+  partyGuest.findUnique = async () => ({ accessGranted: true, checkedInAt: null, ticketTierName: 'Black Table' });
+  party.findFirst = async () => ({ requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }] });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
   await assert.rejects(() => caller().events.pass.attendeeCredential({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
 });
 
 test('Door Mode checks in a valid credential exactly once and only for authorized staff', async () => {
-  party.findFirst = async () => ({ hostUserId: 'test-user-id', cohosts: [] });
-  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, user: { name: 'Door Guest' } });
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [] });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: null, user: { name: 'Door Guest', membershipTier: 'green' } });
   let update: any;
   partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
 
@@ -107,7 +116,7 @@ test('Door Mode checks in a valid credential exactly once and only for authorize
 });
 
 test('Door Mode rejects all email-only cohost records and unknown credentials', async () => {
-  party.findFirst = async () => ({ hostUserId: 'someone-else', cohosts: [{ email: 'test@bytspot.com', role: 'door' }] });
+  party.findFirst = async () => ({ hostUserId: 'someone-else', requiredMembershipTier: 'green', ticketTiers: [], cohosts: [{ email: 'test@bytspot.com', role: 'door' }] });
   await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'FORBIDDEN' });
 
   party.findFirst = async () => ({ hostUserId: 'test-user-id', cohosts: [] });
@@ -116,8 +125,8 @@ test('Door Mode rejects all email-only cohost records and unknown credentials', 
 });
 
 test('Door Mode reports a rotated credential as expired instead of already checked in', async () => {
-  party.findFirst = async () => ({ hostUserId: 'test-user-id' });
-  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, user: { name: 'Door Guest' } });
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [] });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: null, user: { name: 'Door Guest', membershipTier: 'green' } });
   partyGuest.updateMany = async () => ({ count: 0 });
   partyGuest.findUnique = async () => ({ checkedInAt: null });
 
@@ -125,6 +134,12 @@ test('Door Mode reports a rotated credential as expired instead of already check
     () => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }),
     { code: 'NOT_FOUND', message: 'Attendee credential expired. Ask the guest to refresh their pass.' },
   );
+});
+
+test('Door Mode rejects a stale credential after the guest is downgraded below the recorded ticket tier', async () => {
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }] });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: 'Black Table', user: { name: 'Door Guest', membershipTier: 'platinum' } });
+  await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'NOT_FOUND' });
 });
 
 test('Party draft creation requires authentication', async () => {
@@ -358,6 +373,15 @@ test('Party pass and RSVP enforce the Party required membership tier', async () 
   const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
   assert.equal(pass.action, 'rsvp');
   assert.equal((await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey })).accessGranted, true);
+});
+
+test('Party pass resolve hides an access-granted ticket after a ticket-tier membership downgrade', async () => {
+  party.findFirst = async () => ({ id: 'party-1', accessMode: 'paid-ticket', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }], arrivalVenueId: null });
+  partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true, ticketTierName: 'Black Table' });
+  user.findUnique = async () => ({ membershipTier: 'platinum' });
+  assert.deepEqual(await caller().events.pass.resolve({ partyId: 'party-1' }), {
+    partyId: 'party-1', action: 'unavailable', guest: { status: 'membership-required', accessGranted: false }, premiumMobilityEligible: false,
+  });
 });
 
 test('Paid ticket checkout enforces its required membership tier', async () => {

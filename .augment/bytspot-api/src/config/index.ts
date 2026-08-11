@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const isDev = (process.env.NODE_ENV || 'development') === 'development';
+const httpsUrl = z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Must use HTTPS');
 
 /**
  * Env var schema — parsed and validated at import time.
@@ -41,6 +42,11 @@ const envSchema = z.object({
   APNS_KEY_PATH:          z.string().default(''),
   APNS_BUNDLE_ID:         z.string().default('com.bytspot.app'),
   APNS_ENVIRONMENT:       z.enum(['production', 'sandbox']).default('production'),
+  PUBLIC_API_URL:         httpsUrl.default('https://bytspot-api.onrender.com'),
+  PARTY_SHARE_BASE_URL:   httpsUrl.default('https://bytspot.app'),
+  MOBILITY_AGGREGATOR_BASE_URL: z.union([z.literal(''), httpsUrl]).default(''),
+  MOBILITY_AGGREGATOR_API_KEY: z.string().default(''),
+  MOBILITY_AGGREGATOR_MODE: z.enum(['handoff', 'live']).default('handoff'),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
@@ -94,6 +100,11 @@ export const config = {
   apnsKeyPath: env.APNS_KEY_PATH,
   apnsBundleId: env.APNS_BUNDLE_ID,
   apnsEnvironment: env.APNS_ENVIRONMENT,
+  publicApiUrl: env.PUBLIC_API_URL.replace(/\/$/, ''),
+  partyShareBaseUrl: env.PARTY_SHARE_BASE_URL.replace(/\/$/, ''),
+  mobilityAggregatorBaseUrl: env.MOBILITY_AGGREGATOR_BASE_URL.replace(/\/$/, ''),
+  mobilityAggregatorApiKey: env.MOBILITY_AGGREGATOR_API_KEY,
+  mobilityAggregatorMode: env.MOBILITY_AGGREGATOR_MODE,
 } as const;
 
 /**
@@ -113,6 +124,7 @@ export function printConfigDiagnostics(): void {
   check(config.cronSecret, 'Cron secret', 'cron endpoints unprotected');
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
+  check(config.mobilityAggregatorMode === 'live' && config.mobilityAggregatorBaseUrl && config.mobilityAggregatorApiKey ? 'ok' : '', 'Mobility aggregator', 'premium rides will use Uber/Lyft handoff only');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
   check(config.apnsKeyId && config.apnsTeamId && config.apnsKeyPath && config.apnsBundleId ? 'ok' : '', 'APNs', 'native push will not send');
   console.log('');

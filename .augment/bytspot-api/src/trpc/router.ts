@@ -21,6 +21,7 @@ import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
+import { mobilityRouter } from './mobilityRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -358,31 +359,15 @@ const venuesRouter = router({
  * ── Rides sub-router ────────────────────────────────────
  */
 const ridesRouter = router({
-  /** GET /rides → rides.get */
+  /** Legacy endpoint retained only to avoid simulated provider estimates. */
   get: publicProcedure
     .input(z.object({ lat: z.number(), lng: z.number() }))
-    .query(async ({ input }) => {
-      const { lat, lng } = input;
-      const cacheKey = `rides:${lat.toFixed(3)}:${lng.toFixed(3)}`;
-      return cached(cacheKey, 60, async () => {
-        const basePrice = 8 + Math.random() * 6;
-        const day = new Date().getDay();
-        const surgeMultiplier = (day === 5 || day === 6) ? 1.2 + Math.random() * 0.8 : 1.0;
-        return {
-          location: { lat, lng },
-          timestamp: new Date().toISOString(),
-          providers: [
-            { name: 'Uber', products: [
-              { type: 'UberX', etaMinutes: Math.floor(3 + Math.random() * 5), priceEstimate: `$${(basePrice * surgeMultiplier).toFixed(2)}`, surgeMultiplier: parseFloat(surgeMultiplier.toFixed(1)) },
-              { type: 'Uber Comfort', etaMinutes: Math.floor(5 + Math.random() * 7), priceEstimate: `$${(basePrice * surgeMultiplier * 1.4).toFixed(2)}`, surgeMultiplier: parseFloat(surgeMultiplier.toFixed(1)) },
-            ]},
-            { name: 'Lyft', products: [
-              { type: 'Lyft', etaMinutes: Math.floor(3 + Math.random() * 6), priceEstimate: `$${(basePrice * surgeMultiplier * 0.95).toFixed(2)}`, surgeMultiplier: parseFloat((surgeMultiplier * 0.95).toFixed(1)) },
-              { type: 'Lyft XL', etaMinutes: Math.floor(6 + Math.random() * 8), priceEstimate: `$${(basePrice * surgeMultiplier * 1.6).toFixed(2)}`, surgeMultiplier: parseFloat(surgeMultiplier.toFixed(1)) },
-            ]},
-          ],
-        };
-      });
+    .query(async () => {
+      return {
+        available: false,
+        providers: [],
+        message: 'Provider estimates are unavailable. Premium members can request an authorized Uber or Lyft handoff through mobility.',
+      };
     }),
 });
 
@@ -659,9 +644,9 @@ const subscriptionRouter = router({
     const userId = ctx.user.userId;
 
     // Get or create Stripe customer
-    let user = await db.user.findUnique({ where: { id: userId }, select: { stripeCustomerId: true, email: true, isPremium: true } });
+    let user = await db.user.findUnique({ where: { id: userId }, select: { stripeCustomerId: true, email: true, isPremium: true, membershipTier: true } });
     if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
-    if (user.isPremium) return { url: null as string | null, demoMode: false, message: 'Already premium' };
+    if (user.membershipTier !== 'green') return { url: null as string | null, demoMode: false, message: 'Already premium' };
 
     let customerId = user.stripeCustomerId;
     if (!customerId) {
@@ -701,8 +686,9 @@ const subscriptionRouter = router({
 
   /** GET /subscription/status → returns current user's premium status */
   status: protectedProcedure.query(async ({ ctx }) => {
-    const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { isPremium: true } });
-    return { isPremium: user?.isPremium ?? false };
+    const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { isPremium: true, membershipTier: true } });
+    const membershipTier = user?.membershipTier ?? (user?.isPremium ? 'platinum' : 'green');
+    return { isPremium: membershipTier !== 'green', membershipTier };
   }),
 
   /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
@@ -723,13 +709,13 @@ const subscriptionRouter = router({
       if (type === 'checkout.session.completed') {
         const userId = data?.object?.metadata?.userId;
         if (userId && data?.object?.mode === 'subscription') {
-          await db.user.update({ where: { id: userId }, data: { isPremium: true } });
+          await db.user.updateMany({ where: { id: userId, membershipTier: { not: 'black' } }, data: { isPremium: true, membershipTier: 'platinum' } });
           console.log(`[subscription] User ${userId} upgraded to Premium`);
         }
       } else if (type === 'customer.subscription.deleted') {
         const customerId = data?.object?.customer;
         if (customerId) {
-          await db.user.updateMany({ where: { stripeCustomerId: customerId }, data: { isPremium: false } });
+          await db.user.updateMany({ where: { stripeCustomerId: customerId, membershipTier: 'platinum' }, data: { isPremium: false, membershipTier: 'green' } });
           console.log(`[subscription] Customer ${customerId} subscription cancelled`);
         }
       }
@@ -1135,6 +1121,7 @@ export const appRouter = router({
   reviews: reviewsRouter,
   events: eventsRouter,
   places: placesRouter,
+  mobility: mobilityRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

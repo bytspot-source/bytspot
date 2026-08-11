@@ -456,7 +456,7 @@ describe('push.registerIosDevice', () => {
     const caller = createAuthenticatedCaller('owner-id');
     await caller.push.registerIosDevice({
       token: uppercaseToken,
-      environment: 'sandbox',
+      environment: 'production',
       bundleId: 'com.bytspot.app',
     });
 
@@ -466,10 +466,13 @@ describe('push.registerIosDevice', () => {
     }));
   });
 
-  it('rejects malformed tokens and cannot unregister another owner device', async () => {
+  it('rejects malformed tokens, environment mismatch, and cannot unregister another owner device', async () => {
     const caller = createAuthenticatedCaller('owner-id');
     await expect(caller.push.registerIosDevice({
       token: 'not-a-token', environment: 'production', bundleId: 'com.bytspot.app',
+    })).rejects.toThrow(TRPCError);
+    await expect(caller.push.registerIosDevice({
+      token: uppercaseToken, environment: 'sandbox', bundleId: 'com.bytspot.app',
     })).rejects.toThrow(TRPCError);
 
     await caller.push.unregisterIosDevice({ token: uppercaseToken });

@@ -40,6 +40,7 @@ const envSchema = z.object({
   APNS_TEAM_ID:           z.string().default(''),
   APNS_KEY_PATH:          z.string().default(''),
   APNS_BUNDLE_ID:         z.string().default('com.bytspot.app'),
+  APNS_ENVIRONMENT:       z.enum(['production', 'sandbox']).default('production'),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
@@ -92,6 +93,7 @@ export const config = {
   apnsTeamId: env.APNS_TEAM_ID,
   apnsKeyPath: env.APNS_KEY_PATH,
   apnsBundleId: env.APNS_BUNDLE_ID,
+  apnsEnvironment: env.APNS_ENVIRONMENT,
 } as const;
 
 /**
@@ -112,5 +114,6 @@ export function printConfigDiagnostics(): void {
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
+  check(config.apnsKeyId && config.apnsTeamId && config.apnsKeyPath && config.apnsBundleId ? 'ok' : '', 'APNs', 'native push will not send');
   console.log('');
 }

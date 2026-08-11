@@ -9,11 +9,13 @@ import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
 import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
-import { sendPushToAll, getAllSubscriptions, storeSubscription } from '../routes/push';
+import { getAllSubscriptions, storeSubscription } from '../routes/push';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
+import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice } from '../services/iosPushDevices';
+import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -328,7 +330,14 @@ const venuesRouter = router({
       const result = { success: true, newCrowdLevel: newLevel, pointsEarned };
 
       if (newLevel === 4) {
-        sendPushToAll(`🔴 ${venue.name} is now Packed`, `High crowd at ${venue.name} — plan ahead.`, { venueId, venueName: venue.name, type: 'packed-alert' }).catch(() => {});
+        sendVenueCrowdAlert({
+          venueId,
+          venueName: venue.name,
+          venueSlug: venue.slug,
+          title: `🔴 ${venue.name} is now Packed`,
+          body: `High crowd at ${venue.name} — plan ahead.`,
+          type: 'packed',
+        }).catch(() => {});
         db.user.findMany({ select: { email: true, name: true } }).then((users) => {
           for (const u of users) {
             if (u.email) sendCrowdAlertEmail(u.email, (u.name || '').split(' ')[0], venue.name, venue.slug || venueId).catch(() => {});
@@ -1006,16 +1015,39 @@ const pushRouter = router({
       return { success: true, type: 'web' as const };
     }),
 
-  /** POST /push/registerNative → push.registerNative mutation (APNs/FCM tokens from Capacitor) */
-  registerNative: publicProcedure
+  /** Authenticated native registration; APNs token ownership always derives from ctx. */
+  registerIosDevice: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'push:register-ios' }))
     .input(z.object({
-      token: z.string().min(1),
-      platform: z.enum(['ios', 'android']),
+      token: z.string().max(256),
+      environment: z.literal(config.apnsEnvironment),
+      bundleId: z.literal(config.apnsBundleId),
     }))
-    .mutation(async ({ input }) => {
-      const { storeNativeToken } = await import('../routes/push');
-      await storeNativeToken(input.token, input.platform);
-      return { success: true, type: 'native' as const };
+    .mutation(async ({ ctx, input }) => {
+      const token = normalizeIosDeviceToken(input.token);
+      if (!token) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Invalid iOS device token' });
+      }
+      await registerIosPushDevice({
+        userId: ctx.user.userId,
+        token,
+        environment: input.environment,
+        bundleId: input.bundleId,
+      });
+      return { success: true };
+    }),
+
+  /** Deactivates a device only when it is owned by the authenticated user. */
+  unregisterIosDevice: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'push:unregister-ios' }))
+    .input(z.object({ token: z.string().max(256) }))
+    .mutation(async ({ ctx, input }) => {
+      const token = normalizeIosDeviceToken(input.token);
+      if (!token) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Invalid iOS device token' });
+      }
+      const unregistered = await unregisterIosPushDevice(ctx.user.userId, token);
+      return { success: true, unregistered };
     }),
 });
 

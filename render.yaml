@@ -38,7 +38,7 @@ services:
     runtime: node
     branch: main
     rootDir: .augment/bytspot-api
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci && npm run db:migrate && npm run build
     startCommand: node dist/index.js
     pullRequestPreviewsEnabled: false
     buildFilter:
@@ -60,5 +60,15 @@ services:
       - key: VAPID_PUBLIC_KEY
         sync: false
       - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: APNS_KEY_ID
+        sync: false
+      - key: APNS_TEAM_ID
+        sync: false
+      - key: APNS_KEY_PATH
+        sync: false
+      - key: APNS_BUNDLE_ID
+        sync: false
+      - key: APNS_ENVIRONMENT
         sync: false
 

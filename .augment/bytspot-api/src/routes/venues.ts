@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
-import { sendPushToAll } from './push';
+import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { sendCrowdAlertEmail } from '../lib/email';
 
 const router = Router();
@@ -293,14 +293,16 @@ router.post('/venues/:id/checkin', async (req, res) => {
 
   // ── Push + email when venue flips to "Packed" ──
   if (newLevel === 4) {
-    sendPushToAll(
-      `🔴 ${venue.name} is now Packed`,
-      `High crowd at ${venue.name} — plan ahead or find somewhere chill nearby.`,
-      { venueId: id, venueName: venue.name, type: 'packed-alert' },
-    ).catch(() => {}); // non-blocking, fire-and-forget
+    sendVenueCrowdAlert({
+      venueId: id,
+      venueName: venue.name,
+      venueSlug: venue.slug,
+      title: `🔴 ${venue.name} is now Packed`,
+      body: `High crowd at ${venue.name} — plan ahead or find somewhere chill nearby.`,
+      type: 'packed',
+    }).catch(() => {}); // non-blocking, fire-and-forget
 
-    // Email users who have this venue saved (best-effort — requires savedSpots on user model)
-    // For now we notify all users as a crowd alert broadcast (can scope to saved spots later)
+    // Email delivery remains separate from preference-aware native push delivery.
     db.user.findMany({ select: { email: true, name: true } })
       .then((users) => {
         for (const u of users) {

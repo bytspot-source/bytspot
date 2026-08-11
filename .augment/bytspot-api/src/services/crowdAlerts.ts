@@ -3,7 +3,7 @@
  *
  * Checks crowd levels across all venues every 15 minutes and sends
  * push notifications for two key transitions:
- *   1. Venue just hit Packed (level ≥ 4)  → alert all subscribers
+ *   1. Venue just hit Packed (level ≥ 4)  → alert saved-spot owners who opted into nearby push
  *   2. Venue dropped from Packed to Active/Chill (level ≤ 2) → "spot opened up" alert
  *
  * Previous levels are cached in Redis (or skipped on first run).
@@ -11,7 +11,7 @@
 
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
-import { sendPushToAll } from '../routes/push';
+import { sendVenueCrowdAlert } from './notificationDelivery';
 
 const prevKey = (venueId: string) => `crowd:prev:${venueId}`;
 
@@ -30,6 +30,7 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
     select: {
       id: true,
       name: true,
+      slug: true,
       crowdLevels: {
         orderBy: { recordedAt: 'desc' },
         take: 1,
@@ -52,22 +53,28 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
 
     // ── Transition: any → Packed ─────────────────────
     if (currentLevel >= 4 && (prevLevel === null || prevLevel < 4)) {
-      await sendPushToAll(
-        '🔴 Packed Alert — Bytspot',
-        `${venue.name} just hit Packed. Check it out or find alternatives nearby.`,
-        { venueId: venue.id, type: 'packed', url: 'https://beta.bytspot.com' },
-      ).catch(() => {});
+      await sendVenueCrowdAlert({
+        venueId: venue.id,
+        venueName: venue.name,
+        venueSlug: venue.slug,
+        title: '🔴 Packed Alert — Bytspot',
+        body: `${venue.name} just hit Packed. Check it out or find alternatives nearby.`,
+        type: 'packed',
+      }).catch(() => {});
       alerts.push({ venue: venue.name, type: 'packed' });
       console.log(`[crowd-alerts] Packed alert sent for ${venue.name}`);
     }
 
     // ── Transition: Packed → Active/Chill ────────────
     if (prevLevel !== null && prevLevel >= 4 && currentLevel <= 2) {
-      await sendPushToAll(
-        '🟢 Your Spot Opened Up — Bytspot',
-        `${venue.name} just dropped to ${current.label}. Head over now!`,
-        { venueId: venue.id, type: 'opened-up', url: 'https://beta.bytspot.com' },
-      ).catch(() => {});
+      await sendVenueCrowdAlert({
+        venueId: venue.id,
+        venueName: venue.name,
+        venueSlug: venue.slug,
+        title: '🟢 Your Spot Opened Up — Bytspot',
+        body: `${venue.name} just dropped to ${current.label}. Head over now!`,
+        type: 'opened-up',
+      }).catch(() => {});
       alerts.push({ venue: venue.name, type: 'opened-up' });
       console.log(`[crowd-alerts] Opened-up alert sent for ${venue.name}`);
     }

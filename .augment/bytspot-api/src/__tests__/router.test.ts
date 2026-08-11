@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TRPCError } from '@trpc/server';
 import { createPublicCaller, createAuthenticatedCaller } from './helpers';
 import { db } from '../lib/db';
+import { normalizeIosDeviceToken } from '../services/iosPushDevices';
+import { isAllowedBytspotUrl, venueNotificationUrl } from '../services/notificationDelivery';
 
 // Reset all mocks between tests
 beforeEach(() => {
@@ -431,6 +433,63 @@ describe('social', () => {
   });
 });
 
+
+// ──────────────────────────────────────────────────────────
+// Native push devices
+// ──────────────────────────────────────────────────────────
+describe('push.registerIosDevice', () => {
+  const uppercaseToken = 'A'.repeat(64);
+  const normalizedToken = 'a'.repeat(64);
+
+  it('requires authentication', async () => {
+    const caller = createPublicCaller();
+    await expect(caller.push.registerIosDevice({
+      token: uppercaseToken,
+      environment: 'production',
+      bundleId: 'com.bytspot.app',
+    })).rejects.toThrow(TRPCError);
+  });
+
+  it('normalizes and registers a device for the authenticated user only', async () => {
+    const caller = createAuthenticatedCaller('owner-id');
+    await caller.push.registerIosDevice({
+      token: uppercaseToken,
+      environment: 'production',
+      bundleId: 'com.bytspot.app',
+    });
+
+    expect(db.iOSPushDevice.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { token: normalizedToken },
+      create: expect.objectContaining({ userId: 'owner-id', token: normalizedToken }),
+    }));
+  });
+
+  it('rejects malformed tokens, environment mismatch, and cannot unregister another owner device', async () => {
+    const caller = createAuthenticatedCaller('owner-id');
+    await expect(caller.push.registerIosDevice({
+      token: 'not-a-token', environment: 'production', bundleId: 'com.bytspot.app',
+    })).rejects.toThrow(TRPCError);
+    await expect(caller.push.registerIosDevice({
+      token: uppercaseToken, environment: 'sandbox', bundleId: 'com.bytspot.app',
+    })).rejects.toThrow(TRPCError);
+
+    await caller.push.unregisterIosDevice({ token: uppercaseToken });
+    expect(db.iOSPushDevice.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { token: normalizedToken, userId: 'owner-id', invalidatedAt: null },
+    }));
+  });
+});
+
+describe('push delivery helpers', () => {
+  it('strictly normalizes APNs tokens and permits only canonical Bytspot HTTPS URLs', () => {
+    expect(normalizeIosDeviceToken(' A'.repeat(64))).toBeNull();
+    expect(normalizeIosDeviceToken('A'.repeat(64))).toBe('a'.repeat(64));
+    expect(isAllowedBytspotUrl('https://bytspot.app/venue/a')).toBe(true);
+    expect(isAllowedBytspotUrl('https://beta.bytspot.com/venue/a')).toBe(false);
+    expect(isAllowedBytspotUrl('http://bytspot.app/venue/a')).toBe(false);
+    expect(venueNotificationUrl('a/b')).toBe('https://bytspot.app/venue/a%2Fb');
+  });
+});
 
 // ──────────────────────────────────────────────────────────
 // Rate Limiting

@@ -33,6 +33,7 @@ model User {
   valetProfile   ValetProfile?
   checkIns       CheckIn[]
   savedSpots     SavedSpot[]
+  iosPushDevices      IOSPushDevice[]
   providerIdentities ProviderIdentity[]
   collections    SpotCollection[]
   pointTxns      PointTransaction[]
@@ -49,6 +50,29 @@ model User {
   mobilityTrips  MobilityTrip[]
 
   @@map("users")
+}
+
+// ─── iOS Push Devices ────────────────────────────────
+enum IOSPushEnvironment {
+  production
+  sandbox
+}
+
+model IOSPushDevice {
+  id            String             @id @default(cuid())
+  token         String             @unique
+  userId        String             @map("user_id")
+  environment   IOSPushEnvironment
+  bundleId      String             @map("bundle_id")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+  lastSeenAt    DateTime           @default(now()) @map("last_seen_at")
+  invalidatedAt DateTime?          @map("invalidated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, invalidatedAt])
+  @@map("ios_push_devices")
 }
 
 // ─── Provider identities ─────────────────────────────

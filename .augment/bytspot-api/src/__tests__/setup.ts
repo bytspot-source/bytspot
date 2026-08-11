@@ -51,6 +51,11 @@ vi.mock('../lib/db', () => {
       upsert: vi.fn().mockResolvedValue({ id: 'ss-1' }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    iOSPushDevice: {
+      upsert: vi.fn().mockResolvedValue({ id: 'ios-device-1' }),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     providerIdentity: {
       findUnique: vi.fn(),
       create: vi.fn().mockResolvedValue({ id: 'provider-identity-1' }),
@@ -121,6 +126,7 @@ vi.mock('../config', () => ({
     apnsTeamId: '',
     apnsKeyPath: '',
     apnsBundleId: 'com.bytspot.app',
+    apnsEnvironment: 'production',
   },
   printConfigDiagnostics: vi.fn(),
 }));
@@ -134,11 +140,8 @@ vi.mock('../lib/email', () => ({
 
 // ── Mock push ─────────────────────────────────────────────
 vi.mock('../routes/push', () => ({
-  sendPushToAll: vi.fn().mockResolvedValue(undefined),
   getAllSubscriptions: vi.fn().mockResolvedValue([]),
-  getAllNativeTokens: vi.fn().mockResolvedValue([]),
   storeSubscription: vi.fn().mockResolvedValue(undefined),
-  storeNativeToken: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ── Mock venues (crowdEmitter) ────────────────────────────

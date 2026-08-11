@@ -1,11 +1,25 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
-import { sendPushToAll } from './push';
+import { requireAuth } from '../middleware/auth';
+import { entersPacked } from '../services/crowdTransition';
+import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { sendCrowdAlertEmail } from '../lib/email';
 
 const router = Router();
+
+// Legacy REST check-ins are retained for compatible clients, but authenticate
+// before this limiter so its key is a stable user ID rather than an IP address.
+const checkinRateLimit = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.userId ?? 'missing-auth',
+  message: { error: 'Too many check-ins, please try again later' },
+});
 
 // In-memory event emitter for SSE crowd updates
 export const crowdEmitter = new EventEmitter();
@@ -238,10 +252,15 @@ router.get('/venues/crowd/stream', async (req, res) => {
   });
 });
 
-/** POST /venues/:id/checkin — user contributes crowd data (idempotent) */
-router.post('/venues/:id/checkin', async (req, res) => {
-  const { id } = req.params;
-  const iKey = req.headers['idempotency-key'] as string | undefined;
+/** POST /venues/:id/checkin — authenticated user contributes crowd data (idempotent) */
+router.post('/venues/:id/checkin', requireAuth, checkinRateLimit, async (req, res) => {
+  const id = req.params.id;
+  if (typeof id !== 'string' || id.length === 0) {
+    res.status(400).json({ error: 'Invalid venue identifier' });
+    return;
+  }
+  const rawIdempotencyKey = req.headers['idempotency-key'];
+  const iKey = typeof rawIdempotencyKey === 'string' ? rawIdempotencyKey : undefined;
 
   // ── Idempotency: replay cached result if we've seen this key before ──
   if (iKey) {
@@ -291,16 +310,18 @@ router.post('/venues/:id/checkin', async (req, res) => {
 
   const result = { success: true, newCrowdLevel: newLevel };
 
-  // ── Push + email when venue flips to "Packed" ──
-  if (newLevel === 4) {
-    sendPushToAll(
-      `🔴 ${venue.name} is now Packed`,
-      `High crowd at ${venue.name} — plan ahead or find somewhere chill nearby.`,
-      { venueId: id, venueName: venue.name, type: 'packed-alert' },
-    ).catch(() => {}); // non-blocking, fire-and-forget
+  // ── Push + email only when venue actually enters "Packed" ──
+  if (entersPacked(latest?.level, newLevel)) {
+    sendVenueCrowdAlert({
+      venueId: id,
+      venueName: venue.name,
+      venueSlug: venue.slug,
+      title: `🔴 ${venue.name} is now Packed`,
+      body: `High crowd at ${venue.name} — plan ahead or find somewhere chill nearby.`,
+      type: 'packed',
+    }).catch(() => {}); // non-blocking, fire-and-forget
 
-    // Email users who have this venue saved (best-effort — requires savedSpots on user model)
-    // For now we notify all users as a crowd alert broadcast (can scope to saved spots later)
+    // Email delivery remains separate from preference-aware native push delivery.
     db.user.findMany({ select: { email: true, name: true } })
       .then((users) => {
         for (const u of users) {

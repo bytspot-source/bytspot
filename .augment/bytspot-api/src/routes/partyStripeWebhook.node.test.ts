@@ -161,7 +161,7 @@ test('Party webhook marks paid-after-decline reservations refund-required and ac
 
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
   assert.equal(checkoutUpdate.data.status, 'refund-required');
-  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
+  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false, attendeeCredentialHash: null });
 
   partyCheckout.findUnique = async () => reservation('refund-required');
   let retryUpdates = 0;
@@ -192,7 +192,7 @@ test('Party webhook makes a payment event created after hold expiry refund-requi
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
 
   assert.equal(checkoutUpdate.data.status, 'refund-required');
-  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
+  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false, attendeeCredentialHash: null });
 });
 
 test('Party webhook makes an out-of-order paid event for an expired reservation refund-required', async () => {
@@ -216,5 +216,5 @@ test('Party webhook refunds a checkout when the user is downgraded before paymen
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
 
   assert.equal(checkoutUpdate.data.status, 'refund-required');
-  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
+  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false, attendeeCredentialHash: null });
 });

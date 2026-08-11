@@ -77,7 +77,7 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     });
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {
-      await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+      await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false, attendeeCredentialHash: null } });
       return;
     }
     await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });

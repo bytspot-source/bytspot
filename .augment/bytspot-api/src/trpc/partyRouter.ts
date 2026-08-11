@@ -419,27 +419,19 @@ export const partyPassRouter = router({
     }),
 });
 
-type PartyDoorCohost = { email: string; role: 'cohost' | 'door' | 'finance' };
-
-function partyDoorCohosts(value: Prisma.JsonValue): PartyDoorCohost[] {
-  const parsed = z.array(z.object({ email: z.string().email(), role: z.enum(hostRoles) })).safeParse(value);
-  return parsed.success ? parsed.data : [];
-}
-
 async function requirePartyDoorAuthority(partyId: string, userId: string): Promise<void> {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
-    select: { hostUserId: true, cohosts: true },
+    select: { hostUserId: true },
   });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
-  if (party.hostUserId === userId) return;
 
-  const user = await db.user.findUnique({ where: { id: userId }, select: { email: true } });
-  const email = user?.email.trim().toLocaleLowerCase();
-  const authorized = Boolean(email && partyDoorCohosts(party.cohosts).some((cohost) =>
-    (cohost.role === 'cohost' || cohost.role === 'door') && cohost.email.trim().toLocaleLowerCase() === email,
-  ));
-  if (!authorized) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party door authorization is required.' });
+  // Co-host records are email-only event-planning metadata. They must never
+  // authorize Door Mode until they are replaced by accepted, verified,
+  // user-ID-bound staff grants.
+  if (party.hostUserId !== userId) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Only the Party host can operate Door Mode.' });
+  }
 }
 
 const attendeeCredentialInput = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'Invalid attendee credential.');
@@ -464,7 +456,19 @@ export const partyControlRouter = router({
         where: { id: guest.id, partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest, checkedInAt: null },
         data: { checkedInAt: new Date() },
       });
-      if (checkedIn.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
+      if (checkedIn.count !== 1) {
+        // A failed conditional update after the initial lookup is either a
+        // concurrent successful scan (replay) or a credential rotation. Do
+        // not label a rotated credential as a completed check-in.
+        const current = await db.partyGuest.findUnique({
+          where: { id: guest.id },
+          select: { checkedInAt: true },
+        });
+        if (current?.checkedInAt) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
+        }
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee credential expired. Ask the guest to refresh their pass.' });
+      }
       return { status: 'checked-in' as const, guestName: guest.user.name ?? 'Guest' };
     }),
 });
@@ -605,7 +609,7 @@ export const partyTicketsRouter = router({
         if (activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
 
         const partyGuest = guest
-          ? await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } })
+          ? await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'checkout-pending', accessGranted: false, attendeeCredentialHash: null, ticketTierName: ticketTier.name } })
           : await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } });
         return tx.partyCheckout.create({
           data: {

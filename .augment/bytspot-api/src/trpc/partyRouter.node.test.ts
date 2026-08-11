@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { createCallerFactory } from './trpc';
+import { createCallerFactory, resetLocalRateLimitForTests } from './trpc';
 import { appRouter } from './router';
 import { db } from '../lib/db';
 import type { Context } from './context';
@@ -42,6 +42,7 @@ function caller() {
 }
 
 beforeEach(() => {
+  resetLocalRateLimitForTests();
   party.findUnique = async () => null;
   party.findFirst = async () => null;
   party.create = async () => ({ id: 'party-1' });
@@ -101,22 +102,29 @@ test('Door Mode checks in a valid credential exactly once and only for authorize
   assert.ok(update.data.checkedInAt instanceof Date);
 
   partyGuest.updateMany = async () => ({ count: 0 });
+  partyGuest.findUnique = async () => ({ checkedInAt: new Date() });
   await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'CONFLICT' });
 });
 
-test('Door Mode permits a configured door cohost but rejects finance cohosts and unknown credentials', async () => {
+test('Door Mode rejects all email-only cohost records and unknown credentials', async () => {
   party.findFirst = async () => ({ hostUserId: 'someone-else', cohosts: [{ email: 'test@bytspot.com', role: 'door' }] });
-  user.findUnique = async () => ({ email: 'test@bytspot.com' });
-  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, user: { name: 'Door Guest' } });
-  partyGuest.updateMany = async () => ({ count: 1 });
-  assert.deepEqual(await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { status: 'checked-in', guestName: 'Door Guest' });
-
-  party.findFirst = async () => ({ hostUserId: 'someone-else', cohosts: [{ email: 'test@bytspot.com', role: 'finance' }] });
   await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'FORBIDDEN' });
 
   party.findFirst = async () => ({ hostUserId: 'test-user-id', cohosts: [] });
   partyGuest.findFirst = async () => null;
   await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'NOT_FOUND' });
+});
+
+test('Door Mode reports a rotated credential as expired instead of already checked in', async () => {
+  party.findFirst = async () => ({ hostUserId: 'test-user-id' });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, user: { name: 'Door Guest' } });
+  partyGuest.updateMany = async () => ({ count: 0 });
+  partyGuest.findUnique = async () => ({ checkedInAt: null });
+
+  await assert.rejects(
+    () => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }),
+    { code: 'NOT_FOUND', message: 'Attendee credential expired. Ask the guest to refresh their pass.' },
+  );
 });
 
 test('Party draft creation requires authentication', async () => {
@@ -204,6 +212,25 @@ test('Free RSVP maps serialization conflicts to retryable capacity conflicts', a
   prisma.$transaction = async () => { throw { code: 'P2034' }; };
 
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'CONFLICT' });
+});
+
+test('Starting checkout clears a stale attendee credential from a non-granted guest', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+  (config as any).stripeSecretKey = 'test-only-key';
+  partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'checkout-pending', accessGranted: false, attendeeCredentialHash: 'stale-digest' });
+  partyCheckout.findUnique = async () => null;
+  partyCheckout.findFirst = async () => null;
+  partyCheckout.count = async () => 0;
+  let guestUpdate: any;
+  partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1', ...input.data }; };
+  const isolatedCaller = createCaller({ ...authenticatedContext, user: { userId: 'checkout-revocation-user', email: 'checkout-revocation@bytspot.test' } });
+  await assert.rejects(() => isolatedCaller.events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }));
+  assert.deepEqual(guestUpdate.data, {
+    status: 'checkout-pending', accessGranted: false, attendeeCredentialHash: null, ticketTierName: 'First Drop',
+  });
 });
 
 test('Paid checkout retries return the persisted pending reservation', async () => {
@@ -339,7 +366,8 @@ test('Paid ticket checkout enforces its required membership tier', async () => {
     ticketTiers: [{ name: 'Black Table', priceCents: 2500, quantity: 40, requiredMembershipTier: 'black' }],
   });
   user.findUnique = async () => ({ membershipTier: 'platinum' });
-  await assert.rejects(() => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'Black Table', idempotencyKey }), { code: 'FORBIDDEN' });
+  const isolatedCaller = createCaller({ ...authenticatedContext, user: { userId: 'tier-enforcement-user', email: 'tier-enforcement@bytspot.test' } });
+  await assert.rejects(() => isolatedCaller.events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'Black Table', idempotencyKey }), { code: 'FORBIDDEN' });
 });
 
 test('Party draft creation rejects mismatched template configuration', async () => {

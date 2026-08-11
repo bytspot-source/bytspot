@@ -239,6 +239,7 @@ model PartyGuest {
 
   @@unique([partyId, userId])
   @@index([partyId, status])
+  @@index([partyId, attendeeCredentialHash], map: "party_guests_party_id_attendee_credential_hash_idx")
   @@index([userId, updatedAt(sort: Desc)])
   @@map("party_guests")
 }

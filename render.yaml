@@ -33,12 +33,17 @@ services:
         value: no-cache, no-store, must-revalidate
 
   # ─── API: Express / Prisma / Resend ───────────────────────────────────────
+  # SECURITY DEPLOYMENT REQUIREMENT: Route public API traffic through Cloudflare
+  # only; block direct Render-origin access. Cloudflare must overwrite incoming
+  # X-Forwarded-For before forwarding, because Express trusts the Cloudflare →
+  # Render proxy chain for per-client rate limiting.
   - type: web
     name: bytspot-api
     runtime: node
     branch: main
     rootDir: .augment/bytspot-api
-    buildCommand: npm ci && npm run db:migrate && npm run build
+    buildCommand: npm ci && npx prisma generate && npm run build
+    preDeployCommand: npx prisma migrate deploy
     startCommand: node dist/index.js
     pullRequestPreviewsEnabled: false
     buildFilter:
@@ -70,5 +75,9 @@ services:
       - key: APNS_BUNDLE_ID
         sync: false
       - key: APNS_ENVIRONMENT
+        sync: false
+      - key: APPLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_SERVER_CLIENT_ID
         sync: false
 

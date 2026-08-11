@@ -42,7 +42,7 @@ export async function sendWelcomeEmail(to: string, firstName: string): Promise<v
             You're one of the first people in the Bytspot beta.
           </p>
           <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
-            Know before you go — live crowd levels, open parking, and ride ETAs for Atlanta Midtown, all in one place.
+            Know before you go — live crowd levels, open parking, and premium ride handoff for Atlanta Midtown, all in one place.
           </p>
           <a href="${welcomeUrl}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6, #06b6d4); color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
             Open Bytspot Beta →
@@ -79,7 +79,7 @@ export async function sendBetaLeadEmail(to: string, firstName: string): Promise<
           <p style="font-size: 28px; margin: 0 0 12px;">🎯</p>
           <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 12px;">You're officially in, ${name}. 🎉</h1>
           <p style="color: #aaa; font-size: 15px; line-height: 1.6; margin: 0 0 20px;">
-            Bytspot is <strong style="color: #fff">live in Atlanta Midtown right now</strong> — real-time crowd levels, open parking, and ride ETAs, all before you leave home.
+            Bytspot is <strong style="color: #fff">live in Atlanta Midtown right now</strong> — real-time crowd levels, open parking, and premium ride handoff, all before you leave home.
           </p>
           <a href="${welcomeUrl}" style="display: inline-block; background: linear-gradient(135deg, #8b5cf6, #06b6d4); color: #fff; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 12px; text-decoration: none;">
             Open Bytspot Beta →

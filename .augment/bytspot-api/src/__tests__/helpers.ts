@@ -9,13 +9,13 @@ const factory = createCallerFactory(appRouter);
 
 /** Create an unauthenticated caller */
 export function createPublicCaller() {
-  const ctx: Context = { user: null };
+  const ctx: Context = { user: null, clientRateLimitKey: 'test-public-client' };
   return factory(ctx);
 }
 
 /** Create an authenticated caller with the given userId + email */
 export function createAuthenticatedCaller(userId = 'test-user-id', email = 'test@bytspot.com') {
-  const ctx: Context = { user: { userId, email } };
+  const ctx: Context = { user: { userId, email }, clientRateLimitKey: 'test-authenticated-client' };
   return factory(ctx);
 }
 

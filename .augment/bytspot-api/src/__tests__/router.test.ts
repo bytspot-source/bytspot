@@ -175,13 +175,11 @@ describe('venues', () => {
 // Rides
 // ──────────────────────────────────────────────────────────
 describe('rides', () => {
-  it('rides.get returns providers with ETAs and prices', async () => {
+  it('rides.get never returns simulated provider estimates', async () => {
     const caller = createPublicCaller();
     const result = await caller.rides.get({ lat: 33.78, lng: -84.38 });
-    expect(result.providers).toHaveLength(2);
-    expect(result.providers[0].name).toBe('Uber');
-    expect(result.providers[1].name).toBe('Lyft');
-    expect(result.location.lat).toBe(33.78);
+    expect(result.available).toBe(false);
+    expect(result.providers).toHaveLength(0);
   });
 });
 

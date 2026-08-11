@@ -4,6 +4,7 @@ import { createCallerFactory, resetLocalRateLimitForTests, router } from './trpc
 import { eventsRouter } from './eventsRouter';
 import { db } from '../lib/db';
 import type { Context } from './context';
+import { readFileSync } from 'node:fs';
 
 const appRouter = router({ events: eventsRouter });
 const createCaller = createCallerFactory(appRouter);
@@ -42,7 +43,15 @@ beforeEach(() => {
   block.findFirst = async () => null;
   block.upsert = async () => ({ id: 'block-1' });
   report.create = async () => ({ id: 'report-1' });
-  prisma.$transaction = async (operation: any) => operation({ partyGuest, partyMeetConsent: consent, partyMeetExchange: exchange, partyMeetConnection: connection, userBlock: block, partyMeetReport: report });
+  prisma.$transaction = async (operation: any) => operation({ partyGuest, partyMeetConsent: consent, partyMeetExchange: exchange, partyMeetConnection: connection, userBlock: block, partyMeetReport: report, $executeRaw: async () => 1 });
+});
+
+test('People You Met migration never silently accepts a partial table schema', () => {
+  const migration = readFileSync(new URL('../../prisma/migrations/20260815_add_party_people_met/migration.sql', import.meta.url), 'utf8');
+  assert.doesNotMatch(migration, /CREATE TABLE IF NOT EXISTS/);
+  assert.match(migration, /party_meet_connections_canonical_pair_check/);
+  assert.match(migration, /party_meet_exchanges_code_hash_key/);
+  assert.match(migration, /user_blocks_not_self_check/);
 });
 
 test('People You Met opt-in requires a confirmed Party check-in and expiry is fixed to that check-in', async () => {
@@ -58,11 +67,17 @@ test('People You Met opt-in requires a confirmed Party check-in and expiry is fi
   assert.deepEqual(upsert.update, {});
 });
 
-test('issueExchangeCode stores only a digest and replacement revokes the prior active code', async () => {
+test('issueExchangeCode stores only a digest and serializes replacement under the issuer lock', async () => {
   const updates: any[] = [];
   exchange.updateMany = async (input: any) => { updates.push(input); return { count: 1 }; };
   let created: any;
   exchange.create = async (input: any) => { created = input; return { id: 'exchange-1' }; };
+  let transactionOptions: any;
+  let lockCalls = 0;
+  prisma.$transaction = async (operation: any, options: any) => {
+    transactionOptions = options;
+    return operation({ partyGuest, partyMeetConsent: consent, partyMeetExchange: exchange, partyMeetConnection: connection, userBlock: block, partyMeetReport: report, $executeRaw: async () => { lockCalls += 1; return 1; } });
+  };
   const result = await caller().events.peopleMet.issueExchangeCode({ partyId: 'party-1' });
   assert.match(result.exchangeCode, /^[A-Za-z0-9_-]{43}$/);
   assert.match(created.data.codeHash, /^[a-f0-9]{64}$/);
@@ -70,11 +85,13 @@ test('issueExchangeCode stores only a digest and replacement revokes the prior a
   assert.equal(updates.length, 1);
   assert.equal(updates[0].where.issuerUserId, 'user-a');
   assert.ok(updates[0].data.revokedAt instanceof Date);
+  assert.equal(lockCalls, 1);
+  assert.equal(transactionOptions.isolationLevel, 'Serializable');
 });
 
 test('redemption requires mutual active same-party consent and returns opaque failures without identity', async () => {
   exchange.findFirst = async () => ({ id: 'exchange-1', issuerUserId: 'user-b', consentId: 'consent-b', consent: { userId: 'user-b', expiresAt: new Date(Date.now() + 60_000) } });
-  partyGuest.findUnique = async () => ({ checkedInAt: new Date() });
+  partyGuest.findUnique = async () => ({ checkedInAt: new Date(), party: { status: 'published' } });
   consent.findFirst = async () => ({ id: 'consent-a', expiresAt: new Date(Date.now() + 60_000) });
   block.findFirst = async () => null;
   exchange.updateMany = async () => ({ count: 1 });
@@ -99,7 +116,7 @@ test('redemption requires mutual active same-party consent and returns opaque fa
 
 test('redemption denies self, block, and replay cases with the same opaque response', async () => {
   const base = { id: 'exchange-1', issuerUserId: 'user-b', consentId: 'consent-b', consent: { userId: 'user-b', expiresAt: new Date(Date.now() + 60_000) } };
-  partyGuest.findUnique = async () => ({ checkedInAt: new Date() });
+  partyGuest.findUnique = async () => ({ checkedInAt: new Date(), party: { status: 'published' } });
   consent.findFirst = async () => ({ id: 'consent-a', expiresAt: new Date(Date.now() + 60_000) });
   exchange.updateMany = async () => ({ count: 0 });
   exchange.findFirst = async () => ({ ...base, issuerUserId: 'user-a', consent: { ...base.consent, userId: 'user-a' } });
@@ -122,6 +139,24 @@ test('status cannot enumerate attendees or opt-ins and connections select no ema
   assert.equal('count' in result, false);
   assert.deepEqual(selected.select.userLow.select, { id: true, name: true, profileImage: true });
   assert.equal('email' in selected.select.userLow.select, false);
+});
+
+test('redemption rejects an unpublished Party with the same opaque error', async () => {
+  exchange.findFirst = async () => ({ id: 'exchange-1', issuerUserId: 'user-b', consentId: 'consent-b', consent: { userId: 'user-b', expiresAt: new Date(Date.now() + 60_000) } });
+  partyGuest.findUnique = async () => ({ checkedInAt: new Date(), party: { status: 'draft' } });
+  await assert.rejects(() => caller('user-a').events.peopleMet.redeemExchangeCode({ partyId: 'party-1', exchangeCode: 'E'.repeat(43) }), { code: 'NOT_FOUND', message: 'Unable to complete this exchange.' });
+});
+
+test('global block closes every pair connection and report-with-block is atomic', async () => {
+  connection.findFirst = async () => ({ id: 'connection-1', partyId: 'party-1', userLowId: 'user-a', userHighId: 'user-b' });
+  const updates: any[] = [];
+  connection.updateMany = async (input: any) => { updates.push(input); return { count: 2 }; };
+  await caller('user-a').events.peopleMet.blockConnection({ connectionId: 'connection-1' });
+  assert.deepEqual(updates[0].where, { userLowId: 'user-a', userHighId: 'user-b', deletedAt: null, closedAt: null });
+  let reportCreated = false;
+  report.create = async () => { reportCreated = true; return { id: 'report-1' }; };
+  await caller('user-a').events.peopleMet.reportConnection({ connectionId: 'connection-1', reason: 'safety', block: true });
+  assert.equal(reportCreated, true);
 });
 
 test('deletion closes a connection for both sides and reports remain private', async () => {

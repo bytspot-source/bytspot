@@ -65,6 +65,26 @@ function activeConnectionWhere(userId: string, now = new Date(), partyId?: strin
   };
 }
 
+async function globallyBlockPair(tx: Prisma.TransactionClient, blockerUserId: string, blockedUserId: string, now: Date) {
+  const pair = canonicalPair(blockerUserId, blockedUserId);
+  if (!pair) throw new TRPCError({ code: 'BAD_REQUEST', message: 'You cannot block yourself.' });
+  await tx.userBlock.upsert({
+    where: { blockerUserId_blockedUserId: { blockerUserId, blockedUserId } },
+    create: { blockerUserId, blockedUserId },
+    update: {},
+  });
+  // A block is global: close every existing Party connection for this exact
+  // pair and revoke either user's outstanding bearer exchange codes.
+  await tx.partyMeetConnection.updateMany({
+    where: { ...pair, deletedAt: null, closedAt: null },
+    data: { deletedAt: now, closedAt: now },
+  });
+  await tx.partyMeetExchange.updateMany({
+    where: { issuerUserId: { in: [blockerUserId, blockedUserId] }, redeemedAt: null, revokedAt: null },
+    data: { revokedAt: now },
+  });
+}
+
 export const peopleMetRouter = router({
   status: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'party-people-met-status' }))
@@ -130,18 +150,30 @@ export const peopleMetRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-people-met-issue' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .mutation(async ({ ctx, input }) => {
-      await requireCheckedInGuest(input.partyId, ctx.user.userId);
-      const now = new Date();
-      const consent = await activeConsent(input.partyId, ctx.user.userId, now);
-      if (!consent) throw new TRPCError({ code: 'FORBIDDEN', message: 'An active People You Met opt-in is required.' });
       const exchangeCode = newExchangeCode();
-      const expiresAt = new Date(Math.min(consent.expiresAt.getTime(), now.getTime() + EXCHANGE_WINDOW_MS));
-      await db.$transaction(async (tx) => {
+      const result = await db.$transaction(async (tx) => {
+        // Serialize issuance per Party/issuer. The lock is transaction-scoped,
+        // so a replacement cannot race another replacement into two live codes.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`party-meet:${input.partyId}:${ctx.user.userId}`}))`;
+        const now = new Date();
+        const guest = await tx.partyGuest.findUnique({
+          where: { partyId_userId: { partyId: input.partyId, userId: ctx.user.userId } },
+          select: { checkedInAt: true, party: { select: { status: true } } },
+        });
+        const consent = await tx.partyMeetConsent.findFirst({
+          where: { partyId: input.partyId, userId: ctx.user.userId, withdrawnAt: null, expiresAt: { gt: now } },
+          select: { id: true, expiresAt: true },
+        });
+        if (!guest?.checkedInAt || guest.party.status !== 'published' || !consent) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'An active People You Met opt-in is required.' });
+        }
+        const expiresAt = new Date(Math.min(consent.expiresAt.getTime(), now.getTime() + EXCHANGE_WINDOW_MS));
         await tx.partyMeetExchange.updateMany({ where: { partyId: input.partyId, issuerUserId: ctx.user.userId, redeemedAt: null, revokedAt: null, expiresAt: { gt: now } }, data: { revokedAt: now } });
         await tx.partyMeetExchange.create({ data: { partyId: input.partyId, issuerUserId: ctx.user.userId, consentId: consent.id, codeHash: codeHash(exchangeCode), expiresAt } });
-      });
+        return { expiresAt };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       // Raw bearer code is returned only to its issuer here and is never stored.
-      return { exchangeCode, expiresAt };
+      return { exchangeCode, expiresAt: result.expiresAt };
     }),
 
   redeemExchangeCode: protectedProcedure
@@ -160,12 +192,14 @@ export const peopleMetRouter = router({
           if (!pair) throw opaqueExchangeError();
 
           const [issuerGuest, redeemerGuest, redeemerConsent, blocked] = await Promise.all([
-            tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: input.partyId, userId: exchange.issuerUserId } }, select: { checkedInAt: true } }),
-            tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: input.partyId, userId: ctx.user.userId } }, select: { checkedInAt: true } }),
+            tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: input.partyId, userId: exchange.issuerUserId } }, select: { checkedInAt: true, party: { select: { status: true } } } }),
+            tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: input.partyId, userId: ctx.user.userId } }, select: { checkedInAt: true, party: { select: { status: true } } } }),
             tx.partyMeetConsent.findFirst({ where: { partyId: input.partyId, userId: ctx.user.userId, withdrawnAt: null, expiresAt: { gt: now } }, select: { id: true, expiresAt: true } }),
             tx.userBlock.findFirst({ where: { OR: [{ blockerUserId: exchange.issuerUserId, blockedUserId: ctx.user.userId }, { blockerUserId: ctx.user.userId, blockedUserId: exchange.issuerUserId }] }, select: { id: true } }),
           ]);
-          if (!issuerGuest?.checkedInAt || !redeemerGuest?.checkedInAt || !redeemerConsent || blocked) throw opaqueExchangeError();
+          if (!issuerGuest?.checkedInAt || issuerGuest.party.status !== 'published' ||
+              !redeemerGuest?.checkedInAt || redeemerGuest.party.status !== 'published' ||
+              !redeemerConsent || blocked) throw opaqueExchangeError();
 
           const redeemed = await tx.partyMeetExchange.updateMany({ where: { id: exchange.id, redeemedAt: null, revokedAt: null, expiresAt: { gt: now } }, data: { redeemedAt: now, redeemedById: ctx.user.userId } });
           if (redeemed.count !== 1) throw opaqueExchangeError();
@@ -230,11 +264,10 @@ export const peopleMetRouter = router({
       });
       if (!connection) throw new TRPCError({ code: 'NOT_FOUND', message: 'Connection not found.' });
       const otherUserId = connection.userLowId === ctx.user.userId ? connection.userHighId : connection.userLowId;
-      await db.$transaction(async (tx) => {
-        await tx.userBlock.upsert({ where: { blockerUserId_blockedUserId: { blockerUserId: ctx.user.userId, blockedUserId: otherUserId } }, create: { blockerUserId: ctx.user.userId, blockedUserId: otherUserId }, update: {} });
-        await tx.partyMeetConnection.updateMany({ where: { id: connection.id, deletedAt: null, closedAt: null }, data: { deletedAt: now, closedAt: now } });
-        await tx.partyMeetExchange.updateMany({ where: { partyId: connection.partyId, issuerUserId: { in: [ctx.user.userId, otherUserId] }, redeemedAt: null, revokedAt: null }, data: { revokedAt: now } });
-      });
+      await db.$transaction(
+        (tx) => globallyBlockPair(tx, ctx.user.userId, otherUserId, now),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
       return { status: 'blocked' as const };
     }),
 
@@ -248,15 +281,10 @@ export const peopleMetRouter = router({
       });
       if (!connection) throw new TRPCError({ code: 'NOT_FOUND', message: 'Connection not found.' });
       const reportedUserId = connection.userLowId === ctx.user.userId ? connection.userHighId : connection.userLowId;
-      await db.partyMeetReport.create({ data: { connectionId: connection.id, reporterUserId: ctx.user.userId, reportedUserId, reason: input.reason, details: input.details } });
-      if (input.block) {
-        const now = new Date();
-        await db.$transaction(async (tx) => {
-          await tx.userBlock.upsert({ where: { blockerUserId_blockedUserId: { blockerUserId: ctx.user.userId, blockedUserId: reportedUserId } }, create: { blockerUserId: ctx.user.userId, blockedUserId: reportedUserId }, update: {} });
-          await tx.partyMeetConnection.updateMany({ where: { id: connection.id, deletedAt: null, closedAt: null }, data: { deletedAt: now, closedAt: now } });
-          await tx.partyMeetExchange.updateMany({ where: { partyId: connection.partyId, issuerUserId: { in: [ctx.user.userId, reportedUserId] }, redeemedAt: null, revokedAt: null }, data: { revokedAt: now } });
-        });
-      }
+      await db.$transaction(async (tx) => {
+        await tx.partyMeetReport.create({ data: { connectionId: connection.id, reporterUserId: ctx.user.userId, reportedUserId, reason: input.reason, details: input.details } });
+        if (input.block) await globallyBlockPair(tx, ctx.user.userId, reportedUserId, new Date());
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       // Reports are private; callers receive no report record or target detail.
       return { status: 'received' as const };
     }),

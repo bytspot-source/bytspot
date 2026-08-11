@@ -49,6 +49,11 @@ beforeEach(() => {
 test('People You Met forward repair migration asserts the complete privacy constraint contract', () => {
   const migration = readFileSync(new URL('../../prisma/migrations/20260816_repair_party_people_met_constraints/migration.sql', import.meta.url), 'utf8');
   assert.match(migration, /People You Met repair requires table/);
+  assert.match(migration, /information_schema\.columns/);
+  assert.match(migration, /pg_attrdef/);
+  assert.match(migration, /PartyMeetReportReason enum contract/);
+  assert.match(migration, /conrelid = 'public\.party_meet_exchanges'::regclass/);
+  assert.match(migration, /pg_get_constraintdef/);
   for (const constraint of [
     'party_meet_exchanges_code_hash_key',
     'party_meet_connections_canonical_pair_check',
@@ -56,6 +61,9 @@ test('People You Met forward repair migration asserts the complete privacy const
     'user_blocks_not_self_check',
     'user_blocks_blocker_user_id_blocked_user_id_key',
   ]) assert.match(migration, new RegExp(`ADD CONSTRAINT "${constraint}"`));
+  for (const lifecycleColumn of ['checked_in_at', 'revoked_at', 'deleted_at', 'closed_at']) {
+    assert.match(migration, new RegExp(`'${lifecycleColumn}'`));
+  }
 });
 
 test('People You Met opt-in requires a confirmed Party check-in and expiry is fixed to that check-in', async () => {

@@ -48,6 +48,15 @@ model User {
   partyCheckouts PartyCheckout[]
   mobilityQuotes MobilityQuote[]
   mobilityTrips  MobilityTrip[]
+  partyMeetConsents PartyMeetConsent[]
+  issuedPartyMeetExchanges PartyMeetExchange[] @relation("partyMeetExchangeIssuer")
+  redeemedPartyMeetExchanges PartyMeetExchange[] @relation("partyMeetExchangeRedeemer")
+  partyMeetConnectionsLow PartyMeetConnection[] @relation("partyMeetConnectionLow")
+  partyMeetConnectionsHigh PartyMeetConnection[] @relation("partyMeetConnectionHigh")
+  partyMeetBlocksInitiated UserBlock[] @relation("partyMeetBlocker")
+  partyMeetBlocksReceived UserBlock[] @relation("partyMeetBlocked")
+  partyMeetReportsFiled PartyMeetReport[] @relation("partyMeetReporter")
+  partyMeetReportsTargeted PartyMeetReport[] @relation("partyMeetReportTarget")
 
   @@map("users")
 }
@@ -213,6 +222,9 @@ model Party {
   media                  PartyMedia[]
   guests                 PartyGuest[]
   checkouts              PartyCheckout[]
+  meetConsents           PartyMeetConsent[]
+  meetExchanges          PartyMeetExchange[]
+  meetConnections        PartyMeetConnection[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -242,6 +254,115 @@ model PartyGuest {
   @@index([partyId, attendeeCredentialHash], map: "party_guests_party_id_attendee_credential_hash_idx")
   @@index([userId, updatedAt(sort: Desc)])
   @@map("party_guests")
+}
+
+// ─── People You Met (party-scoped, consent-only) ────────
+// These records deliberately do not model an attendee directory or follow graph.
+// Identity is returned only after a successful in-person exchange between two
+// checked-in, opted-in guests of the same Party.
+enum PartyMeetReportReason {
+  harassment
+  safety
+  impersonation
+  spam
+  other
+}
+
+model PartyMeetConsent {
+  id          String    @id @default(cuid())
+  partyId     String    @map("party_id")
+  userId      String    @map("user_id")
+  checkedInAt DateTime  @map("checked_in_at")
+  optedInAt   DateTime  @default(now()) @map("opted_in_at")
+  expiresAt   DateTime  @map("expires_at")
+  withdrawnAt DateTime? @map("withdrawn_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  party     Party               @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exchanges PartyMeetExchange[]
+
+  @@unique([partyId, userId])
+  @@index([userId, expiresAt])
+  @@index([partyId, expiresAt])
+  @@map("party_meet_consents")
+}
+
+model PartyMeetExchange {
+  id             String    @id @default(cuid())
+  partyId        String    @map("party_id")
+  issuerUserId   String    @map("issuer_user_id")
+  consentId      String    @map("consent_id")
+  codeHash       String    @unique @map("code_hash")
+  expiresAt      DateTime  @map("expires_at")
+  redeemedAt     DateTime? @map("redeemed_at")
+  redeemedById   String?   @map("redeemed_by_id")
+  revokedAt      DateTime? @map("revoked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  party      Party             @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  issuer     User              @relation("partyMeetExchangeIssuer", fields: [issuerUserId], references: [id], onDelete: Cascade)
+  consent    PartyMeetConsent  @relation(fields: [consentId], references: [id], onDelete: Cascade)
+  redeemedBy User?             @relation("partyMeetExchangeRedeemer", fields: [redeemedById], references: [id], onDelete: SetNull)
+
+  @@index([partyId, issuerUserId, expiresAt])
+  @@index([consentId, expiresAt])
+  @@map("party_meet_exchanges")
+}
+
+model PartyMeetConnection {
+  id         String    @id @default(cuid())
+  partyId    String    @map("party_id")
+  userLowId  String    @map("user_low_id")
+  userHighId String    @map("user_high_id")
+  expiresAt  DateTime  @map("expires_at")
+  deletedAt  DateTime? @map("deleted_at")
+  closedAt   DateTime? @map("closed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  party    Party               @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  userLow  User                @relation("partyMeetConnectionLow", fields: [userLowId], references: [id], onDelete: Cascade)
+  userHigh User                @relation("partyMeetConnectionHigh", fields: [userHighId], references: [id], onDelete: Cascade)
+  reports  PartyMeetReport[]
+
+  @@unique([partyId, userLowId, userHighId])
+  @@index([userLowId, expiresAt])
+  @@index([userHighId, expiresAt])
+  @@map("party_meet_connections")
+}
+
+model UserBlock {
+  id            String   @id @default(cuid())
+  blockerUserId String   @map("blocker_user_id")
+  blockedUserId String   @map("blocked_user_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  blocker User @relation("partyMeetBlocker", fields: [blockerUserId], references: [id], onDelete: Cascade)
+  blocked User @relation("partyMeetBlocked", fields: [blockedUserId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerUserId, blockedUserId])
+  @@index([blockedUserId])
+  @@map("user_blocks")
+}
+
+model PartyMeetReport {
+  id             String                 @id @default(cuid())
+  connectionId   String                 @map("connection_id")
+  reporterUserId String                 @map("reporter_user_id")
+  reportedUserId String                 @map("reported_user_id")
+  reason         PartyMeetReportReason
+  details        String?
+  createdAt      DateTime               @default(now()) @map("created_at")
+
+  connection PartyMeetConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  reporter   User                @relation("partyMeetReporter", fields: [reporterUserId], references: [id], onDelete: Cascade)
+  reported   User                @relation("partyMeetReportTarget", fields: [reportedUserId], references: [id], onDelete: Cascade)
+
+  @@index([reporterUserId, createdAt])
+  @@index([reportedUserId, createdAt])
+  @@map("party_meet_reports")
 }
 
 model PartyCheckout {

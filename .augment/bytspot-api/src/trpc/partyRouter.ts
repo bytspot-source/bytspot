@@ -463,7 +463,13 @@ export const partyPassRouter = router({
         ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
         : null;
       const membershipTier = ctx.user ? await membershipTierFor(ctx.user.userId) : null;
-      const membershipEligible = Boolean(ctx.user && currentPartyMembershipEligible(party, membershipTier, guest?.ticketTierName ?? null));
+      // Ticket-tier eligibility applies once a Party Pass has been granted.
+      // Before purchase (or for a retryable checkout), show the ticket CTA to
+      // members who meet the Party's base requirement; createCheckout enforces
+      // the selected ticket tier before reserving or charging anything.
+      const membershipEligible = Boolean(ctx.user && (guest?.accessGranted
+        ? currentPartyMembershipEligible(party, membershipTier, guest.ticketTierName)
+        : meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)));
       const state = passAction(party, guest, Boolean(ctx.user), membershipEligible);
       const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
       return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };

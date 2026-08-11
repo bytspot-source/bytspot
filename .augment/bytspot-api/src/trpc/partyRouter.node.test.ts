@@ -402,6 +402,16 @@ test('Party pass and RSVP enforce the Party required membership tier', async () 
   assert.equal((await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey })).accessGranted, true);
 });
 
+test('Party pass resolve shows the ticket CTA to a new buyer who meets the Party tier', async () => {
+  party.findFirst = async () => ({ id: 'party-1', accessMode: 'paid-ticket', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }], arrivalVenueId: null });
+  partyGuest.findUnique = async () => null;
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  assert.deepEqual(await caller().events.pass.resolve({ partyId: 'party-1' }), {
+    partyId: 'party-1', action: 'ticket', guest: { status: 'eligible', accessGranted: false }, premiumMobilityEligible: false,
+  });
+});
+
 test('Party pass resolve hides an access-granted ticket after a ticket-tier membership downgrade', async () => {
   party.findFirst = async () => ({ id: 'party-1', accessMode: 'paid-ticket', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }], arrivalVenueId: null });
   partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true, ticketTierName: 'Black Table' });

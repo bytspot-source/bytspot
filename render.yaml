@@ -33,6 +33,10 @@ services:
         value: no-cache, no-store, must-revalidate
 
   # ─── API: Express / Prisma / Resend ───────────────────────────────────────
+  # SECURITY DEPLOYMENT REQUIREMENT: Route public API traffic through Cloudflare
+  # only; block direct Render-origin access. Cloudflare must overwrite incoming
+  # X-Forwarded-For before forwarding, because Express trusts the Cloudflare →
+  # Render proxy chain for per-client rate limiting.
   - type: web
     name: bytspot-api
     runtime: node

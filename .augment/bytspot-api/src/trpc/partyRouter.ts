@@ -303,21 +303,22 @@ async function membershipTierFor(userId: string): Promise<MembershipTier | null>
 }
 
 function currentPartyMembershipEligible(
-  party: { requiredMembershipTier: string; ticketTiers: Prisma.JsonValue },
+  party: { accessMode: string; requiredMembershipTier: string; ticketTiers: Prisma.JsonValue },
   membershipTier: unknown,
   ticketTierName: string | null,
 ): boolean {
   if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)) return false;
-  if (!ticketTierName) return true;
+  if (!ticketTierName) return party.accessMode !== 'paid-ticket';
   const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === ticketTierName);
   return Boolean(ticketTier && meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier));
 }
 
 function eligibleMembershipTiersForPartyGuest(
-  party: { requiredMembershipTier: string; ticketTiers: Prisma.JsonValue },
+  party: { accessMode: string; requiredMembershipTier: string; ticketTiers: Prisma.JsonValue },
   ticketTierName: string | null,
 ): MembershipTier[] {
   if (!isMembershipTier(party.requiredMembershipTier)) return [];
+  if (!ticketTierName && party.accessMode === 'paid-ticket') return [];
   const ticketTier = ticketTierName
     ? parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === ticketTierName)
     : null;
@@ -419,7 +420,7 @@ export const partyPassRouter = router({
       const [party, guest, membershipTier] = await Promise.all([
         db.party.findFirst({
           where: { id: input.partyId, status: 'published' },
-          select: { requiredMembershipTier: true, ticketTiers: true },
+          select: { accessMode: true, requiredMembershipTier: true, ticketTiers: true },
         }),
         db.partyGuest.findUnique({
           where: { partyId_userId: { partyId: input.partyId, userId: ctx.user.userId } },
@@ -432,14 +433,17 @@ export const partyPassRouter = router({
       }
 
       const credential = newAttendeeCredential();
-      // The conditional update verifies current access and prevents a checked-in
-      // guest from rotating a credential back into circulation.
+      // The conditional update verifies current access, rechecks membership in
+      // the same SQL write, and prevents a checked-in guest from rotating a
+      // credential back into circulation.
+      const eligibleMembershipTiers = eligibleMembershipTiersForPartyGuest(party, guest.ticketTierName);
       const updated = await db.partyGuest.updateMany({
         where: {
           partyId: input.partyId,
           userId: ctx.user.userId,
           accessGranted: true,
           checkedInAt: null,
+          user: { is: { membershipTier: { in: eligibleMembershipTiers } } },
         },
         data: { attendeeCredentialHash: attendeeCredentialHash(credential) },
       });
@@ -493,7 +497,7 @@ export const partyControlRouter = router({
       const [party, guest] = await Promise.all([
         db.party.findFirst({
           where: { id: input.partyId, status: 'published' },
-          select: { requiredMembershipTier: true, ticketTiers: true },
+          select: { accessMode: true, requiredMembershipTier: true, ticketTiers: true },
         }),
         db.partyGuest.findFirst({
           where: { partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest },

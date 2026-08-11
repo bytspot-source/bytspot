@@ -70,7 +70,7 @@ beforeEach(() => {
 });
 
 test('Attendee credential is issued only to a currently eligible access-granted guest and only its digest is persisted', async () => {
-  party.findFirst = async () => ({ requiredMembershipTier: 'green', ticketTiers: [] });
+  party.findFirst = async () => ({ accessMode: 'free-rsvp', requiredMembershipTier: 'green', ticketTiers: [] });
   partyGuest.findUnique = async () => ({ accessGranted: true, checkedInAt: null, ticketTierName: null });
   let update: any;
   partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
@@ -81,24 +81,29 @@ test('Attendee credential is issued only to a currently eligible access-granted 
   assert.equal(update.where.userId, 'test-user-id');
   assert.equal(update.where.accessGranted, true);
   assert.equal(update.where.checkedInAt, null);
+  assert.deepEqual(update.where.user, { is: { membershipTier: { in: ['green', 'platinum', 'black'] } } });
   assert.match(update.data.attendeeCredentialHash, /^[a-f0-9]{64}$/);
   assert.notEqual(update.data.attendeeCredentialHash, result.attendeeCredential);
 });
 
 test('Attendee credential rejects users without an active Party Pass or current membership eligibility', async () => {
-  party.findFirst = async () => ({ requiredMembershipTier: 'green', ticketTiers: [] });
+  party.findFirst = async () => ({ accessMode: 'free-rsvp', requiredMembershipTier: 'green', ticketTiers: [] });
   partyGuest.findUnique = async () => ({ accessGranted: false, checkedInAt: null, ticketTierName: null });
   partyGuest.updateMany = async () => ({ count: 0 });
   await assert.rejects(() => caller().events.pass.attendeeCredential({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
 
   partyGuest.findUnique = async () => ({ accessGranted: true, checkedInAt: null, ticketTierName: 'Black Table' });
-  party.findFirst = async () => ({ requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }] });
+  party.findFirst = async () => ({ accessMode: 'paid-ticket', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }] });
   user.findUnique = async () => ({ membershipTier: 'platinum' });
+  await assert.rejects(() => caller().events.pass.attendeeCredential({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+
+  partyGuest.findUnique = async () => ({ accessGranted: true, checkedInAt: null, ticketTierName: null });
+  user.findUnique = async () => ({ membershipTier: 'black' });
   await assert.rejects(() => caller().events.pass.attendeeCredential({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
 });
 
 test('Door Mode checks in a valid credential exactly once and only for authorized staff', async () => {
-  party.findFirst = async () => ({ hostUserId: 'test-user-id', requiredMembershipTier: 'green', ticketTiers: [] });
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', accessMode: 'free-rsvp', requiredMembershipTier: 'green', ticketTiers: [] });
   partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, ticketTierName: null, user: { name: 'Door Guest', membershipTier: 'green' } });
   let update: any;
   partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
@@ -401,6 +406,16 @@ test('Party pass resolve hides an access-granted ticket after a ticket-tier memb
   party.findFirst = async () => ({ id: 'party-1', accessMode: 'paid-ticket', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }], arrivalVenueId: null });
   partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true, ticketTierName: 'Black Table' });
   user.findUnique = async () => ({ membershipTier: 'platinum' });
+  assert.deepEqual(await caller().events.pass.resolve({ partyId: 'party-1' }), {
+    partyId: 'party-1', action: 'unavailable', guest: { status: 'membership-required', accessGranted: false }, premiumMobilityEligible: false,
+  });
+});
+
+test('Party pass resolve hides a paid-ticket pass with no recorded ticket tier', async () => {
+  party.findFirst = async () => ({ id: 'party-1', accessMode: 'paid-ticket', requiredMembershipTier: 'green', ticketTiers: [{ name: 'Black Table', requiredMembershipTier: 'black', priceCents: 2500, quantity: 10 }], arrivalVenueId: null });
+  partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true, ticketTierName: null });
+  user.findUnique = async () => ({ membershipTier: 'black' });
+
   assert.deepEqual(await caller().events.pass.resolve({ partyId: 'party-1' }), {
     partyId: 'party-1', action: 'unavailable', guest: { status: 'membership-required', accessGranted: false }, premiumMobilityEligible: false,
   });

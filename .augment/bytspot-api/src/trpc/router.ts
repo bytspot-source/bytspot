@@ -14,6 +14,8 @@ import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
+import { verifyProviderIdToken } from '../services/providerIdTokenVerifier';
+import { resolveProviderIdentity } from '../services/providerIdentityAuth';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -131,6 +133,58 @@ const authRouter = router({
 
       const token = signToken(user.id, user.email);
       return { token, user: { id: user.id, email: user.email, name: user.name } };
+    }),
+
+  /**
+   * Verifies a provider-signed Apple ID token, then resolves the immutable
+   * Apple subject to a Bytspot account. Supplied email/name are never trusted
+   * as identity proof; Apple only supplies them on first authorization.
+   */
+  appleSignIn: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:apple' }))
+    .input(z.object({
+      identityToken: z.string().min(1).max(8_192),
+      email: z.string().email().max(255).optional(),
+      name: z.string().max(100).optional(),
+      ref: z.string().max(100).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      if (!config.appleClientId) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Apple sign-in is unavailable' });
+      }
+      let identity;
+      try {
+        identity = await verifyProviderIdToken('apple', input.identityToken, config.appleClientId);
+      } catch {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Apple sign-in could not be verified' });
+      }
+      const result = await resolveProviderIdentity(identity);
+      const token = signToken(result.user.id, result.user.email);
+      if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
+      return { token, user: result.user, isNewUser: result.isNewUser };
+    }),
+
+  /** Verifies a Google ID token for the configured native iOS OAuth audience. */
+  googleSignIn: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:google' }))
+    .input(z.object({
+      idToken: z.string().min(1).max(8_192),
+      surface: z.literal('parker'),
+    }))
+    .mutation(async ({ input }) => {
+      if (!config.googleServerClientId) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Google sign-in is unavailable' });
+      }
+      let identity;
+      try {
+        identity = await verifyProviderIdToken('google', input.idToken, config.googleServerClientId);
+      } catch {
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Google sign-in could not be verified' });
+      }
+      const result = await resolveProviderIdentity(identity);
+      const token = signToken(result.user.id, result.user.email);
+      if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
+      return { token, user: result.user, isNewUser: result.isNewUser };
     }),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */

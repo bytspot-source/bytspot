@@ -33,6 +33,10 @@ services:
         value: no-cache, no-store, must-revalidate
 
   # ─── API: Express / Prisma / Resend ───────────────────────────────────────
+  # SECURITY DEPLOYMENT REQUIREMENT: Route public API traffic through Cloudflare
+  # only; block direct Render-origin access. Cloudflare must overwrite incoming
+  # X-Forwarded-For before forwarding, because Express trusts the Cloudflare →
+  # Render proxy chain for per-client rate limiting.
   - type: web
     name: bytspot-api
     runtime: node
@@ -61,5 +65,9 @@ services:
       - key: VAPID_PUBLIC_KEY
         sync: false
       - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: APPLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_SERVER_CLIENT_ID
         sync: false
 

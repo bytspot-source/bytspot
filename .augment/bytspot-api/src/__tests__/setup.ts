@@ -9,6 +9,7 @@ vi.mock('../lib/db', () => {
   const mockDb: Record<string, any> = {
     $queryRaw: vi.fn().mockResolvedValue([{ 1: 1 }]),
     $queryRawUnsafe: vi.fn().mockResolvedValue([]),
+    $transaction: vi.fn(async (operation: (tx: Record<string, any>) => unknown) => operation(mockDb)),
     user: {
       findUnique: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
@@ -49,6 +50,10 @@ vi.mock('../lib/db', () => {
       findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue({ id: 'ss-1' }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    providerIdentity: {
+      findUnique: vi.fn(),
+      create: vi.fn().mockResolvedValue({ id: 'provider-identity-1' }),
     },
     spotCollection: {
       findMany: vi.fn().mockResolvedValue([]),

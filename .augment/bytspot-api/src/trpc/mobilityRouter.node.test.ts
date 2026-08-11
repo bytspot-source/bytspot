@@ -6,7 +6,7 @@ import { db } from '../lib/db';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
-const platinumContext: Context = { user: { userId: 'platinum-user', email: 'platinum@bytspot.com' } };
+const platinumContext: Context = { user: { userId: 'platinum-user', email: 'platinum@bytspot.com' }, clientRateLimitKey: 'test-mobility-client' };
 const quoteId = 'quote-1';
 const idempotencyKey = '00000000-0000-4000-8000-000000000099';
 const now = new Date('2026-08-12T18:00:00.000Z');

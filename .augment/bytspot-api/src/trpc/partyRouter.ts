@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
@@ -113,6 +113,16 @@ function hasImageSignature(bytes: Buffer, mimeType: string): boolean {
 
 function newPassCode(): string {
   return `BYT-${randomBytes(5).toString('hex').toUpperCase()}`;
+}
+
+// Attendee credentials are bearer secrets. Persist only a digest so a database
+// disclosure cannot be replayed at a Party door.
+function newAttendeeCredential(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function attendeeCredentialHash(credential: string): string {
+  return createHash('sha256').update(credential).digest('hex');
 }
 
 function isUniqueConstraint(error: unknown): boolean {
@@ -371,6 +381,30 @@ export const partyInvite = publicProcedure
   });
 
 export const partyPassRouter = router({
+  attendeeCredential: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-attendee-credential' }))
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .mutation(async ({ ctx, input }) => {
+      const credential = newAttendeeCredential();
+      // The conditional update both verifies current access and prevents a
+      // checked-in guest from rotating a credential back into circulation.
+      const updated = await db.partyGuest.updateMany({
+        where: {
+          partyId: input.partyId,
+          userId: ctx.user.userId,
+          accessGranted: true,
+          checkedInAt: null,
+        },
+        data: { attendeeCredentialHash: attendeeCredentialHash(credential) },
+      });
+      if (updated.count !== 1) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'An active Party Pass is required to display an attendee credential.' });
+      }
+      // Deliberately return the raw bearer secret exactly once. It must never
+      // appear in guest lists, logs, or any host-facing API response.
+      return { partyId: input.partyId, attendeeCredential: credential };
+    }),
+
   resolve: publicProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
@@ -382,6 +416,56 @@ export const partyPassRouter = router({
       const state = passAction(party, guest, Boolean(ctx.user), meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier));
       const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
       return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };
+    }),
+});
+
+type PartyDoorCohost = { email: string; role: 'cohost' | 'door' | 'finance' };
+
+function partyDoorCohosts(value: Prisma.JsonValue): PartyDoorCohost[] {
+  const parsed = z.array(z.object({ email: z.string().email(), role: z.enum(hostRoles) })).safeParse(value);
+  return parsed.success ? parsed.data : [];
+}
+
+async function requirePartyDoorAuthority(partyId: string, userId: string): Promise<void> {
+  const party = await db.party.findFirst({
+    where: { id: partyId, status: 'published' },
+    select: { hostUserId: true, cohosts: true },
+  });
+  if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+  if (party.hostUserId === userId) return;
+
+  const user = await db.user.findUnique({ where: { id: userId }, select: { email: true } });
+  const email = user?.email.trim().toLocaleLowerCase();
+  const authorized = Boolean(email && partyDoorCohosts(party.cohosts).some((cohost) =>
+    (cohost.role === 'cohost' || cohost.role === 'door') && cohost.email.trim().toLocaleLowerCase() === email,
+  ));
+  if (!authorized) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party door authorization is required.' });
+}
+
+const attendeeCredentialInput = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'Invalid attendee credential.');
+
+export const partyControlRouter = router({
+  checkIn: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 300, label: 'party-door-check-in' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), attendeeCredential: attendeeCredentialInput }))
+    .mutation(async ({ ctx, input }) => {
+      await requirePartyDoorAuthority(input.partyId, ctx.user.userId);
+      const digest = attendeeCredentialHash(input.attendeeCredential);
+      const guest = await db.partyGuest.findFirst({
+        where: { partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest },
+        select: { id: true, checkedInAt: true, user: { select: { name: true } } },
+      });
+      if (!guest) throw new TRPCError({ code: 'NOT_FOUND', message: 'Attendee credential not recognized.' });
+      if (guest.checkedInAt) throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
+
+      // The null predicate is the replay guard: concurrent scans allow only
+      // one update to succeed.
+      const checkedIn = await db.partyGuest.updateMany({
+        where: { id: guest.id, partyId: input.partyId, accessGranted: true, attendeeCredentialHash: digest, checkedInAt: null },
+        data: { checkedInAt: new Date() },
+      });
+      if (checkedIn.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'Attendee has already checked in.' });
+      return { status: 'checked-in' as const, guestName: guest.user.name ?? 'Guest' };
     }),
 });
 

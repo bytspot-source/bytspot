@@ -51,6 +51,8 @@ beforeEach(() => {
   partyMedia.findUnique = async () => null;
   partyGuest.count = async () => 0;
   partyGuest.findUnique = async () => null;
+  partyGuest.findFirst = async () => null;
+  partyGuest.updateMany = async () => ({ count: 0 });
   partyGuest.upsert = async ({ create }: any) => ({ id: 'guest-1', ...create });
   partyGuest.create = async ({ data }: any) => ({ id: 'guest-1', ...data });
   partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', ...data });
@@ -64,6 +66,57 @@ beforeEach(() => {
   user.findUnique = async () => ({ membershipTier: 'green' });
   (config as any).stripeSecretKey = '';
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
+});
+
+test('Attendee credential is issued only to an access-granted guest and only its digest is persisted', async () => {
+  let update: any;
+  partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  const result = await caller().events.pass.attendeeCredential({ partyId: 'party-1' });
+  assert.match(result.attendeeCredential, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(result.partyId, 'party-1');
+  assert.equal(update.where.userId, 'test-user-id');
+  assert.equal(update.where.accessGranted, true);
+  assert.equal(update.where.checkedInAt, null);
+  assert.match(update.data.attendeeCredentialHash, /^[a-f0-9]{64}$/);
+  assert.notEqual(update.data.attendeeCredentialHash, result.attendeeCredential);
+});
+
+test('Attendee credential rejects users without an active Party Pass', async () => {
+  partyGuest.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.pass.attendeeCredential({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
+});
+
+test('Door Mode checks in a valid credential exactly once and only for authorized staff', async () => {
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', cohosts: [] });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, user: { name: 'Door Guest' } });
+  let update: any;
+  partyGuest.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  const result = await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) });
+  assert.deepEqual(result, { status: 'checked-in', guestName: 'Door Guest' });
+  assert.equal(update.where.id, 'guest-1');
+  assert.equal(update.where.checkedInAt, null);
+  assert.match(update.where.attendeeCredentialHash, /^[a-f0-9]{64}$/);
+  assert.ok(update.data.checkedInAt instanceof Date);
+
+  partyGuest.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'CONFLICT' });
+});
+
+test('Door Mode permits a configured door cohost but rejects finance cohosts and unknown credentials', async () => {
+  party.findFirst = async () => ({ hostUserId: 'someone-else', cohosts: [{ email: 'test@bytspot.com', role: 'door' }] });
+  user.findUnique = async () => ({ email: 'test@bytspot.com' });
+  partyGuest.findFirst = async () => ({ id: 'guest-1', checkedInAt: null, user: { name: 'Door Guest' } });
+  partyGuest.updateMany = async () => ({ count: 1 });
+  assert.deepEqual(await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { status: 'checked-in', guestName: 'Door Guest' });
+
+  party.findFirst = async () => ({ hostUserId: 'someone-else', cohosts: [{ email: 'test@bytspot.com', role: 'finance' }] });
+  await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'FORBIDDEN' });
+
+  party.findFirst = async () => ({ hostUserId: 'test-user-id', cohosts: [] });
+  partyGuest.findFirst = async () => null;
+  await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: 'A'.repeat(43) }), { code: 'NOT_FOUND' });
 });
 
 test('Party draft creation requires authentication', async () => {

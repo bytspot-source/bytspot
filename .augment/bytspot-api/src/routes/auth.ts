@@ -6,6 +6,7 @@ import { db } from '../lib/db';
 import { config } from '../config';
 import { sendWelcomeEmail } from '../lib/email';
 import { requireAuth } from '../middleware/auth';
+import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 
 const router = Router();
 
@@ -49,6 +50,9 @@ router.post('/auth/signup', async (req, res) => {
   });
 
   const token = signToken(user.id, user.email);
+
+  // Identity hashes power contact-graph discovery (non-blocking)
+  void refreshUserIdentityHashes(user.id, { email: user.email });
 
   // Send welcome email (non-blocking — fire and forget)
   if (user.email) {

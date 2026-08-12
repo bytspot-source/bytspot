@@ -51,6 +51,7 @@ beforeEach(() => {
   partyMedia.findUnique = async () => null;
   partyGuest.count = async () => 0;
   partyGuest.findUnique = async () => null;
+  partyGuest.findFirst = async () => null;
   partyGuest.upsert = async ({ create }: any) => ({ id: 'guest-1', ...create });
   partyGuest.create = async ({ data }: any) => ({ id: 'guest-1', ...data });
   partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', ...data });
@@ -101,6 +102,32 @@ test('Draft retries do not update content after publishing wins the race', async
   party.findFirst = async () => publishedParty;
 
   assert.deepEqual(await caller().events.drafts.create({ ...draftInput, title: 'Too Late To Change' }), { id: 'party-1' });
+});
+
+test('Party deletion is host-only, allows drafts, and refuses committed guests', async () => {
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  // Draft with no committed guests deletes atomically.
+  let deleteWhere: any;
+  party.findFirst = async () => partyDraft;
+  party.deleteMany = async ({ where }: any) => {
+    deleteWhere = where;
+    return { count: 1 };
+  };
+  assert.deepEqual(await caller().events.drafts.delete({ partyId: 'party-1' }), { success: true });
+  assert.equal(deleteWhere.hostUserId, 'test-user-id');
+  assert.deepEqual(deleteWhere.guests, { none: { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] } });
+
+  // Published party with a ticketed guest is refused before any delete.
+  party.findFirst = async () => ({ ...partyDraft, status: 'published' });
+  partyGuest.findFirst = async () => ({ id: 'guest-1' });
+  await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
+
+  // Race guard: guest commits between the check and the delete.
+  partyGuest.findFirst = async () => null;
+  party.deleteMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
 });
 
 test('Party draft creation accepts iOS standard templates and Black tier', async () => {

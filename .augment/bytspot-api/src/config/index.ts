@@ -49,6 +49,10 @@ const envSchema = z.object({
   MOBILITY_AGGREGATOR_BASE_URL: z.union([z.literal(''), httpsUrl]).default(''),
   MOBILITY_AGGREGATOR_API_KEY: z.string().default(''),
   MOBILITY_AGGREGATOR_MODE: z.enum(['handoff', 'live']).default('handoff'),
+  // Shared salt for the privacy-preserving contact graph. MUST match the iOS
+  // build's `BytspotContactHashSalt` (Info.plist) or device contact hashes
+  // will never match member identity hashes.
+  CONTACT_HASH_SALT:      z.string().default('dev-contact-salt-change-me'),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
@@ -109,6 +113,7 @@ export const config = {
   mobilityAggregatorBaseUrl: env.MOBILITY_AGGREGATOR_BASE_URL.replace(/\/$/, ''),
   mobilityAggregatorApiKey: env.MOBILITY_AGGREGATOR_API_KEY,
   mobilityAggregatorMode: env.MOBILITY_AGGREGATOR_MODE,
+  contactHashSalt: env.CONTACT_HASH_SALT,
 } as const;
 
 /**

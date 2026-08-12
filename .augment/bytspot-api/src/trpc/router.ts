@@ -9,6 +9,7 @@ import { db } from '../lib/db';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
 import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
+import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { getAllSubscriptions, storeSubscription } from '../routes/push';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
@@ -105,6 +106,9 @@ const authRouter = router({
       });
 
       const token = signToken(user.id, user.email);
+
+      // Identity hashes power contact-graph discovery (non-blocking)
+      void refreshUserIdentityHashes(user.id, { email: user.email });
 
       // Send welcome email (non-blocking)
       if (user.email) {

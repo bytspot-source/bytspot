@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { router, protectedProcedure } from './trpc';
 import { db } from '../lib/db';
+import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 
 // ─── Achievement Definitions (static catalog) ────────────────────────
 export const ACHIEVEMENTS = [
@@ -242,6 +243,8 @@ const profileRouter = router({
         data: input,
         select: { id: true, email: true, name: true, phone: true, profileImage: true, address: true, birthday: true },
       });
+      // Identity hashes power contact-graph discovery (non-blocking)
+      void refreshUserIdentityHashes(user.id, { email: user.email, phone: user.phone });
       return user;
     }),
 });

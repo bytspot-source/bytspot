@@ -14,6 +14,7 @@ const socialInvitation = db.socialInvitation as any;
 const socialCircle = db.socialCircle as any;
 const socialCircleMember = db.socialCircleMember as any;
 const contactHash = db.contactHash as any;
+const userIdentityHash = db.userIdentityHash as any;
 const partyEncounterOptIn = db.partyEncounterOptIn as any;
 const party = db.party as any;
 const partyGuest = db.partyGuest as any;
@@ -38,6 +39,7 @@ beforeEach(() => {
   contactHash.findMany = async () => [];
   contactHash.deleteMany = async () => ({ count: 0 });
   contactHash.createMany = async () => ({ count: 0 });
+  userIdentityHash.findMany = async () => [];
   partyEncounterOptIn.findUnique = async () => null;
   partyEncounterOptIn.findMany = async () => [];
   partyEncounterOptIn.upsert = async ({ create }: any) => ({ id: 'opt-1', ...create });
@@ -205,6 +207,29 @@ test('Suggestions surface mutual hash overlaps, never raw contacts, and skip dec
   for (const item of items) assert.deepEqual(Object.keys(item), ['userId', 'name', 'relationshipStatus', 'circleIds']);
 });
 
+test('Suggestions surface identity matches without the other member syncing', async () => {
+  contactHash.findMany = async ({ where }: any) => where.userId === 'me'
+    ? [{ hashedContact: hashA }]
+    : []; // the friend never synced an address book
+  userIdentityHash.findMany = async ({ where }: any) => {
+    assert.deepEqual(where.hashedIdentity, { in: [hashA] });
+    assert.deepEqual(where.userId, { not: 'me' });
+    return [{ userId: 'friend' }];
+  };
+  user.findMany = async () => [{ id: 'friend', name: 'Friend' }];
+
+  const { items } = await caller().social.suggestions();
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0], { userId: 'friend', name: 'Friend', relationshipStatus: 'suggested', circleIds: [] });
+});
+
+test('Contact sync counts identity matches in matched/mutual', async () => {
+  userIdentityHash.findMany = async () => [{ userId: 'friend', hashedIdentity: hashA }];
+  contactHash.findMany = async () => [];
+  const result = await caller().social.syncCloudContact({ source: 'apple', hashes: [hashA, hashB] });
+  assert.deepEqual(result, { synced: 2, matched: 1, mutual: 1 });
+});
+
 test('Suggestions are empty without any synced hashes', async () => {
   contactHash.findMany = async () => [];
   assert.deepEqual(await caller().social.suggestions(), { items: [] });
@@ -229,6 +254,24 @@ test('Circle creation persists the authenticated owner', async () => {
   const circle = await caller().social.groups.create({ name: 'Close Friends', privacy: 'private', surface: 'network' });
   assert.equal(created.ownerId, 'me');
   assert.deepEqual(circle, { id: 'circle-1', name: 'Close Friends', ownerUserId: 'me', memberCount: 0, memberIds: [], role: 'owner' });
+});
+
+test('Circle deletion is owner-only and cascades via a single delete', async () => {
+  await assert.rejects(() => caller().social.groups.delete({ groupId: 'circle-1', surface: 'network' }), { code: 'NOT_FOUND' });
+
+  let circleWhere: any;
+  let deletedWhere: any;
+  socialCircle.findFirst = async ({ where }: any) => {
+    circleWhere = where;
+    return { id: 'circle-1' };
+  };
+  socialCircle.delete = async ({ where }: any) => {
+    deletedWhere = where;
+    return { id: 'circle-1' };
+  };
+  assert.deepEqual(await caller().social.groups.delete({ groupId: 'circle-1', surface: 'network' }), { success: true });
+  assert.deepEqual(circleWhere, { id: 'circle-1', ownerId: 'me' });
+  assert.deepEqual(deletedWhere, { id: 'circle-1' });
 });
 
 test('Circle member mutations are owner-only and fail closed', async () => {

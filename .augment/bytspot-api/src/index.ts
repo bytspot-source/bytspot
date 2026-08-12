@@ -19,6 +19,7 @@ import partyMediaRouter from './routes/partyMedia';
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
+import { backfillUserIdentityHashes } from './services/userIdentityHashes';
 
 const app = express();
 
@@ -83,6 +84,9 @@ app.listen(config.port, () => {
   // Start in-process crowd simulation (fresh data every 15 min)
   // Crowd alerts are chained — they run automatically after each simulation
   startCrowdSimulator();
+  // One-shot, best-effort: hash identifiers for members created before the
+  // identity-hash feature so contact discovery covers the full member base.
+  void backfillUserIdentityHashes();
 });
 
 export default app;

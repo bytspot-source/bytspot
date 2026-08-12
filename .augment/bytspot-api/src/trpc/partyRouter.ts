@@ -191,6 +191,49 @@ export const partyDraftsRouter = router({
         throw error;
       }
     }),
+
+  /**
+   * Delete a party the caller hosts. Drafts always delete. Published
+   * parties delete only while no guest holds a paid ticket or has checked
+   * in — after that the host must use Party Control instead so paid
+   * attendees are never silently stranded. Guests, media, checkouts, and
+   * encounter opt-ins cascade at the DB level.
+   */
+  delete: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-draft-delete' }))
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId },
+        select: { id: true, status: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      if (party.status === 'published') {
+        const committedGuest = await db.partyGuest.findFirst({
+          where: {
+            partyId: party.id,
+            OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }],
+          },
+          select: { id: true },
+        });
+        if (committedGuest) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed or checked-in guests and can no longer be deleted.' });
+        }
+      }
+      // Guard against a guest paying between the check and the delete: the
+      // conditional deleteMany re-verifies host + deletable state atomically.
+      const deleted = await db.party.deleteMany({
+        where: {
+          id: party.id,
+          hostUserId: ctx.user.userId,
+          guests: { none: { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] } },
+        },
+      });
+      if (deleted.count === 0) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed or checked-in guests and can no longer be deleted.' });
+      }
+      return { success: true };
+    }),
 });
 
 export const partyMediaRouter = router({

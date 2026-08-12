@@ -446,15 +446,41 @@ test('Share link dies when the party ends: expired links 404 for new arrivals bu
   });
 
   // New arrivals: invite, pass resolve, and RSVP are indistinguishable from a deleted party.
+  partyGuest.findUnique = async () => null;
   await assert.rejects(() => createCaller({ user: null }).events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'NOT_FOUND' });
 
-  // A confirmed guest keeps their pass after expiry.
+  // A confirmed guest keeps their pass — and every share-link procedure —
+  // after expiry: pass resolve, invite landing, and RSVP re-calls.
   partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
   const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
   assert.equal(pass.action, 'view-pass');
   assert.equal(pass.guest.accessGranted, true);
+  assert.equal((await caller().events.invite({ partyId: 'party-1' })).id, 'party-1');
+  assert.deepEqual(await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { status: 'rsvp', accessGranted: true });
+});
+
+test('Expired paid-ticket share link still reports already-confirmed to a ticketed guest', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,
+    startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000), shareLinkExpiresAt: null,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+
+  // Dedicated user: protected procedures rate-limit per user, and earlier
+  // checkout tests consume test-user-id's party-ticket-checkout budget.
+  const expiredCaller = () => createCaller({ user: { userId: 'expired-link-user', email: 'expired@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  // Without a confirmed pass the expired link is a 404, not a checkout error.
+  partyGuest.findUnique = async () => null;
+  await assert.rejects(() => expiredCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'NOT_FOUND' });
+
+  // A ticketed guest gets the normal already-confirmed conflict instead.
+  partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true });
+  await assert.rejects(() => expiredCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'CONFLICT' });
 });
 
 test('Share link default expiry falls back to startsAt + 6h when the party has no end time', async () => {

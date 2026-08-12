@@ -422,9 +422,12 @@ async function serializableTransaction<T>(operation: (tx: Prisma.TransactionClie
 
 export const partyInvite = publicProcedure
   .input(z.object({ partyId: z.string().min(1).max(128) }))
-  .query(async ({ input }) => {
+  .query(async ({ ctx, input }) => {
     const party = await publishedParty(input.partyId);
-    assertShareLinkUsable(party, null);
+    const guest = ctx.user
+      ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
+      : null;
+    assertShareLinkUsable(party, guest);
     const destinations = safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
     const album = party.media.filter((media) => media.kind === 'album');
@@ -697,7 +700,8 @@ export const partyRsvpRouter = router({
     .input(z.object({ partyId: z.string().min(1).max(128), idempotencyKey: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
-      assertShareLinkUsable(party, null);
+      const callerGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+      assertShareLinkUsable(party, callerGuest);
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
       if (!meetsRequiredMembershipTier(await membershipTierFor(ctx.user.userId), party.requiredMembershipTier)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
@@ -730,7 +734,8 @@ export const partyTicketsRouter = router({
     .input(z.object({ partyId: z.string().min(1).max(128), ticketTierName: z.string().trim().min(1).max(100), idempotencyKey: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
-      assertShareLinkUsable(party, null);
+      const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+      assertShareLinkUsable(party, knownGuest);
       if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
       const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
       if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
@@ -738,7 +743,6 @@ export const partyTicketsRouter = router({
       if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier) || !meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party ticket requirement.' });
       }
-      const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       if (knownGuest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
       if (knownGuest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });
       if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });

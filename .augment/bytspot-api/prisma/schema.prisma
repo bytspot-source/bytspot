@@ -48,6 +48,12 @@ model User {
   partyCheckouts PartyCheckout[]
   mobilityQuotes MobilityQuote[]
   mobilityTrips  MobilityTrip[]
+  socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
+  socialInvitesReceived SocialInvitation[]    @relation("socialInviteTo")
+  contactHashes         ContactHash[]
+  ownedCircles          SocialCircle[]
+  circleMemberships     SocialCircleMember[]
+  partyEncounterOptIns  PartyEncounterOptIn[]
 
   @@map("users")
 }
@@ -203,6 +209,7 @@ model Party {
   cohosts                Json
   templateConfig         Json         @map("template_config")
   status                 String       @default("draft")
+  admissionPaused        Boolean      @default(false) @map("admission_paused")
   passCode               String?      @unique @map("pass_code")
   publishedAt            DateTime?    @map("published_at")
   createdAt              DateTime     @default(now()) @map("created_at")
@@ -213,6 +220,7 @@ model Party {
   media                  PartyMedia[]
   guests                 PartyGuest[]
   checkouts              PartyCheckout[]
+  encounterOptIns        PartyEncounterOptIn[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -228,6 +236,8 @@ model PartyGuest {
   status            String   @default("pending")
   accessGranted     Boolean  @default(false) @map("access_granted")
   ticketTierName    String?  @map("ticket_tier_name")
+  credential        String?  @unique
+  checkedInAt       DateTime? @map("checked_in_at")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
@@ -493,6 +503,87 @@ model Follow {
   @@index([followerId])
   @@index([followingId])
   @@map("follows")
+}
+
+// ─── Social: Connection Invitations ───────────────────
+model SocialInvitation {
+  id          String    @id @default(cuid())
+  fromUserId  String    @map("from_user_id")
+  toUserId    String    @map("to_user_id")
+  status      String    @default("pending") // pending | accepted | declined
+  createdAt   DateTime  @default(now()) @map("created_at")
+  respondedAt DateTime? @map("responded_at")
+
+  fromUser User @relation("socialInviteFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("socialInviteTo", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, toUserId])
+  @@index([fromUserId, status])
+  @@index([toUserId, status])
+  @@map("social_invitations")
+}
+
+// ─── Social: Privacy-preserving Contact Graph ─────────
+// Only salted SHA-256 hashes of normalized contact identifiers are stored.
+// Raw emails/phone numbers never reach the server (see the shared iOS
+// `BytspotContactHasher` contract).
+model ContactHash {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  hashedContact String   @map("hashed_contact")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, hashedContact])
+  @@index([hashedContact])
+  @@map("contact_hashes")
+}
+
+// ─── Social: Circles ──────────────────────────────────
+model SocialCircle {
+  id        String   @id @default(cuid())
+  ownerId   String   @map("owner_id")
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  owner   User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  members SocialCircleMember[]
+
+  @@index([ownerId])
+  @@map("social_circles")
+}
+
+model SocialCircleMember {
+  id       String   @id @default(cuid())
+  circleId String   @map("circle_id")
+  userId   String   @map("user_id")
+  addedAt  DateTime @default(now()) @map("added_at")
+
+  circle SocialCircle @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([circleId, userId])
+  @@index([userId])
+  @@map("social_circle_members")
+}
+
+// ─── Social: People You Met (per-Party opt-in) ────────
+// Attendee visibility is strictly double-opt-in and per Party. A row only
+// records willingness to be discoverable; deleting it removes the user from
+// every People You Met surface immediately.
+model PartyEncounterOptIn {
+  id        String   @id @default(cuid())
+  partyId   String   @map("party_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, userId])
+  @@index([userId])
+  @@map("party_encounter_opt_ins")
 }
 
 // ─── Reviews ─────────────────────────────────────────

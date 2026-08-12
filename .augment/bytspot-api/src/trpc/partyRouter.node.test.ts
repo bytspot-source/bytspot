@@ -27,6 +27,9 @@ const draftInput = {
   source: 'host-studio' as const,
 };
 const partyDraft = { id: 'party-1', hostUserId: 'test-user-id', idempotencyKey, status: 'draft' };
+// Share-link expiry fixture: an upcoming party whose link is still alive
+// under the default policy (dies when the party ends).
+const linkAlive = { startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 4 * 60 * 60 * 1000), shareLinkExpiresAt: null };
 const createCaller = createCallerFactory(appRouter);
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
@@ -160,16 +163,16 @@ test('Party draft creation accepts withheld locations and rejects insecure offic
 });
 
 test('Party mutations reject host-declined guests even when invoked directly', async () => {
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'paid-ticket', ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }] });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'paid-ticket', ...linkAlive, ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }] });
   partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'declined', accessGranted: false });
   await assert.rejects(() => caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'FORBIDDEN' });
 
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 40 });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', capacity: 40, ...linkAlive });
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN' });
 });
 
 test('Free RSVP capacity is enforced inside a serializable transaction', async () => {
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 1 });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 1, ...linkAlive });
   partyGuest.count = async () => 1;
   let transactionOptions: any;
   prisma.$transaction = async (callback: any, options: any) => {
@@ -182,7 +185,7 @@ test('Free RSVP capacity is enforced inside a serializable transaction', async (
 });
 
 test('Free RSVP maps serialization conflicts to retryable capacity conflicts', async () => {
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 2 });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 2, ...linkAlive });
   prisma.$transaction = async () => { throw { code: 'P2034' }; };
 
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'CONFLICT' });
@@ -190,7 +193,7 @@ test('Free RSVP maps serialization conflicts to retryable capacity conflicts', a
 
 test('Paid checkout retries return the persisted pending reservation', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.', ...linkAlive,
     ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
   });
   (config as any).stripeSecretKey = 'test-only-key';
@@ -205,7 +208,7 @@ test('Paid checkout retries return the persisted pending reservation', async () 
 
 test('Paid checkout rejects an idempotent retry that changes tier and a second active reservation', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.',
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: 'One moment.', ...linkAlive,
     ticketTiers: [
       { name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' },
       { name: 'Late Drop', priceCents: 3000, quantity: 40, requiredMembershipTier: 'green' },
@@ -224,7 +227,7 @@ test('Paid checkout rejects an idempotent retry that changes tier and a second a
 
 test('Public Party invitations redact protected venues and project only official destinations', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', title: 'Secret Set', tagline: 'See you there.', templateId: 'pop-up', requiredMembershipTier: 'black',
+    id: 'party-1', title: 'Secret Set', tagline: 'See you there.', templateId: 'pop-up', requiredMembershipTier: 'black', endsAt: linkAlive.endsAt, shareLinkExpiresAt: null,
     startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'Never Return This Venue', locationDisclosure: 'withheld',
     accessMode: 'paid-ticket', capacity: 40, hostDestinations: { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } },
     itinerary: [{ title: 'Doors', offsetMinutes: 0 }], ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
@@ -302,7 +305,7 @@ test('Party pass advertises premium handoff only when its host has bound an arri
 });
 
 test('Party pass and RSVP enforce the Party required membership tier', async () => {
-  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'black', capacity: 40, arrivalVenueId: null });
+  party.findFirst = async () => ({ id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'black', capacity: 40, arrivalVenueId: null, ...linkAlive });
   user.findUnique = async () => ({ membershipTier: 'platinum' });
   assert.deepEqual(await caller().events.pass.resolve({ partyId: 'party-1' }), {
     partyId: 'party-1', action: 'unavailable', guest: { status: 'membership-required', accessGranted: false }, premiumMobilityEligible: false,
@@ -317,7 +320,7 @@ test('Party pass and RSVP enforce the Party required membership tier', async () 
 
 test('Paid ticket checkout enforces its required membership tier', async () => {
   party.findFirst = async () => ({
-    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, ...linkAlive,
     ticketTiers: [{ name: 'Black Table', priceCents: 2500, quantity: 40, requiredMembershipTier: 'black' }],
   });
   user.findUnique = async () => ({ membershipTier: 'platinum' });
@@ -433,4 +436,89 @@ test('Party publishing retries a pass-code uniqueness collision', async () => {
   const result = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
   assert.match(result.passCode, /^BYT-[A-F0-9]{10}$/);
   assert.equal(attempts, 2);
+});
+test('Share link dies when the party ends: expired links 404 for new arrivals but not confirmed guests', async () => {
+  const ended = { startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000), shareLinkExpiresAt: null };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 40, arrivalVenueId: null,
+    title: 'Late Set', tagline: 'Done.', templateId: 'pop-up', venueName: 'Somewhere', locationDisclosure: 'public',
+    itinerary: [], ticketTiers: [], hostDestinations: null, host: { name: 'Host' }, media: [], ...ended,
+  });
+
+  // New arrivals: invite, pass resolve, and RSVP are indistinguishable from a deleted party.
+  partyGuest.findUnique = async () => null;
+  await assert.rejects(() => createCaller({ user: null }).events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'NOT_FOUND' });
+
+  // A confirmed guest keeps their pass — and every share-link procedure —
+  // after expiry: pass resolve, invite landing, and RSVP re-calls.
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
+  assert.equal(pass.action, 'view-pass');
+  assert.equal(pass.guest.accessGranted, true);
+  assert.equal((await caller().events.invite({ partyId: 'party-1' })).id, 'party-1');
+  assert.deepEqual(await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { status: 'rsvp', accessGranted: true });
+});
+
+test('Expired paid-ticket share link still reports already-confirmed to a ticketed guest', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,
+    startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000), shareLinkExpiresAt: null,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+
+  // Dedicated user: protected procedures rate-limit per user, and earlier
+  // checkout tests consume test-user-id's party-ticket-checkout budget.
+  const expiredCaller = () => createCaller({ user: { userId: 'expired-link-user', email: 'expired@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  // Without a confirmed pass the expired link is a 404, not a checkout error.
+  partyGuest.findUnique = async () => null;
+  await assert.rejects(() => expiredCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'NOT_FOUND' });
+
+  // A ticketed guest gets the normal already-confirmed conflict instead.
+  partyGuest.findUnique = async () => ({ status: 'ticketed', accessGranted: true });
+  await assert.rejects(() => expiredCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'CONFLICT' });
+});
+
+test('Share link default expiry falls back to startsAt + 6h when the party has no end time', async () => {
+  const base = {
+    id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 40, arrivalVenueId: null,
+    endsAt: null, shareLinkExpiresAt: null,
+  };
+  party.findFirst = async () => ({ ...base, startsAt: new Date(Date.now() - 7 * 60 * 60 * 1000) });
+  await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  party.findFirst = async () => ({ ...base, startsAt: new Date(Date.now() - 60 * 60 * 1000) });
+  assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).action, 'rsvp');
+});
+
+test('Host share-link expiry override wins and setShareLinkExpiry validates its input', async () => {
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  // Override keeps the link alive past the party end.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 40, arrivalVenueId: null,
+    startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000), shareLinkExpiresAt: future,
+  });
+  assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).action, 'rsvp');
+
+  // Host mutation: persists the override; rejects past timestamps.
+  let updateArgs: any;
+  party.updateMany = async (args: any) => { updateArgs = args; return { count: 1 }; };
+  const result = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: future.toISOString() });
+  assert.equal(result.shareLinkExpiresAt, future.toISOString());
+  assert.equal(result.shareLinkExpiryIsDefault, false);
+  assert.deepEqual(updateArgs.where, { id: 'party-1', hostUserId: 'test-user-id', status: 'published' });
+  assert.deepEqual(updateArgs.data, { shareLinkExpiresAt: future });
+
+  await assert.rejects(
+    () => caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: new Date(Date.now() - 1000).toISOString() }),
+    { code: 'BAD_REQUEST' },
+  );
+
+  // Null restores the default policy (dies at party end).
+  const restored = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: null });
+  assert.equal(restored.shareLinkExpiryIsDefault, true);
 });

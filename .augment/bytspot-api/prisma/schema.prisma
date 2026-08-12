@@ -196,6 +196,7 @@ model Party {
   title                  String
   tagline                String
   startsAt               DateTime     @map("starts_at")
+  endsAt                 DateTime?    @map("ends_at")
   venueName              String       @map("venue_name")
   arrivalVenueId         String?      @map("arrival_venue_id")
   locationDisclosure     String       @default("public") @map("location_disclosure")

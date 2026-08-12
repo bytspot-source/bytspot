@@ -70,6 +70,42 @@ test('Invite creation rejects self-invites and unknown members, and returns the 
   assert.deepEqual(invite.person, { userId: 'friend', name: 'Friend' });
 });
 
+test('Invite creation is reciprocity-aware across both directions', async () => {
+  // Reverse pending: the target already invited the caller — no duplicate row.
+  socialInvitation.findMany = async () => [
+    { id: 'in-1', fromUserId: 'friend', toUserId: 'me', status: 'pending', createdAt: new Date('2026-08-01T00:00:00Z'), respondedAt: null },
+  ];
+  await assert.rejects(
+    () => caller().social.invites.create({ targetType: 'user', targetValue: 'friend', surface: 'network' }),
+    (error: any) => error.code === 'CONFLICT' && error.message === 'This person already invited you. Respond to their invitation instead.',
+  );
+
+  // Accepted in either direction: idempotently return the stored row.
+  let upsertCalled = false;
+  socialInvitation.upsert = async () => {
+    upsertCalled = true;
+    throw new Error('should not create a new row when an accepted invitation exists');
+  };
+  socialInvitation.findMany = async () => [
+    { id: 'accepted-1', fromUserId: 'friend', toUserId: 'me', status: 'accepted', createdAt: new Date('2026-08-01T00:00:00Z'), respondedAt: new Date('2026-08-02T00:00:00Z') },
+  ];
+  const accepted = await caller().social.invites.create({ targetType: 'user', targetValue: 'friend', surface: 'network' });
+  assert.equal(accepted.id, 'accepted-1');
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(accepted.direction, 'incoming');
+  assert.equal(upsertCalled, false);
+
+  // Reverse declined: the caller may still send their own pending invite.
+  socialInvitation.findMany = async () => [
+    { id: 'declined-1', fromUserId: 'friend', toUserId: 'me', status: 'declined', createdAt: new Date('2026-08-01T00:00:00Z'), respondedAt: new Date('2026-08-02T00:00:00Z') },
+  ];
+  socialInvitation.upsert = async ({ create }: any) => ({ id: 'invite-2', status: 'pending', createdAt: new Date('2026-08-05T00:00:00Z'), respondedAt: null, ...create });
+  const invite = await caller().social.invites.create({ targetType: 'user', targetValue: 'friend', surface: 'network' });
+  assert.equal(invite.id, 'invite-2');
+  assert.equal(invite.direction, 'outgoing');
+  assert.equal(invite.status, 'pending');
+});
+
 test('Invite creation only echoes a circle the caller owns', async () => {
   await assert.rejects(() => caller().social.invites.create({
     targetType: 'user', targetValue: 'friend', groupId: 'not-mine', surface: 'network',
@@ -240,11 +276,37 @@ test('People You Met opt-out deletes the row immediately and status reflects it'
   assert.deepEqual(await caller().social.peopleMet.status({ partyId: 'party-1' }), { partyId: 'party-1', optedIn: true });
 });
 
-test('People You Met list requires an ended Party and mutual opt-in with real attendance', async () => {
-  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() + 60_000) });
+const HOUR_MS = 60 * 60 * 1000;
+
+test('People You Met list only opens after the Party has ended', async () => {
+  partyEncounterOptIn.findUnique = async () => ({ id: 'opt-1' });
+  partyGuest.findUnique = async () => ({ status: 'checked-in', accessGranted: true });
+
+  // No endsAt: mid-window (started 1h ago) is still closed…
+  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 1 * HOUR_MS), endsAt: null });
+  await assert.rejects(
+    () => caller().social.peopleMet.list({ partyId: 'party-1' }),
+    (error: any) => error.code === 'PRECONDITION_FAILED' && error.message === 'People You Met opens after the Party has ended.',
+  );
+
+  // …but the 6-hour fallback window has elapsed after 7 hours.
+  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 7 * HOUR_MS), endsAt: null });
+  const afterFallback = await caller().social.peopleMet.list({ partyId: 'party-1' });
+  assert.equal(afterFallback.partyId, 'party-1');
+
+  // Explicit endsAt in the future keeps the surface closed even long after start.
+  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 10 * HOUR_MS), endsAt: new Date(Date.now() + 60_000) });
   await assert.rejects(() => caller().social.peopleMet.list({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
 
-  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 60_000) });
+  // Explicit endsAt in the past opens it.
+  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 2 * HOUR_MS), endsAt: new Date(Date.now() - 60_000) });
+  const afterEnd = await caller().social.peopleMet.list({ partyId: 'party-1' });
+  assert.equal(afterEnd.partyId, 'party-1');
+});
+
+test('People You Met list requires mutual opt-in and door check-in on both sides', async () => {
+  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 7 * HOUR_MS), endsAt: null });
+
   partyEncounterOptIn.findUnique = async () => null;
   partyGuest.findUnique = async () => ({ status: 'checked-in', accessGranted: true });
   await assert.rejects(() => caller().social.peopleMet.list({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
@@ -253,11 +315,19 @@ test('People You Met list requires an ended Party and mutual opt-in with real at
   partyGuest.findUnique = async () => ({ status: 'pending', accessGranted: false });
   await assert.rejects(() => caller().social.peopleMet.list({ partyId: 'party-1' }), { code: 'FORBIDDEN' });
 
+  // Opted-in caller with rsvp status but no door check-in cannot see anyone.
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  await assert.rejects(
+    () => caller().social.peopleMet.list({ partyId: 'party-1' }),
+    (error: any) => error.code === 'PRECONDITION_FAILED' && /checked in/.test(error.message),
+  );
+
   partyGuest.findUnique = async () => ({ status: 'checked-in', accessGranted: true });
-  partyEncounterOptIn.findMany = async () => [{ userId: 'friend' }, { userId: 'no-show' }];
+  partyEncounterOptIn.findMany = async () => [{ userId: 'friend' }, { userId: 'rsvp-only' }, { userId: 'no-show' }];
   let guestWhere: any;
   partyGuest.findMany = async ({ where }: any) => {
     guestWhere = where;
+    // The rsvp-only guest is excluded by the checked-in filter.
     return [{ userId: 'friend', user: { id: 'friend', name: 'Friend' } }];
   };
   socialInvitation.findMany = async () => [{ fromUserId: 'me', toUserId: 'friend', status: 'pending' }];
@@ -265,9 +335,42 @@ test('People You Met list requires an ended Party and mutual opt-in with real at
   const result = await caller().social.peopleMet.list({ partyId: 'party-1' });
   assert.deepEqual(result, {
     partyId: 'party-1',
-    items: [{ userId: 'friend', name: 'Friend', inviteExists: true, relationshipStatus: 'invite_sent' }],
+    items: [{ userId: 'friend', name: 'Friend', inviteStatus: 'pending', relationshipStatus: 'invite_sent' }],
   });
-  assert.deepEqual(guestWhere.status, { in: ['rsvp', 'ticketed', 'approved', 'checked-in'] });
+  assert.equal(guestWhere.status, 'checked-in');
   assert.equal(guestWhere.accessGranted, true);
-  for (const item of result.items) assert.deepEqual(Object.keys(item), ['userId', 'name', 'inviteExists', 'relationshipStatus']);
+  assert.ok(!result.items.some((item) => item.userId === 'rsvp-only'));
+});
+
+test('People You Met items match the iOS NativePeopleMetPerson shape', async () => {
+  party.findFirst = async () => ({ id: 'party-1', startsAt: new Date(Date.now() - 7 * HOUR_MS), endsAt: null });
+  partyEncounterOptIn.findUnique = async () => ({ id: 'opt-1' });
+  partyGuest.findUnique = async () => ({ status: 'checked-in', accessGranted: true });
+  partyEncounterOptIn.findMany = async () => [{ userId: 'pending-out' }, { userId: 'accepted-in' }, { userId: 'declined-out' }, { userId: 'stranger' }];
+  partyGuest.findMany = async () => [
+    { userId: 'pending-out', user: { id: 'pending-out', name: 'Pending Out' } },
+    { userId: 'accepted-in', user: { id: 'accepted-in', name: 'Accepted In' } },
+    { userId: 'declined-out', user: { id: 'declined-out', name: 'Declined Out' } },
+    { userId: 'stranger', user: { id: 'stranger', name: null } },
+  ];
+  socialInvitation.findMany = async () => [
+    { fromUserId: 'me', toUserId: 'pending-out', status: 'pending' },
+    { fromUserId: 'accepted-in', toUserId: 'me', status: 'accepted' },
+    { fromUserId: 'me', toUserId: 'declined-out', status: 'declined' },
+  ];
+
+  const { items } = await caller().social.peopleMet.list({ partyId: 'party-1' });
+  const byId = new Map(items.map((item: any) => [item.userId, item]));
+  // inviteStatus is exactly 'pending' | 'accepted' | 'declined', lowercased.
+  assert.equal(byId.get('pending-out').inviteStatus, 'pending');
+  assert.equal(byId.get('accepted-in').inviteStatus, 'accepted');
+  assert.equal(byId.get('declined-out').inviteStatus, 'declined');
+  // No invitation in either direction → the key is omitted (nil → can invite).
+  assert.ok(!('inviteStatus' in byId.get('stranger')));
+  assert.equal(byId.get('stranger').name, 'Bytspot member');
+  for (const item of items) {
+    assert.equal(typeof item.userId, 'string');
+    assert.equal(typeof item.name, 'string');
+    if ('inviteStatus' in item) assert.ok(['pending', 'accepted', 'declined'].includes(item.inviteStatus));
+  }
 });

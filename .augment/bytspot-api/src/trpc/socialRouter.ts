@@ -13,8 +13,12 @@ const surfaceInput = z.string().max(40).optional();
 // identifiers (shared iOS `BytspotContactHasher` contract). Raw emails and
 // phone numbers are never accepted, stored, or returned.
 const hashedContactInput = z.string().regex(/^[a-f0-9]{64}$/, 'Contact hashes must be lowercase SHA-256 hex digests.');
-// Guest states that count as actually attending for People You Met.
-const attendedGuestStatuses = ['rsvp', 'ticketed', 'approved', 'checked-in'];
+// Guest states eligible to opt in to People You Met (access-granted going
+// guests may opt in before or during the party).
+const optInEligibleGuestStatuses = ['rsvp', 'ticketed', 'approved', 'checked-in'];
+// Parties without an explicit endsAt are treated as ended this long after
+// startsAt so People You Met never opens mid-event.
+const PARTY_DEFAULT_DURATION_MS = 6 * 60 * 60 * 1000;
 
 function displayName(name: string | null | undefined): string {
   return name?.trim() || 'Bytspot member';
@@ -30,6 +34,17 @@ function relationshipStatus(invites: InvitePair[], viewerId: string, otherUserId
   if (pair.status === 'accepted') return 'connected';
   if (pair.status === 'declined') return 'declined';
   return pair.fromUserId === viewerId ? 'invite_sent' : 'invite_received';
+}
+
+// iOS `NativePeopleMetPerson` contract: 'pending' | 'accepted' | 'declined',
+// or omitted entirely when no invitation exists in either direction.
+function inviteStatus(invites: InvitePair[], viewerId: string, otherUserId: string): 'pending' | 'accepted' | 'declined' | undefined {
+  const pair = invites.find((invite) =>
+    (invite.fromUserId === viewerId && invite.toUserId === otherUserId) ||
+    (invite.fromUserId === otherUserId && invite.toUserId === viewerId));
+  if (!pair) return undefined;
+  if (pair.status === 'accepted' || pair.status === 'declined' || pair.status === 'pending') return pair.status;
+  return 'pending';
 }
 
 /** Connection invitations between two members. */
@@ -55,6 +70,37 @@ const socialInvitesRouter = router({
         circle = await db.socialCircle.findFirst({ where: { id: input.groupId, ownerId: ctx.user.userId }, select: { id: true, name: true } });
         if (!circle) throw new TRPCError({ code: 'NOT_FOUND', message: 'That circle was not found.' });
       }
+      // Invitations are directional rows, so check both directions before
+      // writing: an accepted pair is idempotent, and a pending invite from the
+      // target must be answered rather than shadowed by a duplicate.
+      const existingPair = await db.socialInvitation.findMany({
+        where: {
+          OR: [
+            { fromUserId: ctx.user.userId, toUserId: target.id },
+            { fromUserId: target.id, toUserId: ctx.user.userId },
+          ],
+        },
+      });
+      const accepted = existingPair.find((row) => row.status === 'accepted');
+      if (accepted) {
+        return {
+          id: accepted.id,
+          direction: accepted.fromUserId === ctx.user.userId ? ('outgoing' as const) : ('incoming' as const),
+          status: accepted.status,
+          person: { userId: target.id, name: displayName(target.name) },
+          groupId: circle?.id ?? null,
+          groupName: circle?.name ?? null,
+          createdAt: accepted.createdAt.toISOString(),
+          respondedAt: accepted.respondedAt?.toISOString() ?? null,
+        };
+      }
+      const reversePending = existingPair.find((row) => row.fromUserId === target.id && row.status === 'pending');
+      if (reversePending) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This person already invited you. Respond to their invitation instead.' });
+      }
+      // A reverse-direction declined row does not block the caller's own
+      // pending invite, but the upsert never resurrects a caller→target row
+      // the target already declined.
       const invite = await db.socialInvitation.upsert({
         where: { fromUserId_toUserId: { fromUserId: ctx.user.userId, toUserId: target.id } },
         create: { fromUserId: ctx.user.userId, toUserId: target.id, status: 'pending' },
@@ -199,7 +245,7 @@ const socialPeopleMetRouter = router({
       const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' }, select: { id: true } });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
       const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
-      if (!guest?.accessGranted || !attendedGuestStatuses.includes(guest.status)) {
+      if (!guest?.accessGranted || !optInEligibleGuestStatuses.includes(guest.status)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Only confirmed Party guests can opt in to People You Met.' });
       }
       await db.partyEncounterOptIn.upsert({
@@ -232,18 +278,26 @@ const socialPeopleMetRouter = router({
   list: protectedProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
-      const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' }, select: { id: true, startsAt: true } });
+      const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' }, select: { id: true, startsAt: true, endsAt: true } });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
-      if (party.startsAt.getTime() >= Date.now()) {
-        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'People You Met opens after the Party has started.' });
+      // The surface opens only after the party has ended — endsAt when set,
+      // otherwise the documented default duration past startsAt.
+      const endedAt = party.endsAt ?? new Date(party.startsAt.getTime() + PARTY_DEFAULT_DURATION_MS);
+      if (endedAt.getTime() >= Date.now()) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'People You Met opens after the Party has ended.' });
       }
       const [myOptIn, myGuest] = await Promise.all([
         db.partyEncounterOptIn.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } }),
         db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } }),
       ]);
-      // Fail closed: the caller must be a confirmed attendee who opted in.
-      if (!myOptIn || !myGuest?.accessGranted || !attendedGuestStatuses.includes(myGuest.status)) {
+      // Fail closed: the caller must be an access-granted guest who opted in.
+      if (!myOptIn || !myGuest?.accessGranted) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Opt in to People You Met to see other opted-in attendees.' });
+      }
+      // Real attendance is required on both sides — only door-checked-in
+      // guests can see or be seen.
+      if (myGuest.status !== 'checked-in') {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'People You Met is only available to guests who checked in at the door.' });
       }
       const optIns = await db.partyEncounterOptIn.findMany({
         where: { partyId: party.id, userId: { not: ctx.user.userId } },
@@ -252,9 +306,9 @@ const socialPeopleMetRouter = router({
       });
       const optedInUserIds = optIns.map((optIn) => optIn.userId);
       if (optedInUserIds.length === 0) return { partyId: party.id, items: [] };
-      // Only surface people who both opted in AND actually attended.
+      // Only surface people who both opted in AND actually checked in.
       const guests = await db.partyGuest.findMany({
-        where: { partyId: party.id, userId: { in: optedInUserIds }, accessGranted: true, status: { in: attendedGuestStatuses } },
+        where: { partyId: party.id, userId: { in: optedInUserIds }, accessGranted: true, status: 'checked-in' },
         include: { user: { select: { id: true, name: true } } },
       });
       if (guests.length === 0) return { partyId: party.id, items: [] };
@@ -271,12 +325,14 @@ const socialPeopleMetRouter = router({
       return {
         partyId: party.id,
         items: guests.map((guest) => {
-          const relationship = relationshipStatus(invites, ctx.user.userId, guest.userId);
+          const status = inviteStatus(invites, ctx.user.userId, guest.userId);
           return {
             userId: guest.userId,
             name: displayName(guest.user.name),
-            inviteExists: relationship !== 'suggested',
-            relationshipStatus: relationship,
+            // Omitted (not null) when no invitation exists — iOS treats a
+            // missing inviteStatus as "can send invite".
+            ...(status ? { inviteStatus: status } : {}),
+            relationshipStatus: relationshipStatus(invites, ctx.user.userId, guest.userId),
           };
         }),
       };
@@ -293,7 +349,9 @@ export const socialRouter = router({
    * members who mutually share at least one hashed contact with the caller.
    * Declined connection pairs are never resurfaced.
    */
-  suggestions: protectedProcedure.query(async ({ ctx }) => {
+  suggestions: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:suggestions' }))
+    .query(async ({ ctx }) => {
     const mine = await db.contactHash.findMany({
       where: { userId: ctx.user.userId },
       select: { hashedContact: true },

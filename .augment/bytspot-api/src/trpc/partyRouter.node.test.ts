@@ -118,14 +118,22 @@ test('Party deletion is host-only, allows drafts, and refuses committed guests',
   assert.deepEqual(await caller().events.drafts.delete({ partyId: 'party-1' }), { success: true });
   assert.equal(deleteWhere.hostUserId, 'test-user-id');
   assert.deepEqual(deleteWhere.guests, { none: { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] } });
+  assert.deepEqual(deleteWhere.checkouts.none.OR[0], { status: 'completed' });
+  assert.deepEqual(deleteWhere.checkouts.none.OR[1].status, { in: ['creating', 'pending'] });
 
   // Published party with a ticketed guest is refused before any delete.
   party.findFirst = async () => ({ ...partyDraft, status: 'published' });
   partyGuest.findFirst = async () => ({ id: 'guest-1' });
   await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
 
-  // Race guard: guest commits between the check and the delete.
+  // Published party with an in-flight Stripe checkout (unpaid, unexpired
+  // reservation) is refused so the webhook can still reconcile/refund.
   partyGuest.findFirst = async () => null;
+  partyCheckout.findFirst = async () => ({ id: 'checkout-1' });
+  await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
+
+  // Race guard: guest commits or checkout opens between the check and the delete.
+  partyCheckout.findFirst = async () => null;
   party.deleteMany = async () => ({ count: 0 });
   await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
 });

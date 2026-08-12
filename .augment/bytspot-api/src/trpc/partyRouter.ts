@@ -194,10 +194,11 @@ export const partyDraftsRouter = router({
 
   /**
    * Delete a party the caller hosts. Drafts always delete. Published
-   * parties delete only while no guest holds a paid ticket or has checked
-   * in — after that the host must use Party Control instead so paid
-   * attendees are never silently stranded. Guests, media, checkouts, and
-   * encounter opt-ins cascade at the DB level.
+   * parties delete only while money is not in motion: deletion is refused
+   * once any guest is ticketed or checked in, or any Stripe checkout is
+   * completed or still inside its reservation window — deleting mid-payment
+   * would strip the webhook of the rows it needs to reconcile or refund.
+   * Guests, media, checkouts, and encounter opt-ins cascade at the DB level.
    */
   delete: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-draft-delete' }))
@@ -208,29 +209,35 @@ export const partyDraftsRouter = router({
         select: { id: true, status: true },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      const committedGuests = { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] };
+      const activeCheckouts = {
+        OR: [
+          { status: 'completed' },
+          { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: new Date() } },
+        ],
+      };
       if (party.status === 'published') {
-        const committedGuest = await db.partyGuest.findFirst({
-          where: {
-            partyId: party.id,
-            OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }],
-          },
-          select: { id: true },
-        });
-        if (committedGuest) {
-          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed or checked-in guests and can no longer be deleted.' });
+        const [committedGuest, activeCheckout] = await Promise.all([
+          db.partyGuest.findFirst({ where: { partyId: party.id, ...committedGuests }, select: { id: true } }),
+          db.partyCheckout.findFirst({ where: { partyId: party.id, ...activeCheckouts }, select: { id: true } }),
+        ]);
+        if (committedGuest || activeCheckout) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests and can no longer be deleted.' });
         }
       }
       // Guard against a guest paying between the check and the delete: the
-      // conditional deleteMany re-verifies host + deletable state atomically.
+      // conditional deleteMany re-verifies host + deletable state atomically,
+      // including in-flight checkouts the webhook may still reconcile.
       const deleted = await db.party.deleteMany({
         where: {
           id: party.id,
           hostUserId: ctx.user.userId,
-          guests: { none: { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] } },
+          guests: { none: committedGuests },
+          checkouts: { none: activeCheckouts },
         },
       });
       if (deleted.count === 0) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed or checked-in guests and can no longer be deleted.' });
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests and can no longer be deleted.' });
       }
       return { success: true };
     }),

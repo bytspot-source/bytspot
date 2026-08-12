@@ -3,6 +3,7 @@ import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
 import { db } from '../lib/db';
+import { hashEmail, hashPhone, normalizeEmail, normalizePhone } from '../lib/contactHash';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
@@ -228,6 +229,20 @@ test('Contact sync counts identity matches in matched/mutual', async () => {
   contactHash.findMany = async () => [];
   const result = await caller().social.syncCloudContact({ source: 'apple', hashes: [hashA, hashB] });
   assert.deepEqual(result, { synced: 2, matched: 1, mutual: 1 });
+});
+
+test('Contact hashing pins the iOS BytspotContactHasher contract (fixed vectors, dev salt)', () => {
+  // Vectors computed with salt "dev-contact-salt-change-me" — the iOS
+  // BytspotContactHasher must produce identical digests for these inputs.
+  assert.equal(normalizeEmail('  Friend@Bytspot.COM '), 'friend@bytspot.com');
+  assert.equal(normalizeEmail('not-an-email'), null);
+  assert.equal(normalizePhone('(415) 555-1212'), '14155551212');
+  assert.equal(normalizePhone('+1 415 555 1212'), '14155551212');
+  assert.equal(normalizePhone('12345'), null);
+  assert.equal(hashEmail('  Friend@Bytspot.COM '), '83dede3460ef7b64930a992131c4280b6db3086c6c6382420cbd3dac0d4a442e');
+  assert.equal(hashPhone('(415) 555-1212'), 'af267c845c1211f1a3bf6c8d9a1a423856f498190c4fc980bd1899176524e900');
+  assert.equal(hashEmail(''), null);
+  assert.equal(hashPhone(''), null);
 });
 
 test('Suggestions are empty without any synced hashes', async () => {

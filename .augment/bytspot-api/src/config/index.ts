@@ -51,8 +51,9 @@ const envSchema = z.object({
   MOBILITY_AGGREGATOR_MODE: z.enum(['handoff', 'live']).default('handoff'),
   // Shared salt for the privacy-preserving contact graph. MUST match the iOS
   // build's `BytspotContactHashSalt` (Info.plist) or device contact hashes
-  // will never match member identity hashes.
-  CONTACT_HASH_SALT:      z.string().default('dev-contact-salt-change-me'),
+  // will never match member identity hashes. The dev default is public in
+  // this repo, so production refuses to start with it (checked below).
+  CONTACT_HASH_SALT:      z.string().default(isDev ? 'dev-contact-salt-change-me' : ''),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
@@ -78,6 +79,14 @@ if (!parseResult.success) {
 }
 
 const env = parseResult.data;
+
+// The dev salt is public in this repo; running production with it would make
+// contact-graph hashes precomputable for common emails. Fail closed instead
+// of silently degrading the privacy guarantee.
+if (!isDev && env.NODE_ENV !== 'test' && (!env.CONTACT_HASH_SALT || env.CONTACT_HASH_SALT === 'dev-contact-salt-change-me')) {
+  console.error('\n❌ FATAL: CONTACT_HASH_SALT must be set to a private value in production (it must match the iOS BytspotContactHashSalt).\n');
+  process.exit(1);
+}
 
 export const config = {
   port: parseInt(env.PORT, 10),

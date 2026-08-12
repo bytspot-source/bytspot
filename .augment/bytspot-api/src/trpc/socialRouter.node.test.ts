@@ -104,6 +104,20 @@ test('Invite creation is reciprocity-aware across both directions', async () => 
   assert.equal(invite.id, 'invite-2');
   assert.equal(invite.direction, 'outgoing');
   assert.equal(invite.status, 'pending');
+
+  // Concurrent reciprocal create: the check reads an empty pair, but the
+  // DB partial unique index on the unordered pair rejects the write (P2002).
+  // The loser must surface the same CONFLICT as a sequential reverse-pending.
+  socialInvitation.findMany = async () => [];
+  socialInvitation.upsert = async () => {
+    const error: any = new Error('unique constraint');
+    error.code = 'P2002';
+    throw error;
+  };
+  await assert.rejects(
+    () => caller().social.invites.create({ targetType: 'user', targetValue: 'friend', surface: 'network' }),
+    (error: any) => error.code === 'CONFLICT' && error.message === 'This person already invited you. Respond to their invitation instead.',
+  );
 });
 
 test('Invite creation only echoes a circle the caller owns', async () => {

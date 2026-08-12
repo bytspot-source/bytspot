@@ -101,11 +101,22 @@ const socialInvitesRouter = router({
       // A reverse-direction declined row does not block the caller's own
       // pending invite, but the upsert never resurrects a caller→target row
       // the target already declined.
-      const invite = await db.socialInvitation.upsert({
-        where: { fromUserId_toUserId: { fromUserId: ctx.user.userId, toUserId: target.id } },
-        create: { fromUserId: ctx.user.userId, toUserId: target.id, status: 'pending' },
-        update: {},
-      });
+      let invite;
+      try {
+        invite = await db.socialInvitation.upsert({
+          where: { fromUserId_toUserId: { fromUserId: ctx.user.userId, toUserId: target.id } },
+          create: { fromUserId: ctx.user.userId, toUserId: target.id, status: 'pending' },
+          update: {},
+        });
+      } catch (error) {
+        // The partial unique index on the unordered user pair
+        // (social_invitations_pair_active_key) closes the race where both
+        // members create reciprocal invites concurrently: the loser lands here.
+        if (error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This person already invited you. Respond to their invitation instead.' });
+        }
+        throw error;
+      }
       return {
         id: invite.id,
         direction: 'outgoing' as const,

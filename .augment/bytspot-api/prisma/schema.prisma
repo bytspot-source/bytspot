@@ -518,6 +518,9 @@ model SocialInvitation {
   fromUser User @relation("socialInviteFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
   toUser   User @relation("socialInviteTo", fields: [toUserId], references: [id], onDelete: Cascade)
 
+  // DB-only (see 20260814_add_social_graph): partial unique expression index
+  // social_invitations_pair_active_key on (LEAST(from,to), GREATEST(from,to))
+  // WHERE status IN ('pending','accepted') — one active invite per user pair.
   @@unique([fromUserId, toUserId])
   @@index([fromUserId, status])
   @@index([toUserId, status])

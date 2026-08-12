@@ -14,6 +14,12 @@ CREATE TABLE "social_invitations" (
 );
 
 CREATE UNIQUE INDEX "social_invitations_from_user_id_to_user_id_key" ON "social_invitations"("from_user_id", "to_user_id");
+-- Race safety for reciprocal invites: at most one active (pending/accepted)
+-- invitation may exist per unordered user pair, regardless of direction.
+-- Declined rows are excluded so a declined invite never blocks the other
+-- member from extending their own. Expression indexes are not expressible in
+-- schema.prisma; the router handles the unique violation as a conflict.
+CREATE UNIQUE INDEX "social_invitations_pair_active_key" ON "social_invitations"(LEAST("from_user_id", "to_user_id"), GREATEST("from_user_id", "to_user_id")) WHERE "status" IN ('pending', 'accepted');
 CREATE INDEX "social_invitations_from_user_id_status_idx" ON "social_invitations"("from_user_id", "status");
 CREATE INDEX "social_invitations_to_user_id_status_idx" ON "social_invitations"("to_user_id", "status");
 

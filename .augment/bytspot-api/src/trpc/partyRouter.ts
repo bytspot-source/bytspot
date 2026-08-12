@@ -383,6 +383,157 @@ export const partyPassRouter = router({
       const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
       return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };
     }),
+
+  /**
+   * Issues the guest's opaque bearer credential (32 random bytes, base64url —
+   * exactly 43 characters). Only the authorized guest may fetch it; only the
+   * host consumes it at the door through events.control.checkIn.
+   */
+  attendeeCredential: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-attendee-credential' }))
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({ where: { id: input.partyId, status: 'published' }, select: { id: true } });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+      const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
+      if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before an attendee credential is issued.' });
+      if (guest.credential) return { partyId: party.id, attendeeCredential: guest.credential };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const credential = randomBytes(32).toString('base64url');
+        try {
+          const updated = await db.partyGuest.updateMany({ where: { id: guest.id, credential: null }, data: { credential } });
+          if (updated.count === 1) return { partyId: party.id, attendeeCredential: credential };
+          break;
+        } catch (error) {
+          if (!isUniqueConstraint(error) || attempt === 2) throw error;
+        }
+      }
+      const issued = await db.partyGuest.findUnique({ where: { id: guest.id } });
+      if (issued?.credential) return { partyId: party.id, attendeeCredential: issued.credential };
+      throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Attendee credential issuance failed.' });
+    }),
+});
+
+/**
+ * ── Party Control (host console) ────────────────────────
+ * Every procedure is host-only: the authenticated user must own the
+ * published Party or the request fails closed with NOT_FOUND.
+ */
+async function hostControlledParty(partyId: string, userId: string) {
+  const party = await db.party.findFirst({ where: { id: partyId, hostUserId: userId, status: 'published' } });
+  if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+  return party;
+}
+
+const attendeeCredentialInput = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'Attendee credentials are 43 base64url characters.');
+
+export const partyControlRouter = router({
+  summary: protectedProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .query(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      const [confirmed, pending, checkedIn] = await Promise.all([
+        db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
+        db.partyGuest.count({ where: { partyId: party.id, status: 'pending' } }),
+        db.partyGuest.count({ where: { partyId: party.id, status: 'checked-in' } }),
+      ]);
+      return {
+        partyId: party.id,
+        title: party.title,
+        admissionPaused: party.admissionPaused,
+        capacity: party.capacity,
+        confirmed,
+        spacesRemaining: Math.max(party.capacity - confirmed, 0),
+        pending,
+        checkedIn,
+      };
+    }),
+
+  guests: protectedProcedure
+    .input(z.object({
+      partyId: z.string().min(1).max(128),
+      status: z.enum(['all', 'pending', 'rsvp', 'ticketed', 'approved', 'declined', 'checked-in', 'refund-required', 'checkout-pending']).default('all'),
+    }))
+    .query(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      const guests = await db.partyGuest.findMany({
+        where: { partyId: party.id, ...(input.status === 'all' ? {} : { status: input.status }) },
+        include: { user: { select: { id: true, name: true, profileImage: true } } },
+        orderBy: { createdAt: 'asc' },
+      });
+      return {
+        guests: guests.map((guest) => ({
+          id: guest.id,
+          status: guest.status,
+          source: guest.ticketTierName ? 'ticket' : 'rsvp',
+          ticketTierName: guest.ticketTierName,
+          checkedInAt: guest.checkedInAt?.toISOString() ?? null,
+          person: { userId: guest.user.id, name: guest.user.name ?? 'Bytspot member', profileImage: guest.user.profileImage },
+        })),
+      };
+    }),
+
+  setAdmissionPaused: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-pause' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), paused: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const updated = await db.party.updateMany({
+        where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' },
+        data: { admissionPaused: input.paused },
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      return { partyId: input.partyId, admissionPaused: input.paused };
+    }),
+
+  decide: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'party-control-decide' }))
+    .input(z.object({
+      partyId: z.string().min(1).max(128),
+      guestId: z.string().min(1).max(128),
+      decision: z.enum(['approved', 'declined']),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      return serializableTransaction(async (tx) => {
+        const guest = await tx.partyGuest.findFirst({ where: { id: input.guestId, partyId: party.id } });
+        if (!guest) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party guest not found.' });
+        if (guest.status !== 'pending') throw new TRPCError({ code: 'CONFLICT', message: 'Only pending guests can be decided.' });
+        if (input.decision === 'approved') {
+          const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
+          if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+        }
+        const updated = await tx.partyGuest.update({
+          where: { id: guest.id },
+          data: { status: input.decision, accessGranted: input.decision === 'approved' },
+        });
+        return { guestId: updated.id, status: updated.status, accessGranted: updated.accessGranted };
+      }, 'Party capacity changed. Please retry.');
+    }),
+
+  checkIn: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-control-checkin' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), attendeeCredential: attendeeCredentialInput }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      return serializableTransaction(async (tx) => {
+        const guest = await tx.partyGuest.findUnique({
+          where: { credential: input.attendeeCredential },
+          include: { user: { select: { name: true } } },
+        });
+        // A credential from another Party must be indistinguishable from an
+        // unknown credential.
+        if (!guest || guest.partyId !== party.id || !guest.accessGranted) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'That attendee credential is not recognized for this Party.' });
+        }
+        if (guest.status === 'checked-in') throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already been checked in.' });
+        const updated = await tx.partyGuest.updateMany({
+          where: { id: guest.id, status: { not: 'checked-in' }, accessGranted: true },
+          data: { status: 'checked-in', checkedInAt: new Date() },
+        });
+        if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already been checked in.' });
+        return { status: 'checked-in' as const, guestName: guest.user.name ?? 'Bytspot member' };
+      }, 'Door check-in conflicted. Please retry.');
+    }),
 });
 
 export const partyArrivalRouter = router({
@@ -449,6 +600,7 @@ export const partyRsvpRouter = router({
         const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (existing?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
         if (existing?.accessGranted) return { status: existing.status, accessGranted: true };
+        if (party.admissionPaused) throw new TRPCError({ code: 'CONFLICT', message: 'The host has paused new admissions for this Party.' });
         if (accessGranted) {
           const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
           if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });

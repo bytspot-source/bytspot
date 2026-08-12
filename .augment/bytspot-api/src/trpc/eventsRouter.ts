@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
-import { partyArrivalRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
+import { partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 
@@ -71,6 +71,7 @@ export const eventsRouter = router({
   invite: partyInvite,
   pass: partyPassRouter,
   arrival: partyArrivalRouter,
+  control: partyControlRouter,
   rsvp: partyRsvpRouter,
   tickets: partyTicketsRouter,
   /** List events near Atlanta (cached 15 min) */

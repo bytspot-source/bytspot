@@ -545,9 +545,12 @@ model ContactHash {
   @@map("contact_hashes")
 }
 
-// Salted SHA-256 hashes of each member's own verified identifiers (signup
-// email, profile phone), maintained server-side so contact sync can surface
-// "this contact is on Bytspot" without the other member syncing first.
+// Salted SHA-256 hashes of each member's own auth-verified identifiers,
+// maintained server-side so contact sync can surface "this contact is on
+// Bytspot" without the other member syncing first. Currently only the
+// signup email is hashed; `kind: 'phone'` is reserved and must not be
+// written until a phone-verification flow proves ownership (unverified
+// numbers would enable discovery impersonation).
 // Same salt/normalization contract as ContactHash (`src/lib/contactHash.ts`).
 model UserIdentityHash {
   id             String   @id @default(cuid())

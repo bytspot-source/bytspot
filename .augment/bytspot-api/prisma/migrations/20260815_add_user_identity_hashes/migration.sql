@@ -1,6 +1,8 @@
--- Member identity hashes: salted SHA-256 of each user's own verified
--- identifiers (signup email, profile phone). Enables "this contact is on
--- Bytspot" discovery without requiring the other member to sync contacts.
+-- Member identity hashes: salted SHA-256 of each user's own auth-verified
+-- identifiers. Only the signup email is hashed today; the 'phone' kind is
+-- reserved until a phone-verification flow exists (unverified numbers would
+-- enable discovery impersonation). Enables "this contact is on Bytspot"
+-- discovery without requiring the other member to sync contacts.
 -- Raw identifiers are never stored here. Existing members are backfilled
 -- at server startup (the salt is not available at migration time).
 CREATE TABLE "user_identity_hashes" (

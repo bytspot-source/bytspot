@@ -337,6 +337,36 @@ async function publishedParty(partyId: string) {
   return party;
 }
 
+/**
+ * When the share link stops resolving for members without access. The host
+ * override wins; otherwise the link dies when the party ends (endsAt, with a
+ * 6-hour grace window after startsAt when no end time was set — the same
+ * fallback People You Met uses).
+ */
+function shareLinkExpiry(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): Date {
+  if (party.shareLinkExpiresAt) return party.shareLinkExpiresAt;
+  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+}
+
+function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): boolean {
+  return shareLinkExpiry(party).getTime() <= Date.now();
+}
+
+/**
+ * An expired share link must be indistinguishable from a deleted party for
+ * anyone who does not already hold access — confirmed guests keep their pass
+ * and the host keeps Party Control (both use host/guest-scoped procedures).
+ */
+function assertShareLinkUsable(
+  party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date },
+  guest: { accessGranted: boolean } | null,
+): void {
+  if (guest?.accessGranted) return;
+  if (shareLinkExpired(party)) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  }
+}
+
 async function membershipTierFor(userId: string): Promise<MembershipTier | null> {
   const user = await db.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
   return isMembershipTier(user?.membershipTier) ? user.membershipTier : null;
@@ -394,6 +424,7 @@ export const partyInvite = publicProcedure
   .input(z.object({ partyId: z.string().min(1).max(128) }))
   .query(async ({ input }) => {
     const party = await publishedParty(input.partyId);
+    assertShareLinkUsable(party, null);
     const destinations = safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
     const album = party.media.filter((media) => media.kind === 'album');
@@ -428,6 +459,7 @@ export const partyPassRouter = router({
       const guest = ctx.user
         ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
         : null;
+      assertShareLinkUsable(party, guest);
       const membershipTier = ctx.user ? await membershipTierFor(ctx.user.userId) : null;
       const state = passAction(party, guest, Boolean(ctx.user), meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier));
       const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
@@ -496,7 +528,33 @@ export const partyControlRouter = router({
         spacesRemaining: Math.max(party.capacity - confirmed, 0),
         pending,
         checkedIn,
+        shareLinkExpiresAt: shareLinkExpiry(party).toISOString(),
+        shareLinkExpired: shareLinkExpired(party),
+        shareLinkExpiryIsDefault: party.shareLinkExpiresAt === null,
       };
+    }),
+
+  /**
+   * Host override for when the share link stops resolving. Null restores the
+   * default: the link dies when the party ends. Confirmed guests and the
+   * host are never affected — expiry only gates new arrivals via the link.
+   */
+  setShareLinkExpiry: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-share-expiry' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), expiresAt: z.string().datetime().nullable() }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      const expiresAt = input.expiresAt === null ? null : new Date(input.expiresAt);
+      if (expiresAt && expiresAt.getTime() <= Date.now()) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'The share link expiry must be in the future. To stop new arrivals now, pause admissions instead.' });
+      }
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published' },
+        data: { shareLinkExpiresAt: expiresAt },
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      const effective = shareLinkExpiry({ shareLinkExpiresAt: expiresAt, endsAt: party.endsAt, startsAt: party.startsAt });
+      return { partyId: party.id, shareLinkExpiresAt: effective.toISOString(), shareLinkExpiryIsDefault: expiresAt === null };
     }),
 
   guests: protectedProcedure
@@ -639,6 +697,7 @@ export const partyRsvpRouter = router({
     .input(z.object({ partyId: z.string().min(1).max(128), idempotencyKey: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
+      assertShareLinkUsable(party, null);
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
       if (!meetsRequiredMembershipTier(await membershipTierFor(ctx.user.userId), party.requiredMembershipTier)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
@@ -671,6 +730,7 @@ export const partyTicketsRouter = router({
     .input(z.object({ partyId: z.string().min(1).max(128), ticketTierName: z.string().trim().min(1).max(100), idempotencyKey: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
+      assertShareLinkUsable(party, null);
       if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
       const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
       if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });

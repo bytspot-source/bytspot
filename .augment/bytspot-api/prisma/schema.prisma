@@ -212,6 +212,10 @@ model Party {
   templateConfig         Json         @map("template_config")
   status                 String       @default("draft")
   admissionPaused        Boolean      @default(false) @map("admission_paused")
+  // Host override for when the share link stops resolving. Null means the
+  // default policy: the link dies when the party ends (endsAt, falling back
+  // to startsAt + 6h when the host set no end time).
+  shareLinkExpiresAt     DateTime?    @map("share_link_expires_at")
   passCode               String?      @unique @map("pass_code")
   publishedAt            DateTime?    @map("published_at")
   createdAt              DateTime     @default(now()) @map("created_at")

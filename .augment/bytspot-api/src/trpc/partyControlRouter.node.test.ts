@@ -10,7 +10,8 @@ const hostContext: Context = { user: { userId: 'host-user', email: 'host@bytspot
 const guestContext: Context = { user: { userId: 'guest-user', email: 'guest@bytspot.com' }, clientRateLimitKey: 'test-control-guest' };
 const credential = 'A'.repeat(43);
 const idempotencyKey = '00000000-0000-4000-8000-000000000011';
-const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false };
+const partyEndsAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
+const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null };
 const party = db.party as any;
 const partyGuest = db.partyGuest as any;
 const user = db.user as any;
@@ -57,6 +58,7 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
   assert.deepEqual(summary, {
     partyId: 'party-1', title: 'First Listen', admissionPaused: false,
     capacity: 80, confirmed: 41, spacesRemaining: 39, pending: 6, checkedIn: 12,
+    shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true,
   });
 });
 

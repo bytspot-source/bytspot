@@ -80,4 +80,6 @@ services:
         sync: false
       - key: GOOGLE_SERVER_CLIENT_ID
         sync: false
+      - key: CONTACT_HASH_SALT
+        sync: false
 

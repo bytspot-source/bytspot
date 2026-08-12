@@ -210,6 +210,20 @@ const socialGroupsRouter = router({
       return { id: circle.id, name: circle.name, ownerUserId: circle.ownerId, memberCount: 0, memberIds: [], role: 'owner' as const };
     }),
 
+  /** Delete a circle the caller owns. Memberships cascade at the DB level. */
+  delete: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'social:groups-delete' }))
+    .input(z.object({
+      groupId: z.string().min(1).max(128),
+      surface: surfaceInput,
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const circle = await db.socialCircle.findFirst({ where: { id: input.groupId, ownerId: ctx.user.userId }, select: { id: true } });
+      if (!circle) throw new TRPCError({ code: 'NOT_FOUND', message: 'That circle was not found.' });
+      await db.socialCircle.delete({ where: { id: circle.id } });
+      return { success: true };
+    }),
+
   members: router({
     add: protectedProcedure
       .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:groups-members-add' }))
@@ -356,9 +370,15 @@ export const socialRouter = router({
   peopleMet: socialPeopleMetRouter,
 
   /**
-   * Ranked friend suggestions from the privacy-preserving contact graph:
-   * members who mutually share at least one hashed contact with the caller.
-   * Declined connection pairs are never resurfaced.
+   * Ranked friend suggestions from the privacy-preserving contact graph.
+   * A member is suggested when either side of the relationship is visible:
+   *   • identity match — one of the caller's device contacts is a member
+   *     (their salted identity hash equals a synced contact hash), or
+   *   • mutual contact overlap — both members synced address books that
+   *     share at least one hashed contact.
+   * Identity matching means a member appears immediately after the caller
+   * syncs, without the other member syncing first. Declined connection
+   * pairs are never resurfaced.
    */
   suggestions: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:suggestions' }))
@@ -368,11 +388,18 @@ export const socialRouter = router({
       select: { hashedContact: true },
     });
     if (mine.length === 0) return { items: [] };
-    const overlaps = await db.contactHash.findMany({
-      where: { hashedContact: { in: mine.map((row) => row.hashedContact) }, userId: { not: ctx.user.userId } },
-      select: { userId: true },
-    });
-    const candidateIds = [...new Set(overlaps.map((row) => row.userId))].slice(0, 50);
+    const myHashes = mine.map((row) => row.hashedContact);
+    const [identityMatches, overlaps] = await Promise.all([
+      db.userIdentityHash.findMany({
+        where: { hashedIdentity: { in: myHashes }, userId: { not: ctx.user.userId } },
+        select: { userId: true },
+      }),
+      db.contactHash.findMany({
+        where: { hashedContact: { in: myHashes }, userId: { not: ctx.user.userId } },
+        select: { userId: true },
+      }),
+    ]);
+    const candidateIds = [...new Set([...identityMatches.map((row) => row.userId), ...overlaps.map((row) => row.userId)])].slice(0, 50);
     if (candidateIds.length === 0) return { items: [] };
     const [users, invites, circleMemberships] = await Promise.all([
       db.user.findMany({ where: { id: { in: candidateIds } }, select: { id: true, name: true } }),
@@ -425,14 +452,20 @@ export const socialRouter = router({
         }),
       ]);
       if (hashes.length === 0) return { synced: 0, matched: 0, mutual: 0 };
-      const overlaps = await db.contactHash.findMany({
-        where: { hashedContact: { in: hashes }, userId: { not: ctx.user.userId } },
-        select: { userId: true, hashedContact: true },
-      });
+      const [identityMatches, overlaps] = await Promise.all([
+        db.userIdentityHash.findMany({
+          where: { hashedIdentity: { in: hashes }, userId: { not: ctx.user.userId } },
+          select: { userId: true, hashedIdentity: true },
+        }),
+        db.contactHash.findMany({
+          where: { hashedContact: { in: hashes }, userId: { not: ctx.user.userId } },
+          select: { userId: true, hashedContact: true },
+        }),
+      ]);
       return {
         synced: hashes.length,
-        matched: new Set(overlaps.map((row) => row.hashedContact)).size,
-        mutual: new Set(overlaps.map((row) => row.userId)).size,
+        matched: new Set([...identityMatches.map((row) => row.hashedIdentity), ...overlaps.map((row) => row.hashedContact)]).size,
+        mutual: new Set([...identityMatches.map((row) => row.userId), ...overlaps.map((row) => row.userId)]).size,
       };
     }),
 

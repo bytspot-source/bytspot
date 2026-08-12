@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { TRPCError } from '@trpc/server';
 import { db } from '../lib/db';
 import { VerifiedProviderIdentity } from './providerIdTokenVerifier';
+import { refreshUserIdentityHashes } from './userIdentityHashes';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
@@ -51,6 +52,10 @@ export async function resolveProviderIdentity(
         data: { provider: identity.provider, subject: identity.subject, userId: user.id },
       });
       return { user, isNewUser: true };
+    }).then((result) => {
+      // Identity hashes power contact-graph discovery (non-blocking)
+      void refreshUserIdentityHashes(result.user.id, { email: result.user.email });
+      return result;
     });
   } catch (error: unknown) {
     // A concurrent first sign-in may have created this identity. Re-read by

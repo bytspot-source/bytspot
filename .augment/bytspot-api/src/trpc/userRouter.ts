@@ -242,6 +242,9 @@ const profileRouter = router({
         data: input,
         select: { id: true, email: true, name: true, phone: true, profileImage: true, address: true, birthday: true },
       });
+      // Identity hashes are refreshed only from auth-verified identifiers
+      // (signup email). The free-form profile phone is intentionally never
+      // hashed — see services/userIdentityHashes.ts.
       return user;
     }),
 });

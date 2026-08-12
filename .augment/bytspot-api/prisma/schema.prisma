@@ -51,6 +51,7 @@ model User {
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
   socialInvitesReceived SocialInvitation[]    @relation("socialInviteTo")
   contactHashes         ContactHash[]
+  identityHashes        UserIdentityHash[]
   ownedCircles          SocialCircle[]
   circleMemberships     SocialCircleMember[]
   partyEncounterOptIns  PartyEncounterOptIn[]
@@ -542,6 +543,27 @@ model ContactHash {
   @@unique([userId, hashedContact])
   @@index([hashedContact])
   @@map("contact_hashes")
+}
+
+// Salted SHA-256 hashes of each member's own auth-verified identifiers,
+// maintained server-side so contact sync can surface "this contact is on
+// Bytspot" without the other member syncing first. Currently only the
+// signup email is hashed; `kind: 'phone'` is reserved and must not be
+// written until a phone-verification flow proves ownership (unverified
+// numbers would enable discovery impersonation).
+// Same salt/normalization contract as ContactHash (`src/lib/contactHash.ts`).
+model UserIdentityHash {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  hashedIdentity String   @map("hashed_identity")
+  kind           String // email | phone
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, hashedIdentity])
+  @@index([hashedIdentity])
+  @@map("user_identity_hashes")
 }
 
 // ─── Social: Circles ──────────────────────────────────

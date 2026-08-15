@@ -513,6 +513,42 @@ async function hostControlledParty(partyId: string, userId: string) {
 const attendeeCredentialInput = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'Attendee credentials are 43 base64url characters.');
 
 export const partyControlRouter = router({
+  /**
+   * Rooms this host can reopen in Party Control. Drafts are omitted —
+   * Control is a published-party console. Newest first so the room they
+   * just left is on top.
+   */
+  hosted: protectedProcedure.query(async ({ ctx }) => {
+    const parties = await db.party.findMany({
+      where: { hostUserId: ctx.user.userId, status: 'published' },
+      orderBy: [{ startsAt: 'desc' }],
+      take: 50,
+      select: {
+        id: true,
+        title: true,
+        venueName: true,
+        startsAt: true,
+        endsAt: true,
+        admissionPaused: true,
+        shareLinkExpiresAt: true,
+        capacity: true,
+      },
+    });
+    return {
+      parties: parties.map((party) => ({
+        id: party.id,
+        title: party.title,
+        venueName: party.venueName,
+        startsAt: party.startsAt.toISOString(),
+        endsAt: party.endsAt?.toISOString() ?? null,
+        admissionPaused: party.admissionPaused,
+        shareLinkExpiresAt: shareLinkExpiry(party).toISOString(),
+        shareLinkExpired: shareLinkExpired(party),
+        capacity: party.capacity,
+      })),
+    };
+  }),
+
   summary: protectedProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {

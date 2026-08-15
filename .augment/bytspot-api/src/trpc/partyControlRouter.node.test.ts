@@ -23,6 +23,7 @@ function caller(context = hostContext) {
 
 beforeEach(() => {
   party.findFirst = async () => publishedParty;
+  party.findMany = async () => [];
   party.updateMany = async () => ({ count: 1 });
   partyGuest.count = async () => 0;
   partyGuest.findMany = async () => [];
@@ -33,6 +34,30 @@ beforeEach(() => {
   partyGuest.upsert = async ({ create }: any) => ({ id: 'guest-1', ...create });
   user.findUnique = async () => ({ membershipTier: 'green' });
   prisma.$transaction = async (callback: any) => callback({ party, partyGuest });
+});
+
+test('Hosted rooms list is authenticated and returns only this host\'s published parties', async () => {
+  const publicCaller = createCaller({ user: null, clientRateLimitKey: 'test-control-anon' });
+  await assert.rejects(() => publicCaller.events.control.hosted(), { code: 'UNAUTHORIZED' });
+
+  let listedWhere: any;
+  party.findMany = async ({ where, take }: any) => {
+    listedWhere = where;
+    assert.equal(take, 50);
+    return [{
+      id: 'party-1', title: 'First Listen', venueName: 'The Basement',
+      startsAt: publishedParty.startsAt, endsAt: publishedParty.endsAt,
+      admissionPaused: false, shareLinkExpiresAt: null, capacity: 80,
+    }];
+  };
+  const { parties } = await caller().events.control.hosted();
+  assert.deepEqual(listedWhere, { hostUserId: 'host-user', status: 'published' });
+  assert.equal(parties.length, 1);
+  assert.equal(parties[0].id, 'party-1');
+  assert.equal(parties[0].title, 'First Listen');
+  assert.equal(parties[0].venueName, 'The Basement');
+  assert.equal(parties[0].shareLinkExpiresAt, partyEndsAt.toISOString());
+  assert.equal(parties[0].shareLinkExpired, false);
 });
 
 test('Party Control routes require authentication and host ownership', async () => {

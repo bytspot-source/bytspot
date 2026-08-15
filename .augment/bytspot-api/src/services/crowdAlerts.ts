@@ -1,8 +1,9 @@
 /**
  * Crowd Alert Service
  *
- * Checks crowd levels across all venues every 15 minutes and sends
- * push notifications for two key transitions:
+ * Checks *live* crowd levels (door / user_report / sensor) every 15
+ * minutes and sends push notifications for two key transitions.
+ * Typical / simulation rows are ignored — a day-part curve is not a sensor.
  *   1. Venue just hit Packed (level ≥ 4)  → alert saved-spot owners who opted into nearby push
  *   2. Venue dropped from Packed to Active/Chill (level ≤ 2) → "spot opened up" alert
  *
@@ -12,6 +13,7 @@
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { sendVenueCrowdAlert } from './notificationDelivery';
+import { isLiveOccupancySource } from './typicalOccupancy';
 
 const prevKey = (venueId: string) => `crowd:prev:${venueId}`;
 
@@ -34,7 +36,7 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
       crowdLevels: {
         orderBy: { recordedAt: 'desc' },
         take: 1,
-        select: { level: true, label: true },
+        select: { level: true, label: true, source: true },
       },
     },
   });
@@ -42,6 +44,9 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
   for (const venue of venues) {
     const current = venue.crowdLevels[0];
     if (!current) continue;
+    // Typical / leftover simulation rows are a catalog, not a sensor.
+    // Never push "Packed" or "spot opened up" off a day-part curve.
+    if (!isLiveOccupancySource(current.source)) continue;
 
     const currentLevel = current.level;
     let prevLevel: number | null = null;

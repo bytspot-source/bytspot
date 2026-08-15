@@ -250,7 +250,7 @@ const venuesRouter = router({
           entryPrice: v.entryPrice ?? null,
           ticketUrl: v.ticketUrl ?? null,
           crowd: v.crowdLevels[0]
-            ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
+            ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, source: v.crowdLevels[0].source, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
             : null,
           parking: {
             totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
@@ -384,7 +384,7 @@ const venuesRouter = router({
       ]).catch(() => { /* non-blocking — don't fail the checkin if points fail */ });
 
       crowdEmitter.emit('crowd-update', {
-        venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, recordedAt: new Date().toISOString() },
+        venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },
       });
 
       const result = { success: true, newCrowdLevel: newLevel, pointsEarned };

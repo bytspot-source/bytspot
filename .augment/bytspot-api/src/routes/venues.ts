@@ -53,6 +53,7 @@ router.get('/venues', async (_req, res) => {
             level: v.crowdLevels[0].level,
             label: v.crowdLevels[0].label,
             waitMins: v.crowdLevels[0].waitMins,
+            source: v.crowdLevels[0].source,
             // Ensure recordedAt is always a valid ISO string (Prisma returns Date objects)
             recordedAt: v.crowdLevels[0].recordedAt instanceof Date
               ? v.crowdLevels[0].recordedAt.toISOString()
@@ -231,7 +232,7 @@ router.get('/venues/crowd/stream', async (req, res) => {
     const snapshot = rows.map((v) => ({
       id: v.id,
       crowd: v.crowdLevels[0]
-        ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
+        ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, source: v.crowdLevels[0].source, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
         : null,
     }));
     res.write(`data: ${JSON.stringify({ type: 'snapshot', venues: snapshot })}\n\n`);
@@ -305,7 +306,7 @@ router.post('/venues/:id/checkin', requireAuth, checkinRateLimit, async (req, re
   // Broadcast to all SSE clients
   crowdEmitter.emit('crowd-update', {
     venueId: id,
-    crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, recordedAt: new Date().toISOString() },
+    crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },
   });
 
   const result = { success: true, newCrowdLevel: newLevel };

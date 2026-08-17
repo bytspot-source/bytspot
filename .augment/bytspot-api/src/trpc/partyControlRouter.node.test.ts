@@ -11,7 +11,7 @@ const guestContext: Context = { user: { userId: 'guest-user', email: 'guest@byts
 const credential = 'A'.repeat(43);
 const idempotencyKey = '00000000-0000-4000-8000-000000000011';
 const partyEndsAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
-const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null };
+const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null, passCode: 'BYT-EXISTING' };
 const party = db.party as any;
 const partyGuest = db.partyGuest as any;
 const user = db.user as any;
@@ -47,7 +47,7 @@ test('Hosted rooms list is authenticated and returns only this host\'s published
     return [{
       id: 'party-1', title: 'First Listen', venueName: 'The Basement',
       startsAt: publishedParty.startsAt, endsAt: publishedParty.endsAt,
-      admissionPaused: false, shareLinkExpiresAt: null, capacity: 80,
+      admissionPaused: false, shareLinkExpiresAt: null, passCode: 'BYT-EXISTING', capacity: 80,
     }];
   };
   const { parties } = await caller().events.control.hosted();
@@ -58,6 +58,8 @@ test('Hosted rooms list is authenticated and returns only this host\'s published
   assert.equal(parties[0].venueName, 'The Basement');
   assert.equal(parties[0].shareLinkExpiresAt, partyEndsAt.toISOString());
   assert.equal(parties[0].shareLinkExpired, false);
+  assert.equal(parties[0].shareUrl, 'https://bytspot.app/party/party-1');
+  assert.equal(parties[0].passCode, 'BYT-EXISTING');
 });
 
 test('Party Control routes require authentication and host ownership', async () => {
@@ -83,8 +85,15 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
   assert.deepEqual(summary, {
     partyId: 'party-1', title: 'First Listen', admissionPaused: false,
     capacity: 80, confirmed: 41, spacesRemaining: 39, pending: 6, checkedIn: 12,
+    shareUrl: 'https://bytspot.app/party/party-1', passCode: 'BYT-EXISTING',
     shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true,
   });
+
+  // Missing pass codes stay null — Control retrieves the issued code, it never mints a new one.
+  party.findFirst = async () => ({ ...publishedParty, passCode: null });
+  const withoutCode = await caller().events.control.summary({ partyId: 'party-1' });
+  assert.equal(withoutCode.shareUrl, 'https://bytspot.app/party/party-1');
+  assert.equal(withoutCode.passCode, null);
 });
 
 test('Guest list projects person fields and infers source from ticket tier', async () => {

@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
-import { partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
+import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 
@@ -66,6 +66,7 @@ const FALLBACK_EVENTS = [
 
 export const eventsRouter = router({
   drafts: partyDraftsRouter,
+  hostDestinations: hostDestinationsRouter,
   media: partyMediaRouter,
   publish: partyPublish,
   invite: partyInvite,

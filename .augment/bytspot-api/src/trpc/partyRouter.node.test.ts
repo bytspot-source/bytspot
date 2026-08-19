@@ -45,6 +45,8 @@ function caller() {
 }
 
 beforeEach(() => {
+  (db.hostProfile as any).findUnique = async () => null;
+  (db.hostProfile as any).upsert = async () => ({});
   party.findUnique = async () => null;
   party.findFirst = async () => null;
   party.create = async () => ({ id: 'party-1' });
@@ -521,4 +523,161 @@ test('Host share-link expiry override wins and setShareLinkExpiry validates its 
   // Null restores the default policy (dies at party end).
   const restored = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: null });
   assert.equal(restored.shareLinkExpiryIsDefault, true);
+});
+
+test('Official Host identity lives on the host profile: handle + ordered destinations', async () => {
+  const hostProfile = db.hostProfile as any;
+
+  // First read with no profile row: empty identity, no error.
+  assert.deepEqual(await caller().events.hostDestinations.get(), { handle: null, destinations: [] });
+
+  // Save upserts the handle (normalized: no @, lowercase) and ordered list.
+  let upsertArgs: any;
+  hostProfile.upsert = async (args: any) => { upsertArgs = args; return {}; };
+  const destinations = [
+    { kind: 'instagram', value: 'MidtownJohn', primary: true },
+    { kind: 'music', value: 'https://music.example.com/host' },
+  ];
+  const saved = await caller().events.hostDestinations.save({ handle: '@MidtownJohn', destinations });
+  assert.equal(saved.handle, 'midtownjohn');
+  assert.deepEqual(upsertArgs.where, { userId: 'test-user-id' });
+  assert.equal(upsertArgs.update.handle, 'midtownjohn');
+  assert.deepEqual(upsertArgs.update.hostDestinations, destinations);
+
+  // All pills off is a valid saved state.
+  assert.deepEqual((await caller().events.hostDestinations.save({ handle: null, destinations: [] })).destinations, []);
+
+  // Socials take handles; links must be HTTPS; one primary max; no duplicate kinds.
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'instagram', value: 'https://instagram.com/host' }] }));
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'music', value: 'http://insecure.example.com' }] }));
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'music', value: 'https://a.example.com', primary: true }, { kind: 'website', value: 'https://b.example.com', primary: true }] }));
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'instagram', value: 'a' }, { kind: 'instagram', value: 'b' }] }));
+
+  // Handle collisions surface as CONFLICT.
+  hostProfile.upsert = async () => { throw Object.assign(new Error('unique'), { code: 'P2002' }); };
+  await assert.rejects(() => caller().events.hostDestinations.save({ handle: 'taken', destinations: [] }), { code: 'CONFLICT' });
+
+  // Corrupt stored JSON fails closed to empty instead of leaking.
+  hostProfile.findUnique = async () => ({ handle: 'midtownjohn', hostDestinations: { musicUrl: 'javascript:alert(1)' } });
+  assert.deepEqual(await caller().events.hostDestinations.get(), { handle: 'midtownjohn', destinations: [] });
+});
+
+test('Invite projects the Official Host identity block with no raw URLs as labels', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue',
+    hostDestinations: { identity: true, handle: 'midtownjohn', destinations: [
+      { kind: 'instagram', value: 'MidtownJohn', primary: true },
+      { kind: 'tiktok', value: '@midtownjohn' },
+      { kind: 'music', value: 'https://music.example.com/host' },
+    ] },
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  });
+  const invite = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(invite.host.handle, 'midtownjohn');
+  assert.deepEqual(invite.host.destinationList, [
+    { kind: 'instagram', label: '@MidtownJohn', url: 'https://instagram.com/MidtownJohn', primary: true },
+    { kind: 'tiktok', label: '@midtownjohn', url: 'https://tiktok.com/@midtownjohn', primary: false },
+    { kind: 'music', label: 'Music', url: 'https://music.example.com/host', primary: false },
+  ]);
+  // Legacy object stays empty when the identity snapshot is present.
+  assert.deepEqual(invite.host.destinations, {});
+
+  // Legacy parties (old snapshot shape) still project the legacy object.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue',
+    hostDestinations: { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } },
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  });
+  const legacy = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(legacy.host.handle, null);
+  assert.deepEqual(legacy.host.destinationList, []);
+  assert.equal((legacy.host.destinations as any).musicUrl, 'https://music.example.com/host');
+
+  // A crafted URL as the legacy platform never renders as public text.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue',
+    hostDestinations: { primarySocial: { platform: 'https://evil.example.com', url: 'https://instagram.com/host' } },
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  });
+  const sanitized = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal((sanitized.host.destinations as any).primarySocial.platform, 'Social');
+});
+
+test('Invite projects published cover and album as HTTPS media URLs', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'private-approval', capacity: 80, locationDisclosure: 'after-approval', venueName: 'Sample Venue',
+    hostDestinations: {}, startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' },
+    media: [
+      { id: 'cover-1', kind: 'cover', position: 0 },
+      { id: 'album-0', kind: 'album', position: 0 },
+      { id: 'album-1', kind: 'album', position: 1 },
+    ],
+  });
+  const invite = await createCaller({ user: null }).events.invite({ partyId: 'party-1' });
+  assert.match(invite.heroImageURL ?? '', /\/media\/parties\/cover-1$/);
+  assert.match(invite.thumbnailURL ?? '', /\/media\/parties\/cover-1$/);
+  assert.deepEqual(invite.photoURLs.map((url: string) => url.split('/').pop()), ['album-0', 'album-1']);
+  for (const url of [invite.heroImageURL, invite.thumbnailURL, ...invite.photoURLs]) {
+    assert.match(url, /^https:\/\//);
+  }
+});
+
+test('Publish snapshots a handle-only Official Host identity onto the party', async () => {
+  let savedSnapshot: any;
+  (db.hostProfile as any).findUnique = async () => ({ handle: 'midtownjohn', hostDestinations: [] });
+  party.findFirst = async () => partyDraft;
+  party.updateMany = async ({ data }: any) => {
+    if (data.hostDestinations) savedSnapshot = data.hostDestinations;
+    return { count: 1 };
+  };
+  const result = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.equal(result.id, 'party-1');
+  assert.deepEqual(savedSnapshot, { identity: true, handle: 'midtownjohn', destinations: [] });
+});
+
+test('Run of Show slice 1: endsAt persists, derives from the last beat, and projects absolute times', async () => {
+  let createData: any;
+  party.create = async ({ data }: any) => { createData = data; return { id: 'party-1' }; };
+  // Dedicated user: drafts.create rate-limits per user and earlier tests
+  // consume test-user-id's budget.
+  const runOfShowCaller = () => createCaller({ user: { userId: 'run-of-show-user', email: 'ros@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+
+  // Explicit host end wins.
+  await runOfShowCaller().events.drafts.create({ ...draftInput, endsAt: '2026-08-11T02:00:00Z' });
+  assert.equal(createData.endsAt.toISOString(), '2026-08-11T02:00:00.000Z');
+
+  // No explicit end: last itinerary beat + 60 minutes closes the party.
+  await runOfShowCaller().events.drafts.create({ ...draftInput, itinerary: [{ title: 'Doors open', offsetMinutes: 0 }, { title: 'Headliner', offsetMinutes: 120 }] });
+  assert.equal(createData.endsAt.toISOString(), '2026-08-10T23:00:00.000Z');
+
+  // No end and no beats: endsAt stays null (share-link 6h fallback applies).
+  await runOfShowCaller().events.drafts.create({ ...draftInput, itinerary: [] });
+  assert.equal(createData.endsAt, null);
+
+  // End before start and >7-day runs are rejected.
+  await assert.rejects(() => runOfShowCaller().events.drafts.create({ ...draftInput, endsAt: '2026-08-10T19:00:00Z' }));
+  await assert.rejects(() => runOfShowCaller().events.drafts.create({ ...draftInput, endsAt: '2026-08-18T20:00:01Z' }));
+
+  // The invite projects endsAt and the absolute schedule for each beat.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue', hostDestinations: null,
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: new Date('2026-08-11T02:00:00Z'), shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [{ title: 'Doors open', offsetMinutes: 0 }, { title: 'Headliner', offsetMinutes: 120 }],
+    ticketTiers: [], host: { name: 'Ava' }, media: [],
+  });
+  const invite = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(invite.endsAt, '2026-08-11T02:00:00.000Z');
+  assert.deepEqual(invite.runOfShow, [
+    { title: 'Doors open', scheduledAt: '2026-08-10T20:00:00.000Z' },
+    { title: 'Headliner', scheduledAt: '2026-08-10T22:00:00.000Z' },
+  ]);
 });

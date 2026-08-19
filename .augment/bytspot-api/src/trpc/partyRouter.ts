@@ -27,6 +27,14 @@ const hostDestinationsInput = z.object({
   primarySocial: z.object({ platform: z.string().trim().min(1).max(40), url: httpsUrl }),
 });
 
+/**
+ * Host-profile destinations may be saved incomplete (pills toggled off);
+ * a party still requires a primary social at publish via hostDestinationsInput.
+ */
+const profileDestinationsInput = hostDestinationsInput.extend({
+  primarySocial: hostDestinationsInput.shape.primarySocial.optional(),
+});
+
 const draftInput = z.object({
   idempotencyKey: z.string().uuid(),
   templateId: z.enum(partyKinds),
@@ -453,6 +461,24 @@ export const partyInvite = publicProcedure
       photoURLs: album.map((media) => partyMediaUrl(media.id)),
     };
   });
+
+export const hostDestinationsRouter = router({
+  get: protectedProcedure.query(async ({ ctx }) => {
+    const profile = await db.hostProfile.findUnique({ where: { userId: ctx.user.userId }, select: { hostDestinations: true } });
+    const parsed = profileDestinationsInput.safeParse(profile?.hostDestinations ?? {});
+    return { destinations: parsed.success ? parsed.data : {} };
+  }),
+  save: protectedProcedure
+    .input(z.object({ destinations: profileDestinationsInput }))
+    .mutation(async ({ ctx, input }) => {
+      await db.hostProfile.upsert({
+        where: { userId: ctx.user.userId },
+        update: { hostDestinations: input.destinations as Prisma.InputJsonValue },
+        create: { userId: ctx.user.userId, hostDestinations: input.destinations as Prisma.InputJsonValue },
+      });
+      return { destinations: input.destinations };
+    }),
+});
 
 export const partyPassRouter = router({
   resolve: publicProcedure

@@ -522,3 +522,30 @@ test('Host share-link expiry override wins and setShareLinkExpiry validates its 
   const restored = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: null });
   assert.equal(restored.shareLinkExpiryIsDefault, true);
 });
+
+test('Official Host destinations live on the host profile and reject insecure links', async () => {
+  const hostProfile = db.hostProfile as any;
+
+  // First read with no profile row: empty destinations, no error.
+  hostProfile.findUnique = async () => null;
+  assert.deepEqual(await caller().events.hostDestinations.get(), { destinations: {} });
+
+  // Save upserts onto the caller's host profile.
+  let upsertArgs: any;
+  hostProfile.upsert = async (args: any) => { upsertArgs = args; return {}; };
+  const destinations = { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } };
+  assert.deepEqual(await caller().events.hostDestinations.save({ destinations }), { destinations });
+  assert.deepEqual(upsertArgs.where, { userId: 'test-user-id' });
+  assert.deepEqual(upsertArgs.update, { hostDestinations: destinations });
+  assert.equal(upsertArgs.create.userId, 'test-user-id');
+
+  // Pills may all be off — an empty object is a valid saved state.
+  assert.deepEqual(await caller().events.hostDestinations.save({ destinations: {} }), { destinations: {} });
+
+  // HTTPS is enforced at the source of truth, not just at publish.
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: { musicUrl: 'http://insecure.example.com' } as any }));
+
+  // Corrupt stored JSON fails closed to empty instead of leaking.
+  hostProfile.findUnique = async () => ({ hostDestinations: { musicUrl: 'javascript:alert(1)' } });
+  assert.deepEqual(await caller().events.hostDestinations.get(), { destinations: {} });
+});

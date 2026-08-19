@@ -23,13 +23,17 @@ partyMediaRouter.get('/media/parties/:mediaId', async (req, res) => {
   if (!media) return res.status(404).json({ error: 'Not found' });
 
   const owner = requestUserId(req.headers.authorization) === media.party.hostUserId;
-  const publicParty = media.party.status === 'published' && media.party.accessMode !== 'private-approval';
-  if (!owner && !publicParty) return res.status(404).json({ error: 'Not found' });
+  // Published-party cover and album are part of the invitation itself — they
+  // are not a withheld location. Anyone who already has the media URL (issued
+  // only via events.invite) can render it, including unsigned App Clip guests
+  // on after-approval / private-approval rooms. Draft media stays host-only.
+  const published = media.party.status === 'published';
+  if (!owner && !published) return res.status(404).json({ error: 'Not found' });
 
   res.setHeader('Content-Type', media.mimeType);
   res.setHeader('Content-Length', String(media.byteSize));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Cache-Control', publicParty ? 'public, max-age=86400' : 'private, no-store');
+  res.setHeader('Cache-Control', published ? 'public, max-age=86400' : 'private, no-store');
   return res.status(200).send(media.bytes);
 });
 

@@ -596,6 +596,51 @@ test('Invite projects the Official Host identity block with no raw URLs as label
   assert.equal(legacy.host.handle, null);
   assert.deepEqual(legacy.host.destinationList, []);
   assert.equal((legacy.host.destinations as any).musicUrl, 'https://music.example.com/host');
+
+  // A crafted URL as the legacy platform never renders as public text.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue',
+    hostDestinations: { primarySocial: { platform: 'https://evil.example.com', url: 'https://instagram.com/host' } },
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  });
+  const sanitized = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal((sanitized.host.destinations as any).primarySocial.platform, 'Social');
+});
+
+test('Invite projects published cover and album as HTTPS media URLs', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'private-approval', capacity: 80, locationDisclosure: 'after-approval', venueName: 'Sample Venue',
+    hostDestinations: {}, startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' },
+    media: [
+      { id: 'cover-1', kind: 'cover', position: 0 },
+      { id: 'album-0', kind: 'album', position: 0 },
+      { id: 'album-1', kind: 'album', position: 1 },
+    ],
+  });
+  const invite = await createCaller({ user: null }).events.invite({ partyId: 'party-1' });
+  assert.match(invite.heroImageURL ?? '', /\/media\/parties\/cover-1$/);
+  assert.match(invite.thumbnailURL ?? '', /\/media\/parties\/cover-1$/);
+  assert.deepEqual(invite.photoURLs.map((url: string) => url.split('/').pop()), ['album-0', 'album-1']);
+  for (const url of [invite.heroImageURL, invite.thumbnailURL, ...invite.photoURLs]) {
+    assert.match(url, /^https:\/\//);
+  }
+});
+
+test('Publish snapshots a handle-only Official Host identity onto the party', async () => {
+  let savedSnapshot: any;
+  (db.hostProfile as any).findUnique = async () => ({ handle: 'midtownjohn', hostDestinations: [] });
+  party.findFirst = async () => partyDraft;
+  party.updateMany = async ({ data }: any) => {
+    if (data.hostDestinations) savedSnapshot = data.hostDestinations;
+    return { count: 1 };
+  };
+  const result = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.equal(result.id, 'party-1');
+  assert.deepEqual(savedSnapshot, { identity: true, handle: 'midtownjohn', destinations: [] });
 });
 
 test('Run of Show slice 1: endsAt persists, derives from the last beat, and projects absolute times', async () => {

@@ -37,7 +37,7 @@ const linkDestinationKinds = ['music', 'merch', 'website'] as const;
 const destinationKinds = [...socialDestinationKinds, ...linkDestinationKinds] as const;
 type DestinationKind = (typeof destinationKinds)[number];
 
-const hostHandle = z.string().trim().regex(/^@?[a-z0-9._]{2,30}$/i, 'Handles are 2–30 letters, numbers, dots, or underscores.').transform((value) => value.replace(/^@/, '').toLowerCase());
+const hostHandle = z.string().trim().regex(/^@?(?=.*[a-z0-9])[a-z0-9._]{2,30}$/i, 'Handles are 2–30 letters, numbers, dots, or underscores.').transform((value) => value.replace(/^@/, '').toLowerCase());
 
 const destinationEntry = z.object({
   kind: z.enum(destinationKinds),
@@ -45,7 +45,8 @@ const destinationEntry = z.object({
   primary: z.boolean().optional(),
 }).superRefine((entry, ctx) => {
   if ((socialDestinationKinds as readonly string[]).includes(entry.kind)) {
-    if (!/^@?[a-z0-9._\-]{1,80}$/i.test(entry.value)) {
+    // At least one alphanumeric: all-dot handles would route to a social root.
+    if (!/^@?(?=.*[a-z0-9])[a-z0-9._\-]{1,80}$/i.test(entry.value)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'Social destinations take a handle, not a link.' });
     }
   } else if (!httpsUrl.safeParse(entry.value).success) {
@@ -381,7 +382,9 @@ export const partyPublish = protectedProcedure
     // for the next party.
     const profile = await db.hostProfile.findUnique({ where: { userId: ctx.user.userId }, select: { handle: true, hostDestinations: true } });
     const profileList = destinationList.safeParse(profile?.hostDestinations ?? []);
-    if (profile && profileList.success && profileList.data.length > 0) {
+    // A handle-only identity is still an identity: snapshot whenever the
+    // profile carries a handle or at least one valid destination.
+    if (profile && profileList.success && (profile.handle || profileList.data.length > 0)) {
       await db.party.updateMany({
         where: { id: party.id, hostUserId: ctx.user.userId, status: 'draft' },
         data: { hostDestinations: { identity: true, handle: profile.handle, destinations: profileList.data } as Prisma.InputJsonValue },
@@ -439,7 +442,15 @@ function runOfShow(startsAt: Date, value: Prisma.JsonValue): Array<{ title: stri
 
 function safeDestinations(value: Prisma.JsonValue | null): z.infer<typeof hostDestinationsInput> | null {
   const parsed = hostDestinationsInput.safeParse(value ?? {});
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  // Legacy `primarySocial.platform` is arbitrary stored text that shipped
+  // clients render as the public label. Anything URL-like or unrecognized
+  // collapses to a known display name so a raw URL can never render as text.
+  if (parsed.data.primarySocial) {
+    const known = socialDestinationKinds.map((kind) => destinationDisplayNames[kind]).find((name) => name.toLowerCase() === parsed.data.primarySocial.platform.toLowerCase());
+    parsed.data.primarySocial.platform = known ?? 'Social';
+  }
+  return parsed.data;
 }
 
 /**
@@ -606,12 +617,17 @@ export const hostDestinationsRouter = router({
   save: protectedProcedure
     .input(profileIdentityInput)
     .mutation(async ({ ctx, input }) => {
-      const handle = input.handle ?? null;
+      // Host Studio no longer collects a handle — the verified host name is
+      // the sign-in identity. Only overwrite handle when the client sent one.
+      const handle = input.handle === undefined ? undefined : input.handle ?? null;
       try {
         await db.hostProfile.upsert({
           where: { userId: ctx.user.userId },
-          update: { handle, hostDestinations: input.destinations as Prisma.InputJsonValue },
-          create: { userId: ctx.user.userId, handle, hostDestinations: input.destinations as Prisma.InputJsonValue },
+          update: {
+            ...(handle !== undefined ? { handle } : {}),
+            hostDestinations: input.destinations as Prisma.InputJsonValue,
+          },
+          create: { userId: ctx.user.userId, handle: handle ?? null, hostDestinations: input.destinations as Prisma.InputJsonValue },
         });
       } catch (error) {
         if (isUniqueConstraint(error)) throw new TRPCError({ code: 'CONFLICT', message: 'That handle is already taken.' });

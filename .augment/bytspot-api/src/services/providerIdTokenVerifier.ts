@@ -16,10 +16,12 @@ export interface VerifiedProviderIdentity {
   name?: string;
 }
 
+type Audience = string | readonly string[];
+
 interface ProviderVerificationOptions {
   provider: ProviderName;
   issuer: string;
-  audience: string;
+  audience: Audience;
   jwksURL: string;
   requireVerifiedEmail: boolean;
 }
@@ -61,10 +63,24 @@ function stringClaim(claims: JsonRecord, name: string): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function audienceMatches(value: unknown, expected: string): boolean {
-  // Native flows expect exactly one configured client audience. Rejecting
-  // multi-audience tokens avoids accepting a token without an unambiguous azp.
-  return value === expected;
+function allowedAudiences(expected: Audience): string[] {
+  const values = typeof expected === 'string' ? [expected] : [...expected];
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function audienceMatches(value: unknown, expected: Audience): boolean {
+  // Native tokens carry exactly one client audience. Reject multi-aud arrays
+  // so a token cannot satisfy the check without an unambiguous azp.
+  const allowed = allowedAudiences(expected);
+  return typeof value === 'string' && allowed.includes(value);
+}
+
+/** Full-app Services/bundle ID plus the App Clip bundle (`<id>.Clip`). */
+export function appleIdentityAudiences(appleClientId: string): string[] {
+  const primary = appleClientId.trim();
+  if (!primary) return [];
+  if (primary.endsWith('.Clip')) return [primary];
+  return [primary, `${primary}.Clip`];
 }
 
 function emailIsVerified(value: unknown): boolean {
@@ -101,10 +117,10 @@ async function fetchJwks(url: string): Promise<unknown> {
 export async function verifyProviderIdToken(
   provider: ProviderName,
   idToken: string,
-  audience: string,
+  audience: Audience,
   getJwks: JwksFetcher = fetchJwks,
 ): Promise<VerifiedProviderIdentity> {
-  if (!audience || idToken.length === 0 || idToken.length > MAX_ID_TOKEN_LENGTH) {
+  if (allowedAudiences(audience).length === 0 || idToken.length === 0 || idToken.length > MAX_ID_TOKEN_LENGTH) {
     throw new Error('Invalid provider identity token');
   }
 

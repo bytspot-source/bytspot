@@ -18,7 +18,7 @@ import { entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice } from '../services/iosPushDevices';
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
-import { verifyProviderIdToken } from '../services/providerIdTokenVerifier';
+import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
 import { resolveProviderIdentity } from '../services/providerIdentityAuth';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
@@ -161,7 +161,7 @@ const authRouter = router({
       }
       let identity;
       try {
-        identity = await verifyProviderIdToken('apple', input.identityToken, config.appleClientId);
+        identity = await verifyProviderIdToken('apple', input.identityToken, appleIdentityAudiences(config.appleClientId));
       } catch {
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Apple sign-in could not be verified' });
       }

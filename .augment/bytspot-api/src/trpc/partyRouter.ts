@@ -28,12 +28,78 @@ const hostDestinationsInput = z.object({
 });
 
 /**
- * Host-profile destinations may be saved incomplete (pills toggled off);
- * a party still requires a primary social at publish via hostDestinationsInput.
+ * Official Host identity. Socials store handles — Bytspot owns the routing —
+ * while music/merch/website store HTTPS URLs that are never shown publicly.
+ * The list is ordered (host reorders pills) with at most one primary ⭐.
  */
-const profileDestinationsInput = hostDestinationsInput.extend({
-  primarySocial: hostDestinationsInput.shape.primarySocial.optional(),
+const socialDestinationKinds = ['instagram', 'tiktok', 'youtube', 'x', 'facebook', 'linkedin'] as const;
+const linkDestinationKinds = ['music', 'merch', 'website'] as const;
+const destinationKinds = [...socialDestinationKinds, ...linkDestinationKinds] as const;
+type DestinationKind = (typeof destinationKinds)[number];
+
+const hostHandle = z.string().trim().regex(/^@?[a-z0-9._]{2,30}$/i, 'Handles are 2–30 letters, numbers, dots, or underscores.').transform((value) => value.replace(/^@/, '').toLowerCase());
+
+const destinationEntry = z.object({
+  kind: z.enum(destinationKinds),
+  value: z.string().trim().min(1).max(2048),
+  primary: z.boolean().optional(),
+}).superRefine((entry, ctx) => {
+  if ((socialDestinationKinds as readonly string[]).includes(entry.kind)) {
+    if (!/^@?[a-z0-9._\-]{1,80}$/i.test(entry.value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'Social destinations take a handle, not a link.' });
+    }
+  } else if (!httpsUrl.safeParse(entry.value).success) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'Official destinations must use HTTPS.' });
+  }
 });
+
+const destinationList = z.array(destinationEntry).max(destinationKinds.length).superRefine((list, ctx) => {
+  if (new Set(list.map((entry) => entry.kind)).size !== list.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Each destination can only appear once.' });
+  }
+  if (list.filter((entry) => entry.primary).length > 1) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only one destination can be primary.' });
+  }
+});
+
+const profileIdentityInput = z.object({ handle: hostHandle.nullish(), destinations: destinationList });
+
+/** Bytspot owns social routing: handles resolve to canonical profile URLs. */
+function socialProfileUrl(kind: DestinationKind, handle: string): string {
+  const clean = handle.replace(/^@/, '');
+  switch (kind) {
+    case 'instagram': return `https://instagram.com/${clean}`;
+    case 'tiktok': return `https://tiktok.com/@${clean}`;
+    case 'youtube': return `https://youtube.com/@${clean}`;
+    case 'x': return `https://x.com/${clean}`;
+    case 'facebook': return `https://facebook.com/${clean}`;
+    case 'linkedin': return `https://linkedin.com/in/${clean}`;
+    default: return clean;
+  }
+}
+
+const destinationDisplayNames: Record<DestinationKind, string> = {
+  instagram: 'Instagram', tiktok: 'TikTok', youtube: 'YouTube', x: 'X', facebook: 'Facebook', linkedin: 'LinkedIn',
+  music: 'Music', merch: 'Merch', website: 'Website',
+};
+
+/**
+ * Public projection: label is the @handle for socials or the display name for
+ * links — raw URLs never appear as text, they only power the tap-through.
+ */
+function projectDestinationList(value: Prisma.JsonValue | null | undefined): Array<{ kind: DestinationKind; label: string; url: string; primary: boolean }> {
+  const parsed = destinationList.safeParse(value ?? []);
+  if (!parsed.success) return [];
+  return parsed.data.map((entry) => {
+    const isSocial = (socialDestinationKinds as readonly string[]).includes(entry.kind);
+    return {
+      kind: entry.kind,
+      label: isSocial ? `@${entry.value.replace(/^@/, '')}` : destinationDisplayNames[entry.kind],
+      url: isSocial ? socialProfileUrl(entry.kind, entry.value) : entry.value,
+      primary: entry.primary === true,
+    };
+  });
+}
 
 const draftInput = z.object({
   idempotencyKey: z.string().uuid(),
@@ -47,7 +113,7 @@ const draftInput = z.object({
   capacity: z.number().int().min(2).max(10_000),
   accessMode: z.enum(accessModes),
   requiredMembershipTier: z.enum(tiers),
-  hostDestinations: hostDestinationsInput,
+  hostDestinations: hostDestinationsInput.optional(),
   audienceCircleIds: z.array(z.string().min(1).max(128)).max(100),
   itinerary: z.array(z.object({ title: z.string().trim().min(1).max(160), offsetMinutes: z.number().int().min(0).max(10_080) })).max(30),
   ticketTiers: z.array(ticketTierInput).max(10),
@@ -157,7 +223,7 @@ function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   return {
     templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), endsAt: derivedEndsAt(input), venueName: input.venueName, locationDisclosure: input.locationDisclosure,
     capacity: input.capacity, accessMode: input.accessMode, requiredMembershipTier: input.requiredMembershipTier,
-    hostDestinations: input.hostDestinations as Prisma.InputJsonValue, audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
+    hostDestinations: (input.hostDestinations ?? null) as Prisma.InputJsonValue, audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
     cohosts: input.cohosts, templateConfig: input.templateConfig as Prisma.InputJsonValue,
   };
 }
@@ -310,6 +376,17 @@ export const partyPublish = protectedProcedure
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
     if (party.status === 'published' && party.passCode) return { id: party.id, shareUrl: partyShareUrl(party.id), passCode: party.passCode };
     if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be published from its current state.' });
+    // Snapshot the Official Host identity so later profile edits never
+    // rewrite an already-shared pass. The profile remains the source of truth
+    // for the next party.
+    const profile = await db.hostProfile.findUnique({ where: { userId: ctx.user.userId }, select: { handle: true, hostDestinations: true } });
+    const profileList = destinationList.safeParse(profile?.hostDestinations ?? []);
+    if (profile && profileList.success && profileList.data.length > 0) {
+      await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'draft' },
+        data: { hostDestinations: { identity: true, handle: profile.handle, destinations: profileList.data } as Prisma.InputJsonValue },
+      });
+    }
     const shareUrl = partyShareUrl(party.id);
     const redis = getRedis();
     if (redis) {
@@ -362,6 +439,21 @@ function runOfShow(startsAt: Date, value: Prisma.JsonValue): Array<{ title: stri
 
 function safeDestinations(value: Prisma.JsonValue | null): z.infer<typeof hostDestinationsInput> | null {
   const parsed = hostDestinationsInput.safeParse(value ?? {});
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Publish-time snapshot of the Official Host identity. Distinguishable from
+ * the legacy per-party destinations object by its `identity` marker.
+ */
+const identitySnapshot = z.object({
+  identity: z.literal(true),
+  handle: z.string().nullable(),
+  destinations: destinationList,
+});
+
+function safeIdentitySnapshot(value: Prisma.JsonValue | null): z.infer<typeof identitySnapshot> | null {
+  const parsed = identitySnapshot.safeParse(value ?? {});
   return parsed.success ? parsed.data : null;
 }
 
@@ -468,7 +560,8 @@ export const partyInvite = publicProcedure
       ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
       : null;
     assertShareLinkUsable(party, guest);
-    const destinations = safeDestinations(party.hostDestinations);
+    const identity = safeIdentitySnapshot(party.hostDestinations);
+    const destinations = identity ? null : safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
     const album = party.media.filter((media) => media.kind === 'album');
     return {
@@ -479,7 +572,15 @@ export const partyInvite = publicProcedure
       templateId: party.templateId,
       tier: party.requiredMembershipTier,
       hostName: party.host.name ?? 'Bytspot Host',
-      host: { name: party.host.name ?? 'Bytspot Host', destinations: destinations ?? {} },
+      host: {
+        name: party.host.name ?? 'Bytspot Host',
+        // Legacy per-party object (shipped clients) — empty when the party
+        // carries the new identity snapshot.
+        destinations: destinations ?? {},
+        handle: identity?.handle ?? null,
+        // Ordered public list: label only (never a raw URL); url powers tap-through.
+        destinationList: projectDestinationList(identity?.destinations ?? null),
+      },
       scheduledDate: party.startsAt.toISOString(),
       endsAt: party.endsAt?.toISOString() ?? null,
       runOfShow: runOfShow(party.startsAt, party.itinerary),
@@ -498,19 +599,25 @@ export const partyInvite = publicProcedure
 
 export const hostDestinationsRouter = router({
   get: protectedProcedure.query(async ({ ctx }) => {
-    const profile = await db.hostProfile.findUnique({ where: { userId: ctx.user.userId }, select: { hostDestinations: true } });
-    const parsed = profileDestinationsInput.safeParse(profile?.hostDestinations ?? {});
-    return { destinations: parsed.success ? parsed.data : {} };
+    const profile = await db.hostProfile.findUnique({ where: { userId: ctx.user.userId }, select: { handle: true, hostDestinations: true } });
+    const parsed = destinationList.safeParse(profile?.hostDestinations ?? []);
+    return { handle: profile?.handle ?? null, destinations: parsed.success ? parsed.data : [] };
   }),
   save: protectedProcedure
-    .input(z.object({ destinations: profileDestinationsInput }))
+    .input(profileIdentityInput)
     .mutation(async ({ ctx, input }) => {
-      await db.hostProfile.upsert({
-        where: { userId: ctx.user.userId },
-        update: { hostDestinations: input.destinations as Prisma.InputJsonValue },
-        create: { userId: ctx.user.userId, hostDestinations: input.destinations as Prisma.InputJsonValue },
-      });
-      return { destinations: input.destinations };
+      const handle = input.handle ?? null;
+      try {
+        await db.hostProfile.upsert({
+          where: { userId: ctx.user.userId },
+          update: { handle, hostDestinations: input.destinations as Prisma.InputJsonValue },
+          create: { userId: ctx.user.userId, handle, hostDestinations: input.destinations as Prisma.InputJsonValue },
+        });
+      } catch (error) {
+        if (isUniqueConstraint(error)) throw new TRPCError({ code: 'CONFLICT', message: 'That handle is already taken.' });
+        throw error;
+      }
+      return { handle, destinations: input.destinations };
     }),
 });
 

@@ -176,9 +176,12 @@ model HostProfile {
   status         String    @default("draft") // draft | pending | approved | rejected
   currentStep    Int       @default(1) @map("current_step")
   onboardingData Json?     @map("onboarding_data")
-  /// Official Host destinations (music/merch/website/primary social). The
-  /// host profile is the source of truth; parties snapshot it at publish.
-  hostDestinations Json?   @map("host_destinations")
+  /// Official Host identity. `handle` is the public @name; `hostDestinations`
+  /// is an ordered list of { kind, value, primary? } where socials store
+  /// handles (Bytspot resolves routing) and music/merch/website store HTTPS
+  /// URLs that are never shown publicly. Parties snapshot at publish.
+  handle           String?  @unique
+  hostDestinations Json?    @map("host_destinations")
   submittedAt    DateTime? @map("submitted_at")
   approvedAt     DateTime? @map("approved_at")
   createdAt      DateTime  @default(now()) @map("created_at")

@@ -45,6 +45,8 @@ function caller() {
 }
 
 beforeEach(() => {
+  (db.hostProfile as any).findUnique = async () => null;
+  (db.hostProfile as any).upsert = async () => ({});
   party.findUnique = async () => null;
   party.findFirst = async () => null;
   party.create = async () => ({ id: 'party-1' });
@@ -523,31 +525,77 @@ test('Host share-link expiry override wins and setShareLinkExpiry validates its 
   assert.equal(restored.shareLinkExpiryIsDefault, true);
 });
 
-test('Official Host destinations live on the host profile and reject insecure links', async () => {
+test('Official Host identity lives on the host profile: handle + ordered destinations', async () => {
   const hostProfile = db.hostProfile as any;
 
-  // First read with no profile row: empty destinations, no error.
-  hostProfile.findUnique = async () => null;
-  assert.deepEqual(await caller().events.hostDestinations.get(), { destinations: {} });
+  // First read with no profile row: empty identity, no error.
+  assert.deepEqual(await caller().events.hostDestinations.get(), { handle: null, destinations: [] });
 
-  // Save upserts onto the caller's host profile.
+  // Save upserts the handle (normalized: no @, lowercase) and ordered list.
   let upsertArgs: any;
   hostProfile.upsert = async (args: any) => { upsertArgs = args; return {}; };
-  const destinations = { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } };
-  assert.deepEqual(await caller().events.hostDestinations.save({ destinations }), { destinations });
+  const destinations = [
+    { kind: 'instagram', value: 'MidtownJohn', primary: true },
+    { kind: 'music', value: 'https://music.example.com/host' },
+  ];
+  const saved = await caller().events.hostDestinations.save({ handle: '@MidtownJohn', destinations });
+  assert.equal(saved.handle, 'midtownjohn');
   assert.deepEqual(upsertArgs.where, { userId: 'test-user-id' });
-  assert.deepEqual(upsertArgs.update, { hostDestinations: destinations });
-  assert.equal(upsertArgs.create.userId, 'test-user-id');
+  assert.equal(upsertArgs.update.handle, 'midtownjohn');
+  assert.deepEqual(upsertArgs.update.hostDestinations, destinations);
 
-  // Pills may all be off — an empty object is a valid saved state.
-  assert.deepEqual(await caller().events.hostDestinations.save({ destinations: {} }), { destinations: {} });
+  // All pills off is a valid saved state.
+  assert.deepEqual((await caller().events.hostDestinations.save({ handle: null, destinations: [] })).destinations, []);
 
-  // HTTPS is enforced at the source of truth, not just at publish.
-  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: { musicUrl: 'http://insecure.example.com' } as any }));
+  // Socials take handles; links must be HTTPS; one primary max; no duplicate kinds.
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'instagram', value: 'https://instagram.com/host' }] }));
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'music', value: 'http://insecure.example.com' }] }));
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'music', value: 'https://a.example.com', primary: true }, { kind: 'website', value: 'https://b.example.com', primary: true }] }));
+  await assert.rejects(() => caller().events.hostDestinations.save({ destinations: [{ kind: 'instagram', value: 'a' }, { kind: 'instagram', value: 'b' }] }));
+
+  // Handle collisions surface as CONFLICT.
+  hostProfile.upsert = async () => { throw Object.assign(new Error('unique'), { code: 'P2002' }); };
+  await assert.rejects(() => caller().events.hostDestinations.save({ handle: 'taken', destinations: [] }), { code: 'CONFLICT' });
 
   // Corrupt stored JSON fails closed to empty instead of leaking.
-  hostProfile.findUnique = async () => ({ hostDestinations: { musicUrl: 'javascript:alert(1)' } });
-  assert.deepEqual(await caller().events.hostDestinations.get(), { destinations: {} });
+  hostProfile.findUnique = async () => ({ handle: 'midtownjohn', hostDestinations: { musicUrl: 'javascript:alert(1)' } });
+  assert.deepEqual(await caller().events.hostDestinations.get(), { handle: 'midtownjohn', destinations: [] });
+});
+
+test('Invite projects the Official Host identity block with no raw URLs as labels', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue',
+    hostDestinations: { identity: true, handle: 'midtownjohn', destinations: [
+      { kind: 'instagram', value: 'MidtownJohn', primary: true },
+      { kind: 'tiktok', value: '@midtownjohn' },
+      { kind: 'music', value: 'https://music.example.com/host' },
+    ] },
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  });
+  const invite = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(invite.host.handle, 'midtownjohn');
+  assert.deepEqual(invite.host.destinationList, [
+    { kind: 'instagram', label: '@MidtownJohn', url: 'https://instagram.com/MidtownJohn', primary: true },
+    { kind: 'tiktok', label: '@midtownjohn', url: 'https://tiktok.com/@midtownjohn', primary: false },
+    { kind: 'music', label: 'Music', url: 'https://music.example.com/host', primary: false },
+  ]);
+  // Legacy object stays empty when the identity snapshot is present.
+  assert.deepEqual(invite.host.destinations, {});
+
+  // Legacy parties (old snapshot shape) still project the legacy object.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue',
+    hostDestinations: { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } },
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  });
+  const legacy = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(legacy.host.handle, null);
+  assert.deepEqual(legacy.host.destinationList, []);
+  assert.equal((legacy.host.destinations as any).musicUrl, 'https://music.example.com/host');
 });
 
 test('Run of Show slice 1: endsAt persists, derives from the last beat, and projects absolute times', async () => {

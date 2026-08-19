@@ -173,6 +173,21 @@ const socialInvitesRouter = router({
       if (updated.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'That invitation is not awaiting your response.' });
       return { inviteId: input.inviteId, status: input.response };
     }),
+
+  /** Sender-only cancel of a still-pending invite. Deletes the row so the pair can be re-invited. */
+  cancel: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:invites-cancel' }))
+    .input(z.object({
+      inviteId: z.string().min(1).max(128),
+      surface: surfaceInput,
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const deleted = await db.socialInvitation.deleteMany({
+        where: { id: input.inviteId, fromUserId: ctx.user.userId, status: 'pending' },
+      });
+      if (deleted.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'That invitation is not awaiting cancellation.' });
+      return { success: true };
+    }),
 });
 
 /** Circles — owner-run private member groups. */

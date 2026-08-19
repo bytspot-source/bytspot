@@ -31,6 +31,7 @@ beforeEach(() => {
   socialInvitation.findMany = async () => [];
   socialInvitation.upsert = async ({ create }: any) => ({ id: 'invite-1', status: 'pending', createdAt: new Date('2026-08-01T00:00:00Z'), respondedAt: null, ...create });
   socialInvitation.updateMany = async () => ({ count: 1 });
+  socialInvitation.deleteMany = async () => ({ count: 1 });
   socialCircle.findFirst = async () => null;
   socialCircle.findMany = async () => [];
   socialCircle.create = async ({ data }: any) => ({ id: 'circle-1', createdAt: new Date(), ...data });
@@ -145,6 +146,19 @@ test('Invite list labels directions relative to the caller', async () => {
   assert.deepEqual(invites[0].person, { userId: 'friend', name: 'Friend' });
   assert.equal(invites[1].direction, 'outgoing');
   assert.deepEqual(invites[1].person, { userId: 'other', name: 'Bytspot member' });
+});
+
+test('Only the pending sender can cancel an invitation', async () => {
+  let deleteWhere: any;
+  socialInvitation.deleteMany = async ({ where }: any) => {
+    deleteWhere = where;
+    return { count: 1 };
+  };
+  assert.deepEqual(await caller().social.invites.cancel({ inviteId: 'invite-1', surface: 'network' }), { success: true });
+  assert.deepEqual(deleteWhere, { id: 'invite-1', fromUserId: 'me', status: 'pending' });
+
+  socialInvitation.deleteMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().social.invites.cancel({ inviteId: 'invite-1', surface: 'network' }), { code: 'NOT_FOUND' });
 });
 
 test('Only the pending recipient can respond to an invitation', async () => {

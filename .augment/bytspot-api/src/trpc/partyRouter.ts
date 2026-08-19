@@ -41,6 +41,7 @@ const draftInput = z.object({
   title: z.string().trim().min(3).max(140),
   tagline: z.string().trim().max(280),
   startsAt: z.string().datetime({ offset: true }),
+  endsAt: z.string().datetime({ offset: true }).nullish(),
   venueName: z.string().trim().min(1).max(200),
   locationDisclosure: z.enum(locationDisclosures).default('public'),
   capacity: z.number().int().min(2).max(10_000),
@@ -54,6 +55,15 @@ const draftInput = z.object({
   templateConfig: z.object({ kind: z.enum(templateConfigKinds) }).passthrough(),
   source: z.literal('host-studio'),
 }).superRefine((input, ctx) => {
+  if (input.endsAt) {
+    const startsAt = Date.parse(input.startsAt);
+    const endsAt = Date.parse(input.endsAt);
+    if (endsAt <= startsAt) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endsAt'], message: 'Party end must be after the start.' });
+    } else if (endsAt - startsAt > 7 * 24 * 60 * 60 * 1000) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endsAt'], message: 'Party cannot run longer than 7 days.' });
+    }
+  }
   const allowsStandardConfig = input.templateId === 'comedy-night' || input.templateId === 'premiere';
   if (input.templateConfig.kind === 'standard' && !allowsStandardConfig) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['templateConfig', 'kind'], message: 'Standard configuration is only valid for Comedy Night and Premiere Parties.' });
@@ -128,12 +138,24 @@ function isUniqueConstraint(error: unknown): boolean {
 }
 
 type PartyContent = Pick<Prisma.PartyUncheckedCreateInput,
-  'templateId' | 'title' | 'tagline' | 'startsAt' | 'venueName' | 'locationDisclosure' | 'capacity' | 'accessMode' |
+  'templateId' | 'title' | 'tagline' | 'startsAt' | 'endsAt' | 'venueName' | 'locationDisclosure' | 'capacity' | 'accessMode' |
   'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig'>;
+
+/**
+ * Run of Show slice 1: hosts may set an explicit end; otherwise the last
+ * itinerary beat + 60 minutes closes the party. No end and no beats leaves
+ * endsAt null (share-link fallback of startsAt + 6h still applies).
+ */
+function derivedEndsAt(input: z.infer<typeof draftInput>): Date | null {
+  if (input.endsAt) return new Date(input.endsAt);
+  if (input.itinerary.length === 0) return null;
+  const lastOffset = Math.max(...input.itinerary.map((item) => item.offsetMinutes));
+  return new Date(Date.parse(input.startsAt) + (lastOffset + 60) * 60 * 1000);
+}
 
 function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   return {
-    templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), venueName: input.venueName, locationDisclosure: input.locationDisclosure,
+    templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), endsAt: derivedEndsAt(input), venueName: input.venueName, locationDisclosure: input.locationDisclosure,
     capacity: input.capacity, accessMode: input.accessMode, requiredMembershipTier: input.requiredMembershipTier,
     hostDestinations: input.hostDestinations as Prisma.InputJsonValue, audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
     cohosts: input.cohosts, templateConfig: input.templateConfig as Prisma.InputJsonValue,
@@ -328,6 +350,16 @@ function activityHighlights(value: Prisma.JsonValue): string[] {
   return parsed.success ? parsed.data.map((item) => item.title) : [];
 }
 
+/**
+ * Absolute schedule for the Party Pass: each beat's time derives from the
+ * party clock (startsAt + offset). The client decides "Now" locally; no cron.
+ */
+function runOfShow(startsAt: Date, value: Prisma.JsonValue): Array<{ title: string; scheduledAt: string }> {
+  const parsed = z.array(z.object({ title: z.string(), offsetMinutes: z.number().int().min(0) })).safeParse(value);
+  if (!parsed.success) return [];
+  return parsed.data.map((item) => ({ title: item.title, scheduledAt: new Date(startsAt.getTime() + item.offsetMinutes * 60 * 1000).toISOString() }));
+}
+
 function safeDestinations(value: Prisma.JsonValue | null): z.infer<typeof hostDestinationsInput> | null {
   const parsed = hostDestinationsInput.safeParse(value ?? {});
   return parsed.success ? parsed.data : null;
@@ -449,6 +481,8 @@ export const partyInvite = publicProcedure
       hostName: party.host.name ?? 'Bytspot Host',
       host: { name: party.host.name ?? 'Bytspot Host', destinations: destinations ?? {} },
       scheduledDate: party.startsAt.toISOString(),
+      endsAt: party.endsAt?.toISOString() ?? null,
+      runOfShow: runOfShow(party.startsAt, party.itinerary),
       locationLabel: party.locationDisclosure === 'public' ? party.venueName : null,
       locationDisclosure: party.locationDisclosure,
       accessMode: party.accessMode,

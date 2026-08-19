@@ -549,3 +549,42 @@ test('Official Host destinations live on the host profile and reject insecure li
   hostProfile.findUnique = async () => ({ hostDestinations: { musicUrl: 'javascript:alert(1)' } });
   assert.deepEqual(await caller().events.hostDestinations.get(), { destinations: {} });
 });
+
+test('Run of Show slice 1: endsAt persists, derives from the last beat, and projects absolute times', async () => {
+  let createData: any;
+  party.create = async ({ data }: any) => { createData = data; return { id: 'party-1' }; };
+  // Dedicated user: drafts.create rate-limits per user and earlier tests
+  // consume test-user-id's budget.
+  const runOfShowCaller = () => createCaller({ user: { userId: 'run-of-show-user', email: 'ros@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+
+  // Explicit host end wins.
+  await runOfShowCaller().events.drafts.create({ ...draftInput, endsAt: '2026-08-11T02:00:00Z' });
+  assert.equal(createData.endsAt.toISOString(), '2026-08-11T02:00:00.000Z');
+
+  // No explicit end: last itinerary beat + 60 minutes closes the party.
+  await runOfShowCaller().events.drafts.create({ ...draftInput, itinerary: [{ title: 'Doors open', offsetMinutes: 0 }, { title: 'Headliner', offsetMinutes: 120 }] });
+  assert.equal(createData.endsAt.toISOString(), '2026-08-10T23:00:00.000Z');
+
+  // No end and no beats: endsAt stays null (share-link 6h fallback applies).
+  await runOfShowCaller().events.drafts.create({ ...draftInput, itinerary: [] });
+  assert.equal(createData.endsAt, null);
+
+  // End before start and >7-day runs are rejected.
+  await assert.rejects(() => runOfShowCaller().events.drafts.create({ ...draftInput, endsAt: '2026-08-10T19:00:00Z' }));
+  await assert.rejects(() => runOfShowCaller().events.drafts.create({ ...draftInput, endsAt: '2026-08-18T20:00:01Z' }));
+
+  // The invite projects endsAt and the absolute schedule for each beat.
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue', hostDestinations: null,
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: new Date('2026-08-11T02:00:00Z'), shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [{ title: 'Doors open', offsetMinutes: 0 }, { title: 'Headliner', offsetMinutes: 120 }],
+    ticketTiers: [], host: { name: 'Ava' }, media: [],
+  });
+  const invite = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(invite.endsAt, '2026-08-11T02:00:00.000Z');
+  assert.deepEqual(invite.runOfShow, [
+    { title: 'Doors open', scheduledAt: '2026-08-10T20:00:00.000Z' },
+    { title: 'Headliner', scheduledAt: '2026-08-10T22:00:00.000Z' },
+  ]);
+});

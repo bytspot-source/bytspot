@@ -1,0 +1,79 @@
+import type Redis from 'ioredis';
+import { db } from '../lib/db';
+import { getRedis } from '../lib/redis';
+
+/**
+ * Grace period between a deletion request and irreversible purge. Long enough
+ * that an accidental or coerced deletion is recoverable, short enough to stay
+ * a credible deletion promise.
+ */
+export const DELETION_GRACE_DAYS = 30;
+const GRACE_MS = DELETION_GRACE_DAYS * 24 * 60 * 60 * 1000;
+
+/** Redis key holding user ids whose sessions are revoked pending purge. */
+const REVOKED_KEY = 'account:pending-deletion';
+
+export function purgeDateFrom(requestedAt: Date): Date {
+  return new Date(requestedAt.getTime() + GRACE_MS);
+}
+
+export function isWithinGracePeriod(purgeAfter: Date | null | undefined, now = new Date()): boolean {
+  return Boolean(purgeAfter && purgeAfter.getTime() > now.getTime());
+}
+
+/**
+ * Revoke live sessions for a deleted account.
+ *
+ * Access tokens are valid for days, so clearing the DB flag alone would leave
+ * a deleted account usable until its JWT expired. The revocation set is keyed
+ * by user id and expires with the grace period, after which the row is gone.
+ */
+export async function revokeSessions(userId: string, redis: Redis | null = getRedis()): Promise<void> {
+  if (!redis) return;
+  try {
+    await redis.set(`${REVOKED_KEY}:${userId}`, '1', 'PX', GRACE_MS);
+  } catch {
+    // Redis unavailability must not block the deletion itself; the DB flag is
+    // authoritative and every auth entry point re-checks it.
+  }
+}
+
+export async function restoreSessions(userId: string, redis: Redis | null = getRedis()): Promise<void> {
+  if (!redis) return;
+  try {
+    await redis.del(`${REVOKED_KEY}:${userId}`);
+  } catch {
+    /* see revokeSessions */
+  }
+}
+
+export async function isSessionRevoked(userId: string, redis: Redis | null = getRedis()): Promise<boolean> {
+  if (!redis) return false;
+  try {
+    return (await redis.exists(`${REVOKED_KEY}:${userId}`)) === 1;
+  } catch {
+    // Fail open: a Redis outage must not lock out the entire member base.
+    // The DB flag still blocks sign-in and the purge job still runs.
+    return false;
+  }
+}
+
+/**
+ * Irreversibly remove accounts whose grace period has elapsed. Returns the
+ * number of rows purged so the cron response is observable.
+ */
+export async function purgeExpiredAccounts(now = new Date()): Promise<{ purged: number }> {
+  const due = await db.user.findMany({
+    where: { deletedAt: { not: null }, purgeAfter: { lte: now } },
+    select: { id: true },
+  });
+  if (due.length === 0) return { purged: 0 };
+
+  for (const { id } of due) {
+    // Relations cascade at the schema level; identity hashes are removed first
+    // so a purged member can never resurface in contact discovery.
+    await db.userIdentityHash.deleteMany({ where: { userId: id } });
+    await db.user.delete({ where: { id } });
+  }
+  return { purged: due.length };
+}

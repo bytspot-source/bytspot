@@ -2,9 +2,17 @@
  * User sub-router — Phase 1: Core User Data
  * Handles points, achievements, check-in history, saved spots, preferences.
  */
+import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from './trpc';
 import { db } from '../lib/db';
+import {
+  DELETION_GRACE_DAYS,
+  isWithinGracePeriod,
+  purgeDateFrom,
+  restoreSessions,
+  revokeSessions,
+} from '../services/accountDeletion';
 
 // ─── Achievement Definitions (static catalog) ────────────────────────
 export const ACHIEVEMENTS = [
@@ -360,6 +368,77 @@ const notificationsRouter = router({
     }),
 });
 
+/**
+ * Account lifecycle — App Store guideline 5.1.1(v) requires in-app account
+ * deletion. Deletion is soft for a fixed grace period so a mistaken or coerced
+ * request stays recoverable, then the row is purged irreversibly.
+ */
+const accountRouter = router({
+  /** Current deletion state, so the client can show the countdown. */
+  deletionStatus: protectedProcedure.query(async ({ ctx }) => {
+    const user = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { deletedAt: true, purgeAfter: true },
+    });
+    return {
+      pendingDeletion: Boolean(user?.deletedAt),
+      purgeAfter: user?.purgeAfter?.toISOString() ?? null,
+      graceDays: DELETION_GRACE_DAYS,
+    };
+  }),
+
+  /** Request deletion. Idempotent: re-requesting does not extend the window. */
+  requestDeletion: protectedProcedure
+    .input(z.object({ reason: z.string().max(500).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const user = await db.user.findUnique({
+        where: { id: ctx.user.userId },
+        select: { deletedAt: true, purgeAfter: true },
+      });
+      if (!user) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Account not found' });
+      }
+      if (user.deletedAt && isWithinGracePeriod(user.purgeAfter)) {
+        return { purgeAfter: user.purgeAfter!.toISOString(), graceDays: DELETION_GRACE_DAYS };
+      }
+
+      const requestedAt = new Date();
+      const purgeAfter = purgeDateFrom(requestedAt);
+      await db.user.update({
+        where: { id: ctx.user.userId },
+        data: { deletedAt: requestedAt, purgeAfter, deletionReason: input.reason ?? null },
+      });
+      // Identity hashes go immediately: a member who asked to leave must stop
+      // surfacing in other people's contact discovery at once, even though the
+      // row itself survives for the grace period.
+      await db.userIdentityHash.deleteMany({ where: { userId: ctx.user.userId } });
+      await revokeSessions(ctx.user.userId);
+
+      return { purgeAfter: purgeAfter.toISOString(), graceDays: DELETION_GRACE_DAYS };
+    }),
+
+  /** Cancel a pending deletion while still inside the grace period. */
+  cancelDeletion: protectedProcedure.mutation(async ({ ctx }) => {
+    const user = await db.user.findUnique({
+      where: { id: ctx.user.userId },
+      select: { deletedAt: true, purgeAfter: true },
+    });
+    if (!user?.deletedAt) {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'No deletion is pending' });
+    }
+    if (!isWithinGracePeriod(user.purgeAfter)) {
+      throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'The grace period for this account has elapsed' });
+    }
+
+    await db.user.update({
+      where: { id: ctx.user.userId },
+      data: { deletedAt: null, purgeAfter: null, deletionReason: null },
+    });
+    await restoreSessions(ctx.user.userId);
+    return { restored: true };
+  }),
+});
+
 // ─── Compose user router ────────────────────────────────────────────
 export const userRouter = router({
   points: pointsRouter,
@@ -370,5 +449,6 @@ export const userRouter = router({
   profile: profileRouter,
   vehicles: vehiclesRouter,
   notifications: notificationsRouter,
+  account: accountRouter,
 });
 

@@ -22,6 +22,14 @@ model User {
   vehicles          Json?    // JSON array of saved vehicles
   notificationPrefs Json?    @map("notification_prefs") // push/email/sms preference toggles
   ref       String?  // signup source: "qr", "tiktok", "organic"
+
+  // Account deletion is soft for a fixed grace period so an accidental or
+  // coerced deletion is recoverable; `purgeAfter` is when the row becomes
+  // eligible for irreversible removal.
+  deletedAt      DateTime? @map("deleted_at")
+  purgeAfter     DateTime? @map("purge_after")
+  deletionReason String?   @map("deletion_reason")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

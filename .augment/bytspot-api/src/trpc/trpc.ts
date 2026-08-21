@@ -1,6 +1,7 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import type Redis from 'ioredis';
 import { getRedis } from '../lib/redis';
+import { isSessionRevoked } from '../services/accountDeletion';
 import type { Context } from './context';
 
 /**
@@ -24,6 +25,11 @@ export const publicProcedure = t.procedure;
 export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   if (!ctx.user) {
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Not authenticated' });
+  }
+  // Access tokens outlive a deletion request, so a pending-deletion account
+  // must lose its live sessions rather than stay usable until the JWT expires.
+  if (await isSessionRevoked(ctx.user.userId)) {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is pending deletion' });
   }
   return next({ ctx: { ...ctx, user: ctx.user } });
 });

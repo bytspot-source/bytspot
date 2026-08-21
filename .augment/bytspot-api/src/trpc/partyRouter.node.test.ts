@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
@@ -729,4 +730,107 @@ test('A host still reaches their own party after the share link expires', async 
 
   party.findFirst = async () => ({ ...expired, hostUserId: 'test-user-id' });
   assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).action, 'view-pass');
+});
+
+test('an RSVP tells the host once, and a repeat RSVP does not ring them again', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  const targeted: string[][] = [];
+  pushDevice.findMany = async ({ where }: any) => { targeted.push(where.userId.in); return []; };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'open', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'usr_host', startsAt: new Date(Date.now() + 3_600_000), endsAt: null, shareLinkExpiresAt: null,
+    admissionPaused: false, ticketTiers: [],
+  });
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'published' });
+  user.findUnique = async () => ({ membershipTier: 'green', name: 'Ama Boateng' });
+  partyGuest.findUnique = async () => null;
+  partyGuest.count = async () => 0;
+  partyGuest.upsert = async () => ({ status: 'rsvp', accessGranted: true });
+
+  await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(targeted, [['usr_host']], 'the host, and only the host, is told a guest is coming');
+
+  // The same member re-opening their pass is not a new arrival.
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(targeted.length, 1, 'a repeat RSVP must not notify the host again');
+});
+
+test('a guest list row that appeared concurrently does not ring the host twice', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  let sends = 0;
+  pushDevice.findMany = async () => { sends += 1; return []; };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'open', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'usr_host', startsAt: new Date(Date.now() + 3_600_000), endsAt: null, shareLinkExpiresAt: null,
+    admissionPaused: false, ticketTiers: [],
+  });
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'published' });
+  user.findUnique = async () => ({ membershipTier: 'green', name: 'Ama' });
+  partyGuest.count = async () => 0;
+  partyGuest.upsert = async () => ({ status: 'rsvp', accessGranted: true });
+
+  // The pre-transaction read sees nobody, but by the time the transaction
+  // runs another request has already added this member. Notification must
+  // follow the state read inside the transaction, not the stale one.
+  let reads = 0;
+  partyGuest.findUnique = async () => {
+    reads += 1;
+    return reads === 1 ? null : { status: 'rsvp', accessGranted: false };
+  };
+
+  const concurrentCaller = createCaller({ user: { userId: 'usr_concurrent', email: 'c@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  await concurrentCaller.events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sends, 0, 'the host is told when the guest joins the list, and only then');
+});
+
+test('a name lookup failure still delivers the alert and never fails the RSVP', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  const targeted: string[][] = [];
+  pushDevice.findMany = async ({ where }: any) => { targeted.push(where.userId.in); return []; };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'open', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'usr_host', startsAt: new Date(Date.now() + 3_600_000), endsAt: null, shareLinkExpiresAt: null,
+    admissionPaused: false, ticketTiers: [],
+  });
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'published' });
+  partyGuest.findUnique = async () => null;
+  partyGuest.count = async () => 0;
+  partyGuest.upsert = async () => ({ status: 'rsvp', accessGranted: true });
+
+  let membershipRead = false;
+  user.findUnique = async () => {
+    // The membership read that gates the RSVP must still succeed; only the
+    // later cosmetic name lookup fails.
+    if (!membershipRead) { membershipRead = true; return { membershipTier: 'green' }; }
+    throw new Error('user lookup failed');
+  };
+
+  const enrichCaller = createCaller({ user: { userId: 'usr_enrich', email: 'e@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  const result = await enrichCaller.events.rsvp.create({ partyId: 'party-1', idempotencyKey: randomUUID() });
+  assert.deepEqual(result, { status: 'rsvp', accessGranted: true }, 'the RSVP stands even when its notification copy cannot be enriched');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(targeted, [['usr_host']], 'the host is still told, under a generic name');
+});
+
+test('a failing push never turns a successful RSVP into an error', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  pushDevice.findMany = async () => { throw new Error('APNs is down'); };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'open', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'usr_host', startsAt: new Date(Date.now() + 3_600_000), endsAt: null, shareLinkExpiresAt: null,
+    admissionPaused: false, ticketTiers: [],
+  });
+  user.findUnique = async () => ({ membershipTier: 'green', name: 'Ama' });
+  partyGuest.findUnique = async () => null;
+  partyGuest.count = async () => 0;
+  partyGuest.upsert = async () => ({ status: 'rsvp', accessGranted: true });
+
+  const pushFailCaller = createCaller({ user: { userId: 'usr_pushfail', email: 'p@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  const result = await pushFailCaller.events.rsvp.create({ partyId: 'party-1', idempotencyKey: randomUUID() });
+  assert.deepEqual(result, { status: 'rsvp', accessGranted: true });
+  await new Promise((resolve) => setImmediate(resolve));
 });

@@ -21,6 +21,32 @@ export function isWithinGracePeriod(purgeAfter: Date | null | undefined, now = n
   return Boolean(purgeAfter && purgeAfter.getTime() > now.getTime());
 }
 
+export type SignInDeletionOutcome = 'none' | 'restored' | 'purge-pending';
+
+/**
+ * Applies deletion policy to a successful sign-in, whatever the credential.
+ * Signing in is the owner proving control, so it cancels a pending deletion
+ * rather than locking them out of their own recovery. Every auth path must
+ * call this: a member who deleted their account and signs back in with Apple
+ * must be restored exactly as an email member is, or the 30-day promise is
+ * only true for one credential type.
+ *
+ * Returns 'purge-pending' when the grace period has elapsed; the caller must
+ * then refuse the sign-in, because the row is awaiting irreversible purge.
+ */
+export async function applyDeletionPolicyOnSignIn(userId: string, now = new Date()): Promise<SignInDeletionOutcome> {
+  const user = await db.user.findUnique({ where: { id: userId }, select: { deletedAt: true, purgeAfter: true } });
+  if (!user?.deletedAt) return 'none';
+  if (!isWithinGracePeriod(user.purgeAfter, now)) return 'purge-pending';
+
+  await db.user.update({
+    where: { id: userId },
+    data: { deletedAt: null, purgeAfter: null, deletionReason: null },
+  });
+  await restoreSessions(userId);
+  return 'restored';
+}
+
 /**
  * Revoke live sessions for a deleted account.
  *

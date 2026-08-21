@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
+import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { db } from '../lib/db';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
@@ -855,8 +856,13 @@ export const partyControlRouter = router({
           where: { id: guest.id },
           data: { status: input.decision, accessGranted: input.decision === 'approved' },
         });
-        return { guestId: updated.id, status: updated.status, accessGranted: updated.accessGranted };
-      }, 'Party capacity changed. Please retry.');
+        return { guestId: updated.id, status: updated.status, accessGranted: updated.accessGranted, guestUserId: updated.userId };
+      }, 'Party capacity changed. Please retry.').then(({ guestUserId, ...result }) => {
+        dispatchPartyAlert(alertGuestOfDecision({
+          partyId: party.id, guestUserId, partyTitle: party.title ?? null, decision: input.decision,
+        }));
+        return result;
+      });
     }),
 
   checkIn: protectedProcedure
@@ -880,8 +886,11 @@ export const partyControlRouter = router({
           data: { status: 'checked-in', checkedInAt: new Date() },
         });
         if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already been checked in.' });
-        return { status: 'checked-in' as const, guestName: guest.user.name ?? 'Bytspot member' };
-      }, 'Door check-in conflicted. Please retry.');
+        return { status: 'checked-in' as const, guestName: guest.user.name ?? 'Bytspot member', arrivedName: guest.user.name ?? null };
+      }, 'Door check-in conflicted. Please retry.').then(({ arrivedName, ...result }) => {
+        dispatchPartyAlert(alertHostOfDoorArrival({ partyId: party.id, guestName: arrivedName }));
+        return result;
+      });
     }),
 });
 
@@ -950,7 +959,7 @@ export const partyRsvpRouter = router({
       return serializableTransaction(async (tx) => {
         const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (existing?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
-        if (existing?.accessGranted) return { status: existing.status, accessGranted: true };
+        if (existing?.accessGranted) return { status: existing.status, accessGranted: true, joinedGuestList: false };
         if (party.admissionPaused) throw new TRPCError({ code: 'CONFLICT', message: 'The host has paused new admissions for this Party.' });
         if (accessGranted) {
           const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
@@ -961,8 +970,18 @@ export const partyRsvpRouter = router({
           create: { partyId: party.id, userId: ctx.user.userId, status, accessGranted },
           update: { status, accessGranted },
         });
-        return { status: guest.status, accessGranted: guest.accessGranted };
-      }, 'Party capacity changed. Please retry.');
+        return { status: guest.status, accessGranted: guest.accessGranted, joinedGuestList: !existing };
+      }, 'Party capacity changed. Please retry.').then(({ joinedGuestList, ...result }) => {
+        // Only joining the guest list is worth a push, and that decision is
+        // read inside the transaction: a pre-read taken before it could let
+        // two concurrent first RSVPs both look new and ring the host twice.
+        if (joinedGuestList) {
+          dispatchPartyAlert(alertHostOfGuestResponse({
+            partyId: party.id, guestUserId: ctx.user.userId, approvalRequired,
+          }));
+        }
+        return result;
+      });
     }),
 });
 

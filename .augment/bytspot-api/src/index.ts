@@ -4,6 +4,8 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as trpcExpress from '@trpc/server/adapters/express';
 import { config, printConfigDiagnostics } from './config';
+import { db } from './lib/db';
+import { logAdminBootstrapIds } from './services/adminRbac';
 
 // tRPC
 import { appRouter } from './trpc/router';
@@ -81,6 +83,10 @@ app.listen(config.port, () => {
   console.log(`   Environment: ${config.nodeEnv}`);
   console.log(`   Health check: http://localhost:${config.port}/health`);
   printConfigDiagnostics();
+  // Resolution only — prints ids for ADMIN_BOOTSTRAP_EMAILS, grants nothing.
+  void logAdminBootstrapIds((emails) =>
+    db.user.findMany({ where: { email: { in: emails } }, select: { id: true, email: true } }),
+  ).catch(() => {});
   // Start in-process crowd simulation (fresh data every 15 min)
   // Crowd alerts are chained — they run automatically after each simulation
   startCrowdSimulator();

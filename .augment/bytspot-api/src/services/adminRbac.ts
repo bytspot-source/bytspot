@@ -56,6 +56,38 @@ export function assertBytspotAdmin(user: AuthPayload | null | undefined): AdminG
 }
 
 /**
+ * Boot-time helper: print the immutable user ids behind ADMIN_BOOTSTRAP_EMAILS
+ * so an operator can populate ADMIN_USER_IDS from the deploy logs without
+ * database shell access.
+ *
+ * This grants nothing. Email is attacker-choosable because `auth.signup` is
+ * public and unverified, so resolution stays a human-reviewed step.
+ */
+export async function logAdminBootstrapIds(
+  findUsers: (emails: string[]) => Promise<Array<{ id: string; email: string }>>,
+  raw = config.adminBootstrapEmails,
+): Promise<void> {
+  const emails = raw.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (emails.length === 0) return;
+
+  const users = await findUsers(emails);
+  const byEmail = new Map(users.map((u) => [u.email.toLowerCase(), u.id]));
+
+  console.log('   ── Admin bootstrap (resolution only — grants nothing) ──');
+  for (const email of emails) {
+    const id = byEmail.get(email);
+    console.log(id
+      ? `   ${email} → ${id}`
+      : `   ${email} → NOT REGISTERED — claim this account before granting it`);
+  }
+  const resolved = emails.map((e) => byEmail.get(e)).filter((id): id is string => Boolean(id));
+  if (resolved.length > 0) {
+    console.log(`   ADMIN_USER_IDS=${resolved.map((id) => `${id}:BYTSPOT_ADMIN`).join(',')}`);
+  }
+  console.log('   Set that value, then remove ADMIN_BOOTSTRAP_EMAILS.');
+}
+
+/**
  * Structured audit line for an admin action. Admin identity must be
  * attributable, so every gated call records who acted and under which group.
  */

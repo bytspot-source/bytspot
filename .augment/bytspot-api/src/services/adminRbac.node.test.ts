@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { adminGroupFor, assertBytspotAdmin, ADMIN_GROUPS } from './adminRbac';
+import { adminGroupFor, assertBytspotAdmin, logAdminBootstrapIds, ADMIN_GROUPS } from './adminRbac';
+
+async function captureBootstrap(emails: string, rows: Array<{ id: string; email: string }>): Promise<string> {
+  const original = console.log;
+  const lines: string[] = [];
+  console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
+  try {
+    await logAdminBootstrapIds(async () => rows, emails);
+  } finally {
+    console.log = original;
+  }
+  return lines.join('\n');
+}
 
 const allowlist = 'usr_ops:BYTSPOT_ADMIN,usr_oncall:INTERNAL_OPS,usr_bare';
 
@@ -48,6 +60,31 @@ test('the gate separates unauthenticated from forbidden', () => {
     () => assertBytspotAdmin({ userId: 'usr_guest', email: 'guest@bytspot.com' }),
     { code: 'FORBIDDEN' },
   );
+});
+
+test('bootstrap resolution prints ids and a ready-to-paste allowlist', async () => {
+  const out = await captureBootstrap('kojo@bytspot.com', [{ id: 'usr_kojo', email: 'kojo@bytspot.com' }]);
+  assert.match(out, /kojo@bytspot\.com → usr_kojo/);
+  assert.match(out, /ADMIN_USER_IDS=usr_kojo:BYTSPOT_ADMIN/);
+});
+
+test('bootstrap flags unregistered addresses as squattable', async () => {
+  const out = await captureBootstrap('admin@bytspot.app', []);
+  assert.match(out, /NOT REGISTERED/);
+  assert.doesNotMatch(out, /ADMIN_USER_IDS=/);
+});
+
+test('bootstrap resolution grants nothing on its own', async () => {
+  await captureBootstrap('kojo@bytspot.com', [{ id: 'usr_kojo', email: 'kojo@bytspot.com' }]);
+  assert.equal(adminGroupFor('usr_kojo', ''), null);
+  assert.throws(
+    () => assertBytspotAdmin({ userId: 'usr_kojo', email: 'kojo@bytspot.com' }),
+    { code: 'FORBIDDEN' },
+  );
+});
+
+test('an empty bootstrap list prints nothing', async () => {
+  assert.equal(await captureBootstrap('', []), '');
 });
 
 test('only the two documented groups exist', () => {

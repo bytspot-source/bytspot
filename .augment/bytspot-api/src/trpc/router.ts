@@ -1,4 +1,5 @@
 import { TRPCError } from '@trpc/server';
+import { randomInt } from 'crypto';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -20,6 +21,7 @@ import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
 import { resolveProviderIdentity } from '../services/providerIdentityAuth';
+import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -925,13 +927,12 @@ const providersRouter = router({
  * ── Admin sub-router ────────────────────────────────────
  */
 const adminRouter = router({
-  /** GET /admin/stats → admin.stats query (admin password required) */
-  stats: publicProcedure
-    .input(z.object({ adminPassword: z.string() }))
-    .query(async ({ input }) => {
-      if (!config.adminPassword || input.adminPassword !== config.adminPassword) {
-        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Wrong admin password' });
-      }
+  /** admin.stats query — JWT auth + admin group membership required */
+  stats: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-stats' }))
+    .query(async ({ ctx }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.stats' });
 
       const r = getRedis();
       const today = new Date();
@@ -985,13 +986,19 @@ const adminRouter = router({
       };
     }),
 
-  /** POST /admin/generate-invite → admin.generateInvite mutation */
-  generateInvite: publicProcedure
-    .input(z.object({ adminPassword: z.string(), count: z.number().min(1).max(50).default(1) }))
-    .mutation(async ({ input }) => {
-      if (!config.adminPassword || input.adminPassword !== config.adminPassword) {
-        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Wrong admin password' });
-      }
+  /** admin.generateInvite mutation — JWT auth + admin group membership required */
+  generateInvite: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin-generate-invite' }))
+    .input(z.object({ count: z.number().min(1).max(50).default(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      auditAdminAction({
+        actorId: ctx.user.userId,
+        actorEmail: ctx.user.email,
+        group,
+        action: 'admin.generateInvite',
+        detail: { count: input.count },
+      });
 
       const r = getRedis();
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -999,7 +1006,7 @@ const adminRouter = router({
 
       for (let i = 0; i < input.count; i++) {
         let code = 'BYT-';
-        for (let j = 0; j < 6; j++) code += chars[Math.floor(Math.random() * chars.length)];
+        for (let j = 0; j < 6; j++) code += chars[randomInt(chars.length)];
         if (r) {
           await r.set(`invite:${code}`, JSON.stringify({ used: false, createdAt: new Date().toISOString() }), 'EX', 60 * 60 * 24 * 30);
         }

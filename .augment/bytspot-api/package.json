@@ -10,7 +10,8 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
-    "db:migrate": "prisma migrate deploy"
+    "db:migrate": "prisma migrate deploy",
+    "admin:resolve": "tsx scripts/resolve-admin-ids.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

@@ -349,6 +349,36 @@ const DEFAULT_NOTIFICATION_PREFS = {
   sms: { reservations: true, reminders: true, emergencies: true },
 };
 
+/**
+ * Rebuilds one preference channel from the defaults, so only known keys with
+ * boolean values survive. Stored JSON is untrusted: legacy rows, arrays and
+ * hand-edited values must not be copied back into the saved shape, and a
+ * non-boolean would read as "unset" at delivery time and silently restore the
+ * default the member had switched off.
+ */
+function mergeChannel<T extends Record<string, boolean>>(
+  defaults: T,
+  stored: unknown,
+  channel: string,
+  input: Partial<T>,
+): T {
+  const merged = { ...defaults };
+  const container = stored && typeof stored === 'object' && !Array.isArray(stored)
+    ? (stored as Record<string, unknown>)[channel]
+    : undefined;
+  const storedChannel = container && typeof container === 'object' && !Array.isArray(container)
+    ? (container as Record<string, unknown>)
+    : {};
+
+  for (const key of Object.keys(defaults) as (keyof T)[]) {
+    const previous = storedChannel[key as string];
+    if (typeof previous === 'boolean') merged[key] = previous as T[keyof T];
+    const next = input[key];
+    if (typeof next === 'boolean') merged[key] = next as T[keyof T];
+  }
+  return merged;
+}
+
 const notificationsRouter = router({
   /** Get user's notification preferences */
   getPrefs: protectedProcedure.query(async ({ ctx }) => {
@@ -370,11 +400,11 @@ const notificationsRouter = router({
       // A client that predates a category omits it. Merging over what is
       // already stored keeps an existing opt-out switched off instead of
       // silently turning it back on when an older build saves.
-      const stored = (existing?.notificationPrefs ?? {}) as Record<string, Record<string, boolean>>;
+      const stored = existing?.notificationPrefs;
       const merged = {
-        push: { ...DEFAULT_NOTIFICATION_PREFS.push, ...stored.push, ...input.push },
-        email: { ...DEFAULT_NOTIFICATION_PREFS.email, ...stored.email, ...input.email },
-        sms: { ...DEFAULT_NOTIFICATION_PREFS.sms, ...stored.sms, ...input.sms },
+        push: mergeChannel(DEFAULT_NOTIFICATION_PREFS.push, stored, 'push', input.push),
+        email: mergeChannel(DEFAULT_NOTIFICATION_PREFS.email, stored, 'email', input.email),
+        sms: mergeChannel(DEFAULT_NOTIFICATION_PREFS.sms, stored, 'sms', input.sms),
       };
       await db.user.update({
         where: { id: ctx.user.userId },

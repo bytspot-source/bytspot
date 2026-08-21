@@ -154,3 +154,43 @@ test('a member can switch party alerts off explicitly', async () => {
 
   assert.equal(saved.push.party, false);
 });
+
+test('malformed stored preferences cannot be written back or bypass an opt-out', async () => {
+  // Stored JSON is untrusted: legacy rows and hand-edited values must not
+  // survive a save, and a non-boolean must not read as "unset" later.
+  user.findUnique = async () => ({
+    notificationPrefs: { push: { party: 'garbage', extra: true }, email: ['nonsense'], sms: null },
+  });
+  let saved: any = null;
+  user.update = async ({ data }: any) => { saved = data.notificationPrefs; return {}; };
+
+  await caller().user.notifications.updatePrefs({
+    push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false },
+    email: { reservations: true, promotions: false, newsletter: true, receipts: true },
+    sms: { reservations: true, reminders: true, emergencies: true },
+  });
+
+  assert.equal(saved.push.party, true, 'a non-boolean falls back to the default rather than persisting');
+  assert.equal('extra' in saved.push, false, 'unknown keys are not copied into the saved shape');
+  assert.deepEqual(Object.keys(saved).sort(), ['email', 'push', 'sms']);
+  assert.equal(saved.email.receipts, true, 'a garbage channel rebuilds from defaults and input');
+  assert.equal(saved.sms.reminders, true);
+  for (const channel of Object.values(saved) as Record<string, unknown>[]) {
+    for (const value of Object.values(channel)) assert.equal(typeof value, 'boolean');
+  }
+});
+
+test('a stored preferences array cannot leak numeric keys into the saved shape', async () => {
+  user.findUnique = async () => ({ notificationPrefs: ['garbage'] });
+  let saved: any = null;
+  user.update = async ({ data }: any) => { saved = data.notificationPrefs; return {}; };
+
+  await caller().user.notifications.updatePrefs({
+    push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false, party: false },
+    email: { reservations: true, promotions: false, newsletter: true, receipts: true },
+    sms: { reservations: true, reminders: true, emergencies: true },
+  });
+
+  assert.equal(saved.push.party, false, 'the explicit opt-out still wins');
+  assert.equal('0' in saved.push, false);
+});

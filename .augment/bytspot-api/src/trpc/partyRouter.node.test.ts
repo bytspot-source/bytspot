@@ -681,3 +681,52 @@ test('Run of Show slice 1: endsAt persists, derives from the last beat, and proj
     { title: 'Headliner', scheduledAt: '2026-08-10T22:00:00.000Z' },
   ]);
 });
+
+test('A host holds a confirmed pass to their own party regardless of tier or access mode', async () => {
+  // A host is not a guest of their own party, so without an explicit host
+  // branch they fall through to "membership-required" (or get asked to buy a
+  // ticket to their own room) and arrival guidance stays locked.
+  party.findFirst = async () => ({
+    id: 'party-1', hostUserId: 'test-user-id', status: 'published', accessMode: 'paid-ticket',
+    requiredMembershipTier: 'platinum', capacity: 20, startsAt: new Date(Date.now() + 86_400_000),
+    endsAt: null, shareLinkExpiresAt: null, arrivalVenueId: 'venue-1',
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 20, requiredMembershipTier: 'platinum' }],
+  });
+  partyGuest.findUnique = async () => null;
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
+  assert.equal(pass.action, 'view-pass');
+  assert.equal(pass.guest.accessGranted, true);
+  assert.equal(pass.guest.status, 'host');
+});
+
+test('A non-host on the same party is still gated by membership tier', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', hostUserId: 'someone-else', status: 'published', accessMode: 'paid-ticket',
+    requiredMembershipTier: 'platinum', capacity: 20, startsAt: new Date(Date.now() + 86_400_000),
+    endsAt: null, shareLinkExpiresAt: null, arrivalVenueId: 'venue-1', ticketTiers: [],
+  });
+  partyGuest.findUnique = async () => null;
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
+  assert.equal(pass.action, 'unavailable');
+  assert.equal(pass.guest.accessGranted, false);
+});
+
+test('A host still reaches their own party after the share link expires', async () => {
+  const expired = {
+    id: 'party-1', status: 'published', accessMode: 'rsvp', requiredMembershipTier: 'green', capacity: 20,
+    startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000),
+    shareLinkExpiresAt: null, ticketTiers: [],
+  };
+  partyGuest.findUnique = async () => null;
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  party.findFirst = async () => ({ ...expired, hostUserId: 'someone-else' });
+  await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  party.findFirst = async () => ({ ...expired, hostUserId: 'test-user-id' });
+  assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).action, 'view-pass');
+});

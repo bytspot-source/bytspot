@@ -501,10 +501,14 @@ function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsAt: Date
  * and the host keeps Party Control (both use host/guest-scoped procedures).
  */
 function assertShareLinkUsable(
-  party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date },
+  party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date; hostUserId?: string },
   guest: { accessGranted: boolean } | null,
+  viewerUserId?: string | null,
 ): void {
   if (guest?.accessGranted) return;
+  // A host must always be able to open their own party, including after the
+  // share link has stopped admitting new arrivals.
+  if (viewerUserId && party.hostUserId && viewerUserId === party.hostUserId) return;
   if (shareLinkExpired(party)) {
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   }
@@ -515,8 +519,15 @@ async function membershipTierFor(userId: string): Promise<MembershipTier | null>
   return isMembershipTier(user?.membershipTier) ? user.membershipTier : null;
 }
 
-function passAction(party: { accessMode: string; requiredMembershipTier: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean, membershipEligible: boolean) {
+function passAction(party: { accessMode: string; requiredMembershipTier: string; hostUserId: string }, guest: { status: string; accessGranted: boolean } | null, isAuthenticated: boolean, membershipEligible: boolean, viewerUserId?: string | null) {
   if (!isAuthenticated) return { action: 'authenticate', status: 'anonymous', accessGranted: false } as const;
+  // The host holds their own door. Membership tier and access mode gate the
+  // guests a host admits, never the host: a host is not a guest of their own
+  // party, so without this they fall through to "membership-required" or are
+  // asked to buy a ticket to their own room.
+  if (viewerUserId && viewerUserId === party.hostUserId) {
+    return { action: 'view-pass', status: 'host', accessGranted: true } as const;
+  }
   if (!membershipEligible) return { action: 'unavailable', status: 'membership-required', accessGranted: false } as const;
   if (guest?.accessGranted) return { action: 'view-pass', status: guest.status, accessGranted: true } as const;
   if (guest?.status === 'pending') return { action: 'unavailable', status: 'pending', accessGranted: false } as const;
@@ -537,11 +548,14 @@ async function authorizedPartyArrival(partyId: string, userId: string) {
     include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true } } },
   });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
-  if (!meetsRequiredMembershipTier(await membershipTierFor(userId), party.requiredMembershipTier)) {
+  const isHost = party.hostUserId === userId;
+  if (!isHost && !meetsRequiredMembershipTier(await membershipTierFor(userId), party.requiredMembershipTier)) {
     throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
   }
-  const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId } } });
-  if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
+  if (!isHost) {
+    const guest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId } } });
+    if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
+  }
   if (!party.arrivalVenue) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Arrival guidance is not enabled for this Party.' });
   return party;
 }
@@ -570,7 +584,7 @@ export const partyInvite = publicProcedure
     const guest = ctx.user
       ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
       : null;
-    assertShareLinkUsable(party, guest);
+    assertShareLinkUsable(party, guest, ctx.user?.userId);
     const identity = safeIdentitySnapshot(party.hostDestinations);
     const destinations = identity ? null : safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
@@ -645,9 +659,9 @@ export const partyPassRouter = router({
       const guest = ctx.user
         ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
         : null;
-      assertShareLinkUsable(party, guest);
+      assertShareLinkUsable(party, guest, ctx.user?.userId);
       const membershipTier = ctx.user ? await membershipTierFor(ctx.user.userId) : null;
-      const state = passAction(party, guest, Boolean(ctx.user), meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier));
+      const state = passAction(party, guest, Boolean(ctx.user), meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier), ctx.user?.userId);
       const premiumMobilityEligible = Boolean(ctx.user && state.accessGranted && party.arrivalVenueId && meetsRequiredMembershipTier(membershipTier, 'platinum'));
       return { partyId: party.id, action: state.action, guest: { status: state.status, accessGranted: state.accessGranted }, premiumMobilityEligible };
     }),

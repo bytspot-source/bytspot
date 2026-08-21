@@ -194,3 +194,28 @@ test('a stored preferences array cannot leak numeric keys into the saved shape',
   assert.equal(saved.push.party, false, 'the explicit opt-out still wins');
   assert.equal('0' in saved.push, false);
 });
+
+test('reading preferences rebuilds a malformed stored record', async () => {
+  user.findUnique = async () => ({
+    notificationPrefs: { push: { party: 'garbage', extra: true }, email: ['nonsense'], sms: null },
+  });
+  const prefs: any = await caller().user.notifications.getPrefs();
+
+  assert.equal(prefs.push.party, true, 'a non-boolean reads as the default, matching delivery');
+  assert.equal('extra' in prefs.push, false);
+  assert.deepEqual(Object.keys(prefs).sort(), ['email', 'push', 'sms']);
+  for (const channel of Object.values(prefs) as Record<string, unknown>[]) {
+    for (const value of Object.values(channel)) assert.equal(typeof value, 'boolean');
+  }
+
+  // A stored array is not a settings screen.
+  user.findUnique = async () => ({ notificationPrefs: ['garbage'] });
+  const fromArray: any = await caller().user.notifications.getPrefs();
+  assert.equal(Array.isArray(fromArray), false);
+  assert.equal(fromArray.push.party, true);
+
+  // A genuine opt-out survives the rebuild.
+  user.findUnique = async () => ({ notificationPrefs: { push: { party: false } } });
+  const optedOut: any = await caller().user.notifications.getPrefs();
+  assert.equal(optedOut.push.party, false, 'what the member chose is what they are shown');
+});

@@ -379,6 +379,15 @@ function mergeChannel<T extends Record<string, boolean>>(
   return merged;
 }
 
+/** The stored record rebuilt into the shape every caller is entitled to assume. */
+function sanitizeNotificationPrefs(stored: unknown): typeof DEFAULT_NOTIFICATION_PREFS {
+  return {
+    push: mergeChannel(DEFAULT_NOTIFICATION_PREFS.push, stored, 'push', {}),
+    email: mergeChannel(DEFAULT_NOTIFICATION_PREFS.email, stored, 'email', {}),
+    sms: mergeChannel(DEFAULT_NOTIFICATION_PREFS.sms, stored, 'sms', {}),
+  };
+}
+
 const notificationsRouter = router({
   /** Get user's notification preferences */
   getPrefs: protectedProcedure.query(async ({ ctx }) => {
@@ -386,7 +395,9 @@ const notificationsRouter = router({
       where: { id: ctx.user.userId },
       select: { notificationPrefs: true },
     });
-    return (user?.notificationPrefs as typeof DEFAULT_NOTIFICATION_PREFS) ?? DEFAULT_NOTIFICATION_PREFS;
+    // Rebuilt rather than returned raw: a malformed row must not reach the
+    // client as a settings screen it cannot render or honestly represent.
+    return sanitizeNotificationPrefs(user?.notificationPrefs);
   }),
 
   /** Update user's notification preferences */
@@ -406,6 +417,7 @@ const notificationsRouter = router({
         email: mergeChannel(DEFAULT_NOTIFICATION_PREFS.email, stored, 'email', input.email),
         sms: mergeChannel(DEFAULT_NOTIFICATION_PREFS.sms, stored, 'sms', input.sms),
       };
+
       await db.user.update({
         where: { id: ctx.user.userId },
         data: { notificationPrefs: merged as any },

@@ -37,14 +37,14 @@ export function partyAlertUrl(partyId: string): string {
  * later alert cannot reach someone the host has already turned away.
  */
 export async function partyAlertRecipient(audience: PartyAlertAudience): Promise<string | null> {
-  if (audience.kind === 'host') {
-    const party = await db.party.findUnique({
-      where: { id: audience.partyId },
-      select: { hostUserId: true, status: true },
-    });
-    if (!party || party.status !== 'published') return null;
-    return party.hostUserId;
-  }
+  const party = await db.party.findUnique({
+    where: { id: audience.partyId },
+    select: { hostUserId: true, status: true },
+  });
+  // A Party that is not published is not addressable by either audience: an
+  // unpublished or withdrawn Party must not be able to notify anyone.
+  if (!party || party.status !== 'published') return null;
+  if (audience.kind === 'host') return party.hostUserId;
 
   const guest = await db.partyGuest.findUnique({
     where: { partyId_userId: { partyId: audience.partyId, userId: audience.userId } },
@@ -75,13 +75,27 @@ async function send(input: {
   });
 }
 
+/**
+ * Looks up a display name for alert copy. Every failure degrades to the
+ * generic form: enriching a notification must never be able to fail the
+ * mutation that earned it, and the alert is worth more than the name.
+ */
+async function displayName(userId: string): Promise<string | null> {
+  try {
+    const member = await db.user.findUnique({ where: { id: userId }, select: { name: true } });
+    return member?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** A guest asked to come. Reaches the host only. */
 export async function alertHostOfGuestResponse(input: {
   partyId: string;
-  guestName: string | null;
+  guestUserId: string;
   approvalRequired: boolean;
 }): Promise<NotificationDeliveryResult> {
-  const who = input.guestName?.trim() || 'A Bytspot member';
+  const who = (await displayName(input.guestUserId))?.trim() || 'A Bytspot member';
   return send({
     audience: { kind: 'host', partyId: input.partyId },
     title: input.approvalRequired ? 'New Party request' : 'Someone is coming',

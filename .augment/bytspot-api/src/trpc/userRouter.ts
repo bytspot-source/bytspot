@@ -326,6 +326,9 @@ const notificationPrefsSchema = z.object({
     reminders: z.boolean(),
     insider: z.boolean(),
     nearby: z.boolean(),
+    // Optional so a client built before party alerts existed can still save
+    // preferences without silently dropping the member's party choice.
+    party: z.boolean().optional(),
   }),
   email: z.object({
     reservations: z.boolean(),
@@ -341,7 +344,7 @@ const notificationPrefsSchema = z.object({
 });
 
 const DEFAULT_NOTIFICATION_PREFS = {
-  push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false },
+  push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false, party: true },
   email: { reservations: true, promotions: false, newsletter: true, receipts: true },
   sms: { reservations: true, reminders: true, emergencies: true },
 };
@@ -360,9 +363,22 @@ const notificationsRouter = router({
   updatePrefs: protectedProcedure
     .input(notificationPrefsSchema)
     .mutation(async ({ ctx, input }) => {
+      const existing = await db.user.findUnique({
+        where: { id: ctx.user.userId },
+        select: { notificationPrefs: true },
+      });
+      // A client that predates a category omits it. Merging over what is
+      // already stored keeps an existing opt-out switched off instead of
+      // silently turning it back on when an older build saves.
+      const stored = (existing?.notificationPrefs ?? {}) as Record<string, Record<string, boolean>>;
+      const merged = {
+        push: { ...DEFAULT_NOTIFICATION_PREFS.push, ...stored.push, ...input.push },
+        email: { ...DEFAULT_NOTIFICATION_PREFS.email, ...stored.email, ...input.email },
+        sms: { ...DEFAULT_NOTIFICATION_PREFS.sms, ...stored.sms, ...input.sms },
+      };
       await db.user.update({
         where: { id: ctx.user.userId },
-        data: { notificationPrefs: input as any },
+        data: { notificationPrefs: merged as any },
       });
       return { success: true };
     }),

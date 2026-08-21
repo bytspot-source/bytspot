@@ -956,11 +956,10 @@ export const partyRsvpRouter = router({
       const approvalRequired = party.accessMode === 'private-approval';
       const status = approvalRequired ? 'pending' : 'rsvp';
       const accessGranted = !approvalRequired;
-      const existingGuestBefore = Boolean(callerGuest);
       return serializableTransaction(async (tx) => {
         const existing = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (existing?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
-        if (existing?.accessGranted) return { status: existing.status, accessGranted: true };
+        if (existing?.accessGranted) return { status: existing.status, accessGranted: true, joinedGuestList: false };
         if (party.admissionPaused) throw new TRPCError({ code: 'CONFLICT', message: 'The host has paused new admissions for this Party.' });
         if (accessGranted) {
           const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
@@ -971,13 +970,15 @@ export const partyRsvpRouter = router({
           create: { partyId: party.id, userId: ctx.user.userId, status, accessGranted },
           update: { status, accessGranted },
         });
-        return { status: guest.status, accessGranted: guest.accessGranted };
-      }, 'Party capacity changed. Please retry.').then(async (result) => {
-        // Only a state change is worth a push: a repeat RSVP returns the
-        // existing pass and must not ring the host's phone again.
-        if (!existingGuestBefore) {
-          const member = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { name: true } });
-          dispatchPartyAlert(alertHostOfGuestResponse({ partyId: party.id, guestName: member?.name ?? null, approvalRequired }));
+        return { status: guest.status, accessGranted: guest.accessGranted, joinedGuestList: !existing };
+      }, 'Party capacity changed. Please retry.').then(({ joinedGuestList, ...result }) => {
+        // Only joining the guest list is worth a push, and that decision is
+        // read inside the transaction: a pre-read taken before it could let
+        // two concurrent first RSVPs both look new and ring the host twice.
+        if (joinedGuestList) {
+          dispatchPartyAlert(alertHostOfGuestResponse({
+            partyId: party.id, guestUserId: ctx.user.userId, approvalRequired,
+          }));
         }
         return result;
       });

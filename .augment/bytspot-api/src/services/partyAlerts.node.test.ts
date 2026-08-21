@@ -55,3 +55,12 @@ test('party alerts link to the Party itself on an allowed host', () => {
   // Ids are encoded rather than interpolated raw into the path.
   assert.match(partyAlertUrl('a/b?c'), /\/party\/a%2Fb%3Fc$/);
 });
+
+test('an unpublished Party cannot notify its guests either', async () => {
+  // The resolver, not the caller, is what keeps an unpublished Party silent.
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'draft' });
+  assert.equal(await partyAlertRecipient({ kind: 'guest', partyId: 'party-1', userId: 'usr_guest' }), null);
+
+  party.findUnique = async () => null;
+  assert.equal(await partyAlertRecipient({ kind: 'guest', partyId: 'party-1', userId: 'usr_guest' }), null);
+});

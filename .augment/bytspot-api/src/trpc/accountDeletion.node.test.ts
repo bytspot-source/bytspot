@@ -123,3 +123,34 @@ test('signing in without a pending deletion changes nothing', async () => {
   assert.equal(await applyDeletionPolicyOnSignIn('usr_me'), 'none');
   assert.equal(updated, false);
 });
+
+test('an older client saving preferences does not switch party alerts back on', async () => {
+  // Clients built before the party category omit it. A save must preserve the
+  // member's stored choice rather than resetting it to the default.
+  user.findUnique = async () => ({ notificationPrefs: { push: { party: false, nearby: true } } });
+  let saved: any = null;
+  user.update = async ({ data }: any) => { saved = data.notificationPrefs; return {}; };
+
+  await caller().user.notifications.updatePrefs({
+    push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false },
+    email: { reservations: true, promotions: false, newsletter: true, receipts: true },
+    sms: { reservations: true, reminders: true, emergencies: true },
+  });
+
+  assert.equal(saved.push.party, false, 'an omitted category keeps its stored value');
+  assert.equal(saved.push.nearby, false, 'a category the client did send is updated');
+});
+
+test('a member can switch party alerts off explicitly', async () => {
+  user.findUnique = async () => ({ notificationPrefs: null });
+  let saved: any = null;
+  user.update = async ({ data }: any) => { saved = data.notificationPrefs; return {}; };
+
+  await caller().user.notifications.updatePrefs({
+    push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false, party: false },
+    email: { reservations: true, promotions: false, newsletter: true, receipts: true },
+    sms: { reservations: true, reminders: true, emergencies: true },
+  });
+
+  assert.equal(saved.push.party, false);
+});

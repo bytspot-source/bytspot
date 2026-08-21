@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
@@ -729,4 +730,48 @@ test('A host still reaches their own party after the share link expires', async 
 
   party.findFirst = async () => ({ ...expired, hostUserId: 'test-user-id' });
   assert.equal((await caller().events.pass.resolve({ partyId: 'party-1' })).action, 'view-pass');
+});
+
+test('an RSVP tells the host once, and a repeat RSVP does not ring them again', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  const targeted: string[][] = [];
+  pushDevice.findMany = async ({ where }: any) => { targeted.push(where.userId.in); return []; };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'open', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'usr_host', startsAt: new Date(Date.now() + 3_600_000), endsAt: null, shareLinkExpiresAt: null,
+    admissionPaused: false, ticketTiers: [],
+  });
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'published' });
+  user.findUnique = async () => ({ membershipTier: 'green', name: 'Ama Boateng' });
+  partyGuest.findUnique = async () => null;
+  partyGuest.count = async () => 0;
+  partyGuest.upsert = async () => ({ status: 'rsvp', accessGranted: true });
+
+  await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(targeted, [['usr_host']], 'the host, and only the host, is told a guest is coming');
+
+  // The same member re-opening their pass is not a new arrival.
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(targeted.length, 1, 'a repeat RSVP must not notify the host again');
+});
+
+test('a failing push never turns a successful RSVP into an error', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  pushDevice.findMany = async () => { throw new Error('APNs is down'); };
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'open', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'usr_host', startsAt: new Date(Date.now() + 3_600_000), endsAt: null, shareLinkExpiresAt: null,
+    admissionPaused: false, ticketTiers: [],
+  });
+  user.findUnique = async () => ({ membershipTier: 'green', name: 'Ama' });
+  partyGuest.findUnique = async () => null;
+  partyGuest.count = async () => 0;
+  partyGuest.upsert = async () => ({ status: 'rsvp', accessGranted: true });
+
+  const result = await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey: randomUUID() });
+  assert.deepEqual(result, { status: 'rsvp', accessGranted: true });
+  await new Promise((resolve) => setImmediate(resolve));
 });

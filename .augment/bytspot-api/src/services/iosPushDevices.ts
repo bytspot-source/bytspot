@@ -1,7 +1,7 @@
 import { db } from '../lib/db';
 
 export type IosPushEnvironment = 'production' | 'sandbox';
-export type PushCategory = 'reservations' | 'promotions' | 'reminders' | 'insider' | 'nearby';
+export type PushCategory = 'reservations' | 'promotions' | 'reminders' | 'insider' | 'nearby' | 'party';
 
 export const DEFAULT_PUSH_PREFERENCES: Record<PushCategory, boolean> = {
   reservations: true,
@@ -9,6 +9,9 @@ export const DEFAULT_PUSH_PREFERENCES: Record<PushCategory, boolean> = {
   reminders: true,
   insider: true,
   nearby: false,
+  // Party alerts only ever reach the host of that Party or a guest holding a
+  // pass to it, so the default is on: this is the room you are already in.
+  party: true,
 };
 
 /** APNs tokens are exactly 32 bytes represented as 64 hexadecimal characters. */
@@ -61,7 +64,7 @@ export async function invalidateIosPushDevice(token: string): Promise<void> {
   });
 }
 
-function permitsCategory(rawPreferences: unknown, category: PushCategory): boolean {
+export function permitsCategory(rawPreferences: unknown, category: PushCategory): boolean {
   if (!rawPreferences || typeof rawPreferences !== 'object' || Array.isArray(rawPreferences)) {
     return DEFAULT_PUSH_PREFERENCES[category];
   }

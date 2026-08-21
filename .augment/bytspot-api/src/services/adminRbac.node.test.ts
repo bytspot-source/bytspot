@@ -2,38 +2,50 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { adminGroupFor, assertBytspotAdmin, ADMIN_GROUPS } from './adminRbac';
 
-const allowlist = 'ops@bytspot.com:BYTSPOT_ADMIN,oncall@bytspot.com:INTERNAL_OPS,bare@bytspot.com';
+const allowlist = 'usr_ops:BYTSPOT_ADMIN,usr_oncall:INTERNAL_OPS,usr_bare';
 
-test('allowlist maps emails to their declared admin group', () => {
-  assert.equal(adminGroupFor('ops@bytspot.com', allowlist), 'BYTSPOT_ADMIN');
-  assert.equal(adminGroupFor('oncall@bytspot.com', allowlist), 'INTERNAL_OPS');
+test('allowlist maps user ids to their declared admin group', () => {
+  assert.equal(adminGroupFor('usr_ops', allowlist), 'BYTSPOT_ADMIN');
+  assert.equal(adminGroupFor('usr_oncall', allowlist), 'INTERNAL_OPS');
 });
 
 test('a bare allowlist entry never implicitly grants the stronger group', () => {
-  assert.equal(adminGroupFor('bare@bytspot.com', allowlist), 'INTERNAL_OPS');
-});
-
-test('matching is case- and whitespace-insensitive', () => {
-  assert.equal(adminGroupFor('  OPS@Bytspot.com ', allowlist), 'BYTSPOT_ADMIN');
+  assert.equal(adminGroupFor('usr_bare', allowlist), 'INTERNAL_OPS');
 });
 
 test('non-members and empty identities are refused', () => {
-  assert.equal(adminGroupFor('guest@bytspot.com', allowlist), null);
+  assert.equal(adminGroupFor('usr_guest', allowlist), null);
   assert.equal(adminGroupFor(undefined, allowlist), null);
   assert.equal(adminGroupFor('', allowlist), null);
   // An empty allowlist must not turn into an open door.
-  assert.equal(adminGroupFor('ops@bytspot.com', ''), null);
+  assert.equal(adminGroupFor('usr_ops', ''), null);
 });
 
-test('a substring of an allowlisted address is not a member', () => {
-  assert.equal(adminGroupFor('ops@bytspot.com.evil.test', allowlist), null);
-  assert.equal(adminGroupFor('xops@bytspot.com', allowlist), null);
+test('a substring of an allowlisted id is not a member', () => {
+  assert.equal(adminGroupFor('usr_ops_evil', allowlist), null);
+  assert.equal(adminGroupFor('xusr_ops', allowlist), null);
+});
+
+test('admin membership cannot be claimed by registering an email', () => {
+  // auth.signup is public and performs no email verification, so an
+  // attacker-chosen email must never resolve to a group.
+  assert.equal(adminGroupFor('admin@bytspot.app', allowlist), null);
+  assert.equal(
+    adminGroupFor('admin@bytspot.app', 'admin@bytspot.app:BYTSPOT_ADMIN'),
+    'BYTSPOT_ADMIN',
+    'the parser is id-agnostic; safety comes from operators configuring ids, which the deploy check enforces',
+  );
+  assert.throws(
+    () => assertBytspotAdmin({ userId: 'usr_attacker', email: 'admin@bytspot.app' }),
+    { code: 'FORBIDDEN' },
+    'an attacker who registers an admin-looking address gets no group',
+  );
 });
 
 test('the gate separates unauthenticated from forbidden', () => {
   assert.throws(() => assertBytspotAdmin(null), { code: 'UNAUTHORIZED' });
   assert.throws(
-    () => assertBytspotAdmin({ userId: 'u-1', email: 'guest@bytspot.com' }),
+    () => assertBytspotAdmin({ userId: 'usr_guest', email: 'guest@bytspot.com' }),
     { code: 'FORBIDDEN' },
   );
 });

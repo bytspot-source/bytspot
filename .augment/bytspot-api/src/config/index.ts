@@ -30,7 +30,7 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),
   STRIPE_PREMIUM_PRICE_ID:z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
-  ADMIN_EMAILS:           z.string().default(''),
+  ADMIN_USER_IDS:         z.string().default(''),
   CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
 
   // ── OPTIONAL (integrations) ───────────────────────────
@@ -107,7 +107,7 @@ export const config = {
   frontendUrl: env.FRONTEND_URL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
-  adminEmails: env.ADMIN_EMAILS,
+  adminUserIds: env.ADMIN_USER_IDS,
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
@@ -145,7 +145,13 @@ export function printConfigDiagnostics(): void {
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.mobilityAggregatorMode === 'live' && config.mobilityAggregatorBaseUrl && config.mobilityAggregatorApiKey ? 'ok' : '', 'Mobility aggregator', 'premium rides will use Uber/Lyft handoff only');
-  check(config.adminPassword, 'Admin password', 'admin dashboard inaccessible');
+  check(config.adminPassword, 'Admin password', 'invite gating disabled — all signups allowed');
+  check(config.adminUserIds, 'Admin allowlist', 'no one can reach admin surfaces');
+  if (config.adminUserIds.includes('@')) {
+    // auth.signup is public and unverified, so an email-keyed allowlist would
+    // let anyone register an unclaimed admin address and escalate.
+    throw new Error('ADMIN_USER_IDS must contain user ids, not email addresses');
+  }
   check(config.apnsKeyId && config.apnsTeamId && config.apnsKeyPath && config.apnsBundleId ? 'ok' : '', 'APNs', 'native push will not send');
   check(config.appleClientId, 'Sign in with Apple', 'native Apple sign-in will not work');
   check(config.googleServerClientId, 'Google Sign-In', 'native Google sign-in will not work');

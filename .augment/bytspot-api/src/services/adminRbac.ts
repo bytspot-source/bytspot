@@ -12,22 +12,27 @@ export const ADMIN_GROUPS = ['BYTSPOT_ADMIN', 'INTERNAL_OPS'] as const;
 export type AdminGroup = (typeof ADMIN_GROUPS)[number];
 
 function parseAllowlist(raw: string): Map<string, AdminGroup> {
-  // Format: "ops@bytspot.com:BYTSPOT_ADMIN,oncall@bytspot.com:INTERNAL_OPS".
-  // A bare email defaults to INTERNAL_OPS so the stronger group is never
-  // granted implicitly.
+  // Format: "<userId>:BYTSPOT_ADMIN,<userId>:INTERNAL_OPS". A bare id defaults
+  // to INTERNAL_OPS so the stronger group is never granted implicitly.
   const entries = new Map<string, AdminGroup>();
   for (const part of raw.split(',')) {
-    const [emailRaw, groupRaw] = part.split(':');
-    const email = emailRaw?.trim().toLowerCase();
-    if (!email) continue;
+    const [idRaw, groupRaw] = part.split(':');
+    const userId = idRaw?.trim();
+    if (!userId) continue;
     const group = ADMIN_GROUPS.find((g) => g === groupRaw?.trim().toUpperCase()) ?? 'INTERNAL_OPS';
-    entries.set(email, group);
+    entries.set(userId, group);
   }
   return entries;
 }
 
-export function adminGroupFor(email: string | undefined, allowlist = config.adminEmails): AdminGroup | null {
-  const normalized = email?.trim().toLowerCase();
+/**
+ * Admin membership is keyed to the immutable user id, never the email.
+ * `auth.signup` is public and performs no email verification, so an
+ * email-keyed allowlist would let anyone register an unclaimed admin address
+ * and escalate to that group.
+ */
+export function adminGroupFor(userId: string | undefined, allowlist = config.adminUserIds): AdminGroup | null {
+  const normalized = userId?.trim();
   if (!normalized) return null;
   return parseAllowlist(allowlist).get(normalized) ?? null;
 }
@@ -43,7 +48,7 @@ export function assertBytspotAdmin(user: AuthPayload | null | undefined): AdminG
   if (!user) {
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Not authenticated' });
   }
-  const group = adminGroupFor(user.email);
+  const group = adminGroupFor(user.userId);
   if (!group) {
     throw new TRPCError({ code: 'FORBIDDEN', message: 'Admin group membership required' });
   }

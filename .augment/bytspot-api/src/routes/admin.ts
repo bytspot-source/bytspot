@@ -15,7 +15,7 @@ const router = Router();
  */
 function adminAuth(req: any, res: any, next: any) {
   requireAuth(req, res, () => {
-    const group = adminGroupFor(req.user?.email);
+    const group = adminGroupFor(req.user?.userId);
     if (!group) {
       res.status(403).json({ error: 'Admin group membership required' });
       return;

@@ -30,6 +30,7 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),
   STRIPE_PREMIUM_PRICE_ID:z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
+  ADMIN_EMAILS:           z.string().default(''),
   CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
 
   // ── OPTIONAL (integrations) ───────────────────────────
@@ -106,6 +107,7 @@ export const config = {
   frontendUrl: env.FRONTEND_URL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
+  adminEmails: env.ADMIN_EMAILS,
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,

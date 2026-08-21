@@ -187,24 +187,32 @@ describe('rides', () => {
 // Admin
 // ──────────────────────────────────────────────────────────
 describe('admin', () => {
-  it('admin.stats rejects wrong password', async () => {
+  it('admin.stats rejects an unauthenticated caller', async () => {
     const caller = createPublicCaller();
-    await expect(
-      caller.admin.stats({ adminPassword: 'wrong' }),
-    ).rejects.toThrow(TRPCError);
+    await expect(caller.admin.stats()).rejects.toThrow(TRPCError);
   });
 
-  it('admin.stats returns stats with correct password', async () => {
+  it('admin.stats forbids an authenticated non-admin', async () => {
+    const caller = createAuthenticatedCaller('u-1', 'guest@bytspot.com');
+    await expect(caller.admin.stats()).rejects.toThrow(TRPCError);
+  });
+
+  it('admin.stats returns stats for an admin-group caller', async () => {
     (db.user.count as any).mockResolvedValue(42);
     (db.crowdLevel.count as any).mockResolvedValueOnce(100);
     (db.crowdLevel.groupBy as any).mockResolvedValueOnce([]);
     (db.venue.findMany as any).mockResolvedValueOnce([]);
 
-    const caller = createPublicCaller();
-    const result = await caller.admin.stats({ adminPassword: 'test-admin-pass' });
+    const caller = createAuthenticatedCaller('admin-1', 'ops@bytspot.com');
+    const result = await caller.admin.stats();
     expect(result.totalUsers).toBe(42);
     expect(result.totalCheckins).toBe(100);
     expect(result).toHaveProperty('generatedAt');
+  });
+
+  it('admin.generateInvite forbids an authenticated non-admin', async () => {
+    const caller = createAuthenticatedCaller('u-2', 'guest2@bytspot.com');
+    await expect(caller.admin.generateInvite({ count: 1 })).rejects.toThrow(TRPCError);
   });
 });
 

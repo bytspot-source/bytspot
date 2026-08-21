@@ -1,32 +1,49 @@
 import { Router } from 'express';
+import { randomInt } from 'crypto';
 import { db } from '../lib/db';
 import { config } from '../config';
 import { getRedis } from '../lib/redis';
+import { requireAuth } from '../middleware/auth';
+import { adminGroupFor, auditAdminAction } from '../services/adminRbac';
 
 const router = Router();
 
-/** Simple password guard — checks X-Admin-Password header */
+/**
+ * Admin guard — JWT auth plus admin group membership. The former
+ * X-Admin-Password shared secret is no longer accepted: it made admin actions
+ * unattributable and could not be rotated per user.
+ */
 function adminAuth(req: any, res: any, next: any) {
-  const pw = req.headers['x-admin-password'];
-  if (!pw || pw !== config.adminPassword) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return;
-  }
-  next();
+  requireAuth(req, res, () => {
+    const group = adminGroupFor(req.user?.email);
+    if (!group) {
+      res.status(403).json({ error: 'Admin group membership required' });
+      return;
+    }
+    req.adminGroup = group;
+    next();
+  });
 }
 
 /** Generate a random invite code like BYT-XXXXX */
 function makeCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = 'BYT-';
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 6; i++) code += chars[randomInt(chars.length)];
   return code;
 }
 
 // ── POST /admin/generate-invite ──────────────────────────
 // Creates one or more invite codes, stored in Redis with 30-day TTL
-router.post('/admin/generate-invite', adminAuth, async (req, res) => {
+router.post('/admin/generate-invite', adminAuth, async (req: any, res) => {
   const count = Math.min(parseInt(req.body?.count || '1', 10), 50);
+  auditAdminAction({
+    actorId: req.user.userId,
+    actorEmail: req.user.email,
+    group: req.adminGroup,
+    action: 'admin.generateInvite.rest',
+    detail: { count },
+  });
   const r = getRedis();
   const codes: string[] = [];
 
@@ -85,7 +102,13 @@ router.post('/admin/validate-invite', async (req, res) => {
 });
 
 // ── GET /admin/stats ────────────────────────────────────
-router.get('/admin/stats', adminAuth, async (req, res) => {
+router.get('/admin/stats', adminAuth, async (req: any, res) => {
+  auditAdminAction({
+    actorId: req.user.userId,
+    actorEmail: req.user.email,
+    group: req.adminGroup,
+    action: 'admin.stats.rest',
+  });
   const r = getRedis();
   const today = new Date();
   today.setHours(0, 0, 0, 0);

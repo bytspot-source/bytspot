@@ -4,6 +4,7 @@ import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
 import { db } from '../lib/db';
 import type { Context } from './context';
+import { applyDeletionPolicyOnSignIn } from '../services/accountDeletion';
 
 const createCaller = createCallerFactory(appRouter);
 const authenticated: Context = { user: { userId: 'usr_me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-deletion-client' };
@@ -89,4 +90,36 @@ test('account procedures require authentication', async () => {
   const anon = createCaller({ user: null, clientRateLimitKey: 'test-deletion-anon' });
   await assert.rejects(() => anon.user.account.requestDeletion({}), { code: 'UNAUTHORIZED' });
   await assert.rejects(() => anon.user.account.deletionStatus(), { code: 'UNAUTHORIZED' });
+});
+
+test('signing in with Apple restores a pending deletion exactly as email does', async () => {
+  // Provider accounts must honour the same 30-day promise: the app tells every
+  // member that signing back in restores them, whatever the credential.
+  const providerIdentity = db.providerIdentity as any;
+  let restored = false;
+  user.findUnique = async () => ({ deletedAt: new Date(), purgeAfter: new Date(Date.now() + 10 * DAY_MS) });
+  user.update = async () => { restored = true; return {}; };
+  providerIdentity.findUnique = async () => ({ user: { id: 'usr_apple', email: 'apple@bytspot.com', name: 'Apple Member' } });
+
+  const outcome = await applyDeletionPolicyOnSignIn('usr_apple');
+  assert.equal(outcome, 'restored');
+  assert.equal(restored, true);
+});
+
+test('a sign-in past the grace period is refused rather than silently restoring', async () => {
+  user.findUnique = async () => ({ deletedAt: new Date(), purgeAfter: new Date(Date.now() - DAY_MS) });
+  let updated = false;
+  user.update = async () => { updated = true; return {}; };
+
+  assert.equal(await applyDeletionPolicyOnSignIn('usr_expired'), 'purge-pending');
+  assert.equal(updated, false, 'an account awaiting purge must never be revived by a sign-in');
+});
+
+test('signing in without a pending deletion changes nothing', async () => {
+  user.findUnique = async () => ({ deletedAt: null, purgeAfter: null });
+  let updated = false;
+  user.update = async () => { updated = true; return {}; };
+
+  assert.equal(await applyDeletionPolicyOnSignIn('usr_me'), 'none');
+  assert.equal(updated, false);
 });

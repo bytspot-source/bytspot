@@ -22,6 +22,7 @@ import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
 import { resolveProviderIdentity } from '../services/providerIdentityAuth';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
+import { isWithinGracePeriod, restoreSessions } from '../services/accountDeletion';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -99,6 +100,9 @@ const authRouter = router({
 
       const existing = await db.user.findUnique({ where: { email } });
       if (existing) {
+        // A soft-deleted row still owns the address for the grace period, so
+        // the reply must not differ from an active account: doing otherwise
+        // would disclose that someone deleted an account at this address.
         throw new TRPCError({ code: 'CONFLICT', message: 'Email already registered' });
       }
 
@@ -140,8 +144,26 @@ const authRouter = router({
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
       }
 
+      // Signing in is the account owner proving control, so it cancels a
+      // pending deletion rather than locking them out of their own recovery.
+      if (user.deletedAt && isWithinGracePeriod(user.purgeAfter)) {
+        await db.user.update({
+          where: { id: user.id },
+          data: { deletedAt: null, purgeAfter: null, deletionReason: null },
+        });
+        await restoreSessions(user.id);
+        void refreshUserIdentityHashes(user.id, { email: user.email });
+      } else if (user.deletedAt) {
+        // Grace period elapsed; the row is awaiting purge and must not be usable.
+        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
+      }
+
       const token = signToken(user.id, user.email);
-      return { token, user: { id: user.id, email: user.email, name: user.name } };
+      return {
+        token,
+        user: { id: user.id, email: user.email, name: user.name },
+        deletionCancelled: Boolean(user.deletedAt),
+      };
     }),
 
   /**

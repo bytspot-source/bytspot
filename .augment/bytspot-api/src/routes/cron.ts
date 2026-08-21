@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { config } from '../config';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
+import { purgeExpiredAccounts } from '../services/accountDeletion';
 
 const router = Router();
 
@@ -44,6 +45,24 @@ router.post('/cron/crowd-sim', async (req, res) => {
     res.json({ ok: true, ...result });
   } catch (err: any) {
     console.error('[cron/crowd-sim] error:', err?.message);
+    res.status(500).json({ error: 'Internal error', detail: err?.message });
+  }
+});
+
+/**
+ * POST /cron/purge-accounts
+ * Irreversibly removes accounts whose deletion grace period has elapsed.
+ */
+router.post('/cron/purge-accounts', async (req, res) => {
+  if (!verifyCronSecret(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  try {
+    const result = await purgeExpiredAccounts();
+    res.json({ ok: true, ...result });
+  } catch (err: any) {
+    console.error('[cron/purge-accounts] error:', err?.message);
     res.status(500).json({ error: 'Internal error', detail: err?.message });
   }
 });

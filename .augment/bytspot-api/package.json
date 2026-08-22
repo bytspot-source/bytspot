@@ -11,7 +11,8 @@
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:migrate": "prisma migrate deploy",
-    "admin:resolve": "tsx scripts/resolve-admin-ids.ts"
+    "admin:resolve": "tsx scripts/resolve-admin-ids.ts",
+    "test": "tsx --test src/**/*.node.test.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

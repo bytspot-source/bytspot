@@ -1,0 +1,77 @@
+name: API CI
+
+on:
+  push:
+    branches: [main]
+    paths: ['.augment/bytspot-api/**', '.github/workflows/api-ci.yml']
+  pull_request:
+    paths: ['.augment/bytspot-api/**', '.github/workflows/api-ci.yml']
+
+defaults:
+  run:
+    working-directory: .augment/bytspot-api
+
+jobs:
+  # The migrations are the gate this repo was missing. 20260821_add_user_soft_delete
+  # named a table that does not exist, passed every unit test, and then blocked
+  # production deploys for a week: unit tests never touch a real database, so
+  # nothing executed the SQL until Render did. This job executes it.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bytspot_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bytspot_ci?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: .augment/bytspot-api/package-lock.json
+      - run: npm ci
+
+      # Applies every migration in order against an empty database, exactly as
+      # Render does. A migration referencing a missing table fails here.
+      - name: Apply migrations to an empty database
+        run: npx prisma migrate deploy
+
+      # Applying cleanly is not enough: the result has to be the schema the
+      # client is generated from. This catches a migration that runs but leaves
+      # the database a column short of schema.prisma.
+      - name: Migrations must produce the schema the code expects
+        run: |
+          npx prisma migrate diff \
+            --from-url "$DATABASE_URL" \
+            --to-schema-datamodel prisma/schema.prisma \
+            --exit-code && echo "database matches schema.prisma"
+
+      # Re-running must be a no-op. A deploy that retries after a partial
+      # failure replays the pending migration, which is how the last incident
+      # was recovered.
+      - name: Re-applying is a no-op
+        run: npx prisma migrate deploy | tee /tmp/replay.log && grep -q "No pending migrations to apply" /tmp/replay.log
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: .augment/bytspot-api/package-lock.json
+      - run: npm ci
+      - run: npx prisma generate
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm test

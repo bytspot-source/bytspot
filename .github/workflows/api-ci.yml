@@ -45,14 +45,22 @@ jobs:
         run: npx prisma migrate deploy
 
       # Applying cleanly is not enough: the result has to be the schema the
-      # client is generated from. This catches a migration that runs but leaves
-      # the database a column short of schema.prisma.
+      # client is generated from. This caught user_preferences, a table that
+      # only ever existed because `prisma db push` created it in production.
+      #
+      # postgis and vector are excluded because this Postgres cannot host them;
+      # 20260226 already enables them defensively for the same reason. Any other
+      # difference fails the job.
       - name: Migrations must produce the schema the code expects
         run: |
           npx prisma migrate diff \
             --from-url "$DATABASE_URL" \
-            --to-schema-datamodel prisma/schema.prisma \
-            --exit-code && echo "database matches schema.prisma"
+            --to-schema-datamodel prisma/schema.prisma > drift.txt 2>/dev/null
+          remaining=$(grep -vE '^[[:space:]]*$|\[\+\] Added extensions|^[[:space:]]*- (postgis|vector)$|No difference detected' drift.txt || true)
+          if [ -n "$remaining" ]; then
+            echo "Migrations do not produce schema.prisma:"; echo "$remaining"; exit 1
+          fi
+          echo "database matches schema.prisma (postgis/vector excluded)"
 
       # Re-running must be a no-op. A deploy that retries after a partial
       # failure replays the pending migration, which is how the last incident

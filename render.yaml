@@ -43,14 +43,7 @@ services:
     branch: main
     rootDir: .augment/bytspot-api
     buildCommand: npm ci && npx prisma generate && npm run build
-    # ONE-SHOT (revert immediately after the next successful deploy):
-    # 20260821_add_user_soft_delete failed part-way on 2026-08-21, so every
-    # deploy since has been refused with P3009 and production is pinned to
-    # 8542954. Clearing that one failed row lets the now-replayable migration
-    # re-run. Scoped to this single migration by name and tolerant of it
-    # already being cleared; it must not stay in place, or a future failed
-    # migration would be swept away silently instead of stopping the deploy.
-    preDeployCommand: (npx prisma migrate resolve --rolled-back 20260821_add_user_soft_delete || true) && npx prisma migrate deploy
+    preDeployCommand: npx prisma migrate deploy
     startCommand: node dist/index.js
     pullRequestPreviewsEnabled: false
     buildFilter:

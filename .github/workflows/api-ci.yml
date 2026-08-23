@@ -84,9 +84,10 @@ jobs:
       - name: Unit tests
         run: npm test
       # The web repo has gated on this for months; the API shipped a known
-      # ReDoS in its request path because nothing checked here.
+      # ReDoS in its request path because nothing checked here. Accepted
+      # exceptions are dated in scripts/audit-gate.mjs and expire on their own.
       - name: Security audit (runtime dependencies)
-        run: npm audit --omit=dev --audit-level=high
+        run: node scripts/audit-gate.mjs
       - name: Full dependency audit advisory
         continue-on-error: true
         run: npm audit --audit-level=high

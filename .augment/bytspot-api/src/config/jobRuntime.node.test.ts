@@ -38,6 +38,24 @@ test('A scheduled job boots with only a database, without the API secrets', () =
   assert.match(result.output, /db:true/);
 });
 
+test('The purge job declares its own runtime, so a missing scheduler variable cannot stop the deletion promise', () => {
+  const script = path.join(__dirname, '..', 'scripts', 'purgeAccounts.ts');
+  let output = '';
+  try {
+    // Unreachable database on purpose: the job must get far enough to try.
+    output = execFileSync(tsx, [script], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH ?? '', NODE_ENV: 'production', DATABASE_URL: 'postgresql://user@127.0.0.1:1/nope' },
+    });
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string };
+    output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+  }
+  assert.doesNotMatch(output, /JWT_SECRET/, 'the job must not require the API request-signing secret');
+  assert.doesNotMatch(output, /Environment variable validation failed/);
+});
+
 test('A job that reads a secret it was not given fails loudly rather than using an empty one', () => {
   for (const [field, expected] of [['jwtSecret', /does not sign tokens/], ['contactHashSalt', /does not hash contacts/]] as const) {
     const result = loadConfig({ ...productionDatabase, BYTSPOT_RUNTIME: 'job' }, `config.${field};`);

@@ -1,16 +1,31 @@
+import { timingSafeEqual } from 'crypto';
 import { Router } from 'express';
 import { config } from '../config';
+import { captureError } from '../lib/observability';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { purgeExpiredAccounts } from '../services/accountDeletion';
 
 const router = Router();
 
-/** Verify cron secret from Bearer token */
-function verifyCronSecret(req: any): boolean {
-  const auth = req.headers['authorization'] || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  return token === config.cronSecret;
+/**
+ * Verify the cron secret from a Bearer token.
+ *
+ * An unset secret must reject everything. Comparing against an empty expected
+ * value used to accept a request with no Authorization header at all, which
+ * left purge-accounts open to anyone whenever CRON_SECRET was missing.
+ */
+export function verifyCronSecret(req: { headers: Record<string, unknown> }): boolean {
+  const expected = config.cronSecret;
+  if (!expected) return false;
+
+  const auth = typeof req.headers['authorization'] === 'string' ? (req.headers['authorization'] as string) : '';
+  if (!auth.startsWith('Bearer ')) return false;
+
+  const token = Buffer.from(auth.slice(7));
+  const secret = Buffer.from(expected);
+  if (token.length !== secret.length) return false;
+  return timingSafeEqual(token, secret);
 }
 
 /**
@@ -25,9 +40,10 @@ router.post('/cron/crowd-alerts', async (req, res) => {
   try {
     const result = await runCrowdAlerts();
     res.json({ ok: true, ...result });
-  } catch (err: any) {
-    console.error('[cron/crowd-alerts] error:', err?.message);
-    res.status(500).json({ error: 'Internal error', detail: err?.message });
+  } catch (err) {
+    console.error('[cron/crowd-alerts] error:', err);
+    captureError(err, { job: 'crowd-alerts' });
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -43,9 +59,10 @@ router.post('/cron/crowd-sim', async (req, res) => {
   try {
     const result = await runCrowdSimulation();
     res.json({ ok: true, ...result });
-  } catch (err: any) {
-    console.error('[cron/crowd-sim] error:', err?.message);
-    res.status(500).json({ error: 'Internal error', detail: err?.message });
+  } catch (err) {
+    console.error('[cron/crowd-sim] error:', err);
+    captureError(err, { job: 'crowd-sim' });
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -61,9 +78,10 @@ router.post('/cron/purge-accounts', async (req, res) => {
   try {
     const result = await purgeExpiredAccounts();
     res.json({ ok: true, ...result });
-  } catch (err: any) {
-    console.error('[cron/purge-accounts] error:', err?.message);
-    res.status(500).json({ error: 'Internal error', detail: err?.message });
+  } catch (err) {
+    console.error('[cron/purge-accounts] error:', err);
+    captureError(err, { job: 'purge-accounts' });
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 

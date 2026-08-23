@@ -91,4 +91,26 @@ services:
         sync: false
       - key: SENTRY_DSN
         sync: false
+      - key: CRON_SECRET
+        sync: false
+
+  # ─── Deletion purge: the half of "delete my account" that actually deletes ─
+  # A deletion request only sets a 30-day purge date; without this schedule
+  # nothing ever acts on it. Runs against the database directly, so it needs no
+  # shared secret and is not reachable from the internet.
+  - type: cron
+    name: bytspot-purge-accounts
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    schedule: "17 7 * * *"
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: node dist/scripts/purgeAccounts.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
 

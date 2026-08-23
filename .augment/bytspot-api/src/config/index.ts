@@ -1,6 +1,15 @@
 import { z } from 'zod';
 
 const isDev = (process.env.NODE_ENV || 'development') === 'development';
+
+/**
+ * Scheduled jobs share this config but not the server's job. The purge cron
+ * needs a database and nothing else, so requiring the API's request-signing
+ * and contact-hashing secrets there would spread them to a process that never
+ * uses them. Job mode drops those requirements; reading one anyway throws
+ * rather than quietly signing with an empty secret.
+ */
+export const isJobRuntime = process.env.BYTSPOT_RUNTIME === 'job';
 const httpsUrl = z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Must use HTTPS');
 
 /**
@@ -16,7 +25,7 @@ const envSchema = z.object({
   PORT:           z.string().default('4000'),
   NODE_ENV:       z.string().default('development'),
   DATABASE_URL:   z.string().min(1, 'DATABASE_URL is required'),
-  JWT_SECRET:     z.string().min(1, 'JWT_SECRET is required'),
+  JWT_SECRET:     isJobRuntime ? z.string().default('') : z.string().min(1, 'JWT_SECRET is required'),
   JWT_EXPIRES_IN: z.string().default('7d'),
   CORS_ORIGINS:   z.string().default('http://localhost:3000'),
 
@@ -86,7 +95,7 @@ const env = parseResult.data;
 // The dev salt is public in this repo; running production with it would make
 // contact-graph hashes precomputable for common emails. Fail closed instead
 // of silently degrading the privacy guarantee.
-if (!isDev && env.NODE_ENV !== 'test' && (!env.CONTACT_HASH_SALT || env.CONTACT_HASH_SALT === 'dev-contact-salt-change-me')) {
+if (!isDev && !isJobRuntime && env.NODE_ENV !== 'test' && (!env.CONTACT_HASH_SALT || env.CONTACT_HASH_SALT === 'dev-contact-salt-change-me')) {
   console.error('\n❌ FATAL: CONTACT_HASH_SALT must be set to a private value in production (it must match the iOS BytspotContactHashSalt).\n');
   process.exit(1);
 }
@@ -99,7 +108,10 @@ export const config = {
   isDev,
   databaseUrl: env.DATABASE_URL,
   redisUrl: env.REDIS_URL,
-  jwtSecret: env.JWT_SECRET,
+  get jwtSecret(): string {
+    if (!env.JWT_SECRET) throw new Error('JWT_SECRET is not configured in this runtime (job mode does not sign tokens).');
+    return env.JWT_SECRET;
+  },
   jwtExpiresIn: env.JWT_EXPIRES_IN,
   corsOrigins: env.CORS_ORIGINS.split(',').map((s) => s.trim()),
   vapidPublicKey: env.VAPID_PUBLIC_KEY,
@@ -129,7 +141,10 @@ export const config = {
   mobilityAggregatorBaseUrl: env.MOBILITY_AGGREGATOR_BASE_URL.replace(/\/$/, ''),
   mobilityAggregatorApiKey: env.MOBILITY_AGGREGATOR_API_KEY,
   mobilityAggregatorMode: env.MOBILITY_AGGREGATOR_MODE,
-  contactHashSalt: env.CONTACT_HASH_SALT,
+  get contactHashSalt(): string {
+    if (!env.CONTACT_HASH_SALT) throw new Error('CONTACT_HASH_SALT is not configured in this runtime (job mode does not hash contacts).');
+    return env.CONTACT_HASH_SALT;
+  },
 } as const;
 
 /**

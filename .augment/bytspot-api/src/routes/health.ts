@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
+import { isErrorTrackingEnabled } from '../lib/observability';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -40,6 +41,12 @@ router.get('/health', async (_req, res) => {
     checks.redis = 'disabled';
   }
 
+  // On/off only: whether errors are being reported is operational state, the
+  // DSN itself is not.
+  checks.errorTracking = isErrorTrackingEnabled() ? 'on' : 'off';
+
+  // Error tracking is deliberately not part of the healthy test: losing
+  // visibility must not take the API out of Render's rotation.
   const healthy = checks.postgres === 'ok';
   res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', version: pkgVersion, checks });
 });

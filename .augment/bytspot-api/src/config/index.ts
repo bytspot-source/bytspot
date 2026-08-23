@@ -22,6 +22,7 @@ const envSchema = z.object({
 
   // ── IMPORTANT (degraded features without) ─────────────
   REDIS_URL:              z.string().default(''),
+  SENTRY_DSN:             z.string().default(''),
   VAPID_PUBLIC_KEY:       z.string().default(''),
   VAPID_PRIVATE_KEY:      z.string().default(''),
   VAPID_EMAIL:            z.string().default('mailto:bytspotapp@gmail.com'),
@@ -93,6 +94,8 @@ if (!isDev && env.NODE_ENV !== 'test' && (!env.CONTACT_HASH_SALT || env.CONTACT_
 export const config = {
   port: parseInt(env.PORT, 10),
   nodeEnv: env.NODE_ENV,
+  sentryDsn: env.SENTRY_DSN,
+  releaseVersion: process.env.RENDER_GIT_COMMIT ?? 'dev',
   isDev,
   databaseUrl: env.DATABASE_URL,
   redisUrl: env.REDIS_URL,

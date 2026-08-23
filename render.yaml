@@ -45,6 +45,9 @@ services:
     buildCommand: npm ci && npx prisma generate && npm run build
     preDeployCommand: npx prisma migrate deploy
     startCommand: node dist/index.js
+    # /health verifies Postgres and Redis, so a wedged process stops taking
+    # traffic instead of serving errors until someone notices.
+    healthCheckPath: /health
     pullRequestPreviewsEnabled: false
     buildFilter:
       paths:
@@ -81,5 +84,11 @@ services:
       - key: GOOGLE_SERVER_CLIENT_ID
         sync: false
       - key: CONTACT_HASH_SALT
+        sync: false
+      # Set in the dashboard already; declared here so the runtime contract is
+      # readable from the repo rather than only from Render.
+      - key: REDIS_URL
+        sync: false
+      - key: SENTRY_DSN
         sync: false
 

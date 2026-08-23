@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as trpcExpress from '@trpc/server/adapters/express';
 import { config, printConfigDiagnostics } from './config';
+import { captureError, initErrorTracking, installProcessGuards, isErrorTrackingEnabled } from './lib/observability';
 import { db } from './lib/db';
 import { logAdminBootstrapIds } from './services/adminRbac';
 
@@ -22,6 +23,10 @@ import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
+
+// Initialised before the app so instrumentation wraps everything below it.
+initErrorTracking();
+installProcessGuards();
 
 const app = express();
 
@@ -75,6 +80,16 @@ app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
+// ─── Error handler ───────────────────────────────────
+// Express only reaches this with four parameters, and the response body stays
+// generic so an internal failure never describes itself to a caller.
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[error]', req.method, req.path, err);
+  captureError(err, { route: req.path, method: req.method });
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 // ─── Start ───────────────────────────────────────────
 // Critical env vars (DATABASE_URL, JWT_SECRET) are validated by Zod in config/index.ts
 // — the server won't even reach this point if they're missing in production.
@@ -82,6 +97,7 @@ app.listen(config.port, () => {
   console.log(`\n🟢 Bytspot API running on port ${config.port}`);
   console.log(`   Environment: ${config.nodeEnv}`);
   console.log(`   Health check: http://localhost:${config.port}/health`);
+  console.log(`   Error tracking: ${isErrorTrackingEnabled() ? 'on' : 'off (SENTRY_DSN unset)'}`);
   printConfigDiagnostics();
   // Resolution only — prints ids for ADMIN_BOOTSTRAP_EMAILS, grants nothing.
   void logAdminBootstrapIds((emails) =>

@@ -13,6 +13,13 @@ import {
   restoreSessions,
   revokeSessions,
 } from '../services/accountDeletion';
+import {
+  ACTIVE_WINDOW_MS,
+  activeCount,
+  circleOutCount,
+  recordActive,
+  resolveSummary,
+} from '../services/presence';
 
 // ─── Achievement Definitions (static catalog) ────────────────────────
 export const ACHIEVEMENTS = [
@@ -498,7 +505,21 @@ const accountRouter = router({
 });
 
 // ─── Compose user router ────────────────────────────────────────────
+const presenceRouter = router({
+  /** Home header count. Circle takes precedence over the global crowd, and the
+   *  window is returned so the client can state it rather than imply it. */
+  summary: protectedProcedure.query(async ({ ctx }) => {
+    await recordActive(ctx.user.userId);
+    const [circle, global] = await Promise.all([
+      circleOutCount(ctx.user.userId),
+      activeCount(),
+    ]);
+    return { ...resolveSummary(circle, global), windowMs: ACTIVE_WINDOW_MS };
+  }),
+});
+
 export const userRouter = router({
+  presence: presenceRouter,
   points: pointsRouter,
   achievements: achievementsRouter,
   checkins: checkinsRouter,

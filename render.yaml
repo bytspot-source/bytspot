@@ -65,6 +65,12 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      # APNs signing key: upload the .p8 as a Render Secret File (Dashboard →
+      # Environment → Secret Files), then point APNS_KEY_PATH at its mount,
+      # /etc/secrets/<filename>. Blueprints cannot declare secret files, so
+      # this comment is the only place that contract is recorded. Without the
+      # mount the credentials still read as configured and sign nothing;
+      # /health reports checks.push=key-unreadable when that happens.
       - key: APNS_KEY_ID
         sync: false
       - key: APNS_TEAM_ID

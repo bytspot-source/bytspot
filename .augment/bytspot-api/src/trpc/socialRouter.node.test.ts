@@ -20,6 +20,8 @@ const partyEncounterOptIn = db.partyEncounterOptIn as any;
 const party = db.party as any;
 const partyGuest = db.partyGuest as any;
 const prisma = db as any;
+const checkIn = db.checkIn as any;
+const pointTransaction = db.pointTransaction as any;
 
 function caller(context = authenticatedContext) {
   return createCaller(context);
@@ -459,4 +461,24 @@ test('People You Met items match the iOS NativePeopleMetPerson shape', async () 
     assert.equal(typeof item.name, 'string');
     if ('inviteStatus' in item) assert.ok(['pending', 'accepted', 'declined'].includes(item.inviteStatus));
   }
+});
+
+test('Venue check-ins and the leaderboard are members-only and name nobody', async () => {
+  const anonymous = createCaller({ user: null });
+  await assert.rejects(() => anonymous.social.venueCheckins({ venueId: 'venue-1' }), { code: 'UNAUTHORIZED' });
+  await assert.rejects(() => anonymous.social.leaderboard({}), { code: 'UNAUTHORIZED' });
+
+  // Even to a member, a venue's recent activity is a count and a crowd level.
+  // Names and ids are what turned 40 requests into a movement profile.
+  checkIn.findMany = async () => [
+    { id: 'c1', crowdLevel: 2, crowdLabel: 'Active', createdAt: new Date('2026-08-24T20:00:00Z') },
+  ];
+  const visits = await caller().social.venueCheckins({ venueId: 'venue-1' });
+  assert.equal(visits.count, 1);
+  assert.deepEqual(Object.keys(visits.items[0]).sort(), ['crowdLabel', 'crowdLevel', 'id', 'timestamp']);
+
+  pointTransaction.groupBy = async () => [{ userId: 'user-1', _sum: { amount: 120 } }];
+  user.findMany = async () => [{ id: 'user-1', name: 'Ada' }];
+  const ranks = await caller().social.leaderboard({});
+  assert.deepEqual(ranks, [{ rank: 1, name: 'Ada', points: 120 }]);
 });

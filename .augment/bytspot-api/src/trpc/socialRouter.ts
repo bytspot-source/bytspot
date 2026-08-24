@@ -571,7 +571,10 @@ export const socialRouter = router({
     }),
 
   /** Leaderboard — top users by lifetime points */
-  leaderboard: publicProcedure
+  /** Ranks, to members only. A rank does not need a database key attached:
+   *  returning userId hands an enumerator the list to walk. */
+  leaderboard: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'social-leaderboard' }))
     .input(z.object({ limit: z.number().min(1).max(50).optional().default(20) }))
     .query(async ({ input }) => {
       // Aggregate points per user
@@ -593,7 +596,6 @@ export const socialRouter = router({
 
       return rows.map((r, i) => ({
         rank: i + 1,
-        userId: r.userId,
         name: userMap.get(r.userId) ?? 'Anonymous',
         points: r._sum.amount ?? 0,
       }));
@@ -609,23 +611,27 @@ export const socialRouter = router({
       return { following: !!row };
     }),
 
-  /** Recent check-ins at a specific venue (public — no auth required) */
-  venueCheckins: publicProcedure
+  /** How busy a venue has been, to members only.
+   *
+   *  This previously answered "who was at this venue, by name and id, with
+   *  timestamps" to anyone who asked. Walking the catalog reconstructed a
+   *  member's week. A venue's social proof is a count of recent visits, not a
+   *  guest list, so the identities are no longer returned at all — closing the
+   *  endpoint alone would have left the leak one auth bypass away. */
+  venueCheckins: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'venue-checkins' }))
     .input(z.object({ venueId: z.string(), limit: z.number().min(1).max(30).optional().default(10) }))
     .query(async ({ input }) => {
       const checkins = await db.checkIn.findMany({
         where: { venueId: input.venueId },
-        include: {
-          user: { select: { id: true, name: true } },
-        },
+        select: { id: true, crowdLevel: true, crowdLabel: true, createdAt: true },
         orderBy: { createdAt: 'desc' },
         take: input.limit,
       });
       return {
+        count: checkins.length,
         items: checkins.map((c) => ({
           id: c.id,
-          userId: c.user.id,
-          userName: c.user.name ?? 'Anonymous',
           crowdLevel: c.crowdLevel,
           crowdLabel: c.crowdLabel,
           timestamp: c.createdAt.toISOString(),

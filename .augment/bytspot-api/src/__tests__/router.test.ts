@@ -428,7 +428,7 @@ describe('social', () => {
   it('returns empty leaderboard', async () => {
     (db.pointTransaction.groupBy as any).mockResolvedValueOnce([]);
     (db.user.findMany as any).mockResolvedValueOnce([]);
-    const caller = createPublicCaller();
+    const caller = createAuthenticatedCaller();
     const result = await caller.social.leaderboard({});
     expect(result).toEqual([]);
   });

@@ -23,6 +23,9 @@ function caller(context = hostContext) {
 
 beforeEach(() => {
   party.findFirst = async () => publishedParty;
+  // Alert recipients resolve through party.findUnique; unstubbed, the
+  // fire-and-forget dispatch escaped into real Prisma after the assertions.
+  party.findUnique = async () => null;
   party.findMany = async () => [];
   party.updateMany = async () => ({ count: 1 });
   partyGuest.count = async () => 0;
@@ -242,4 +245,50 @@ test('attendeeCredential returns the concurrently issued value after losing the 
   partyGuest.updateMany = async () => ({ count: 0 });
   party.findFirst = async () => ({ id: 'party-1' });
   assert.deepEqual(await caller(guestContext).events.pass.attendeeCredential({ partyId: 'party-1' }), { partyId: 'party-1', attendeeCredential: credential });
+});
+
+// The alert is a courtesy on top of a completed mutation, so it lands after
+// the mutation resolves. Let the fire-and-forget dispatch settle.
+const settleAlerts = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+test('a decision reaches the decided guest, and a refused decision reaches nobody', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  const targeted: string[][] = [];
+  pushDevice.findMany = async ({ where }: any) => { targeted.push(where.userId.in); return []; };
+  partyGuest.findFirst = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'pending', userId: 'guest-user' });
+  partyGuest.findUnique = async () => ({ userId: 'guest-user' });
+  partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', userId: 'guest-user', ...data });
+  party.findUnique = async () => ({ hostUserId: 'host-user', status: 'published' });
+
+  await caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' });
+  await settleAlerts();
+  assert.deepEqual(targeted, [['guest-user']]);
+
+  await caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'declined' });
+  await settleAlerts();
+  // A decline is still owed to the guest it declined.
+  assert.deepEqual(targeted, [['guest-user'], ['guest-user']]);
+
+  // A mutation that did not happen must not ring anyone.
+  partyGuest.findFirst = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'rsvp', userId: 'guest-user' });
+  await assert.rejects(() => caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' }), { code: 'CONFLICT' });
+  await settleAlerts();
+  assert.equal(targeted.length, 2);
+});
+
+test('a door arrival reaches the host, and a repeat check-in reaches nobody', async () => {
+  const pushDevice = db.iOSPushDevice as any;
+  const targeted: string[][] = [];
+  pushDevice.findMany = async ({ where }: any) => { targeted.push(where.userId.in); return []; };
+  partyGuest.findUnique = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'rsvp', accessGranted: true, user: { name: 'Ada' } });
+  party.findUnique = async () => ({ hostUserId: 'host-user', status: 'published' });
+
+  await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential });
+  await settleAlerts();
+  assert.deepEqual(targeted, [['host-user']]);
+
+  partyGuest.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential }), { code: 'CONFLICT' });
+  await settleAlerts();
+  assert.equal(targeted.length, 1);
 });

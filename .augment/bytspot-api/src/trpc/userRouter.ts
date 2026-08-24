@@ -16,6 +16,7 @@ import {
 import {
   ACTIVE_WINDOW_MS,
   activeCount,
+  cellFor,
   memberCount,
   recordActive,
   resolveSummary,
@@ -509,11 +510,16 @@ const presenceRouter = router({
   /** Home header count: everyone active in the app, so a new arrival can see
    *  the room is occupied before they know anyone in it. The window is
    *  returned so the client states it rather than implies it. */
-  summary: protectedProcedure.query(async ({ ctx }) => {
-    await recordActive(ctx.user.userId);
-    const [global, members] = await Promise.all([activeCount(), memberCount()]);
-    return { ...resolveSummary(global, members), windowMs: ACTIVE_WINDOW_MS };
-  }),
+  summary: protectedProcedure
+    .input(z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).optional())
+    .query(async ({ ctx, input }) => {
+      // The cell is derived here rather than accepted: a client that names its
+      // own room can inflate one. Coordinates pick the cell and are not stored.
+      const cell = input ? cellFor(input.lat, input.lng) : null;
+      await recordActive(ctx.user.userId, cell);
+      const [area, members] = await Promise.all([activeCount(cell), memberCount()]);
+      return { ...resolveSummary(area, members, cell), windowMs: ACTIVE_WINDOW_MS };
+    }),
 });
 
 export const userRouter = router({

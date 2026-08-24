@@ -1,43 +1,72 @@
 import { getRedis } from '../lib/redis';
 import { db } from '../lib/db';
 
-/** Sliding window for "active now". Stated in the UI copy — a count without a
- *  declared window is unfalsifiable. */
-export const ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+/** Sliding window for "active". A day, not an evening: lunch, a coffee and an
+ *  afternoon are uses of a city too, and an hourly window quietly encoded the
+ *  assumption that only nightlife counts. Stated in the UI copy — a count
+ *  without a declared window is unfalsifiable. */
+export const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** Below this, a global count is noise dressed as density and is not rendered. */
+/** Below this, an area count is noise dressed as density and is not rendered. */
 export const GLOBAL_FLOOR = 15;
 
-/** One write per user per minute is enough resolution for an hourly window. */
+/** One write per user per minute is enough resolution for a daily window. */
 const WRITE_THROTTLE_MS = 60 * 1000;
 
-const ACTIVE_KEY = 'presence:active';
+/** Roughly neighbourhood scale: small enough that "here" is true, large enough
+ *  that a corridor is one room rather than forty. */
+const CELL_DEGREES = 0.02;
+
 const lastWrite = new Map<string, number>();
 
-/** Record a user as active. Never throws: presence is decoration on a request
- *  that has already done its real work. */
-export async function recordActive(userId: string, now = Date.now()): Promise<void> {
-  const previous = lastWrite.get(userId);
+/** A coarse grid cell, derived on the server so the client cannot name its own
+ *  room. Coordinates are used to pick the cell and are never stored. */
+export function cellFor(lat: number, lng: number): string {
+  const quantise = (value: number) => Math.floor(value / CELL_DEGREES) * CELL_DEGREES;
+  return `${quantise(lat).toFixed(2)}:${quantise(lng).toFixed(2)}`;
+}
+
+/** Cells we have a catalog for, and may therefore name. Anywhere else is real
+ *  but unnamed: we know someone is in a cell, not that they are in a place we
+ *  have mapped. */
+const NAMED_CELLS: Record<string, string> = {
+  [cellFor(33.7838, -84.383)]: 'Midtown',
+};
+
+export function cellName(cell: string | null): string | null {
+  return cell ? NAMED_CELLS[cell] ?? null : null;
+}
+
+const activeKey = (cell: string) => `presence:active:${cell}`;
+
+/** Record a user as active in a cell. Never throws: presence is decoration on
+ *  a request that has already done its real work. */
+export async function recordActive(userId: string, cell: string | null, now = Date.now()): Promise<void> {
+  if (!cell) return;
+  const throttleKey = `${userId}:${cell}`;
+  const previous = lastWrite.get(throttleKey);
   if (previous && now - previous < WRITE_THROTTLE_MS) return;
-  lastWrite.set(userId, now);
+  lastWrite.set(throttleKey, now);
 
   const redis = getRedis();
   if (!redis) return;
   try {
-    await redis.zadd(ACTIVE_KEY, now, userId);
-    await redis.zremrangebyscore(ACTIVE_KEY, 0, now - ACTIVE_WINDOW_MS);
+    await redis.zadd(activeKey(cell), now, userId);
+    await redis.zremrangebyscore(activeKey(cell), 0, now - ACTIVE_WINDOW_MS);
   } catch {
     // Redis unavailability must never surface as a failed request.
   }
 }
 
-/** Distinct users active inside the window, or null when unknowable. Null and
- *  zero are different answers and must stay distinguishable. */
-export async function activeCount(now = Date.now()): Promise<number | null> {
+/** Distinct users active in one cell inside the window, or null when
+ *  unknowable. Null and zero are different answers and must stay
+ *  distinguishable. */
+export async function activeCount(cell: string | null, now = Date.now()): Promise<number | null> {
+  if (!cell) return null;
   const redis = getRedis();
   if (!redis) return null;
   try {
-    return await redis.zcount(ACTIVE_KEY, now - ACTIVE_WINDOW_MS, now);
+    return await redis.zcount(activeKey(cell), now - ACTIVE_WINDOW_MS, now);
   } catch {
     return null;
   }
@@ -54,16 +83,20 @@ export async function memberCount(): Promise<number | null> {
 }
 
 export type PresenceSummary =
-  | { scope: 'global'; count: number }
+  | { scope: 'area'; count: number; area: string | null }
   | { scope: 'members'; count: number }
   | { scope: 'none' };
 
-/** The home count is everyone using the app, not the people a member knows.
- *  Who a member knows is a fact about them and belongs on their profile
- *  alongside connections and check-ins; the home header answers "is anyone
- *  here", which only a whole-app number can answer for a new arrival. */
-export function resolveSummary(global: number | null, members: number | null = null): PresenceSummary {
-  if (global !== null && global >= GLOBAL_FLOOR) return { scope: 'global', count: global };
+/** The home count is the area, not the world and not the people a member
+ *  knows. An area count is the only one a member can act on, and it is the
+ *  same number at any size — a city of millions still answers "is anyone
+ *  here" one cell at a time. */
+export function resolveSummary(
+  area: number | null,
+  members: number | null = null,
+  cell: string | null = null,
+): PresenceSummary {
+  if (area !== null && area >= GLOBAL_FLOOR) return { scope: 'area', count: area, area: cellName(cell) };
   // Below the floor the honest fallback is a different fact, not a smaller
   // version of the same one: accounts that exist, said as accounts.
   if (members !== null && members > 0) return { scope: 'members', count: members };

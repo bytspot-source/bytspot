@@ -424,6 +424,10 @@ model CheckIn {
   /// answer is most often no — without this it scans the member's whole
   /// history to say so, worst exactly on a first visit.
   @@index([userId, venueId, createdAt(sort: Desc)])
+  /// Crowd level counts the distinct members whose check-in at a venue carried
+  /// proof, inside the recent window. 20260824_add_checkin_proof created this
+  /// index; the model never declared it, so every CI run since has been red.
+  @@index([venueId, proof, createdAt(sort: Desc)])
   @@index([venueId])
   @@map("check_ins")
 }

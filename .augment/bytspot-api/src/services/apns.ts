@@ -34,6 +34,25 @@ function base64UrlJson(value: object): string {
 export type ApnsReadiness = 'ready' | 'unconfigured' | 'key-unreadable' | 'key-invalid';
 
 /**
+ * Where the signing key was read from, as a shape rather than a value.
+ *
+ * `ready` alone cannot distinguish a key on a Render Secret File mount from
+ * one at a relative path that happens to resolve under the current working
+ * directory. Those two fail differently: the mount survives a deploy, the
+ * relative path is true until the next build changes what cwd contains, at
+ * which point readiness silently becomes `key-unreadable` with nothing having
+ * been edited. Blueprints cannot declare secret files, so this classification
+ * is the only way the deployed process can report which one it actually got.
+ */
+export type ApnsKeySource = 'secret-file' | 'absolute-path' | 'relative-path' | 'unset';
+
+export function classifyApnsKeyPath(keyPath: string): ApnsKeySource {
+  if (!keyPath) return 'unset';
+  if (keyPath.startsWith('/etc/secrets/')) return 'secret-file';
+  return keyPath.startsWith('/') ? 'absolute-path' : 'relative-path';
+}
+
+/**
  * The signing key is read once and kept, so readiness is a property of this
  * process rather than of whatever the filesystem happened to look like when a
  * monitor last polled. Reading per token made the key's availability a runtime
@@ -41,10 +60,13 @@ export type ApnsReadiness = 'ready' | 'unconfigured' | 'key-unreadable' | 'key-i
  * settled while a human is watching the deploy and unable to change underneath
  * a running process. The key material never leaves this module.
  */
-let signingState: { readiness: ApnsReadiness; privateKey: string | null } | null = null;
+let signingState: { readiness: ApnsReadiness; keySource: ApnsKeySource; privateKey: string | null } | null = null;
 
-function capture(): { readiness: ApnsReadiness; privateKey: string | null } {
-  if (!isApnsConfigured()) return { readiness: 'unconfigured', privateKey: null };
+function capture(): { readiness: ApnsReadiness; keySource: ApnsKeySource; privateKey: string | null } {
+  // Classified from the configured path, not from whether the read worked, so
+  // the answer is the same whether or not the file is there.
+  const keySource = classifyApnsKeyPath(config.apnsKeyPath);
+  if (!isApnsConfigured()) return { readiness: 'unconfigured', keySource, privateKey: null };
 
   let privateKey: string;
   try {
@@ -53,13 +75,13 @@ function capture(): { readiness: ApnsReadiness; privateKey: string | null } {
     // capture resolved and report a state that is merely not-yet-known.
     privateKey = readFileSync(config.apnsKeyPath, 'utf8');
   } catch {
-    return { readiness: 'key-unreadable', privateKey: null };
+    return { readiness: 'key-unreadable', keySource, privateKey: null };
   }
 
   // Validated by signing once here rather than on first send, so a malformed
   // key is a boot-time verdict too.
-  if (!signWith(privateKey)) return { readiness: 'key-invalid', privateKey: null };
-  return { readiness: 'ready', privateKey };
+  if (!signWith(privateKey)) return { readiness: 'key-invalid', keySource, privateKey: null };
+  return { readiness: 'ready', keySource, privateKey };
 }
 
 /**
@@ -72,7 +94,7 @@ export function captureApnsSigningState(): ApnsReadiness {
   return signingState.readiness;
 }
 
-function currentState(): { readiness: ApnsReadiness; privateKey: string | null } {
+function currentState(): { readiness: ApnsReadiness; keySource: ApnsKeySource; privateKey: string | null } {
   // Callers that never boot the API (scripts, tests) still get capture-once
   // semantics rather than a probe per token.
   if (!signingState) signingState = capture();
@@ -86,6 +108,15 @@ function currentState(): { readiness: ApnsReadiness; privateKey: string | null }
  */
 export function apnsReadiness(): ApnsReadiness {
   return currentState().readiness;
+}
+
+/**
+ * Reports which kind of path the key was configured with, captured alongside
+ * readiness. A shape, never the path itself: the filename of a secret file is
+ * not a secret, but it is also not something /health needs to publish.
+ */
+export function apnsKeySource(): ApnsKeySource {
+  return currentState().keySource;
 }
 
 function signWith(privateKey: string): string | null {

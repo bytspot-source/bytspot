@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
-import { apnsReadiness } from '../services/apns';
+import { apnsKeySource, apnsReadiness } from '../services/apns';
 import { readPushDeliveryTotals } from '../services/notificationDelivery';
 import { isErrorTrackingEnabled } from '../lib/observability';
 import { readFileSync } from 'fs';
@@ -51,6 +51,12 @@ router.get('/health', async (_req, res) => {
   // an unreadable key looks exactly like a night with nothing to announce.
   // Captured at boot, so a poll neither reads the key nor mints a token.
   checks.push = apnsReadiness();
+
+  // `ready` cannot tell a secret-file mount apart from a relative path that
+  // happens to resolve under the current cwd. The second is true until the
+  // next build changes what cwd contains, so publishing the shape is what
+  // makes "ready today" distinguishable from "ready and durable".
+  checks.pushKeySource = apnsKeySource();
 
   // Signing readiness stops at Apple's door. The tallies say whether anything
   // has ever come out the other side.

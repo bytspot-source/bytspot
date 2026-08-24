@@ -1,7 +1,7 @@
 {
   "name": "bytspot-api",
   "version": "0.1.0",
-  "description": "Bytspot MVP backend — venues, crowd levels, rides, parking for Atlanta Midtown",
+  "description": "Bytspot MVP backend \u2014 venues, crowd levels, rides, parking for Atlanta Midtown",
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -12,8 +12,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:migrate": "prisma migrate deploy",
     "admin:resolve": "tsx scripts/resolve-admin-ids.ts",
-    "test": "tsx --test src/**/*.node.test.ts",
-    "audit:gate": "node scripts/audit-gate.mjs"
+    "test": "tsx --test src/**/*.node.test.ts && npm run test:compiled",
+    "audit:gate": "node scripts/audit-gate.mjs",
+    "test:compiled": "tsc && node --test test/*.test.js"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

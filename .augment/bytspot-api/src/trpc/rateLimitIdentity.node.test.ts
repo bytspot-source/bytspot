@@ -31,6 +31,35 @@ test('The Redis increment is one script call carrying its own TTL', async () => 
   assert.deepEqual(calls[0].slice(1), [1, 'rate-limit:auth:google:client:test', '60000']);
 });
 
+// The middleware catches everything from this call and falls through to the
+// per-instance local bucket. So anything the script can return that is not a
+// count has to arrive as a throw: a Redis returning a string would otherwise
+// be compared against `max` and silently downgrade every limiter from one
+// shared counter to one per instance, which is the outage this guard exists
+// to make loud. ioredis returns strings for several reply shapes, so this is
+// a reachable input, not a hypothetical one.
+test('A Redis reply that is not a count is rejected, never used as one', async () => {
+  for (const reply of ['2', null, undefined, { count: 2 }, ['2']]) {
+    const redis: Pick<Redis, 'eval'> = { eval: (async () => reply) as Redis['eval'] };
+    await assert.rejects(
+      () => incrementRedisRateLimit(redis, 'rate-limit:probe', 60_000),
+      /Invalid Redis rate-limit response/,
+      `reply ${JSON.stringify(reply)} must not be treated as a count`,
+    );
+  }
+});
+
+// The middleware's fallback is reached by a throw, so a Redis that is down has
+// to surface as one rather than as a resolved value.
+test('A failing Redis surfaces as a throw, which is what the fallback catches', async () => {
+  const redis: Pick<Redis, 'eval'> = {
+    eval: (async () => {
+      throw new Error('READONLY You cannot write against a read only replica');
+    }) as Redis['eval'],
+  };
+  await assert.rejects(() => incrementRedisRateLimit(redis, 'rate-limit:probe', 60_000), /READONLY/);
+});
+
 test('The local fallback rolls its window and fails closed at capacity', () => {
   resetLocalRateLimitForTests();
   assert.equal(incrementLocalRateLimit('same-client', 100, 1_000), 1);

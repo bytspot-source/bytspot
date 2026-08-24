@@ -1,5 +1,4 @@
 import { getRedis } from '../lib/redis';
-import { db } from '../lib/db';
 
 /** Sliding window for "active now". Stated in the UI copy — a count without a
  *  declared window is unfalsifiable. */
@@ -43,47 +42,15 @@ export async function activeCount(now = Date.now()): Promise<number | null> {
   }
 }
 
-/** People in the caller's circles holding a confirmed pass for a party that is
- *  running now. Evidenced, not inferred: a granted PartyGuest row is a fact. */
-export async function circleOutCount(userId: string, now = new Date()): Promise<number> {
-  const memberships = await db.socialCircleMember.findMany({
-    where: { userId },
-    select: { circleId: true },
-  });
-  if (memberships.length === 0) return 0;
-
-  const peers = await db.socialCircleMember.findMany({
-    where: { circleId: { in: memberships.map((m) => m.circleId) }, userId: { not: userId } },
-    select: { userId: true },
-    distinct: ['userId'],
-  });
-  if (peers.length === 0) return 0;
-
-  const out = await db.partyGuest.findMany({
-    where: {
-      userId: { in: peers.map((p) => p.userId) },
-      accessGranted: true,
-      party: {
-        status: 'published',
-        startsAt: { lte: now },
-        OR: [{ endsAt: null }, { endsAt: { gte: now } }],
-      },
-    },
-    select: { userId: true },
-    distinct: ['userId'],
-  });
-  return out.length;
-}
-
 export type PresenceSummary =
-  | { scope: 'circle'; count: number }
   | { scope: 'global'; count: number }
   | { scope: 'none' };
 
-/** Circle wins whenever it has something to say: "3 people you know are out"
- *  is both Evidenced and stronger than a crowd of strangers. */
-export function resolveSummary(circle: number, global: number | null): PresenceSummary {
-  if (circle > 0) return { scope: 'circle', count: circle };
+/** The home count is everyone using the app, not the people a member knows.
+ *  Who a member knows is a fact about them and belongs on their profile
+ *  alongside connections and check-ins; the home header answers "is anyone
+ *  here", which only a whole-app number can answer for a new arrival. */
+export function resolveSummary(global: number | null): PresenceSummary {
   if (global !== null && global >= GLOBAL_FLOOR) return { scope: 'global', count: global };
   return { scope: 'none' };
 }

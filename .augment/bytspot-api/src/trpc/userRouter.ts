@@ -16,7 +16,6 @@ import {
 import {
   ACTIVE_WINDOW_MS,
   activeCount,
-  circleOutCount,
   recordActive,
   resolveSummary,
 } from '../services/presence';
@@ -506,15 +505,12 @@ const accountRouter = router({
 
 // ─── Compose user router ────────────────────────────────────────────
 const presenceRouter = router({
-  /** Home header count. Circle takes precedence over the global crowd, and the
-   *  window is returned so the client can state it rather than imply it. */
+  /** Home header count: everyone active in the app, so a new arrival can see
+   *  the room is occupied before they know anyone in it. The window is
+   *  returned so the client states it rather than implies it. */
   summary: protectedProcedure.query(async ({ ctx }) => {
     await recordActive(ctx.user.userId);
-    const [circle, global] = await Promise.all([
-      circleOutCount(ctx.user.userId),
-      activeCount(),
-    ]);
-    return { ...resolveSummary(circle, global), windowMs: ACTIVE_WINDOW_MS };
+    return { ...resolveSummary(await activeCount()), windowMs: ACTIVE_WINDOW_MS };
   }),
 });
 

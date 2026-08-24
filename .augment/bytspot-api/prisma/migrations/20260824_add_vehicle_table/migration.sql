@@ -67,8 +67,10 @@ FROM (
     COALESCE(v->>'model', '') AS model,
     -- The JSON array was never schema-checked on the way in, so a non-numeric
     -- year is possible and an unguarded cast would abort the whole migration
-    -- over one bad row.
-    COALESCE(CASE WHEN v->>'year' ~ '^[0-9]+$' THEN (v->>'year')::int END, 0) AS year,
+    -- over one bad row. Digits alone are not enough: any value wider than
+    -- four digits overflows int4 and aborts the same way, which is a cast the
+    -- regex admits and the column rejects.
+    COALESCE(CASE WHEN v->>'year' ~ '^[0-9]{1,4}$' THEN (v->>'year')::int END, 0) AS year,
     COALESCE(v->>'color', '') AS color,
     COALESCE(v->>'licensePlate', '') AS license_plate,
     NULLIF(v->>'photo', '') AS photo,
@@ -82,5 +84,9 @@ FROM (
     v_index
   FROM "users" u
   CROSS JOIN LATERAL jsonb_array_elements(u."vehicles") WITH ORDINALITY AS t(v, v_index)
-  WHERE jsonb_typeof(u."vehicles") = 'array'
+  -- Elements are only vehicles if they are objects. A scalar or null element
+  -- reads as an object with every field absent, which would materialise a row
+  -- with a synthesised id and no make, model or plate: a vehicle that never
+  -- existed, indistinguishable from one the owner saved.
+  WHERE jsonb_typeof(u."vehicles") = 'array' AND jsonb_typeof(v) = 'object'
 ) legacy;

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { apnsReadiness } from '../services/apns';
+import { readPushDeliveryTotals } from '../services/notificationDelivery';
 import { isErrorTrackingEnabled } from '../lib/observability';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -50,10 +51,14 @@ router.get('/health', async (_req, res) => {
   // an unreadable key looks exactly like a night with nothing to announce.
   checks.push = await apnsReadiness();
 
+  // Signing readiness stops at Apple's door. The tallies say whether anything
+  // has ever come out the other side.
+  const pushDelivery = await readPushDeliveryTotals();
+
   // Error tracking is deliberately not part of the healthy test: losing
   // visibility must not take the API out of Render's rotation.
   const healthy = checks.postgres === 'ok';
-  res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', version: pkgVersion, checks });
+  res.status(healthy ? 200 : 503).json({ status: healthy ? 'healthy' : 'degraded', version: pkgVersion, checks, pushDelivery });
 });
 
 // ─── Public stats for home screen display ────────────────────────────────────

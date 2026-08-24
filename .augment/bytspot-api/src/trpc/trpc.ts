@@ -96,8 +96,11 @@ export function resetLocalRateLimitForTests(): void {
   rateBuckets.clear();
 }
 
+/** Marks a middleware as a limiter so the router can be audited for coverage. */
+export const RATE_LIMIT_LABEL = Symbol.for('bytspot.rateLimitLabel');
+
 export function rateLimitMiddleware(opts: { windowMs: number; max: number; label: string }) {
-  return t.middleware(async ({ ctx, next }) => {
+  const limiter: Parameters<typeof t.middleware>[0] = async ({ ctx, next }) => {
     const key = `${opts.label}:${rateLimitSubject(ctx.user?.userId, ctx.clientRateLimitKey)}`;
     let count: number | null = null;
     const redis = getRedis();
@@ -121,6 +124,9 @@ export function rateLimitMiddleware(opts: { windowMs: number; max: number; label
       });
     }
     return next();
-  });
+  };
+  // The label rides on the function itself: tRPC keeps the raw middleware, so
+  // this is what a router-wide audit can see.
+  return t.middleware(Object.assign(limiter, { [RATE_LIMIT_LABEL]: opts.label }));
 }
 

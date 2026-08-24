@@ -292,3 +292,21 @@ test('a door arrival reaches the host, and a repeat check-in reaches nobody', as
   await settleAlerts();
   assert.equal(targeted.length, 1);
 });
+
+test('The door and the decision both run at serializable isolation', async () => {
+  // Asserted per path, not once: the isolation level is what stops two
+  // concurrent scans consuming the same credential, and each caller sets it.
+  const levels: unknown[] = [];
+  prisma.$transaction = async (callback: any, options: any) => {
+    levels.push(options?.isolationLevel);
+    return callback({ party, partyGuest });
+  };
+
+  partyGuest.findFirst = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'pending', userId: 'guest-user' });
+  await caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' });
+
+  partyGuest.findUnique = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'rsvp', accessGranted: true, user: { name: 'Ada' } });
+  await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential });
+
+  assert.deepEqual(levels, ['Serializable', 'Serializable']);
+});

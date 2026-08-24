@@ -150,11 +150,42 @@ describe('venues', () => {
     (db.crowdLevel.create as any).mockResolvedValueOnce({});
 
     const caller = createAuthenticatedCaller();
+    // Three other people checked in within the hour, so this member makes four.
+    (db.checkIn.findMany as any).mockResolvedValueOnce([{ userId: 'u-a' }, { userId: 'u-b' }, { userId: 'u-c' }]);
+
     const result = await caller.venues.checkin({ venueId: 'v1', lat: 33.7801, lng: -84.3801 });
     expect(result.success).toBe(true);
     expect(result.proof).toBe('nearby');
     expect(result.pointsEarned).toBe(10);
+    expect(result.pointsReason).toBe('paid');
     expect(result.newCrowdLevel).toBe(3);
+  });
+
+  it('venues.checkin pays once per visit, however many times the member taps', async () => {
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'v1', name: 'Test Bar', slug: 'test-bar', lat: 33.78, lng: -84.38 });
+    (db.crowdLevel.findFirst as any).mockResolvedValueOnce({ level: 2 });
+    (db.crowdLevel.create as any).mockResolvedValueOnce({});
+    // Already paid for this venue half an hour ago: same visit, same evening.
+    (db.checkIn.findFirst as any).mockResolvedValueOnce({ createdAt: new Date(Date.now() - 30 * 60 * 1000) });
+
+    const caller = createAuthenticatedCaller();
+    const result = await caller.venues.checkin({ venueId: 'v1', lat: 33.7801, lng: -84.3801 });
+    expect(result.success).toBe(true);
+    expect(result.pointsEarned).toBe(0);
+    expect(result.pointsReason).toBe('same_visit');
+  });
+
+  it('venues.checkin stops paying at the daily ceiling', async () => {
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'v1', name: 'Test Bar', slug: 'test-bar', lat: 33.78, lng: -84.38 });
+    (db.crowdLevel.findFirst as any).mockResolvedValueOnce({ level: 2 });
+    (db.crowdLevel.create as any).mockResolvedValueOnce({});
+    (db.pointTransaction.aggregate as any).mockResolvedValueOnce({ _sum: { amount: 50 } });
+
+    const caller = createAuthenticatedCaller();
+    const result = await caller.venues.checkin({ venueId: 'v1', lat: 33.7801, lng: -84.3801 });
+    expect(result.success).toBe(true);
+    expect(result.pointsEarned).toBe(0);
+    expect(result.pointsReason).toBe('daily_ceiling');
   });
 
   it('venues.checkin records but does not reward or move the crowd for an unproven tap', async () => {
@@ -168,6 +199,7 @@ describe('venues', () => {
     expect(result.success).toBe(true);
     expect(result.proof).toBe('self_reported');
     expect(result.pointsEarned).toBe(0);
+    expect(result.pointsReason).toBe('unproven');
     expect(result.newCrowdLevel).toBe(2);
   });
 

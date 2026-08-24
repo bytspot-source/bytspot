@@ -17,7 +17,7 @@ import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
-import { movesCrowdLevel, pointsFor, resolveProof } from '../services/checkinProof';
+import { crowdLevelForVisitors, movesCrowdLevel, resolvePayout, resolveProof } from '../services/checkinProof';
 import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice } from '../services/iosPushDevices';
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
@@ -387,7 +387,7 @@ const venuesRouter = router({
         if (r) {
           try {
             const hit = await r.get(`idem:checkin:${idempotencyKey}`);
-            if (hit) return JSON.parse(hit) as { success: boolean; newCrowdLevel: number; pointsEarned: number; proof: string };
+            if (hit) return JSON.parse(hit) as { success: boolean; newCrowdLevel: number; pointsEarned: number; proof: string; pointsReason: string };
           } catch { /* continue */ }
         }
       }
@@ -400,9 +400,24 @@ const venuesRouter = router({
 
       const latest = await db.crowdLevel.findFirst({ where: { venueId }, orderBy: { recordedAt: 'desc' } });
       const labels: Record<number, string> = { 1: 'Chill', 2: 'Active', 3: 'Busy', 4: 'Packed' };
+
+      // The level is how many different people were here in the last hour,
+      // not the previous level plus one: a tap is not evidence of a crowd,
+      // and a member tapping repeatedly is still one person in the room.
+      const now = new Date();
+      const recentVisitors = movesCrowdLevel(proof)
+        ? await db.checkIn.findMany({
+            where: { venueId, proof: { not: 'self_reported' }, createdAt: { gte: new Date(now.getTime() - 60 * 60 * 1000) } },
+            select: { userId: true },
+            distinct: ['userId'],
+          })
+        : [];
+      const distinctVisitors = movesCrowdLevel(proof)
+        ? new Set([...recentVisitors.map((v) => v.userId), ctx.user.userId]).size
+        : 0;
       // An unproven tap leaves the venue's crowd level exactly where it was.
       // Someone at home must not be able to report a bar as packed.
-      const newLevel = movesCrowdLevel(proof) ? Math.min((latest?.level ?? 1) + 1, 4) : latest?.level ?? 1;
+      const newLevel = movesCrowdLevel(proof) ? crowdLevelForVisitors(distinctVisitors) : latest?.level ?? 1;
 
       if (movesCrowdLevel(proof)) {
         await db.crowdLevel.create({
@@ -411,7 +426,25 @@ const venuesRouter = router({
       }
 
       // ── Phase 1: Record per-user check-in + award points ──
-      const pointsEarned = pointsFor(proof);
+      const startOfDay = new Date(now);
+      startOfDay.setHours(0, 0, 0, 0);
+      const [lastPaidVisit, todaysPoints] = await Promise.all([
+        db.checkIn.findFirst({
+          where: { userId: ctx.user.userId, venueId, pointsEarned: { gt: 0 } },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true },
+        }),
+        db.pointTransaction.aggregate({
+          _sum: { amount: true },
+          where: { userId: ctx.user.userId, category: 'checkin', type: 'earn', createdAt: { gte: startOfDay } },
+        }),
+      ]);
+      const { points: pointsEarned, reason: pointsReason } = resolvePayout({
+        proof,
+        lastPaidVisitAt: lastPaidVisit?.createdAt ?? null,
+        pointsEarnedToday: todaysPoints._sum.amount ?? 0,
+        now,
+      });
       await Promise.all([
         db.checkIn.create({
           data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned, proof, distanceM },
@@ -427,7 +460,7 @@ const venuesRouter = router({
         venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },
       });
 
-      const result = { success: true, newCrowdLevel: newLevel, pointsEarned, proof };
+      const result = { success: true, newCrowdLevel: newLevel, pointsEarned, proof, pointsReason };
 
       if (entersPacked(latest?.level, newLevel)) {
         sendVenueCrowdAlert({

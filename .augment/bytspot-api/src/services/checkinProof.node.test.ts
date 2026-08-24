@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { distanceMeters, FENCE_METERS, movesCrowdLevel, pointsFor, resolveProof } from './checkinProof';
+import { DAILY_POINT_CEILING, FENCE_METERS, crowdLevelForVisitors, distanceMeters, movesCrowdLevel, pointsFor, resolvePayout, resolveProof } from './checkinProof';
 
 const venue = { lat: 33.7866, lng: -84.3833 };
 
@@ -39,4 +39,42 @@ test('Distance is symmetric and zero at the venue itself', () => {
   assert.equal(distanceMeters(venue, venue), 0);
   const a = { lat: 33.79, lng: -84.39 };
   assert.equal(distanceMeters(venue, a), distanceMeters(a, venue));
+});
+
+test('One visit pays once, however many times the member taps', () => {
+  const now = new Date('2026-08-24T22:00:00Z');
+  const paid = resolvePayout({ proof: 'nearby', lastPaidVisitAt: null, pointsEarnedToday: 0, now });
+  assert.deepEqual(paid, { points: 10, reason: 'paid' });
+
+  // Standing in the room and tapping again is the same visit, not a second one.
+  const again = resolvePayout({ proof: 'nearby', lastPaidVisitAt: new Date('2026-08-24T21:30:00Z'), pointsEarnedToday: 10, now });
+  assert.deepEqual(again, { points: 0, reason: 'same_visit' });
+
+  // Coming back the next night is a new visit.
+  const tomorrow = resolvePayout({ proof: 'nearby', lastPaidVisitAt: new Date('2026-08-23T22:00:00Z'), pointsEarnedToday: 0, now });
+  assert.deepEqual(tomorrow, { points: 10, reason: 'paid' });
+});
+
+test('The daily ceiling refuses the last points rather than the whole check-in', () => {
+  const now = new Date('2026-08-24T22:00:00Z');
+  const full = resolvePayout({ proof: 'nearby', lastPaidVisitAt: null, pointsEarnedToday: DAILY_POINT_CEILING, now });
+  assert.deepEqual(full, { points: 0, reason: 'daily_ceiling' });
+
+  // Five points short of the ceiling pays five, not ten and not nothing.
+  const partial = resolvePayout({ proof: 'nearby', lastPaidVisitAt: null, pointsEarnedToday: DAILY_POINT_CEILING - 5, now });
+  assert.deepEqual(partial, { points: 5, reason: 'paid' });
+
+  // Proof is checked before either limit, so an unproven tap says so.
+  const unproven = resolvePayout({ proof: 'self_reported', lastPaidVisitAt: null, pointsEarnedToday: DAILY_POINT_CEILING, now });
+  assert.deepEqual(unproven, { points: 0, reason: 'unproven' });
+});
+
+test('Crowd level counts people, so one member cannot report a packed room', () => {
+  assert.equal(crowdLevelForVisitors(1), 1);
+  assert.equal(crowdLevelForVisitors(2), 2);
+  assert.equal(crowdLevelForVisitors(4), 3);
+  assert.equal(crowdLevelForVisitors(8), 4);
+  assert.equal(crowdLevelForVisitors(40), 4);
+  // An empty hour is Chill, not an error.
+  assert.equal(crowdLevelForVisitors(0), 1);
 });

@@ -48,6 +48,61 @@ export function pointsFor(proof: CheckInProof): number {
   return proof === 'self_reported' ? 0 : 10;
 }
 
+/** One visit pays once. Long enough that an evening at one venue is a single
+ *  visit however many times the member taps, short enough that a genuine
+ *  return the next night is a new one. */
+export const VISIT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+/** Check-in is a nudge, not an income. The ceiling is what stops walking a
+ *  block of venues from becoming a job, and it is per member per day. */
+export const DAILY_POINT_CEILING = 50;
+
+/** Why a check-in paid what it paid. The member is told this, so it has to be
+ *  a reason rather than a silent zero. */
+export type PayoutReason = 'paid' | 'unproven' | 'same_visit' | 'daily_ceiling';
+
+export type Payout = { points: number; reason: PayoutReason };
+
+/** The full award decision in one place, so the rules cannot disagree with
+ *  each other across call sites.
+ *
+ *  Order matters and is deliberate: proof first, because an unproven tap was
+ *  never going to pay; then the visit, because the second tap of one evening
+ *  is not a second visit; then the ceiling, which is the only one that can
+ *  refuse a member who did everything right. */
+export function resolvePayout(input: {
+  proof: CheckInProof;
+  lastPaidVisitAt: Date | null | undefined;
+  pointsEarnedToday: number;
+  now?: Date;
+}): Payout {
+  const base = pointsFor(input.proof);
+  if (base === 0) return { points: 0, reason: 'unproven' };
+
+  const now = input.now ?? new Date();
+  if (input.lastPaidVisitAt && now.getTime() - input.lastPaidVisitAt.getTime() < VISIT_COOLDOWN_MS) {
+    return { points: 0, reason: 'same_visit' };
+  }
+
+  const remaining = DAILY_POINT_CEILING - input.pointsEarnedToday;
+  if (remaining <= 0) return { points: 0, reason: 'daily_ceiling' };
+
+  // A partial award beats a silent refusal at the boundary: the member gets
+  // what is left of the day rather than nothing for being 5 points over.
+  return { points: Math.min(base, remaining), reason: 'paid' };
+}
+
+/** How busy a venue is, from how many different people were there — not from
+ *  how many times a tap was pressed. One member cannot report a room as
+ *  packed, which is the same rule as the fence applied to the crowd number
+ *  instead of the reward. */
+export function crowdLevelForVisitors(distinctVisitors: number): number {
+  if (distinctVisitors >= 8) return 4;
+  if (distinctVisitors >= 4) return 3;
+  if (distinctVisitors >= 2) return 2;
+  return 1;
+}
+
 /** Crowd level is what a venue is shown and what a member plans against, so
  *  an unproven tap must not move it. This is the same rule as points, applied
  *  to the data instead of the reward. */

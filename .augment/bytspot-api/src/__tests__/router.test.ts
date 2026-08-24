@@ -144,15 +144,31 @@ describe('venues', () => {
     ).rejects.toThrow(TRPCError);
   });
 
-  it('venues.checkin increments crowd level (authenticated)', async () => {
-    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'v1', name: 'Test Bar', slug: 'test-bar' });
+  it('venues.checkin increments crowd level for a check-in inside the fence', async () => {
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'v1', name: 'Test Bar', slug: 'test-bar', lat: 33.78, lng: -84.38 });
     (db.crowdLevel.findFirst as any).mockResolvedValueOnce({ level: 2 });
     (db.crowdLevel.create as any).mockResolvedValueOnce({});
 
     const caller = createAuthenticatedCaller();
+    const result = await caller.venues.checkin({ venueId: 'v1', lat: 33.7801, lng: -84.3801 });
+    expect(result.success).toBe(true);
+    expect(result.proof).toBe('nearby');
+    expect(result.pointsEarned).toBe(10);
+    expect(result.newCrowdLevel).toBe(3);
+  });
+
+  it('venues.checkin records but does not reward or move the crowd for an unproven tap', async () => {
+    (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'v1', name: 'Test Bar', slug: 'test-bar', lat: 33.78, lng: -84.38 });
+    (db.crowdLevel.findFirst as any).mockResolvedValueOnce({ level: 2 });
+
+    // No coordinate: the server cannot tell the door from the sofa, so the
+    // tap is the member's own history and nothing more.
+    const caller = createAuthenticatedCaller();
     const result = await caller.venues.checkin({ venueId: 'v1' });
     expect(result.success).toBe(true);
-    expect(result.newCrowdLevel).toBe(3);
+    expect(result.proof).toBe('self_reported');
+    expect(result.pointsEarned).toBe(0);
+    expect(result.newCrowdLevel).toBe(2);
   });
 
   it('venues.checkin rejects unauthenticated calls', async () => {

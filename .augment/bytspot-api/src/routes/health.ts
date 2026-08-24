@@ -61,8 +61,9 @@ router.get('/stats', async (_req, res) => {
     ]);
     res.json({ userCount, venueCount, betaLeadCount });
   } catch {
-    // Fallback so the frontend never crashes
-    res.json({ userCount: 246, venueCount: 12, betaLeadCount: 0 });
+    // A count we cannot read is unknown, not 246. Inventing one here would
+    // publish a number precisely when nothing can verify it.
+    res.status(503).json({ error: 'Counts unavailable' });
   }
 });
 

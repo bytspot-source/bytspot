@@ -16,3 +16,12 @@ test('A global count below the floor is withheld rather than rounded up', () => 
 test('An unknowable global count is withheld, never reported as zero', () => {
   assert.deepEqual(resolveSummary(null), { scope: 'none' });
 });
+
+test('Below the floor the row states accounts, which is a different claim', () => {
+  assert.deepEqual(resolveSummary(GLOBAL_FLOOR - 1, 64), { scope: 'members', count: 64 });
+  assert.deepEqual(resolveSummary(null, 64), { scope: 'members', count: 64 });
+  // Presence still outranks it: a measured crowd beats a registration total.
+  assert.deepEqual(resolveSummary(GLOBAL_FLOOR, 64), { scope: 'global', count: GLOBAL_FLOOR });
+  assert.deepEqual(resolveSummary(null, 0), { scope: 'none' });
+  assert.deepEqual(resolveSummary(null, null), { scope: 'none' });
+});

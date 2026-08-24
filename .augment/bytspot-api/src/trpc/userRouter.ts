@@ -16,6 +16,7 @@ import {
 import {
   ACTIVE_WINDOW_MS,
   activeCount,
+  memberCount,
   recordActive,
   resolveSummary,
 } from '../services/presence';
@@ -510,7 +511,8 @@ const presenceRouter = router({
    *  returned so the client states it rather than implies it. */
   summary: protectedProcedure.query(async ({ ctx }) => {
     await recordActive(ctx.user.userId);
-    return { ...resolveSummary(await activeCount()), windowMs: ACTIVE_WINDOW_MS };
+    const [global, members] = await Promise.all([activeCount(), memberCount()]);
+    return { ...resolveSummary(global, members), windowMs: ACTIVE_WINDOW_MS };
   }),
 });
 

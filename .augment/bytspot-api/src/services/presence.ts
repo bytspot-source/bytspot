@@ -1,4 +1,5 @@
 import { getRedis } from '../lib/redis';
+import { db } from '../lib/db';
 
 /** Sliding window for "active now". Stated in the UI copy — a count without a
  *  declared window is unfalsifiable. */
@@ -42,15 +43,29 @@ export async function activeCount(now = Date.now()): Promise<number | null> {
   }
 }
 
+/** Accounts that exist. A different claim from presence and labelled as one:
+ *  a member is not a person who is out tonight. */
+export async function memberCount(): Promise<number | null> {
+  try {
+    return await db.user.count({ where: { deletedAt: null } });
+  } catch {
+    return null;
+  }
+}
+
 export type PresenceSummary =
   | { scope: 'global'; count: number }
+  | { scope: 'members'; count: number }
   | { scope: 'none' };
 
 /** The home count is everyone using the app, not the people a member knows.
  *  Who a member knows is a fact about them and belongs on their profile
  *  alongside connections and check-ins; the home header answers "is anyone
  *  here", which only a whole-app number can answer for a new arrival. */
-export function resolveSummary(global: number | null): PresenceSummary {
+export function resolveSummary(global: number | null, members: number | null = null): PresenceSummary {
   if (global !== null && global >= GLOBAL_FLOOR) return { scope: 'global', count: global };
+  // Below the floor the honest fallback is a different fact, not a smaller
+  // version of the same one: accounts that exist, said as accounts.
+  if (members !== null && members > 0) return { scope: 'members', count: members };
   return { scope: 'none' };
 }

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
+import { apnsReadiness } from '../services/apns';
 import { isErrorTrackingEnabled } from '../lib/observability';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -44,6 +45,10 @@ router.get('/health', async (_req, res) => {
   // On/off only: whether errors are being reported is operational state, the
   // DSN itself is not.
   checks.errorTracking = isErrorTrackingEnabled() ? 'on' : 'off';
+
+  // Push signing is reported because the send path swallows its own failures:
+  // an unreadable key looks exactly like a night with nothing to announce.
+  checks.push = await apnsReadiness();
 
   // Error tracking is deliberately not part of the healthy test: losing
   // visibility must not take the API out of Render's rotation.

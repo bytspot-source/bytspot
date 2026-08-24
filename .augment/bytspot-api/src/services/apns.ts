@@ -31,16 +31,30 @@ function base64UrlJson(value: object): string {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
 }
 
-async function providerToken(): Promise<string | null> {
-  if (!isApnsConfigured()) return null;
+export type ApnsReadiness = 'ready' | 'unconfigured' | 'key-unreadable' | 'key-invalid';
+
+/**
+ * Every failure below is swallowed on the send path, because a push that
+ * cannot be signed must not break the flow that triggered it. That makes an
+ * unsigned provider indistinguishable from a quiet night, so readiness is
+ * reported separately and never carries the key or the token.
+ */
+async function providerTokenResult(): Promise<{ token: string } | { reason: Exclude<ApnsReadiness, 'ready'> }> {
+  if (!isApnsConfigured()) return { reason: 'unconfigured' };
 
   const now = Date.now();
   if (cachedProviderToken && cachedProviderToken.expiresAt > now) {
-    return cachedProviderToken.value;
+    return { token: cachedProviderToken.value };
+  }
+
+  let privateKey: string;
+  try {
+    privateKey = await readFile(config.apnsKeyPath, 'utf8');
+  } catch {
+    return { reason: 'key-unreadable' };
   }
 
   try {
-    const privateKey = await readFile(config.apnsKeyPath, 'utf8');
     const issuedAt = Math.floor(now / 1000);
     const header = base64UrlJson({ alg: 'ES256', kid: config.apnsKeyId });
     const claims = base64UrlJson({ iss: config.apnsTeamId, iat: issuedAt });
@@ -52,10 +66,21 @@ async function providerToken(): Promise<string | null> {
 
     // APNs permits provider tokens for up to one hour. Refresh conservatively.
     cachedProviderToken = { value, expiresAt: now + (50 * 60 * 1000) };
-    return value;
+    return { token: value };
   } catch {
-    return null;
+    return { reason: 'key-invalid' };
   }
+}
+
+/** Signing readiness only: proves the provider can sign, not that Apple accepts it. */
+export async function apnsReadiness(): Promise<ApnsReadiness> {
+  const result = await providerTokenResult();
+  return 'token' in result ? 'ready' : result.reason;
+}
+
+async function providerToken(): Promise<string | null> {
+  const result = await providerTokenResult();
+  return 'token' in result ? result.token : null;
 }
 
 function isPermanentApnsFailure(status: number, reason: string | undefined): boolean {

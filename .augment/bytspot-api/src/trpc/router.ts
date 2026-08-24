@@ -17,6 +17,7 @@ import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
+import { movesCrowdLevel, pointsFor, resolveProof } from '../services/checkinProof';
 import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice } from '../services/iosPushDevices';
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
@@ -371,7 +372,12 @@ const venuesRouter = router({
   /** POST /venues/:id/checkin → venues.checkin (auth required, rate limited) */
   checkin: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'checkin' }))
-    .input(z.object({ venueId: z.string(), idempotencyKey: z.string().optional() }))
+    .input(z.object({
+      venueId: z.string(),
+      idempotencyKey: z.string().optional(),
+      lat: z.number().min(-90).max(90).optional(),
+      lng: z.number().min(-180).max(180).optional(),
+    }))
     .mutation(async ({ ctx, input }) => {
       const { venueId, idempotencyKey } = input;
 
@@ -381,7 +387,7 @@ const venuesRouter = router({
         if (r) {
           try {
             const hit = await r.get(`idem:checkin:${idempotencyKey}`);
-            if (hit) return JSON.parse(hit) as { success: boolean; newCrowdLevel: number; pointsEarned: number };
+            if (hit) return JSON.parse(hit) as { success: boolean; newCrowdLevel: number; pointsEarned: number; proof: string };
           } catch { /* continue */ }
         }
       }
@@ -389,30 +395,39 @@ const venuesRouter = router({
       const venue = await db.venue.findUnique({ where: { id: venueId } });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
 
-      const latest = await db.crowdLevel.findFirst({ where: { venueId }, orderBy: { recordedAt: 'desc' } });
-      const newLevel = Math.min((latest?.level ?? 1) + 1, 4);
-      const labels: Record<number, string> = { 1: 'Chill', 2: 'Active', 3: 'Busy', 4: 'Packed' };
+      const device = input.lat !== undefined && input.lng !== undefined ? { lat: input.lat, lng: input.lng } : null;
+      const { proof, distanceMeters: distanceM } = resolveProof(device, venue);
 
-      await db.crowdLevel.create({
-        data: { venueId, level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report' },
-      });
+      const latest = await db.crowdLevel.findFirst({ where: { venueId }, orderBy: { recordedAt: 'desc' } });
+      const labels: Record<number, string> = { 1: 'Chill', 2: 'Active', 3: 'Busy', 4: 'Packed' };
+      // An unproven tap leaves the venue's crowd level exactly where it was.
+      // Someone at home must not be able to report a bar as packed.
+      const newLevel = movesCrowdLevel(proof) ? Math.min((latest?.level ?? 1) + 1, 4) : latest?.level ?? 1;
+
+      if (movesCrowdLevel(proof)) {
+        await db.crowdLevel.create({
+          data: { venueId, level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report' },
+        });
+      }
 
       // ── Phase 1: Record per-user check-in + award points ──
-      const pointsEarned = 10;
+      const pointsEarned = pointsFor(proof);
       await Promise.all([
         db.checkIn.create({
-          data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned },
+          data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned, proof, distanceM },
         }),
-        db.pointTransaction.create({
+        // No transaction for a tap that earned nothing: a zero-point ledger row
+        // is noise in the member's own history.
+        ...(pointsEarned > 0 ? [db.pointTransaction.create({
           data: { userId: ctx.user.userId, type: 'earn', amount: pointsEarned, description: `Checked in at ${venue.name}`, category: 'checkin' },
-        }),
+        })] : []),
       ]).catch(() => { /* non-blocking — don't fail the checkin if points fail */ });
 
       crowdEmitter.emit('crowd-update', {
         venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },
       });
 
-      const result = { success: true, newCrowdLevel: newLevel, pointsEarned };
+      const result = { success: true, newCrowdLevel: newLevel, pointsEarned, proof };
 
       if (entersPacked(latest?.level, newLevel)) {
         sendVenueCrowdAlert({

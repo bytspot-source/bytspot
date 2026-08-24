@@ -405,6 +405,12 @@ model CheckIn {
   crowdLevel    Int      @map("crowd_level")
   crowdLabel    String   @map("crowd_label")
   pointsEarned  Int      @default(10) @map("points_earned")
+  /// How the check-in was established: self_reported, nearby, or verified.
+  /// Existing rows predate any proof and are self_reported by definition.
+  proof         String   @default("self_reported")
+  /// Metres from the venue at the moment of the tap, when the device offered
+  /// a coordinate. Null means unknown, which is not the same as far.
+  distanceM     Int?     @map("distance_m")
   createdAt     DateTime @default(now()) @map("created_at")
 
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)

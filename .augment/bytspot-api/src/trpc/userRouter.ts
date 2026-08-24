@@ -280,38 +280,59 @@ const vehicleSchema = z.object({
   trunkCategory: z.enum(['full', 'compact', 'frunk_only', 'none']),
 });
 
+/**
+ * Rows, not a JSON array. Each mutation now writes only the vehicle it names,
+ * so two concurrent adds no longer overwrite each other with a stale copy of
+ * the whole list, and an id identifies exactly one vehicle instead of every
+ * vehicle created in the same millisecond.
+ */
+const vehicleSelect = {
+  id: true,
+  type: true,
+  make: true,
+  model: true,
+  year: true,
+  color: true,
+  licensePlate: true,
+  photo: true,
+  vin: true,
+  transmissionType: true,
+  trunkCategory: true,
+} as const;
+
 const vehiclesRouter = router({
   /** List user's saved vehicles */
   list: protectedProcedure.query(async ({ ctx }) => {
-    const user = await db.user.findUnique({
-      where: { id: ctx.user.userId },
-      select: { vehicles: true },
+    return db.vehicle.findMany({
+      where: { userId: ctx.user.userId },
+      select: vehicleSelect,
+      orderBy: { createdAt: 'asc' },
     });
-    return (user?.vehicles as any[]) ?? [];
   }),
 
   /** Add a vehicle */
   add: protectedProcedure
     .input(vehicleSchema.omit({ id: true }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
-      const vehicles = (user?.vehicles as any[]) ?? [];
-      const newVehicle = { id: `v_${Date.now()}`, ...input };
-      vehicles.push(newVehicle);
-      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
-      return newVehicle;
+      return db.vehicle.create({
+        data: { ...input, userId: ctx.user.userId },
+        select: vehicleSelect,
+      });
     }),
 
   /** Update a vehicle */
   update: protectedProcedure
     .input(vehicleSchema)
     .mutation(async ({ ctx, input }) => {
-      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
-      const vehicles = (user?.vehicles as any[]) ?? [];
-      const idx = vehicles.findIndex((v: any) => v.id === input.id);
-      if (idx === -1) throw new (await import('@trpc/server')).TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
-      vehicles[idx] = input;
-      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
+      const { id, ...fields } = input;
+      // Scoped by userId as well as id, so a caller holding another member's
+      // vehicle id gets NOT_FOUND rather than editing it. `updateMany` is used
+      // for that scoping: `update` takes the primary key alone.
+      const { count } = await db.vehicle.updateMany({
+        where: { id, userId: ctx.user.userId },
+        data: fields,
+      });
+      if (count === 0) throw new TRPCError({ code: 'NOT_FOUND', message: 'Vehicle not found' });
       return input;
     }),
 
@@ -319,9 +340,9 @@ const vehiclesRouter = router({
   remove: protectedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { vehicles: true } });
-      const vehicles = ((user?.vehicles as any[]) ?? []).filter((v: any) => v.id !== input.id);
-      await db.user.update({ where: { id: ctx.user.userId }, data: { vehicles } });
+      // Ownership-scoped for the same reason as update. Removing something
+      // already gone stays a success: the caller's intent is satisfied.
+      await db.vehicle.deleteMany({ where: { id: input.id, userId: ctx.user.userId } });
       return { success: true };
     }),
 });

@@ -19,7 +19,9 @@ model User {
   profileImage String? @map("profile_image")
   address   String?
   birthday  String?
-  vehicles          Json?    // JSON array of saved vehicles
+  // Superseded by the Vehicle relation below. No longer read; dropped in a
+  // follow-up migration once the table has been serving for a deploy.
+  vehicles          Json?    // legacy JSON array of saved vehicles
   notificationPrefs Json?    @map("notification_prefs") // push/email/sms preference toggles
   ref       String?  // signup source: "qr", "tiktok", "organic"
 
@@ -41,6 +43,7 @@ model User {
   valetProfile   ValetProfile?
   checkIns       CheckIn[]
   savedSpots     SavedSpot[]
+  savedVehicles  Vehicle[]
   iosPushDevices      IOSPushDevice[]
   providerIdentities ProviderIdentity[]
   collections    SpotCollection[]
@@ -442,6 +445,34 @@ model SavedSpot {
   @@unique([userId, venueId])
   @@index([userId])
   @@map("saved_spots")
+}
+
+// ─── Saved Vehicles ───────────────────────────────────
+// Replaces users.vehicles. As a JSON array every mutation was a
+// read-modify-write of the whole array, so concurrent adds lost one, and
+// `v_${Date.now()}` ids collided within a millisecond — making `update` edit
+// the wrong vehicle and `remove` delete two. Rows give each vehicle its own
+// identity and its own write.
+model Vehicle {
+  id               String   @id @default(cuid())
+  userId           String   @map("user_id")
+  type             String
+  make             String
+  model            String
+  year             Int
+  color            String
+  licensePlate     String   @map("license_plate")
+  photo            String?
+  vin              String?
+  transmissionType String   @map("transmission_type")
+  trunkCategory    String   @map("trunk_category")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("vehicles")
 }
 
 // ─── Spot Collections ─────────────────────────────────

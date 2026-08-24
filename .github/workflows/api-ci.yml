@@ -154,4 +154,7 @@ jobs:
       # ReDoS in its request path because nothing checked here. Accepted
       # exceptions are dated in scripts/audit-gate.mjs and expire on their own.
       - name: Security audit (runtime dependencies)
+        run: node scripts/audit-gate.mjs
+      - name: Full dependency audit advisory
+        continue-on-error: true
         run: npm audit --audit-level=high

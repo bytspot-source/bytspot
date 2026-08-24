@@ -3,9 +3,19 @@ name: API CI
 on:
   push:
     branches: [main]
-    paths: ['.augment/bytspot-api/**', '.github/workflows/api-ci.yml']
+    paths: ['.augment/bytspot-api/**', '.github/workflows/api-ci.yml', 'render.yaml']
   pull_request:
-    paths: ['.augment/bytspot-api/**', '.github/workflows/api-ci.yml']
+    paths: ['.augment/bytspot-api/**', '.github/workflows/api-ci.yml', 'render.yaml']
+
+# render.yaml names the preDeployCommand that runs the migrations, so a change
+# to how production deploys is a change this workflow should see. It was edited
+# once already without CI running.
+
+# main autodeploys, so two pushes in quick succession race and the older run can
+# report last, greening a commit the newer one failed.
+concurrency:
+  group: api-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:

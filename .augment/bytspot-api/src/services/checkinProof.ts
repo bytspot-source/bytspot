@@ -57,6 +57,40 @@ export const VISIT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
  *  block of venues from becoming a job, and it is per member per day. */
 export const DAILY_POINT_CEILING = 50;
 
+/** A points day is the member's day, not the server's. The container runs on
+ *  UTC, so an unqualified midnight lands at 8pm Atlanta — inside the busiest
+ *  check-in window, handing a Friday night two allowances. Pinned to one zone
+ *  while the members are in one metro; it becomes a per-member field the day
+ *  that stops being true. */
+export const POINTS_TIME_ZONE = 'America/New_York';
+
+/** A night that runs past midnight is still one night, so the day turns over
+ *  at 4am local rather than at 12. This is the same reason the ceiling exists:
+ *  the boundary must not fall where people are still out. */
+export const DAY_TURNOVER_HOUR = 4;
+
+/** The instant the member's current points day began. */
+export function startOfPointsDay(now: Date, timeZone = POINTS_TIME_ZONE): Date {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(now).reduce<Record<string, number>>((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = Number(part.value);
+    return acc;
+  }, {});
+
+  // formatToParts gives the wall clock in the zone; the difference between
+  // that and the instant is the offset, DST included, with no table to keep.
+  const wallClock = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour % 24, parts.minute, parts.second);
+  const offsetMs = wallClock - Math.floor(now.getTime() / 1000) * 1000;
+
+  let boundary = Date.UTC(parts.year, parts.month - 1, parts.day, DAY_TURNOVER_HOUR) - offsetMs;
+  // Before turnover, the member is still in yesterday's night.
+  if (boundary > now.getTime()) boundary -= 24 * 60 * 60 * 1000;
+  return new Date(boundary);
+}
+
 /** Why a check-in paid what it paid. The member is told this, so it has to be
  *  a reason rather than a silent zero. */
 export type PayoutReason = 'paid' | 'unproven' | 'same_visit' | 'daily_ceiling';

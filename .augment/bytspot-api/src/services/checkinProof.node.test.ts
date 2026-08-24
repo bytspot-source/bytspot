@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DAILY_POINT_CEILING, FENCE_METERS, crowdLevelForVisitors, distanceMeters, movesCrowdLevel, pointsFor, resolvePayout, resolveProof } from './checkinProof';
+import { DAILY_POINT_CEILING, FENCE_METERS, crowdLevelForVisitors, distanceMeters, movesCrowdLevel, pointsFor, resolvePayout, resolveProof, startOfPointsDay } from './checkinProof';
 
 const venue = { lat: 33.7866, lng: -84.3833 };
 
@@ -77,4 +77,25 @@ test('Crowd level counts people, so one member cannot report a packed room', () 
   assert.equal(crowdLevelForVisitors(40), 4);
   // An empty hour is Chill, not an error.
   assert.equal(crowdLevelForVisitors(0), 1);
+});
+
+test('The points day is the member day, and a night that runs past midnight is one night', () => {
+  // 11pm Atlanta on the 24th and 3:30am on the 25th are the same night, so
+  // they share one allowance.
+  const lateNight = startOfPointsDay(new Date('2026-08-25T03:00:00Z'));
+  const afterMidnight = startOfPointsDay(new Date('2026-08-25T07:30:00Z'));
+  assert.equal(lateNight.toISOString(), afterMidnight.toISOString());
+  assert.equal(lateNight.toISOString(), '2026-08-24T08:00:00.000Z');
+
+  // 5am is the next day.
+  assert.equal(startOfPointsDay(new Date('2026-08-25T09:00:00Z')).toISOString(), '2026-08-25T08:00:00.000Z');
+
+  // Winter: the same 4am local boundary, five hours off UTC instead of four.
+  assert.equal(startOfPointsDay(new Date('2026-01-15T06:00:00Z')).toISOString(), '2026-01-14T09:00:00.000Z');
+
+  // The boundary is never in the future, and never more than a day back.
+  const now = new Date();
+  const start = startOfPointsDay(now);
+  assert.ok(start.getTime() <= now.getTime());
+  assert.ok(now.getTime() - start.getTime() < 25 * 60 * 60 * 1000);
 });

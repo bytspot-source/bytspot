@@ -179,7 +179,7 @@ describe('venues', () => {
     (db.venue.findUnique as any).mockResolvedValueOnce({ id: 'v1', name: 'Test Bar', slug: 'test-bar', lat: 33.78, lng: -84.38 });
     (db.crowdLevel.findFirst as any).mockResolvedValueOnce({ level: 2 });
     (db.crowdLevel.create as any).mockResolvedValueOnce({});
-    (db.pointTransaction.aggregate as any).mockResolvedValueOnce({ _sum: { amount: 50 } });
+    (db.checkIn.aggregate as any).mockResolvedValueOnce({ _sum: { pointsEarned: 50 } });
 
     const caller = createAuthenticatedCaller();
     const result = await caller.venues.checkin({ venueId: 'v1', lat: 33.7801, lng: -84.3801 });

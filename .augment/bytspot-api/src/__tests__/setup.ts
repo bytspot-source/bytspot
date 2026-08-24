@@ -42,6 +42,7 @@ vi.mock('../lib/db', () => {
       upsert: vi.fn(),
     },
     checkIn: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { pointsEarned: 0 } }),
       findFirst: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ id: 'ci-1' }),

@@ -417,6 +417,10 @@ model CheckIn {
   venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt(sort: Desc)])
+  /// The cooldown asks "has this member been paid here recently", and the
+  /// answer is most often no — without this it scans the member's whole
+  /// history to say so, worst exactly on a first visit.
+  @@index([userId, venueId, createdAt(sort: Desc)])
   @@index([venueId])
   @@map("check_ins")
 }

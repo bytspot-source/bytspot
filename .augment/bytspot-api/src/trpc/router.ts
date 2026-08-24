@@ -17,7 +17,7 @@ import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
-import { crowdLevelForVisitors, movesCrowdLevel, resolvePayout, resolveProof } from '../services/checkinProof';
+import { VISIT_COOLDOWN_MS, crowdLevelForVisitors, movesCrowdLevel, resolvePayout, resolveProof, startOfPointsDay } from '../services/checkinProof';
 import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice } from '../services/iosPushDevices';
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
@@ -426,35 +426,55 @@ const venuesRouter = router({
       }
 
       // ── Phase 1: Record per-user check-in + award points ──
-      const startOfDay = new Date(now);
-      startOfDay.setHours(0, 0, 0, 0);
-      const [lastPaidVisit, todaysPoints] = await Promise.all([
-        db.checkIn.findFirst({
-          where: { userId: ctx.user.userId, venueId, pointsEarned: { gt: 0 } },
-          orderBy: { createdAt: 'desc' },
-          select: { createdAt: true },
-        }),
-        db.pointTransaction.aggregate({
-          _sum: { amount: true },
-          where: { userId: ctx.user.userId, category: 'checkin', type: 'earn', createdAt: { gte: startOfDay } },
-        }),
-      ]);
-      const { points: pointsEarned, reason: pointsReason } = resolvePayout({
-        proof,
-        lastPaidVisitAt: lastPaidVisit?.createdAt ?? null,
-        pointsEarnedToday: todaysPoints._sum.amount ?? 0,
-        now,
+      //
+      // Read and write in one transaction. The ceiling is a limit, so two
+      // check-ins racing must not both read 40 and both pay 10, and the
+      // check-in row must not survive a failed award: the cooldown reads that
+      // row, so a torn write would leave a member blocked from earning at a
+      // venue they were never actually paid for.
+      const dayStart = startOfPointsDay(now);
+      const { points: pointsEarned, reason: pointsReason } = await db.$transaction(async (tx) => {
+        const [lastPaidVisit, earnedToday] = await Promise.all([
+          tx.checkIn.findFirst({
+            // Bounded by the cooldown itself: an older row is already
+            // indistinguishable from none, and the bound caps the scan.
+            where: {
+              userId: ctx.user.userId,
+              venueId,
+              pointsEarned: { gt: 0 },
+              createdAt: { gte: new Date(now.getTime() - VISIT_COOLDOWN_MS) },
+            },
+            orderBy: { createdAt: 'desc' },
+            select: { createdAt: true },
+          }),
+          // The ceiling counts the same rows the cooldown reads. The ledger is
+          // the member's readable history, not the accounting source of truth,
+          // so the two rules cannot disagree about what was paid.
+          tx.checkIn.aggregate({
+            _sum: { pointsEarned: true },
+            where: { userId: ctx.user.userId, createdAt: { gte: dayStart } },
+          }),
+        ]);
+
+        const payout = resolvePayout({
+          proof,
+          lastPaidVisitAt: lastPaidVisit?.createdAt ?? null,
+          pointsEarnedToday: earnedToday._sum.pointsEarned ?? 0,
+          now,
+        });
+
+        await tx.checkIn.create({
+          data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned: payout.points, proof, distanceM },
+        });
+        // No ledger row for a tap that earned nothing: a zero-point entry is
+        // noise in the member's own history.
+        if (payout.points > 0) {
+          await tx.pointTransaction.create({
+            data: { userId: ctx.user.userId, type: 'earn', amount: payout.points, description: `Checked in at ${venue.name}`, category: 'checkin' },
+          });
+        }
+        return payout;
       });
-      await Promise.all([
-        db.checkIn.create({
-          data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned, proof, distanceM },
-        }),
-        // No transaction for a tap that earned nothing: a zero-point ledger row
-        // is noise in the member's own history.
-        ...(pointsEarned > 0 ? [db.pointTransaction.create({
-          data: { userId: ctx.user.userId, type: 'earn', amount: pointsEarned, description: `Checked in at ${venue.name}`, category: 'checkin' },
-        })] : []),
-      ]).catch(() => { /* non-blocking — don't fail the checkin if points fail */ });
 
       crowdEmitter.emit('crowd-update', {
         venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },

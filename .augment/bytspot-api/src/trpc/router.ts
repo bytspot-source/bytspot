@@ -419,11 +419,6 @@ const venuesRouter = router({
       // Someone at home must not be able to report a bar as packed.
       const newLevel = movesCrowdLevel(proof) ? crowdLevelForVisitors(distinctVisitors) : latest?.level ?? 1;
 
-      if (movesCrowdLevel(proof)) {
-        await db.crowdLevel.create({
-          data: { venueId, level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report' },
-        });
-      }
 
       // ── Phase 1: Record per-user check-in + award points ──
       //
@@ -462,6 +457,14 @@ const venuesRouter = router({
           pointsEarnedToday: earnedToday._sum.pointsEarned ?? 0,
           now,
         });
+
+        // The recorded crowd level belongs to the same transaction: a venue
+        // must not be reported busier by a check-in that then failed.
+        if (movesCrowdLevel(proof)) {
+          await tx.crowdLevel.create({
+            data: { venueId, level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report' },
+          });
+        }
 
         await tx.checkIn.create({
           data: { userId: ctx.user.userId, venueId, crowdLevel: newLevel, crowdLabel: labels[newLevel], pointsEarned: payout.points, proof, distanceM },

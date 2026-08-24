@@ -99,3 +99,15 @@ test('The points day is the member day, and a night that runs past midnight is o
   assert.ok(start.getTime() <= now.getTime());
   assert.ok(now.getTime() - start.getTime() < 25 * 60 * 60 * 1000);
 });
+
+test('The day boundary is 4am local on the two changeover nights too', () => {
+  // Spring forward: 03:30 EDT is the morning after, so the boundary is the
+  // previous day's 4am EST — not 3am, which is what sampling the offset at
+  // `now` would give.
+  const spring = startOfPointsDay(new Date('2026-03-08T07:30:00Z'));
+  assert.equal(spring.toISOString(), '2026-03-07T09:00:00.000Z');
+
+  // Fall back: 01:30 EST, still the same night, boundary is 4am EDT.
+  const fall = startOfPointsDay(new Date('2026-11-01T06:30:00Z'));
+  assert.equal(fall.toISOString(), '2026-10-31T08:00:00.000Z');
+});

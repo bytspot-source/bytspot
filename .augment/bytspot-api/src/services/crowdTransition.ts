@@ -1,3 +1,5 @@
+import type Redis from 'ioredis';
+
 import { getRedis } from '../lib/redis';
 
 /** True only for a real transition into the Packed alert threshold. */
@@ -12,7 +14,7 @@ export function entersPacked(previousLevel: number | null | undefined, nextLevel
  *
  *  Fails open. Redis is optional here, and no Redis must mean alerts still
  *  send rather than silently stop. */
-export async function claimPackedAlert(venueId: string, ttlSeconds = 3600, redis = getRedis()): Promise<boolean> {
+export async function claimPackedAlert(venueId: string, ttlSeconds = 3600, redis: Pick<Redis, 'set'> | null = getRedis()): Promise<boolean> {
   if (!redis) return true;
   try {
     return (await redis.set(`alert:packed:${venueId}`, '1', 'EX', ttlSeconds, 'NX')) === 'OK';

@@ -13,7 +13,8 @@
     "db:migrate": "prisma migrate deploy",
     "admin:resolve": "tsx scripts/resolve-admin-ids.ts",
     "test": "tsx --test src/**/*.node.test.ts",
-    "audit:gate": "node scripts/audit-gate.mjs"
+    "audit:gate": "node scripts/audit-gate.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

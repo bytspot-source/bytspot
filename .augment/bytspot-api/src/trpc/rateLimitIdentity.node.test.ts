@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import type Redis from 'ioredis';
+
 import { clientRateLimitKey } from './context';
 import { incrementLocalRateLimit, incrementRedisRateLimit, rateLimitSubject, resetLocalRateLimitForTests } from './trpc';
 
@@ -21,7 +23,7 @@ test('Public limits are per client, never one shared anonymous bucket', () => {
 
 test('The Redis increment is one script call carrying its own TTL', async () => {
   const calls: unknown[][] = [];
-  const redis = { eval: async (...args: unknown[]) => { calls.push(args); return 2; } } as never;
+  const redis: Pick<Redis, 'eval'> = { eval: (async (...args: unknown[]) => { calls.push(args); return 2; }) as Redis['eval'] };
   assert.equal(await incrementRedisRateLimit(redis, 'rate-limit:auth:google:client:test', 60_000), 2);
   assert.equal(calls.length, 1);
   assert.match(String(calls[0][0]), /INCR/);

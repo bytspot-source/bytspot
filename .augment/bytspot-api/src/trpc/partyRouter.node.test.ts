@@ -32,6 +32,7 @@ const partyDraft = { id: 'party-1', hostUserId: 'test-user-id', idempotencyKey, 
 // under the default policy (dies when the party ends).
 const linkAlive = { startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 4 * 60 * 60 * 1000), shareLinkExpiresAt: null };
 const createCaller = createCallerFactory(appRouter);
+const anonymousContext: Context = { user: null, clientRateLimitKey: 'test-party-anon' };
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
@@ -74,7 +75,7 @@ beforeEach(() => {
 });
 
 test('Party draft creation requires authentication', async () => {
-  const publicCaller = createCaller({ user: null });
+  const publicCaller = createCaller(anonymousContext);
   await assert.rejects(() => publicCaller.events.drafts.create(draftInput), { code: 'UNAUTHORIZED' });
 });
 
@@ -158,7 +159,7 @@ test('Party draft creation accepts withheld locations and rejects insecure offic
     ...draftInput, locationDisclosure: 'withheld', templateId: 'comedy-night', templateConfig: { kind: 'standard' },
   }));
   await assert.rejects(() => caller().events.drafts.create({
-    ...draftInput, hostDestinations: { websiteUrl: 'http://not-secure.example.com' },
+    ...draftInput, hostDestinations: { primarySocial: { platform: 'instagram', url: 'https://instagram.com/host' }, websiteUrl: 'http://not-secure.example.com' },
   }));
   await assert.rejects(() => caller().events.drafts.create({
     ...draftInput, locationDisclosure: 'after-approval', accessMode: 'free-rsvp',
@@ -236,7 +237,7 @@ test('Public Party invitations redact protected venues and project only official
     itinerary: [{ title: 'Doors', offsetMinutes: 0 }], ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
     host: { name: 'Host' }, media: [],
   });
-  const invite = await createCaller({ user: null }).events.invite({ partyId: 'party-1' });
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
   assert.equal(invite.locationDisclosure, 'withheld');
   assert.equal(invite.locationLabel, null);
   assert.deepEqual(invite.host.destinations, { musicUrl: 'https://music.example.com/host', primarySocial: { platform: 'Instagram', url: 'https://instagram.com/host' } });
@@ -450,7 +451,7 @@ test('Share link dies when the party ends: expired links 404 for new arrivals bu
 
   // New arrivals: invite, pass resolve, and RSVP are indistinguishable from a deleted party.
   partyGuest.findUnique = async () => null;
-  await assert.rejects(() => createCaller({ user: null }).events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => createCaller(anonymousContext).events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   await assert.rejects(() => caller().events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'NOT_FOUND' });
@@ -536,8 +537,8 @@ test('Official Host identity lives on the host profile: handle + ordered destina
   let upsertArgs: any;
   hostProfile.upsert = async (args: any) => { upsertArgs = args; return {}; };
   const destinations = [
-    { kind: 'instagram', value: 'MidtownJohn', primary: true },
-    { kind: 'music', value: 'https://music.example.com/host' },
+    { kind: 'instagram' as const, value: 'MidtownJohn', primary: true },
+    { kind: 'music' as const, value: 'https://music.example.com/host' },
   ];
   const saved = await caller().events.hostDestinations.save({ handle: '@MidtownJohn', destinations });
   assert.equal(saved.handle, 'midtownjohn');
@@ -622,12 +623,12 @@ test('Invite projects published cover and album as HTTPS media URLs', async () =
       { id: 'album-1', kind: 'album', position: 1 },
     ],
   });
-  const invite = await createCaller({ user: null }).events.invite({ partyId: 'party-1' });
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
   assert.match(invite.heroImageURL ?? '', /\/media\/parties\/cover-1$/);
   assert.match(invite.thumbnailURL ?? '', /\/media\/parties\/cover-1$/);
   assert.deepEqual(invite.photoURLs.map((url: string) => url.split('/').pop()), ['album-0', 'album-1']);
   for (const url of [invite.heroImageURL, invite.thumbnailURL, ...invite.photoURLs]) {
-    assert.match(url, /^https:\/\//);
+    assert.match(url ?? '', /^https:\/\//);
   }
 });
 

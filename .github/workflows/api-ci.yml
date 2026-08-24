@@ -79,8 +79,10 @@ jobs:
           cache-dependency-path: .augment/bytspot-api/package-lock.json
       - run: npm ci
       - run: npx prisma generate
+      # Tests are typechecked too: the exclude that skipped them was written
+      # when they lived outside src, and it silently hid eleven type errors.
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: npm run typecheck
       - name: Unit tests
         run: npm test
       # The web repo has gated on this for months; the API shipped a known

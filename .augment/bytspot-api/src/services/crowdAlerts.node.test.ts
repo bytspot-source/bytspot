@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type Redis from 'ioredis';
+
 import { claimPackedAlert } from './crowdTransition';
 import { isLiveOccupancySource } from './typicalOccupancy';
 
@@ -16,12 +18,12 @@ test('Packed alerts stay dark for catalog rows', () => {
 
 test('The packed alert is claimed once per venue, and fires when Redis is absent', async () => {
   const claims: string[] = [];
-  const redis = {
-    set: async (key: string, _value: string, _ex: string, _ttl: number, mode: string) => {
+  const redis: Pick<Redis, 'set'> = {
+    set: (async (key: string, _value: string, _ex: string, _ttl: number, mode: string) => {
       claims.push(`${key}:${mode}`);
       return claims.length === 1 ? 'OK' : null;
-    },
-  } as never;
+    }) as Redis['set'],
+  };
 
   assert.equal(await claimPackedAlert('venue-1', 3600, redis), true);
   // The second entry into Packed inside the window stays quiet.
@@ -32,6 +34,6 @@ test('The packed alert is claimed once per venue, and fires when Redis is absent
   assert.equal(await claimPackedAlert('venue-1', 3600, null), true);
 
   // Nor may a Redis failure silence it.
-  const broken = { set: async () => { throw new Error('down'); } } as never;
+  const broken: Pick<Redis, 'set'> = { set: (async () => { throw new Error('down'); }) as Redis['set'] };
   assert.equal(await claimPackedAlert('venue-1', 3600, broken), true);
 });

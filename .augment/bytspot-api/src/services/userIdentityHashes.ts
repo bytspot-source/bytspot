@@ -17,26 +17,31 @@ import { hashEmail } from '../lib/contactHash';
  * Best-effort by design: identity hashes are a discovery optimization, so
  * failures must never break signup/profile flows. Callers fire-and-forget.
  */
+export type IdentityHashDatabase = Pick<typeof db, '$transaction' | 'userIdentityHash'>;
+
 export async function refreshUserIdentityHashes(
   userId: string,
   identifiers: { email?: string | null },
+  database: IdentityHashDatabase = db,
 ): Promise<void> {
   try {
     const rows: { hashedIdentity: string; kind: string }[] = [];
     const emailHash = hashEmail(identifiers.email);
     if (emailHash) rows.push({ hashedIdentity: emailHash, kind: 'email' });
 
-    await db.$transaction([
-      db.userIdentityHash.deleteMany({
+    await database.$transaction([
+      database.userIdentityHash.deleteMany({
         where: { userId, hashedIdentity: { notIn: rows.map((row) => row.hashedIdentity) } },
       }),
-      db.userIdentityHash.createMany({
+      database.userIdentityHash.createMany({
         data: rows.map((row) => ({ userId, ...row })),
         skipDuplicates: true,
       }),
     ]);
-  } catch {
-    // Non-fatal: suggestions degrade gracefully until the next refresh.
+  } catch (error) {
+    // Non-fatal: suggestions degrade gracefully until the next refresh. Logged
+    // because a persistent failure degrades silently forever otherwise.
+    console.warn('[identity-hashes] refresh failed:', error instanceof Error ? error.message : error);
   }
 }
 

@@ -7,7 +7,7 @@ import { refreshUserIdentityHashes } from './userIdentityHashes';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
-export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user'>;
+export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user' | 'userIdentityHash'>;
 
 /**
  * Resolves a verified provider subject to exactly one user. We deliberately do
@@ -54,7 +54,7 @@ export async function resolveProviderIdentity(
       return { user, isNewUser: true };
     }).then((result) => {
       // Identity hashes power contact-graph discovery (non-blocking)
-      void refreshUserIdentityHashes(result.user.id, { email: result.user.email });
+      void refreshUserIdentityHashes(result.user.id, { email: result.user.email }, database);
       return result;
     });
   } catch (error: unknown) {

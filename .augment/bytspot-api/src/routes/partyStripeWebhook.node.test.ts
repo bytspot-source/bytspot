@@ -20,7 +20,7 @@ function session(overrides: Record<string, unknown> = {}): Stripe.Checkout.Sessi
     id: 'cs_test_1', amount_total: 2500, currency: 'usd',
     metadata: { kind: 'party-ticket', checkoutId: 'checkout-1', partyId: 'party-1', userId: 'user-1', ticketTierName: 'First Drop' },
     ...overrides,
-  } as Stripe.Checkout.Session;
+  } as unknown as Stripe.Checkout.Session;
 }
 
 function reservation(status = 'pending', reservationExpiresAt = future()) {

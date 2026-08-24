@@ -459,12 +459,12 @@ test('People You Met items match the iOS NativePeopleMetPerson shape', async () 
   for (const item of items) {
     assert.equal(typeof item.userId, 'string');
     assert.equal(typeof item.name, 'string');
-    if ('inviteStatus' in item) assert.ok(['pending', 'accepted', 'declined'].includes(item.inviteStatus));
+    if ('inviteStatus' in item) assert.ok(['pending', 'accepted', 'declined'].includes(item.inviteStatus ?? ''));
   }
 });
 
 test('Venue check-ins and the leaderboard are members-only and name nobody', async () => {
-  const anonymous = createCaller({ user: null });
+  const anonymous = createCaller({ user: null, clientRateLimitKey: 'test-social-anon' });
   await assert.rejects(() => anonymous.social.venueCheckins({ venueId: 'venue-1' }), { code: 'UNAUTHORIZED' });
   await assert.rejects(() => anonymous.social.leaderboard({}), { code: 'UNAUTHORIZED' });
 

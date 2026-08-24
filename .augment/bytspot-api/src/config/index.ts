@@ -32,9 +32,6 @@ const envSchema = z.object({
   // ── IMPORTANT (degraded features without) ─────────────
   REDIS_URL:              z.string().default(''),
   SENTRY_DSN:             z.string().default(''),
-  VAPID_PUBLIC_KEY:       z.string().default(''),
-  VAPID_PRIVATE_KEY:      z.string().default(''),
-  VAPID_EMAIL:            z.string().default('mailto:bytspotapp@gmail.com'),
   RESEND_API_KEY:         z.string().default(''),
   STRIPE_SECRET_KEY:      z.string().default(''),
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),
@@ -114,9 +111,6 @@ export const config = {
   },
   jwtExpiresIn: env.JWT_EXPIRES_IN,
   corsOrigins: env.CORS_ORIGINS.split(',').map((s) => s.trim()),
-  vapidPublicKey: env.VAPID_PUBLIC_KEY,
-  vapidPrivateKey: env.VAPID_PRIVATE_KEY,
-  vapidEmail: env.VAPID_EMAIL,
   stripeSecretKey: env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
   stripePremiumPriceId: env.STRIPE_PREMIUM_PRICE_ID,
@@ -156,7 +150,6 @@ export function printConfigDiagnostics(): void {
     console.log(`   ${val ? '✅' : '⚠️ '} ${label}${val ? '' : ` — ${impact}`}`);
 
   console.log('   ── Service Configuration ──');
-  check(config.vapidPublicKey && config.vapidPrivateKey ? 'ok' : '', 'VAPID keys', 'web push will not work');
   check(config.resendApiKey, 'Resend (email)', 'transactional emails will not send');
   check(config.stripeSecretKey, 'Stripe', 'payments in demo mode');
   check(config.openaiApiKey, 'OpenAI', 'concierge AI will not work');

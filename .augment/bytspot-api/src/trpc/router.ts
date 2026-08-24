@@ -12,7 +12,6 @@ import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
 import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
 import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
-import { getAllSubscriptions, storeSubscription } from '../routes/push';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { runCrowdAlerts } from '../services/crowdAlerts';
@@ -1057,20 +1056,18 @@ const adminRouter = router({
         }),
       ]);
 
-      let pushSubscribers = 0;
-      if (r) {
-        try { pushSubscribers = await r.scard('push:subscriptions'); } catch {}
-      }
-
       const venueIds = topVenues.map((v) => v.venueId);
       const venues = await db.venue.findMany({ where: { id: { in: venueIds } }, select: { id: true, name: true } });
       const nameMap = Object.fromEntries(venues.map((v) => [v.id, v.name]));
+      // Live push reach is registered iOS devices; the retired web-push set
+      // counted browsers that nothing has sent to since the PWA was killed.
+      const pushDevices = await db.iOSPushDevice.count({ where: { invalidatedAt: null } });
 
       return {
         totalUsers,
         newSignupsToday: newToday,
         totalCheckins,
-        pushSubscribers,
+        pushDevices,
         betaLeadCount,
         betaLeads: recentBetaLeads.map((l) => ({
           email: l.email,
@@ -1119,7 +1116,11 @@ const adminRouter = router({
 
   /** POST /admin/validate-invite → admin.validateInvite mutation (public — called during signup) */
   validateInvite: publicProcedure
-    .input(z.object({ code: z.string() }))
+    // Guessing an invite is the same class of attack as guessing a password,
+    // so it gets the same budget as auth:login. Unlimited, this was a free
+    // oracle over a ~1e9 keyspace whose hits are consumed on validation.
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin:validate-invite' }))
+    .input(z.object({ code: z.string().max(64) }))
     .mutation(async ({ input }) => {
       const code = input.code.toUpperCase().trim();
       if (!code) {
@@ -1155,19 +1156,6 @@ const adminRouter = router({
  * ── Push Notifications sub-router ───────────────────────
  */
 const pushRouter = router({
-  /** GET /push/vapid-public-key → push.vapidPublicKey query */
-  vapidPublicKey: publicProcedure.query(() => {
-    return { key: config.vapidPublicKey };
-  }),
-
-  /** POST /push/subscribe → push.subscribe mutation (web push VAPID) */
-  subscribe: publicProcedure
-    .input(z.object({ subscription: z.object({ endpoint: z.string() }).passthrough() }))
-    .mutation(async ({ input }) => {
-      await storeSubscription(input.subscription);
-      return { success: true, type: 'web' as const };
-    }),
-
   /** Authenticated native registration; APNs token ownership always derives from ctx. */
   registerIosDevice: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'push:register-ios' }))

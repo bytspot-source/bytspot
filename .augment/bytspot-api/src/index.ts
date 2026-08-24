@@ -15,7 +15,6 @@ import { createContext } from './trpc/context';
 // REST Routes — only keep endpoints that have no tRPC equivalent or are used externally
 import healthRouter from './routes/health';        // external monitoring / Render health checks
 import cronRouter from './routes/cron';             // external cron trigger (Bearer token auth)
-import pushRouter from './routes/push';             // VAPID public key + subscription endpoint
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import partyMediaRouter from './routes/partyMedia';
@@ -70,7 +69,6 @@ app.use(
 // ─── REST Routes (non-duplicated endpoints only) ──────
 app.use(healthRouter);
 app.use(cronRouter);
-app.use(pushRouter);
 app.use(betaSignupRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(partyMediaRouter);

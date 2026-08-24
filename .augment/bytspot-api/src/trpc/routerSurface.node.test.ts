@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { appRouter } from './router';
-import { createCallerFactory, RATE_LIMIT_LABEL } from './trpc';
+import { createCallerFactory, RATE_LIMIT_LABEL, resetLocalRateLimitForTests } from './trpc';
 import type { Context } from './context';
 
 /**
@@ -25,7 +25,6 @@ const mutations = Object.entries(procedures)
 const PUBLIC_MUTATIONS = new Set([
   'auth.signup', 'auth.login', 'auth.appleSignIn', 'auth.googleSignIn',
   'betaSignup.signup',
-  'push.subscribe',
   'admin.validateInvite',
   'subscription.webhook',
   // Guarded by the cron secret rather than a session; see routes/cron.ts.
@@ -39,7 +38,6 @@ const PUBLIC_MUTATIONS = new Set([
  */
 const UNLIMITED_MUTATIONS = new Set([
   'providers.submitHostApplication', 'providers.resetHostProfile', 'providers.acceptValetAgreement',
-  'admin.validateInvite', 'push.subscribe',
   'cron.crowdAlerts', 'cron.crowdSim',
   'user.savedSpots.save', 'user.savedSpots.remove', 'user.savedSpots.createCollection', 'user.savedSpots.addToCollection',
   'user.preferences.update', 'user.preferences.trackBehavior', 'user.profile.update',
@@ -74,4 +72,23 @@ test('Every mutation carries a rate limiter unless it is named as unlimited', ()
   ));
 
   assert.deepEqual(unlimited.sort(), [...UNLIMITED_MUTATIONS].sort());
+});
+
+test('A limiter is wired to a store and refuses past its max', async () => {
+  // The audits above prove a limiter is attached. This proves one fires:
+  // without it, an absent Redis would let the middleware no-op silently.
+  resetLocalRateLimitForTests();
+  const caller = createCallerFactory(appRouter)({ ...anonymous, clientRateLimitKey: 'limiter-fires' });
+  const attempt = () => caller.admin.validateInvite({ code: 'BYT-ZZZZZZ' });
+
+  let refusedAt = 0;
+  for (let call = 1; call <= 12 && refusedAt === 0; call += 1) {
+    try {
+      await attempt();
+    } catch (error) {
+      if ((error as { code?: string }).code === 'TOO_MANY_REQUESTS') refusedAt = call;
+    }
+  }
+  assert.equal(refusedAt, 11);
+  resetLocalRateLimitForTests();
 });

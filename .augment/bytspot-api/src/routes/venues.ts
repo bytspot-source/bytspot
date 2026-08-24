@@ -1,25 +1,9 @@
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
 import { EventEmitter } from 'events';
 import { db } from '../lib/db';
-import { cached, getRedis } from '../lib/redis';
-import { requireAuth } from '../middleware/auth';
-import { entersPacked } from '../services/crowdTransition';
-import { sendVenueCrowdAlert } from '../services/notificationDelivery';
-import { sendCrowdAlertEmail } from '../lib/email';
+import { cached } from '../lib/redis';
 
 const router = Router();
-
-// Legacy REST check-ins are retained for compatible clients, but authenticate
-// before this limiter so its key is a stable user ID rather than an IP address.
-const checkinRateLimit = rateLimit({
-  windowMs: 60_000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.user?.userId ?? 'missing-auth',
-  message: { error: 'Too many check-ins, please try again later' },
-});
 
 // In-memory event emitter for SSE crowd updates
 export const crowdEmitter = new EventEmitter();
@@ -251,97 +235,6 @@ router.get('/venues/crowd/stream', async (req, res) => {
     clearInterval(heartbeat);
     crowdEmitter.off('crowd-update', onUpdate);
   });
-});
-
-/** POST /venues/:id/checkin — authenticated user contributes crowd data (idempotent) */
-router.post('/venues/:id/checkin', requireAuth, checkinRateLimit, async (req, res) => {
-  const id = req.params.id;
-  if (typeof id !== 'string' || id.length === 0) {
-    res.status(400).json({ error: 'Invalid venue identifier' });
-    return;
-  }
-  const rawIdempotencyKey = req.headers['idempotency-key'];
-  const iKey = typeof rawIdempotencyKey === 'string' ? rawIdempotencyKey : undefined;
-
-  // ── Idempotency: replay cached result if we've seen this key before ──
-  if (iKey) {
-    const r = getRedis();
-    if (r) {
-      try {
-        const cached = await r.get(`idem:checkin:${iKey}`);
-        if (cached) {
-          res.json(JSON.parse(cached)); // exact same response, no DB write
-          return;
-        }
-      } catch { /* Redis miss — continue to real handler */ }
-    }
-  }
-
-  const venue = await db.venue.findUnique({ where: { id } });
-  if (!venue) {
-    res.status(404).json({ error: 'Venue not found' });
-    return;
-  }
-
-  // Get latest crowd level to base new reading on
-  const latest = await db.crowdLevel.findFirst({
-    where: { venueId: id },
-    orderBy: { recordedAt: 'desc' },
-  });
-
-  // Nudge level up by 1 (max 4) — checkin signals it's busier
-  const newLevel = Math.min((latest?.level ?? 1) + 1, 4);
-  const labels: Record<number, string> = { 1: 'Chill', 2: 'Active', 3: 'Busy', 4: 'Packed' };
-
-  await db.crowdLevel.create({
-    data: {
-      venueId: id,
-      level: newLevel,
-      label: labels[newLevel],
-      waitMins: newLevel * 5,
-      source: 'user_report',
-    },
-  });
-
-  // Broadcast to all SSE clients
-  crowdEmitter.emit('crowd-update', {
-    venueId: id,
-    crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },
-  });
-
-  const result = { success: true, newCrowdLevel: newLevel };
-
-  // ── Push + email only when venue actually enters "Packed" ──
-  if (entersPacked(latest?.level, newLevel)) {
-    sendVenueCrowdAlert({
-      venueId: id,
-      venueName: venue.name,
-      venueSlug: venue.slug,
-      title: `🔴 ${venue.name} is now Packed`,
-      body: `High crowd at ${venue.name} — plan ahead or find somewhere chill nearby.`,
-      type: 'packed',
-    }).catch(() => {}); // non-blocking, fire-and-forget
-
-    // Email delivery remains separate from preference-aware native push delivery.
-    db.user.findMany({ select: { email: true, name: true } })
-      .then((users) => {
-        for (const u of users) {
-          if (u.email) {
-            const firstName = (u.name || '').split(' ')[0];
-            sendCrowdAlertEmail(u.email, firstName, venue.name, venue.slug || id).catch(() => {});
-          }
-        }
-      })
-      .catch(() => {});
-  }
-
-  // ── Cache result for 24 h so any retries with the same key replay it ──
-  if (iKey) {
-    const r = getRedis();
-    if (r) r.set(`idem:checkin:${iKey}`, JSON.stringify(result), 'EX', 86400).catch(() => {});
-  }
-
-  res.json(result);
 });
 
 export default router;

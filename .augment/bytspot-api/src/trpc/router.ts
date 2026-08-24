@@ -7,6 +7,7 @@ import OpenAI from 'openai';
 import Stripe from 'stripe';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
+import { serializableTransactionWithRetry } from '../lib/transactions';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
 import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
@@ -422,13 +423,15 @@ const venuesRouter = router({
 
       // ── Phase 1: Record per-user check-in + award points ──
       //
-      // Read and write in one transaction. The ceiling is a limit, so two
-      // check-ins racing must not both read 40 and both pay 10, and the
-      // check-in row must not survive a failed award: the cooldown reads that
+      // Read and write in one serializable transaction. Atomicity alone is not
+      // enough: the ceiling is read and then written against, so under the
+      // default isolation two check-ins could both see 40 and both pay 10.
+      // Atomicity is still the other half — the cooldown reads the check-in
       // row, so a torn write would leave a member blocked from earning at a
-      // venue they were never actually paid for.
+      // venue they were never actually paid for. Retried once, because losing
+      // the race is not the member's fault.
       const dayStart = startOfPointsDay(now);
-      const { points: pointsEarned, reason: pointsReason } = await db.$transaction(async (tx) => {
+      const { points: pointsEarned, reason: pointsReason } = await serializableTransactionWithRetry(async (tx) => {
         const [lastPaidVisit, earnedToday] = await Promise.all([
           tx.checkIn.findFirst({
             // Bounded by the cooldown itself: an older row is already
@@ -477,7 +480,7 @@ const venuesRouter = router({
           });
         }
         return payout;
-      });
+      }, 'Another check-in was recorded at the same moment. Try again.');
 
       crowdEmitter.emit('crowd-update', {
         venueId, crowd: { level: newLevel, label: labels[newLevel], waitMins: newLevel * 5, source: 'user_report', recordedAt: new Date().toISOString() },

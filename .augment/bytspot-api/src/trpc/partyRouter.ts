@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { config } from '../config';
 import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { db } from '../lib/db';
+import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -563,19 +564,6 @@ async function authorizedPartyArrival(partyId: string, userId: string) {
 
 async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {
   return meetsRequiredMembershipTier(await membershipTierFor(userId), 'platinum');
-}
-
-function isReservationConflict(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && ['P2002', 'P2034'].includes((error as { code?: string }).code ?? ''));
-}
-
-async function serializableTransaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>, conflictMessage: string): Promise<T> {
-  try {
-    return await db.$transaction(operation, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  } catch (error) {
-    if (isReservationConflict(error)) throw new TRPCError({ code: 'CONFLICT', message: conflictMessage });
-    throw error;
-  }
 }
 
 export const partyInvite = publicProcedure

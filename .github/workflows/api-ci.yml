@@ -68,6 +68,71 @@ jobs:
       - name: Re-applying is a no-op
         run: npx prisma migrate deploy | tee /tmp/replay.log && grep -q "No pending migrations to apply" /tmp/replay.log
 
+  # The job above applies to an empty database, so a backfill there reads zero
+  # rows and passes. 20260824_add_vehicle_table was green on it and then aborted
+  # Render's preDeployCommand on the first real row, leaving production serving
+  # the previous build for an hour.
+  #
+  # This job puts rows in front of the change: prior migrations, then hostile
+  # shapes, then the migrations this branch adds. It asserts on the resulting
+  # rows rather than the exit code, because the worse defect of that pair —
+  # inventing a vehicle out of a JSON string — exited 0.
+  backfill:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bytspot_backfill
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bytspot_backfill?schema=public
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: .augment/bytspot-api/package-lock.json
+      - run: npm ci
+
+      # A change that adds no migrations has nothing to execute here. Skipping
+      # is the correct outcome and has to be quiet: a gate that fails on the
+      # common case is a gate someone removes.
+      - name: Migrations added by this change
+        id: added
+        run: |
+          base="origin/${{ github.base_ref || 'main' }}"
+          git fetch -q origin "${{ github.base_ref || 'main' }}"
+          dirs=$(git diff --name-only "$base...HEAD" -- prisma/migrations \
+            | sed -n 's#.*prisma/migrations/\([^/]*\)/.*#\1#p' | sort -u | tr '\n' ' ')
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+          if [ -z "$dirs" ]; then echo "no migrations added; nothing to execute"; fi
+
+      - name: Seed hostile shapes, then apply the new migrations to them
+        if: steps.added.outputs.dirs != ''
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/held
+          for d in ${{ steps.added.outputs.dirs }}; do mv "prisma/migrations/$d" /tmp/held/; done
+          npx prisma migrate deploy
+          for d in ${{ steps.added.outputs.dirs }}; do mv "/tmp/held/$d" prisma/migrations/; done
+
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f prisma/fixtures/hostile-shapes.sql
+          npx prisma migrate deploy
+
+      # Exit code is not the assertion. The rows are.
+      - name: The backfill did not drop or invent anything
+        if: steps.added.outputs.dirs != ''
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f prisma/fixtures/hostile-shapes.assert.sql
+
   build-and-test:
     runs-on: ubuntu-latest
     steps:
@@ -89,7 +154,4 @@ jobs:
       # ReDoS in its request path because nothing checked here. Accepted
       # exceptions are dated in scripts/audit-gate.mjs and expire on their own.
       - name: Security audit (runtime dependencies)
-        run: node scripts/audit-gate.mjs
-      - name: Full dependency audit advisory
-        continue-on-error: true
         run: npm audit --audit-level=high

@@ -65,10 +65,6 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
-      - key: VAPID_PUBLIC_KEY
-        sync: false
-      - key: VAPID_PRIVATE_KEY
-        sync: false
       - key: APNS_KEY_ID
         sync: false
       - key: APNS_TEAM_ID

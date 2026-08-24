@@ -22,6 +22,7 @@ import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
+import { captureApnsSigningState } from './services/apns';
 
 // Initialised before the app so instrumentation wraps everything below it.
 initErrorTracking();
@@ -96,6 +97,10 @@ app.listen(config.port, () => {
   console.log(`   Environment: ${config.nodeEnv}`);
   console.log(`   Health check: http://localhost:${config.port}/health`);
   console.log(`   Error tracking: ${isErrorTrackingEnabled() ? 'on' : 'off (SENTRY_DSN unset)'}`);
+  // Read the signing key once, here, where a missing mount is visible to
+  // whoever is watching the deploy rather than to a poll 50 minutes later.
+  // Never fatal: a service that cannot announce must still serve.
+  console.log(`   Push signing: ${captureApnsSigningState()}`);
   printConfigDiagnostics();
   // Resolution only — prints ids for ADMIN_BOOTSTRAP_EMAILS, grants nothing.
   void logAdminBootstrapIds((emails) =>

@@ -1,5 +1,5 @@
 import { connect, type ClientHttp2Session } from 'node:http2';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { sign } from 'node:crypto';
 import { config } from '../config';
 import type { IosPushEnvironment } from './iosPushDevices';
@@ -34,53 +34,93 @@ function base64UrlJson(value: object): string {
 export type ApnsReadiness = 'ready' | 'unconfigured' | 'key-unreadable' | 'key-invalid';
 
 /**
- * Every failure below is swallowed on the send path, because a push that
- * cannot be signed must not break the flow that triggered it. That makes an
- * unsigned provider indistinguishable from a quiet night, so readiness is
- * reported separately and never carries the key or the token.
+ * The signing key is read once and kept, so readiness is a property of this
+ * process rather than of whatever the filesystem happened to look like when a
+ * monitor last polled. Reading per token made the key's availability a runtime
+ * fact sampled at an arbitrary moment; captured at boot it is a startup fact,
+ * settled while a human is watching the deploy and unable to change underneath
+ * a running process. The key material never leaves this module.
  */
-async function providerTokenResult(): Promise<{ token: string } | { reason: Exclude<ApnsReadiness, 'ready'> }> {
-  if (!isApnsConfigured()) return { reason: 'unconfigured' };
+let signingState: { readiness: ApnsReadiness; privateKey: string | null } | null = null;
 
-  const now = Date.now();
-  if (cachedProviderToken && cachedProviderToken.expiresAt > now) {
-    return { token: cachedProviderToken.value };
-  }
+function capture(): { readiness: ApnsReadiness; privateKey: string | null } {
+  if (!isApnsConfigured()) return { readiness: 'unconfigured', privateKey: null };
 
   let privateKey: string;
   try {
-    privateKey = await readFile(config.apnsKeyPath, 'utf8');
+    // Synchronous by design: boot is the one point where blocking is correct,
+    // and it removes any window where /health could be served before the
+    // capture resolved and report a state that is merely not-yet-known.
+    privateKey = readFileSync(config.apnsKeyPath, 'utf8');
   } catch {
-    return { reason: 'key-unreadable' };
+    return { readiness: 'key-unreadable', privateKey: null };
   }
 
+  // Validated by signing once here rather than on first send, so a malformed
+  // key is a boot-time verdict too.
+  if (!signWith(privateKey)) return { readiness: 'key-invalid', privateKey: null };
+  return { readiness: 'ready', privateKey };
+}
+
+/**
+ * Reads the signing key once, at startup. Never throws and never exits: a
+ * service that cannot announce anything must still serve everything else, the
+ * same reason `push` is not part of the `healthy` test.
+ */
+export function captureApnsSigningState(): ApnsReadiness {
+  signingState = capture();
+  return signingState.readiness;
+}
+
+function currentState(): { readiness: ApnsReadiness; privateKey: string | null } {
+  // Callers that never boot the API (scripts, tests) still get capture-once
+  // semantics rather than a probe per token.
+  if (!signingState) signingState = capture();
+  return signingState;
+}
+
+/**
+ * Reports the state captured at boot. Deliberately synchronous and free of
+ * I/O: a health poll must not be able to read the key or mint a token as a
+ * side effect of being asked a question.
+ */
+export function apnsReadiness(): ApnsReadiness {
+  return currentState().readiness;
+}
+
+function signWith(privateKey: string): string | null {
   try {
-    const issuedAt = Math.floor(now / 1000);
+    const issuedAt = Math.floor(Date.now() / 1000);
     const header = base64UrlJson({ alg: 'ES256', kid: config.apnsKeyId });
     const claims = base64UrlJson({ iss: config.apnsTeamId, iat: issuedAt });
     const signature = sign('sha256', Buffer.from(`${header}.${claims}`), {
       key: privateKey,
       dsaEncoding: 'ieee-p1363',
     }).toString('base64url');
-    const value = `${header}.${claims}.${signature}`;
-
-    // APNs permits provider tokens for up to one hour. Refresh conservatively.
-    cachedProviderToken = { value, expiresAt: now + (50 * 60 * 1000) };
-    return { token: value };
+    return `${header}.${claims}.${signature}`;
   } catch {
-    return { reason: 'key-invalid' };
+    return null;
   }
 }
 
-/** Signing readiness only: proves the provider can sign, not that Apple accepts it. */
-export async function apnsReadiness(): Promise<ApnsReadiness> {
-  const result = await providerTokenResult();
-  return 'token' in result ? 'ready' : result.reason;
+async function providerToken(): Promise<string | null> {
+  const { privateKey } = currentState();
+  if (!privateKey) return null;
+
+  const now = Date.now();
+  if (cachedProviderToken && cachedProviderToken.expiresAt > now) return cachedProviderToken.value;
+
+  const value = signWith(privateKey);
+  if (!value) return null;
+  // APNs permits provider tokens for up to one hour. Refresh conservatively.
+  cachedProviderToken = { value, expiresAt: now + (50 * 60 * 1000) };
+  return value;
 }
 
-async function providerToken(): Promise<string | null> {
-  const result = await providerTokenResult();
-  return 'token' in result ? result.token : null;
+/** Test-only: re-runs the boot capture after a config change. */
+export function recaptureApnsSigningStateForTests(): ApnsReadiness {
+  cachedProviderToken = null;
+  return captureApnsSigningState();
 }
 
 function isPermanentApnsFailure(status: number, reason: string | undefined): boolean {

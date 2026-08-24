@@ -49,7 +49,8 @@ router.get('/health', async (_req, res) => {
 
   // Push signing is reported because the send path swallows its own failures:
   // an unreadable key looks exactly like a night with nothing to announce.
-  checks.push = await apnsReadiness();
+  // Captured at boot, so a poll neither reads the key nor mints a token.
+  checks.push = apnsReadiness();
 
   // Signing readiness stops at Apple's door. The tallies say whether anything
   // has ever come out the other side.

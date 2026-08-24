@@ -7,7 +7,7 @@ import { refreshUserIdentityHashes } from './userIdentityHashes';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
-type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user'>;
+export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user'>;
 
 /**
  * Resolves a verified provider subject to exactly one user. We deliberately do

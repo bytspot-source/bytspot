@@ -82,3 +82,20 @@ test('rejects a multi-audience Apple token even when one entry is allowed', asyn
 });
 
 test.after(() => resetProviderJwksCacheForTests());
+
+test('An unknown signing key refreshes the JWKS once, not on every attempt', async () => {
+  resetProviderJwksCacheForTests();
+  const header = base64url({ alg: 'RS256', kid: 'unknown-key', typ: 'JWT' });
+  const body = makeToken().split('.')[1];
+  const forged = `${header}.${body}.${sign('RSA-SHA256', Buffer.from(`${header}.${body}`), privateKey).toString('base64url')}`;
+
+  let fetches = 0;
+  const counting = async () => { fetches += 1; return { keys: [jwk] }; };
+
+  // A token naming a key the provider does not publish must not become a way
+  // to make us hammer their endpoint.
+  await assert.rejects(() => verifyProviderIdToken('google', forged, 'google-client', counting));
+  await assert.rejects(() => verifyProviderIdToken('google', forged, 'google-client', counting));
+  assert.equal(fetches, 3);
+  resetProviderJwksCacheForTests();
+});

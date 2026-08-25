@@ -35,6 +35,42 @@ export function captureError(error: unknown, context?: Record<string, string>): 
   }
 }
 
+/** A crash the app survived long enough to report, from MetricKit.
+ *
+ *  Sent as a message rather than an exception: the stack belongs to a process
+ *  that has already died, so attaching it to this one's would invent a trace
+ *  the server never had. */
+export function captureClientDiagnostic(payload: {
+  kind: string;
+  signal?: string;
+  terminationReason?: string;
+  exceptionType?: string;
+  appVersion?: string;
+  osVersion?: string;
+  callStackSummary?: string;
+  occurredAt?: string;
+}): void {
+  if (!isErrorTrackingEnabled()) return;
+  try {
+    Sentry.captureMessage(`ios ${payload.kind}: ${payload.terminationReason ?? payload.exceptionType ?? payload.signal ?? 'unspecified'}`, {
+      level: payload.kind === 'crash' ? 'error' : 'warning',
+      tags: {
+        platform: 'ios',
+        diagnostic: payload.kind,
+        ...(payload.appVersion ? { appVersion: payload.appVersion } : {}),
+        ...(payload.osVersion ? { osVersion: payload.osVersion } : {}),
+      },
+      extra: {
+        ...(payload.signal ? { signal: payload.signal } : {}),
+        ...(payload.callStackSummary ? { callStackSummary: payload.callStackSummary } : {}),
+        ...(payload.occurredAt ? { occurredAt: payload.occurredAt } : {}),
+      },
+    });
+  } catch {
+    // An unreachable Sentry must never surface to the caller.
+  }
+}
+
 /** Crashes that would otherwise leave no trace beyond a restarted process. */
 export function installProcessGuards(): void {
   process.on('uncaughtException', (error) => {

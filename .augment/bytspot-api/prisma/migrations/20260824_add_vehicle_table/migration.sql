@@ -83,10 +83,18 @@ FROM (
     ) AS collision_rank,
     v_index
   FROM "users" u
-  CROSS JOIN LATERAL jsonb_array_elements(u."vehicles") WITH ORDINALITY AS t(v, v_index)
+  -- CASE, not WHERE. jsonb_typeof in WHERE is not a short-circuit: Postgres
+  -- still evaluates the LATERAL, so a JSON object, string or number in the
+  -- column — every shape except an array — aborts the whole transaction with
+  -- "cannot extract elements from a scalar" / "cannot extract elements from
+  -- an object". An aborted pre-deploy is what has been holding every merge
+  -- since 17:26 UTC. CASE never calls jsonb_array_elements on a non-array.
+  CROSS JOIN LATERAL jsonb_array_elements(
+    CASE WHEN jsonb_typeof(u."vehicles") = 'array' THEN u."vehicles" ELSE '[]'::jsonb END
+  ) WITH ORDINALITY AS t(v, v_index)
   -- Elements are only vehicles if they are objects. A scalar or null element
   -- reads as an object with every field absent, which would materialise a row
   -- with a synthesised id and no make, model or plate: a vehicle that never
   -- existed, indistinguishable from one the owner saved.
-  WHERE jsonb_typeof(u."vehicles") = 'array' AND jsonb_typeof(v) = 'object'
+  WHERE jsonb_typeof(v) = 'object'
 ) legacy;

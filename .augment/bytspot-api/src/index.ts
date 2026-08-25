@@ -18,6 +18,7 @@ import cronRouter from './routes/cron';             // external cron trigger (Be
 import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (external)
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import partyMediaRouter from './routes/partyMedia';
+import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
@@ -73,6 +74,7 @@ app.use(cronRouter);
 app.use(betaSignupRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(partyMediaRouter);
+app.use(diagnosticsRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

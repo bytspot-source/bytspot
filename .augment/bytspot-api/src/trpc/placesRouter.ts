@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
-import { cached } from '../lib/redis';
+import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
@@ -76,6 +76,54 @@ async function gpGet<T>(path: string, fieldMask: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/**
+ * Google's free tier allows 100 nearby searches per day for the whole
+ * project. Keying the cache on a four-decimal coordinate (~11m) gave every
+ * device position its own entry, so two people on the same block shared
+ * nothing and the day's quota went in minutes.
+ *
+ * Snapping to ~350m buckets means a corridor costs a handful of calls a day
+ * instead of one per user. The bucket is smaller than the smallest search
+ * radius, so results stay local to the caller.
+ */
+export function locationBucket(lat: number, lng: number): string {
+  const grid = 0.0032;
+  return `${Math.round(lat / grid)}:${Math.round(lng / grid)}`;
+}
+
+/**
+ * Google failing must not empty the app.
+ *
+ * A quota exhaustion or outage used to throw, and Home lost its places
+ * entirely. A day-old list of restaurants is still true — they have not moved
+ * — so the last good answer is kept well past its freshness window and served
+ * when the live call fails. The caller is told the result is stale rather
+ * than being allowed to present it as current.
+ */
+async function cachedWithStale<T>(key: string, ttlSeconds: number, fetcher: () => Promise<T>): Promise<{ data: T; stale: boolean }> {
+  const staleKey = `${key}:stale`;
+  const redis = getRedis();
+  try {
+    const fresh = await cached(key, ttlSeconds, async () => {
+      const data = await fetcher();
+      if (redis) await redis.set(staleKey, JSON.stringify(data), 'EX', STALE_TTL_SECONDS).catch(() => undefined);
+      return data;
+    });
+    return { data: fresh, stale: false };
+  } catch (err) {
+    if (redis) {
+      const hit = await redis.get(staleKey).catch(() => null);
+      if (hit) {
+        console.warn(`[places] serving stale ${key}: ${(err as Error).message}`);
+        return { data: JSON.parse(hit) as T, stale: true };
+      }
+    }
+    throw err;
+  }
+}
+
+const STALE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 export const placesRouter = router({
   nearbySearch: publicProcedure
     .input(z.object({
@@ -87,8 +135,8 @@ export const placesRouter = router({
     .query(async ({ input }) => {
       const { lat, lng, radius, type, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}:${type ?? 'all'}:${maxResults}`;
-      const places = await cached(cacheKey, 900, async () => {
+      const cacheKey = `gp:nearby:${locationBucket(lat, lng)}:${radius}:${type ?? 'all'}:${maxResults}`;
+      const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
         const body: Record<string, unknown> = {
           locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
           maxResultCount: maxResults, rankPreference: 'DISTANCE',
@@ -97,7 +145,7 @@ export const placesRouter = router({
         const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
         return (data.places ?? []).map(mapPlace);
       });
-      return { places, source: 'google' as const };
+      return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
     }),
 
   textSearch: publicProcedure

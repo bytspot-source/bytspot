@@ -493,7 +493,7 @@ function shareLinkExpiry(party: { shareLinkExpiresAt: Date | null; endsAt: Date 
   return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
 }
 
-function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): boolean {
+export function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): boolean {
   return shareLinkExpiry(party).getTime() <= Date.now();
 }
 

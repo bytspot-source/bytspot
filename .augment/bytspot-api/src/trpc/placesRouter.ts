@@ -136,16 +136,26 @@ export const placesRouter = router({
       const { lat, lng, radius, type, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
       const cacheKey = `gp:nearby:${locationBucket(lat, lng)}:${radius}:${type ?? 'all'}:${maxResults}`;
-      const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
-        const body: Record<string, unknown> = {
-          locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
-          maxResultCount: maxResults, rankPreference: 'DISTANCE',
-        };
-        if (type) body.includedTypes = [type];
-        const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
-        return (data.places ?? []).map(mapPlace);
-      });
-      return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+      try {
+        const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
+          const body: Record<string, unknown> = {
+            locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
+            maxResultCount: maxResults, rankPreference: 'DISTANCE',
+          };
+          if (type) body.includedTypes = [type];
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
+          return (data.places ?? []).map(mapPlace);
+        });
+        return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+      } catch (err) {
+        // Google being unreachable is not this server malfunctioning, and an
+        // empty list is not the same claim as "there is nothing here".
+        // 'unavailable' lets the client say it does not know, instead of
+        // erroring the tab or implying the area is empty. The failure still
+        // reaches Sentry through the logged error.
+        console.error(`[places] nearbySearch unavailable: ${(err as Error).message}`);
+        return { places: [] as MappedPlace[], source: 'unavailable' as const };
+      }
     }),
 
   textSearch: publicProcedure
@@ -157,15 +167,20 @@ export const placesRouter = router({
       const { query, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
       const cacheKey = `gp:text:${query.toLowerCase().trim()}:${maxResults}`;
-      const places = await cached(cacheKey, 900, async () => {
-        const body = {
-          textQuery: query, maxResultCount: maxResults,
-          locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
-        };
-        const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
-        return (data.places ?? []).map(mapPlace);
-      });
-      return { places, source: 'google' as const };
+      try {
+        const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
+          const body = {
+            textQuery: query, maxResultCount: maxResults,
+            locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
+          };
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
+          return (data.places ?? []).map(mapPlace);
+        });
+        return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+      } catch (err) {
+        console.error(`[places] textSearch unavailable: ${(err as Error).message}`);
+        return { places: [] as MappedPlace[], source: 'unavailable' as const };
+      }
     }),
 
   details: publicProcedure

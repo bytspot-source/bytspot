@@ -124,8 +124,14 @@ test('A shared cache cannot answer 200 after the link has expired', async () => 
     assert.ok(maxAge > 0 && maxAge <= 60, `${label}: expected TTL capped by expiry, got ${cache}`);
   }
 
-  // A link with an unbounded future still never exceeds the ceiling.
-  party.findFirst = async () => ({ ...published, endsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) });
+  // A link with an unbounded future still never exceeds the ceiling. A page
+  // naming the venue takes the shorter one, because there is no purge path and
+  // a tightened disclosure must stop being served in a minute, not five.
+  const distant = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  party.findFirst = async () => ({ ...published, endsAt: distant, locationDisclosure: 'public' });
+  assert.equal((await get('party-1')).cache, 'public, max-age=60');
+
+  party.findFirst = async () => ({ ...published, endsAt: distant, locationDisclosure: 'withheld' });
   assert.equal((await get('party-1')).cache, 'public, max-age=300');
 });
 

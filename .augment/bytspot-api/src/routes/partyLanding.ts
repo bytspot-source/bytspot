@@ -51,13 +51,23 @@ const DISCLOSURE_NOTE: Record<string, string> = {
 // Shared caches must not outlive the share link: a page cached one second
 // before expiry would otherwise keep answering 200 for another 5 minutes
 // while a never-existed party answers 404, which is exactly the distinction
-// the expiry rule exists to remove. The same cap bounds how long a tightened
-// disclosure or an unpublish can keep serving a stale venue.
+// the expiry rule exists to remove.
 const MAX_CACHE_SECONDS = 300;
 
-function cacheSeconds(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): number {
+// A page that names the venue is the only one whose staleness can leak
+// something. There is no purge path, so that window is bought down rather than
+// assumed away: a host who tightens disclosure or unpublishes is exposed for a
+// minute, not five. Pages with no venue keep the longer TTL, since going stale
+// costs a guest nothing worse than an old title.
+const VENUE_CACHE_SECONDS = 60;
+
+function cacheSeconds(
+  party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date },
+  revealsVenue: boolean,
+): number {
+  const ceiling = revealsVenue ? VENUE_CACHE_SECONDS : MAX_CACHE_SECONDS;
   const remaining = Math.floor((shareLinkExpiry(party).getTime() - Date.now()) / 1000);
-  return Math.max(0, Math.min(MAX_CACHE_SECONDS, remaining));
+  return Math.max(0, Math.min(ceiling, remaining));
 }
 
 /**
@@ -213,13 +223,14 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
   if (!party || shareLinkExpired(party)) return sendNotFound(res);
 
   const cover = party.media[0];
+  const venue = party.locationDisclosure === 'public' ? party.venueName : null;
   const html = renderPage({
     id: party.id,
     title: party.title,
     tagline: party.tagline,
     hostName: party.host.name ?? 'Bytspot Host',
     when: formatWhen(party.startsAt),
-    venue: party.locationDisclosure === 'public' ? party.venueName : null,
+    venue,
     disclosureNote: DISCLOSURE_NOTE[party.locationDisclosure] ?? DISCLOSURE_NOTE.withheld,
     tier: party.requiredMembershipTier,
     access: ACCESS_LABEL[party.accessMode] ?? party.accessMode,
@@ -229,7 +240,7 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  const ttl = cacheSeconds(party);
+  const ttl = cacheSeconds(party, venue !== null);
   res.setHeader('Cache-Control', ttl > 0 ? `public, max-age=${ttl}` : 'no-store');
   // The global helmet policy sets `img-src 'self'`, but this page is served on
   // the share domain while cover art is served from the API origin, so the

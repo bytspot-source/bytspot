@@ -218,3 +218,102 @@ test('Party webhook refunds a checkout when the user is downgraded before paymen
   assert.equal(checkoutUpdate.data.status, 'refund-required');
   assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
 });
+test('Membership upgrade requires a Stripe signature', async () => {
+  let updated = false;
+  user.updateMany = async () => { updated = true; return { count: 1 }; };
+  const app = express();
+  app.use(partyStripeWebhookRouter);
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const port = (server.address() as AddressInfo).port;
+    // The forged payload that the retired tRPC procedure accepted verbatim.
+    const response = await fetch(`http://127.0.0.1:${port}/webhooks/stripe/party`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'checkout.session.completed', data: { object: { mode: 'subscription', metadata: { userId: 'user-1' } } } }),
+    });
+    assert.equal(response.status, 400);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+  assert.equal(updated, false);
+
+  // The same forgery with a wrong secret is still refused.
+  const body = JSON.stringify({ type: 'checkout.session.completed', data: { object: { mode: 'subscription', metadata: { userId: 'user-1' } } } });
+  const signature = Stripe.webhooks.generateTestHeaderString({ payload: body, secret: 'whsec_attacker_secret' });
+  const forged = express();
+  forged.use(partyStripeWebhookRouter);
+  const forgedServer = forged.listen(0, '127.0.0.1');
+  await once(forgedServer, 'listening');
+  try {
+    const port = (forgedServer.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/webhooks/stripe/party`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': signature }, body,
+    });
+    assert.equal(response.status, 400);
+  } finally {
+    await new Promise<void>((resolve, reject) => forgedServer.close((error) => error ? reject(error) : resolve()));
+  }
+  assert.equal(updated, false);
+});
+
+test('Signed subscription checkout upgrades the buyer without touching Black', async () => {
+  let update: any;
+  user.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  const result = await deliverSignedEvent({
+    type: 'checkout.session.completed', created: Math.floor(Date.now() / 1000),
+    data: { object: { id: 'cs_sub_1', mode: 'subscription', payment_status: 'paid', metadata: { userId: 'user-9' } } },
+  } as unknown as Stripe.Event);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(update.where, { id: 'user-9', membershipTier: { not: 'black' } });
+  assert.deepEqual(update.data, { isPremium: true, membershipTier: 'platinum' });
+});
+
+test('Signed subscription checkout grants nothing when unpaid or unattributed', async () => {
+  let updated = false;
+  user.updateMany = async () => { updated = true; return { count: 1 }; };
+
+  for (const object of [
+    { id: 'cs_sub_2', mode: 'subscription', payment_status: 'unpaid', metadata: { userId: 'user-9' } },
+    { id: 'cs_sub_3', mode: 'subscription', payment_status: 'paid', metadata: {} },
+  ]) {
+    const result = await deliverSignedEvent({
+      type: 'checkout.session.completed', created: Math.floor(Date.now() / 1000), data: { object },
+    } as unknown as Stripe.Event);
+    assert.equal(result.status, 200);
+  }
+  assert.equal(updated, false);
+});
+
+test('Signed cancellation downgrades Platinum by customer and leaves Black alone', async () => {
+  let update: any;
+  user.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  const result = await deliverSignedEvent({
+    type: 'customer.subscription.deleted', created: Math.floor(Date.now() / 1000),
+    data: { object: { id: 'sub_1', customer: 'cus_123' } },
+  } as unknown as Stripe.Event);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(update.where, { stripeCustomerId: 'cus_123', membershipTier: 'platinum' });
+  assert.deepEqual(update.data, { isPremium: false, membershipTier: 'green' });
+});
+
+test('Party ticket payments are unaffected by the shared endpoint', async () => {
+  let membershipTouched = false;
+  user.updateMany = async () => { membershipTouched = true; return { count: 1 }; };
+  let checkoutUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+
+  const result = await deliverSignedEvent({
+    type: 'checkout.session.completed', created: Math.floor(Date.now() / 1000),
+    data: { object: { ...session(), mode: 'payment', payment_status: 'paid' } },
+  } as unknown as Stripe.Event);
+
+  assert.equal(result.status, 200);
+  assert.equal(membershipTouched, false);
+  assert.equal(checkoutUpdate.data.status, 'completed');
+});

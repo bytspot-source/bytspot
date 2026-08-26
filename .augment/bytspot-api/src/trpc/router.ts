@@ -851,37 +851,6 @@ const subscriptionRouter = router({
     const membershipTier = user?.membershipTier ?? (user?.isPremium ? 'platinum' : 'green');
     return { isPremium: membershipTier !== 'green', membershipTier };
   }),
-
-  /** POST /subscription/webhook → handles Stripe webhook events for subscriptions */
-  webhook: publicProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 50, label: 'subscription:webhook' }))
-    .input(z.object({
-      type: z.string().max(100),
-      data: z.object({
-        object: z.object({
-          metadata: z.object({ userId: z.string().max(100).optional() }).optional(),
-          mode: z.string().max(50).optional(),
-          customer: z.string().max(100).optional(),
-        }).passthrough().optional(),
-      }).passthrough(),
-    }))
-    .mutation(async ({ input }) => {
-      const { type, data } = input;
-      if (type === 'checkout.session.completed') {
-        const userId = data?.object?.metadata?.userId;
-        if (userId && data?.object?.mode === 'subscription') {
-          await db.user.updateMany({ where: { id: userId, membershipTier: { not: 'black' } }, data: { isPremium: true, membershipTier: 'platinum' } });
-          console.log(`[subscription] User ${userId} upgraded to Premium`);
-        }
-      } else if (type === 'customer.subscription.deleted') {
-        const customerId = data?.object?.customer;
-        if (customerId) {
-          await db.user.updateMany({ where: { stripeCustomerId: customerId, membershipTier: 'platinum' }, data: { isPremium: false, membershipTier: 'green' } });
-          console.log(`[subscription] Customer ${customerId} subscription cancelled`);
-        }
-      }
-      return { received: true };
-    }),
 });
 
 /**

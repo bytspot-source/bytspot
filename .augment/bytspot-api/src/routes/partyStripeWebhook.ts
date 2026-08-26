@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
+import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
 
 const partyStripeWebhookRouter = Router();
 
@@ -101,6 +102,20 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
     event = new Stripe(config.stripeSecretKey).webhooks.constructEvent(req.body, signature, config.stripeWebhookSecret);
   } catch {
     res.status(400).json({ error: 'Invalid Stripe signature.' });
+    return;
+  }
+
+  // Subscription transitions share this endpoint because it is the one place a
+  // Stripe signature is verified. They are claimed before the Party cast, which
+  // does not hold for subscription objects.
+  try {
+    if (await applySubscriptionEvent(event)) {
+      res.json({ received: true });
+      return;
+    }
+  } catch (error) {
+    console.error('[subscription-webhook] membership transition failed', error);
+    res.status(500).json({ error: 'Membership transition will be retried.' });
     return;
   }
 

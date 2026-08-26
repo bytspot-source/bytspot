@@ -26,7 +26,6 @@ const PUBLIC_MUTATIONS = new Set([
   'auth.signup', 'auth.login', 'auth.appleSignIn', 'auth.googleSignIn',
   'betaSignup.signup',
   'admin.validateInvite',
-  'subscription.webhook',
   // Guarded by the cron secret rather than a session; see routes/cron.ts.
   'cron.crowdAlerts', 'cron.crowdSim',
 ]);

@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
 import { cached, getRedis } from '../lib/redis';
+import { captureError } from '../lib/observability';
 import { config } from '../config';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
@@ -76,8 +77,6 @@ async function gpGet<T>(path: string, fieldMask: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-const STALE_TTL_SECONDS = 7 * 24 * 60 * 60;
-
 /**
  * Google's free tier allows 100 nearby searches per day for the whole
  * project. Keying the cache on a four-decimal coordinate (~11m) gave every
@@ -102,19 +101,30 @@ export function locationBucket(lat: number, lng: number): string {
  * when the live call fails. The caller is told the result is stale rather
  * than being allowed to present it as current.
  */
-async function cachedWithStale<T>(key: string, ttlSeconds: number, fetcher: () => Promise<T>): Promise<{ data: T; stale: boolean }> {
+/** Minimal surface used for the stale copy, so tests can supply a fake. */
+export interface StaleStore {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, mode: 'EX', ttl: number): Promise<unknown>;
+}
+
+export async function cachedWithStale<T>(
+  key: string,
+  ttlSeconds: number,
+  fetcher: () => Promise<T>,
+  store?: StaleStore | null,
+): Promise<{ data: T; stale: boolean }> {
   const staleKey = `${key}:stale`;
-  const redis = getRedis();
+  const redis = store ?? (getRedis() as StaleStore | null);
   try {
     const fresh = await cached(key, ttlSeconds, async () => {
       const data = await fetcher();
-      if (redis) await redis.set(staleKey, JSON.stringify(data), 'EX', STALE_TTL_SECONDS).catch(() => undefined);
+      if (redis) await Promise.resolve(redis.set(staleKey, JSON.stringify(data), 'EX', STALE_TTL_SECONDS)).catch(() => undefined);
       return data;
     });
     return { data: fresh, stale: false };
   } catch (err) {
     if (redis) {
-      const hit = await redis.get(staleKey).catch(() => null);
+      const hit = await Promise.resolve(redis.get(staleKey)).catch(() => null);
       if (hit) {
         console.warn(`[places] serving stale ${key}: ${(err as Error).message}`);
         return { data: JSON.parse(hit) as T, stale: true };
@@ -123,6 +133,8 @@ async function cachedWithStale<T>(key: string, ttlSeconds: number, fetcher: () =
     throw err;
   }
 }
+
+const STALE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export const placesRouter = router({
   nearbySearch: publicProcedure
@@ -136,16 +148,26 @@ export const placesRouter = router({
       const { lat, lng, radius, type, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
       const cacheKey = `gp:nearby:${locationBucket(lat, lng)}:${radius}:${type ?? 'all'}:${maxResults}`;
-      const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
-        const body: Record<string, unknown> = {
-          locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
-          maxResultCount: maxResults, rankPreference: 'DISTANCE',
-        };
-        if (type) body.includedTypes = [type];
-        const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
-        return (data.places ?? []).map(mapPlace);
-      });
-      return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+      try {
+        const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
+          const body: Record<string, unknown> = {
+            locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
+            maxResultCount: maxResults, rankPreference: 'DISTANCE',
+          };
+          if (type) body.includedTypes = [type];
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
+          return (data.places ?? []).map(mapPlace);
+        });
+        return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+      } catch (err) {
+        // Google being unreachable is not this server malfunctioning, and an
+        // empty list is not the same claim as "there is nothing here".
+        // 'unavailable' lets the client say it does not know, instead of
+        // erroring the tab or implying the area is empty. Reported explicitly
+        // because a handled provider outage is invisible to Sentry otherwise.
+        captureError(err, { provider: 'google-places', operation: 'nearbySearch' });
+        return { places: [] as MappedPlace[], source: 'unavailable' as const };
+      }
     }),
 
   textSearch: publicProcedure
@@ -157,15 +179,20 @@ export const placesRouter = router({
       const { query, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
       const cacheKey = `gp:text:${query.toLowerCase().trim()}:${maxResults}`;
-      const places = await cached(cacheKey, 900, async () => {
-        const body = {
-          textQuery: query, maxResultCount: maxResults,
-          locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
-        };
-        const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
-        return (data.places ?? []).map(mapPlace);
-      });
-      return { places, source: 'google' as const };
+      try {
+        const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
+          const body = {
+            textQuery: query, maxResultCount: maxResults,
+            locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
+          };
+          const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
+          return (data.places ?? []).map(mapPlace);
+        });
+        return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+      } catch (err) {
+        captureError(err, { provider: 'google-places', operation: 'textSearch' });
+        return { places: [] as MappedPlace[], source: 'unavailable' as const };
+      }
     }),
 
   details: publicProcedure

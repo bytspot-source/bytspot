@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { locationBucket } from './placesRouter';
+import { cachedWithStale, locationBucket, placesRouter, type StaleStore } from './placesRouter';
+import { config } from '../config';
 
 test('Two callers on the same block share one Google search', () => {
   // ~40m apart: previously two cache keys, two paid calls.
@@ -14,4 +15,68 @@ test('A caller a few blocks away still gets local results', () => {
 
 test('Buckets stay distinct across the sign boundary', () => {
   assert.notEqual(locationBucket(0.002, -84.3833), locationBucket(-0.002, -84.3833));
+});
+
+test('Google failing empties the list honestly instead of erroring the tab', async () => {
+  const originalKey = config.googlePlacesApiKey;
+  const originalFetch = globalThis.fetch;
+  // A rejected key (the 403 seen in production) must not surface as a 500.
+  (config as { googlePlacesApiKey: string }).googlePlacesApiKey = 'test-key';
+  globalThis.fetch = (async () => new Response('denied', { status: 403 })) as typeof fetch;
+  try {
+    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places' } as never);
+    const nearby = await caller.nearbySearch({ lat: 33.7866, lng: -84.3833, radius: 2000, maxResults: 10 });
+    assert.deepEqual(nearby, { places: [], source: 'unavailable' });
+
+    const text = await caller.textSearch({ query: 'coffee midtown', maxResults: 10 });
+    assert.deepEqual(text, { places: [], source: 'unavailable' });
+  } finally {
+    (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('An unconfigured key stays distinct from an unreachable provider', async () => {
+  const originalKey = config.googlePlacesApiKey;
+  (config as { googlePlacesApiKey: string }).googlePlacesApiKey = '';
+  try {
+    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places' } as never);
+    // 'none' means never asked; 'unavailable' means asked and could not reach.
+    assert.equal((await caller.nearbySearch({ lat: 33.7866, lng: -84.3833, radius: 2000, maxResults: 10 })).source, 'none');
+    // Both search paths must agree; only nearbySearch was covered before.
+    assert.equal((await caller.textSearch({ query: 'coffee midtown', maxResults: 10 })).source, 'none');
+  } finally {
+    (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
+  }
+});
+
+/** Holds only the stale copy: the fresh key always misses, as after its TTL. */
+function staleOnlyStore(): StaleStore & { seeded: number } {
+  const entries = new Map<string, string>();
+  return {
+    get seeded() { return entries.size; },
+    async get(key) { return key.endsWith(':stale') ? entries.get(key) ?? null : null; },
+    async set(key, value) { entries.set(key, value); return 'OK'; },
+  };
+}
+
+test('A week-old copy is served as stale, never as fresh truth', async () => {
+  const store = staleOnlyStore();
+  const seed = await cachedWithStale('probe', 900, async () => ['cafe'], store);
+  assert.equal(seed.stale, false);
+  assert.equal(store.seeded, 1);
+
+  // Provider now fails and the fresh key has aged out: the surviving week-old
+  // copy must come back flagged stale, not relabelled as a live result.
+  const outage = await cachedWithStale('probe', 900, async () => { throw new Error('429'); }, store);
+  assert.equal(outage.stale, true);
+  assert.deepEqual(outage.data, ['cafe']);
+});
+
+test('With no stale copy the outage surfaces instead of inventing an answer', async () => {
+  const store = staleOnlyStore();
+  await assert.rejects(
+    () => cachedWithStale('probe', 900, async () => { throw new Error('429'); }, store),
+    /429/,
+  );
 });

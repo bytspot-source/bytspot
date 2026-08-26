@@ -137,6 +137,44 @@ export async function alertHostOfDoorArrival(input: {
 }
 
 /**
+ * Tells a host that someone from one of their own circles just bought a ticket,
+ * so they can follow up. Deliberately says nothing a guest could not already
+ * see: it names the buyer to the host only, and never restates the venue, which
+ * for an after-approval or withheld Party stays hidden from unapproved guests.
+ *
+ * Fires only when the buyer is actually in a circle the host owns AND that the
+ * Party was addressed to — a public buyer is not a social-graph signal.
+ */
+export async function alertHostOfCircleTicketPurchase(input: {
+  partyId: string;
+  buyerUserId: string;
+}): Promise<NotificationDeliveryResult | null> {
+  const party = await db.party.findUnique({
+    where: { id: input.partyId },
+    select: { hostUserId: true, audienceCircleIds: true },
+  });
+  if (!party || party.audienceCircleIds.length === 0 || party.hostUserId === input.buyerUserId) return null;
+
+  const membership = await db.socialCircleMember.findFirst({
+    where: {
+      userId: input.buyerUserId,
+      circleId: { in: party.audienceCircleIds },
+      circle: { ownerId: party.hostUserId },
+    },
+    select: { id: true },
+  });
+  if (!membership) return null;
+
+  const who = (await displayName(input.buyerUserId))?.trim() || 'A member of your circle';
+  return send({
+    audience: { kind: 'host', partyId: input.partyId },
+    title: 'Someone from your circle is in',
+    body: `${who} bought a ticket to your Party.`,
+    type: 'party.rsvp',
+  });
+}
+
+/**
  * Party alerts are a courtesy on top of a completed mutation. A push failure
  * must never turn a successful RSVP into an error for the member who made it.
  */

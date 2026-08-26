@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
 import { cached, getRedis } from '../lib/redis';
+import { captureError } from '../lib/observability';
 import { config } from '../config';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
@@ -151,9 +152,9 @@ export const placesRouter = router({
         // Google being unreachable is not this server malfunctioning, and an
         // empty list is not the same claim as "there is nothing here".
         // 'unavailable' lets the client say it does not know, instead of
-        // erroring the tab or implying the area is empty. The failure still
-        // reaches Sentry through the logged error.
-        console.error(`[places] nearbySearch unavailable: ${(err as Error).message}`);
+        // erroring the tab or implying the area is empty. Reported explicitly
+        // because a handled provider outage is invisible to Sentry otherwise.
+        captureError(err, { provider: 'google-places', operation: 'nearbySearch' });
         return { places: [] as MappedPlace[], source: 'unavailable' as const };
       }
     }),
@@ -178,7 +179,7 @@ export const placesRouter = router({
         });
         return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
       } catch (err) {
-        console.error(`[places] textSearch unavailable: ${(err as Error).message}`);
+        captureError(err, { provider: 'google-places', operation: 'textSearch' });
         return { places: [] as MappedPlace[], source: 'unavailable' as const };
       }
     }),

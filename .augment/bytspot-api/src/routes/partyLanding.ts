@@ -1,7 +1,8 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { shareLinkExpired } from '../trpc/partyRouter';
+import { captureError } from '../lib/observability';
+import { shareLinkExpired, shareLinkExpiry } from '../trpc/partyRouter';
 
 const partyLandingRouter = Router();
 
@@ -32,10 +33,32 @@ function formatWhen(startsAt: Date): string {
 }
 
 const ACCESS_LABEL: Record<string, string> = {
-  rsvp: 'Free RSVP',
+  'free-rsvp': 'Free RSVP',
   'paid-ticket': 'Paid Ticket',
   'private-approval': 'Private Approval',
 };
+
+/**
+ * A withheld location is never revealed to anyone, so promising it "to
+ * approved guests" would be a false statement in a forwarded chat. Only
+ * after-approval rooms actually reveal on approval.
+ */
+const DISCLOSURE_NOTE: Record<string, string> = {
+  'after-approval': 'Location is revealed to approved guests.',
+  withheld: 'Location details are not public.',
+};
+
+// Shared caches must not outlive the share link: a page cached one second
+// before expiry would otherwise keep answering 200 for another 5 minutes
+// while a never-existed party answers 404, which is exactly the distinction
+// the expiry rule exists to remove. The same cap bounds how long a tightened
+// disclosure or an unpublish can keep serving a stale venue.
+const MAX_CACHE_SECONDS = 300;
+
+function cacheSeconds(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): number {
+  const remaining = Math.floor((shareLinkExpiry(party).getTime() - Date.now()) / 1000);
+  return Math.max(0, Math.min(MAX_CACHE_SECONDS, remaining));
+}
 
 /**
  * A crawler is never authenticated, so this page may only ever carry what an
@@ -45,7 +68,7 @@ const ACCESS_LABEL: Record<string, string> = {
  */
 interface PublicParty {
   id: string; title: string; tagline: string; hostName: string;
-  when: string; venue: string | null; tier: string; access: string;
+  when: string; venue: string | null; disclosureNote: string; tier: string; access: string;
   coverUrl: string | null; shareUrl: string;
 }
 
@@ -104,10 +127,35 @@ ${cover}
 <p class="tagline">${tagline}</p>
 <p class="host">Hosted by ${host}</p>
 <div class="chips">${chips}</div>
-${party.venue ? `<p class="venue">${escapeHtml(party.venue)}</p>` : '<p class="note">Location is revealed to approved guests.</p>'}
+${party.venue ? `<p class="venue">${escapeHtml(party.venue)}</p>` : `<p class="note">${escapeHtml(party.disclosureNote)}</p>`}
 <a class="cta" href="${escapeHtml(party.shareUrl)}">Open in Bytspot</a>
 <p class="note">Open on iPhone to see the Party Pass, RSVP, and your door status.</p>
 </div></body></html>`;
+}
+
+function renderShell(heading: string, body: string, robots = true): string {
+  return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bytspot</title>
+${robots ? '<meta name="robots" content="noindex">' : ''}
+<style>
+:root{color-scheme:dark}
+body{background:#05070d;color:#fff;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;
+ min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;margin:0}
+h1{font-size:22px;font-weight:900;margin:0 0 8px}
+p{color:rgba(255,255,255,.55);font-weight:600;margin:0}
+</style>
+</head><body><div>
+<h1>${heading}</h1>
+<p>${body}</p>
+</div></body></html>`;
+}
+
+/** A 500 must not claim the party is gone — only that Bytspot cannot answer. */
+function renderUnavailable(): string {
+  return renderShell("Bytspot can't load this right now", 'Please try again in a moment.');
 }
 
 function renderNotFound(): string {
@@ -130,20 +178,39 @@ p{color:rgba(255,255,255,.55);font-weight:600;margin:0}
 </div></body></html>`;
 }
 
+function sendNotFound(res: Response) {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(404).send(renderNotFound());
+}
+
 partyLandingRouter.get('/party/:partyId', async (req, res) => {
-  const party = await db.party.findFirst({
-    where: { id: req.params.partyId, status: 'published' },
-    include: { host: { select: { name: true } }, media: { where: { kind: 'cover' }, take: 1 } },
-  }).catch(() => null);
+  const partyId = req.params.partyId;
+  // Bound the key before it reaches the database. Generated IDs are well under
+  // this, so anything longer is not a party that could exist and must not cost
+  // a query — 404s are deliberately uncached, so misses always reach origin.
+  if (partyId.length < 1 || partyId.length > 128) return sendNotFound(res);
+
+  let party;
+  try {
+    party = await db.party.findFirst({
+      where: { id: partyId, status: 'published' },
+      include: { host: { select: { name: true } }, media: { where: { kind: 'cover' }, take: 1 } },
+    });
+  } catch (err) {
+    // A database outage is not "this party does not exist". Telling a guest the
+    // party is gone would be a lie, and it would hide the outage from Sentry.
+    // Service health is not existence-revealing, so a generic 500 is safe.
+    captureError(err, { route: 'party-landing' });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(500).send(renderUnavailable());
+  }
 
   // An expired link must look the same as a party that never existed. The
   // guest-and-host exceptions cannot apply here: this response is cacheable
   // and the caller is unauthenticated, so it only ever renders the public view.
-  if (!party || shareLinkExpired(party)) {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(404).send(renderNotFound());
-  }
+  if (!party || shareLinkExpired(party)) return sendNotFound(res);
 
   const cover = party.media[0];
   const html = renderPage({
@@ -153,6 +220,7 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
     hostName: party.host.name ?? 'Bytspot Host',
     when: formatWhen(party.startsAt),
     venue: party.locationDisclosure === 'public' ? party.venueName : null,
+    disclosureNote: DISCLOSURE_NOTE[party.locationDisclosure] ?? DISCLOSURE_NOTE.withheld,
     tier: party.requiredMembershipTier,
     access: ACCESS_LABEL[party.accessMode] ?? party.accessMode,
     coverUrl: cover ? `${config.publicApiUrl}/media/parties/${encodeURIComponent(cover.id)}` : null,
@@ -161,7 +229,8 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Cache-Control', 'public, max-age=300');
+  const ttl = cacheSeconds(party);
+  res.setHeader('Cache-Control', ttl > 0 ? `public, max-age=${ttl}` : 'no-store');
   // The global helmet policy sets `img-src 'self'`, but this page is served on
   // the share domain while cover art is served from the API origin, so the
   // cover would be blocked for humans in a browser. Crawlers fetch og:image

@@ -24,7 +24,7 @@ const published = {
   media: [],
 };
 
-async function get(partyId: string): Promise<{ status: number; html: string; csp: string | null }> {
+async function get(partyId: string): Promise<{ status: number; html: string; csp: string | null; cache: string | null }> {
   const app = express();
   app.use(helmet());
   app.use(partyLandingRouter);
@@ -33,7 +33,10 @@ async function get(partyId: string): Promise<{ status: number; html: string; csp
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/party/${partyId}`);
-    return { status: res.status, html: await res.text(), csp: res.headers.get('content-security-policy') };
+    return {
+      status: res.status, html: await res.text(),
+      csp: res.headers.get('content-security-policy'), cache: res.headers.get('cache-control'),
+    };
   } finally {
     server.close();
   }
@@ -65,7 +68,6 @@ test('A withheld venue never reaches the preview', async () => {
     party.findFirst = async () => ({ ...published, locationDisclosure: disclosure });
     const { html } = await get('party-1');
     assert.doesNotMatch(html, /The Roof, Midtown/);
-    assert.match(html, /revealed to approved guests/);
   }
 });
 
@@ -99,4 +101,48 @@ test('A party title cannot inject markup into the page', async () => {
   const { html } = await get('party-1');
   assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
   assert.match(html, /&lt;script&gt;/);
+});
+
+test('A shared cache cannot answer 200 after the link has expired', async () => {
+  // Cached one minute before expiry: a 300s TTL would keep serving the party
+  // for four minutes after an unauthenticated caller must see a 404.
+  party.findFirst = async () => ({ ...published, endsAt: new Date(Date.now() + 60 * 1000) });
+  const { status, cache } = await get('party-1');
+  assert.equal(status, 200);
+  const maxAge = Number(/max-age=(\d+)/.exec(cache ?? '')?.[1] ?? -1);
+  assert.ok(maxAge > 0 && maxAge <= 60, `expected TTL capped by expiry, got ${cache}`);
+});
+
+test('A database outage says Bytspot is down, not that the party is gone', async () => {
+  party.findFirst = async () => { throw new Error('connection terminated'); };
+  const { status, html, cache } = await get('party-1');
+  assert.equal(status, 500);
+  assert.doesNotMatch(html, /isn't available/);
+  assert.equal(cache, 'no-store');
+});
+
+test('A withheld location does not promise a reveal that never comes', async () => {
+  party.findFirst = async () => ({ ...published, locationDisclosure: 'withheld' });
+  const withheld = await get('party-1');
+  assert.doesNotMatch(withheld.html, /revealed to approved guests/);
+  assert.match(withheld.html, /not public/);
+
+  party.findFirst = async () => ({ ...published, locationDisclosure: 'after-approval' });
+  assert.match((await get('party-1')).html, /revealed to approved guests/);
+});
+
+test('An oversized party id never reaches the database', async () => {
+  let queried = false;
+  party.findFirst = async () => { queried = true; return published; };
+  const { status } = await get('x'.repeat(400));
+  assert.equal(status, 404);
+  assert.equal(queried, false);
+});
+
+test('Every access mode renders a human label', async () => {
+  for (const [mode, label] of [['free-rsvp', 'Free RSVP'], ['paid-ticket', 'Paid Ticket'], ['private-approval', 'Private Approval']]) {
+    party.findFirst = async () => ({ ...published, accessMode: mode });
+    const { html } = await get('party-1');
+    assert.match(html, new RegExp(`<span class="chip">${label}</span>`), `${mode} must not render raw`);
+  }
 });

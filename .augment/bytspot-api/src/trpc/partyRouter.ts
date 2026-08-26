@@ -488,7 +488,7 @@ async function publishedParty(partyId: string) {
  * 6-hour grace window after startsAt when no end time was set — the same
  * fallback People You Met uses).
  */
-function shareLinkExpiry(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): Date {
+export function shareLinkExpiry(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): Date {
   if (party.shareLinkExpiresAt) return party.shareLinkExpiresAt;
   return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
 }

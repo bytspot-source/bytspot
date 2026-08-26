@@ -9,7 +9,13 @@
 -- users.vehicles is left in place and stops being read this deploy. It is
 -- dropped in a follow-up, once this table has been serving.
 
-CREATE TABLE "vehicles" (
+-- IF NOT EXISTS, and a guarded backfill below, because production was partly
+-- shaped by `prisma db push` — the same history 20260822 exists to reconcile.
+-- db push creates tables without recording a migration, so "vehicles" can
+-- already be there, and a plain CREATE TABLE aborts with 42P07
+-- "relation already exists", failing the pre-deploy and blocking every later
+-- migration behind P3009.
+CREATE TABLE IF NOT EXISTS "vehicles" (
   "id" TEXT NOT NULL,
   "user_id" TEXT NOT NULL,
   "type" TEXT NOT NULL,
@@ -28,11 +34,16 @@ CREATE TABLE "vehicles" (
   CONSTRAINT "vehicles_pkey" PRIMARY KEY ("id")
 );
 
-CREATE INDEX "vehicles_user_id_idx" ON "vehicles"("user_id");
+CREATE INDEX IF NOT EXISTS "vehicles_user_id_idx" ON "vehicles"("user_id");
 
-ALTER TABLE "vehicles"
-  ADD CONSTRAINT "vehicles_user_id_fkey"
-  FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$
+BEGIN
+  ALTER TABLE "vehicles"
+    ADD CONSTRAINT "vehicles_user_id_fkey"
+    FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Backfill. Legacy ids are preserved so an iOS client holding one from a
 -- previous `list` can still update or remove that vehicle without re-listing.
@@ -47,6 +58,12 @@ ALTER TABLE "vehicles"
 -- The re-keyed form embeds the owner and the array position, which are unique
 -- per source row, so the replacement cannot collide with another re-keyed row.
 -- A bare `|| '_' || rank` suffix could have collided with a real legacy id.
+--
+-- ON CONFLICT DO NOTHING is safe here only because the id is carried over
+-- from the legacy array: a conflict means this exact vehicle was already
+-- backfilled by an earlier attempt, not that a different vehicle is being
+-- discarded. Without it, re-running after a partial apply would abort on the
+-- primary key and re-block the deploy.
 INSERT INTO "vehicles" (
   "id", "user_id", "type", "make", "model", "year", "color",
   "license_plate", "photo", "vin", "transmission_type", "trunk_category"
@@ -87,8 +104,7 @@ FROM (
   -- still evaluates the LATERAL, so a JSON object, string or number in the
   -- column — every shape except an array — aborts the whole transaction with
   -- "cannot extract elements from a scalar" / "cannot extract elements from
-  -- an object". An aborted pre-deploy is what has been holding every merge
-  -- since 17:26 UTC. CASE never calls jsonb_array_elements on a non-array.
+  -- an object". CASE never calls jsonb_array_elements on a non-array.
   CROSS JOIN LATERAL jsonb_array_elements(
     CASE WHEN jsonb_typeof(u."vehicles") = 'array' THEN u."vehicles" ELSE '[]'::jsonb END
   ) WITH ORDINALITY AS t(v, v_index)
@@ -97,4 +113,5 @@ FROM (
   -- with a synthesised id and no make, model or plate: a vehicle that never
   -- existed, indistinguishable from one the owner saved.
   WHERE jsonb_typeof(v) = 'object'
-) legacy;
+) legacy
+ON CONFLICT ("id") DO NOTHING;

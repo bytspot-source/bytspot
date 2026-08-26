@@ -101,19 +101,30 @@ export function locationBucket(lat: number, lng: number): string {
  * when the live call fails. The caller is told the result is stale rather
  * than being allowed to present it as current.
  */
-async function cachedWithStale<T>(key: string, ttlSeconds: number, fetcher: () => Promise<T>): Promise<{ data: T; stale: boolean }> {
+/** Minimal surface used for the stale copy, so tests can supply a fake. */
+export interface StaleStore {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, mode: 'EX', ttl: number): Promise<unknown>;
+}
+
+export async function cachedWithStale<T>(
+  key: string,
+  ttlSeconds: number,
+  fetcher: () => Promise<T>,
+  store?: StaleStore | null,
+): Promise<{ data: T; stale: boolean }> {
   const staleKey = `${key}:stale`;
-  const redis = getRedis();
+  const redis = store ?? (getRedis() as StaleStore | null);
   try {
     const fresh = await cached(key, ttlSeconds, async () => {
       const data = await fetcher();
-      if (redis) await redis.set(staleKey, JSON.stringify(data), 'EX', STALE_TTL_SECONDS).catch(() => undefined);
+      if (redis) await Promise.resolve(redis.set(staleKey, JSON.stringify(data), 'EX', STALE_TTL_SECONDS)).catch(() => undefined);
       return data;
     });
     return { data: fresh, stale: false };
   } catch (err) {
     if (redis) {
-      const hit = await redis.get(staleKey).catch(() => null);
+      const hit = await Promise.resolve(redis.get(staleKey)).catch(() => null);
       if (hit) {
         console.warn(`[places] serving stale ${key}: ${(err as Error).message}`);
         return { data: JSON.parse(hit) as T, stale: true };

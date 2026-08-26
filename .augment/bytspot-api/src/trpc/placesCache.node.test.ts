@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { locationBucket, placesRouter } from './placesRouter';
+import { cachedWithStale, locationBucket, placesRouter, type StaleStore } from './placesRouter';
 import { config } from '../config';
 
 test('Two callers on the same block share one Google search', () => {
@@ -50,30 +50,33 @@ test('An unconfigured key stays distinct from an unreachable provider', async ()
   }
 });
 
-test('Week-old results are served as stale rather than as fresh truth', async () => {
-  const originalKey = config.googlePlacesApiKey;
-  const originalFetch = globalThis.fetch;
-  (config as { googlePlacesApiKey: string }).googlePlacesApiKey = 'test-key';
-  let calls = 0;
-  globalThis.fetch = (async () => {
-    calls += 1;
-    // First call populates the cache; the provider then starts failing.
-    if (calls === 1) return new Response(JSON.stringify({ places: [{ id: 'a', displayName: { text: 'Cafe' }, location: { latitude: 1, longitude: 2 } }] }), { status: 200 });
-    return new Response('rate limited', { status: 429 });
-  }) as typeof fetch;
-  try {
-    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places-stale' } as never);
-    const query = { query: `stale probe ${Date.now()}`, maxResults: 10 };
-    const fresh = await caller.textSearch(query);
-    assert.equal(fresh.source, 'google');
+/** Holds only the stale copy: the fresh key always misses, as after its TTL. */
+function staleOnlyStore(): StaleStore & { seeded: number } {
+  const entries = new Map<string, string>();
+  return {
+    get seeded() { return entries.size; },
+    async get(key) { return key.endsWith(':stale') ? entries.get(key) ?? null : null; },
+    async set(key, value) { entries.set(key, value); return 'OK'; },
+  };
+}
 
-    // Without a cache backend there is nothing to go stale from, so the honest
-    // answer is 'unavailable' — never fresh 'google' with an empty list.
-    const second = await caller.textSearch(query);
-    assert.ok(['google', 'google-stale', 'unavailable'].includes(second.source), second.source);
-    if (second.source === 'unavailable') assert.deepEqual(second.places, []);
-  } finally {
-    (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
-    globalThis.fetch = originalFetch;
-  }
+test('A week-old copy is served as stale, never as fresh truth', async () => {
+  const store = staleOnlyStore();
+  const seed = await cachedWithStale('probe', 900, async () => ['cafe'], store);
+  assert.equal(seed.stale, false);
+  assert.equal(store.seeded, 1);
+
+  // Provider now fails and the fresh key has aged out: the surviving week-old
+  // copy must come back flagged stale, not relabelled as a live result.
+  const outage = await cachedWithStale('probe', 900, async () => { throw new Error('429'); }, store);
+  assert.equal(outage.stale, true);
+  assert.deepEqual(outage.data, ['cafe']);
+});
+
+test('With no stale copy the outage surfaces instead of inventing an answer', async () => {
+  const store = staleOnlyStore();
+  await assert.rejects(
+    () => cachedWithStale('probe', 900, async () => { throw new Error('429'); }, store),
+    /429/,
+  );
 });

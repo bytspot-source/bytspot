@@ -82,6 +82,10 @@ test('An expired link is indistinguishable from a party that never existed', asy
   assert.equal(expired.status, 404);
   assert.equal(missing.status, 404);
   assert.equal(expired.html, missing.html);
+  // Headers are part of the tell: a differing cache directive would
+  // distinguish an expired party from one that never existed.
+  assert.equal(expired.cache, 'no-store');
+  assert.equal(missing.cache, 'no-store');
   assert.doesNotMatch(expired.html, /Champagne pop/);
 });
 
@@ -105,12 +109,24 @@ test('A party title cannot inject markup into the page', async () => {
 
 test('A shared cache cannot answer 200 after the link has expired', async () => {
   // Cached one minute before expiry: a 300s TTL would keep serving the party
-  // for four minutes after an unauthenticated caller must see a 404.
-  party.findFirst = async () => ({ ...published, endsAt: new Date(Date.now() + 60 * 1000) });
-  const { status, cache } = await get('party-1');
-  assert.equal(status, 200);
-  const maxAge = Number(/max-age=(\d+)/.exec(cache ?? '')?.[1] ?? -1);
-  assert.ok(maxAge > 0 && maxAge <= 60, `expected TTL capped by expiry, got ${cache}`);
+  // for four minutes after an unauthenticated caller must see a 404. Each
+  // expiry source must cap the TTL, not just endsAt.
+  const cases = [
+    { label: 'endsAt', patch: { endsAt: new Date(Date.now() + 60 * 1000) } },
+    { label: 'explicit shareLinkExpiresAt', patch: { endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 45 * 1000) } },
+    { label: 'startsAt + 6h fallback', patch: { startsAt: new Date(Date.now() - 6 * 60 * 60 * 1000 + 30 * 1000), endsAt: null } },
+  ];
+  for (const { label, patch } of cases) {
+    party.findFirst = async () => ({ ...published, ...patch });
+    const { status, cache } = await get('party-1');
+    assert.equal(status, 200, label);
+    const maxAge = Number(/max-age=(\d+)/.exec(cache ?? '')?.[1] ?? -1);
+    assert.ok(maxAge > 0 && maxAge <= 60, `${label}: expected TTL capped by expiry, got ${cache}`);
+  }
+
+  // A link with an unbounded future still never exceeds the ceiling.
+  party.findFirst = async () => ({ ...published, endsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) });
+  assert.equal((await get('party-1')).cache, 'public, max-age=300');
 });
 
 test('A database outage says Bytspot is down, not that the party is gone', async () => {

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import express from 'express';
+import helmet from 'helmet';
 import partyLandingRouter from './partyLanding';
 import { db } from '../lib/db';
+import { config } from '../config';
 
 const party = db.party as any;
 
@@ -22,15 +24,16 @@ const published = {
   media: [],
 };
 
-async function get(partyId: string): Promise<{ status: number; html: string }> {
+async function get(partyId: string): Promise<{ status: number; html: string; csp: string | null }> {
   const app = express();
+  app.use(helmet());
   app.use(partyLandingRouter);
   const server = app.listen(0);
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/party/${partyId}`);
-    return { status: res.status, html: await res.text() };
+    return { status: res.status, html: await res.text(), csp: res.headers.get('content-security-policy') };
   } finally {
     server.close();
   }
@@ -78,6 +81,17 @@ test('An expired link is indistinguishable from a party that never existed', asy
   assert.equal(missing.status, 404);
   assert.equal(expired.html, missing.html);
   assert.doesNotMatch(expired.html, /Champagne pop/);
+});
+
+test('The cover survives the global image policy, and scripts do not', async () => {
+  party.findFirst = async () => ({ ...published, media: [{ id: 'media-1', kind: 'cover' }] });
+  const { html, csp } = await get('party-1');
+  // The page is served on the share domain; cover art comes from the API
+  // origin, so `img-src 'self'` alone would blank it in a browser.
+  assert.match(html, /<img class="cover" src="[^"]*\/media\/parties\/media-1"/);
+  assert.ok(csp?.includes(`img-src 'self' data: ${config.publicApiUrl}`), csp ?? 'no CSP');
+  assert.ok(csp?.includes("default-src 'none'"), csp ?? 'no CSP');
+  assert.ok(!/script-src[^;]*unsafe/.test(csp ?? ''), csp ?? 'no CSP');
 });
 
 test('A party title cannot inject markup into the page', async () => {

@@ -162,6 +162,22 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'public, max-age=300');
+  // The global helmet policy sets `img-src 'self'`, but this page is served on
+  // the share domain while cover art is served from the API origin, so the
+  // cover would be blocked for humans in a browser. Crawlers fetch og:image
+  // server-side and are unaffected either way. Scripts stay denied outright:
+  // the page is static markup and must never execute host-controlled text.
+  res.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'none'",
+      `img-src 'self' data: ${config.publicApiUrl}`,
+      "style-src 'unsafe-inline'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ].join(';'),
+  );
   return res.status(200).send(html);
 });
 

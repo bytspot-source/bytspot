@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
+import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services/partyAlerts';
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
 
 const partyStripeWebhookRouter = Router();
@@ -58,9 +59,9 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     throw new PartyCheckoutValidationError('Party Checkout values did not match the reservation.');
   }
 
-  await db.$transaction(async (tx) => {
+  const granted = await db.$transaction(async (tx) => {
     const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
-    if (!current || current.status === 'completed' || current.status === 'refund-required') return;
+    if (!current || current.status === 'completed' || current.status === 'refund-required') return false;
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
     const [guest, party, user] = await Promise.all([
       tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
@@ -79,10 +80,17 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {
       await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
-      return;
+      return false;
     }
     await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
+    return true;
   });
+
+  // Courtesy signal to the host, after the money and the pass are both settled.
+  // Never inside the transaction: a push must not be able to roll back a ticket.
+  if (granted) {
+    dispatchPartyAlert(alertHostOfCircleTicketPurchase({ partyId, buyerUserId: userId }));
+  }
 }
 
 partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application/json' }), async (req, res) => {

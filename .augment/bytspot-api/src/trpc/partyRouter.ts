@@ -476,10 +476,23 @@ async function publishedParty(partyId: string) {
     include: {
       host: { select: { name: true } },
       media: { orderBy: { position: 'asc' } },
+      arrivalVenue: { select: { id: true, name: true, lat: true, lng: true } },
     },
   });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   return party;
+}
+
+/**
+ * Coordinates for the share-link surface. A Party earns them only when the host
+ * published the venue *and* attached a real arrival Venue: a free-text venueName
+ * has no point on the map, and an after-approval or withheld Party must not leak
+ * through a coordinate what its label deliberately hides. Approved guests get
+ * richer arrival guidance from events.arrival.context, which is gated on access.
+ */
+function publicArrivalCoordinate(party: { locationDisclosure: string; arrivalVenue: { lat: number; lng: number } | null }) {
+  if (party.locationDisclosure !== 'public' || !party.arrivalVenue) return { latitude: null, longitude: null };
+  return { latitude: party.arrivalVenue.lat, longitude: party.arrivalVenue.lng };
 }
 
 /**
@@ -600,6 +613,7 @@ export const partyInvite = publicProcedure
       runOfShow: runOfShow(party.startsAt, party.itinerary),
       locationLabel: party.locationDisclosure === 'public' ? party.venueName : null,
       locationDisclosure: party.locationDisclosure,
+      ...publicArrivalCoordinate(party),
       accessMode: party.accessMode,
       capacity: party.capacity,
       participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),

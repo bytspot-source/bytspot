@@ -835,3 +835,34 @@ test('a failing push never turns a successful RSVP into an error', async () => {
   assert.deepEqual(result, { status: 'rsvp', accessGranted: true });
   await new Promise((resolve) => setImmediate(resolve));
 });
+
+test('Invite coordinates require a public venue and a real arrival Venue', async () => {
+  const venue = { id: 'venue-1', name: 'Sample Venue', lat: 33.7841, lng: -84.3830 };
+  const base = {
+    id: 'party-1', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, venueName: 'Sample Venue', hostDestinations: {},
+    startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John' }, media: [],
+  };
+
+  // Public venue with an attached arrival Venue: the point is already public.
+  party.findFirst = async () => ({ ...base, locationDisclosure: 'public', arrivalVenue: venue });
+  const routable = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(routable.latitude, 33.7841);
+  assert.equal(routable.longitude, -84.3830);
+
+  // Public label but free-text venue (no arrival Venue): nothing to route to.
+  party.findFirst = async () => ({ ...base, locationDisclosure: 'public', arrivalVenue: null });
+  const unmapped = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(unmapped.latitude, null);
+  assert.equal(unmapped.longitude, null);
+
+  // A coordinate must never outrun the label it is meant to respect.
+  for (const disclosure of ['after-approval', 'withheld']) {
+    party.findFirst = async () => ({ ...base, locationDisclosure: disclosure, arrivalVenue: venue });
+    const hidden = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+    assert.equal(hidden.locationLabel, null, `${disclosure} must not publish a label`);
+    assert.equal(hidden.latitude, null, `${disclosure} must not leak latitude`);
+    assert.equal(hidden.longitude, null, `${disclosure} must not leak longitude`);
+  }
+});

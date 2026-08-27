@@ -6,6 +6,9 @@ import { shareLinkExpired, shareLinkExpiry } from '../trpc/partyRouter';
 
 const partyLandingRouter = Router();
 
+const APP_STORE_ID = '6761876421';
+const CLIP_BUNDLE_ID = 'com.bytspot.app.Clip';
+
 /**
  * Server-rendered share-link landing page.
  *
@@ -79,7 +82,7 @@ function cacheSeconds(
 interface PublicParty {
   id: string; title: string; tagline: string; hostName: string;
   when: string; venue: string | null; disclosureNote: string; tier: string; access: string;
-  coverUrl: string | null; shareUrl: string;
+  coverUrl: string | null; shareUrl: string; isInAppBrowser: boolean;
 }
 
 function renderPage(party: PublicParty): string {
@@ -109,7 +112,7 @@ ${party.coverUrl ? `<meta property="og:image" content="${escapeHtml(party.coverU
 <meta name="twitter:description" content="${description}">
 <!-- app-argument carries this party, so tapping the banner lands on the
      party rather than the app root. -->
-<meta name="apple-itunes-app" content="app-id=6761876421, app-clip-bundle-id=com.bytspot.app.Clip, app-clip-display=card, app-argument=${escapeHtml(party.shareUrl)}">
+<meta name="apple-itunes-app" content="app-id=${APP_STORE_ID}, app-clip-bundle-id=${CLIP_BUNDLE_ID}, app-clip-display=card, app-argument=${escapeHtml(party.shareUrl)}">
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -138,9 +141,30 @@ ${cover}
 <p class="host">Hosted by ${host}</p>
 <div class="chips">${chips}</div>
 ${party.venue ? `<p class="venue">${escapeHtml(party.venue)}</p>` : `<p class="note">${escapeHtml(party.disclosureNote)}</p>`}
-<a class="cta" href="${escapeHtml(party.shareUrl)}">Open in Bytspot</a>
-<p class="note">Open on iPhone to see the Party Pass, RSVP, and your door status.</p>
+<a class="cta" href="${escapeHtml(appClipLink(party.id))}">Open Pass</a>
+${party.isInAppBrowser
+  ? `<p class="note">This in-app browser can't open the pass. Tap ⋯ and choose “Open in Safari”.</p>`
+  : `<p class="note">Open on iPhone to see the Party Pass, RSVP, and your door status.</p>`}
 </div></body></html>`;
+}
+
+/// Apple's default App Clip link. A link on bytspot.app cannot invoke the Clip
+/// for bytspot.app - iOS suppresses Universal Links to the page's own domain -
+/// so the CTA has to leave the domain. This host is the supported way to do it,
+/// and the query parameters arrive as the Clip's invocation URL.
+/// Snapchat, Instagram, TikTok and Facebook render links in an embedded
+/// WKWebView where Universal Links never fire and the Smart App Banner is not
+/// shown, so no shared link can reach the Clip from inside them. Detected from
+/// the User-Agent server-side: the page's CSP is `default-src 'none'` and must
+/// stay script-free.
+export function isInAppBrowserUA(userAgent: string | undefined): boolean {
+  if (!userAgent) return false;
+  return /Snapchat|Instagram|TikTok|musical_ly|FBAN|FBAV|FB_IAB|Line\/|Twitter|Pinterest/i.test(userAgent);
+}
+
+function appClipLink(partyId: string): string {
+  const params = new URLSearchParams({ p: CLIP_BUNDLE_ID, partyId });
+  return `https://appclip.apple.com/id?${params.toString()}`;
 }
 
 function renderShell(heading: string, body: string, robots = true): string {
@@ -236,12 +260,16 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
     access: ACCESS_LABEL[party.accessMode] ?? party.accessMode,
     coverUrl: cover ? `${config.publicApiUrl}/media/parties/${encodeURIComponent(cover.id)}` : null,
     shareUrl: `${config.partyShareBaseUrl}/party/${encodeURIComponent(party.id)}`,
+    isInAppBrowser: isInAppBrowserUA(req.get('user-agent')),
   });
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   const ttl = cacheSeconds(party, venue !== null);
   res.setHeader('Cache-Control', ttl > 0 ? `public, max-age=${ttl}` : 'no-store');
+  // The body now varies on User-Agent, so a shared cache must not hand an
+  // in-app-browser variant to Safari (or the reverse).
+  res.setHeader('Vary', 'User-Agent');
   // The global helmet policy sets `img-src 'self'`, but this page is served on
   // the share domain while cover art is served from the API origin, so the
   // cover would be blocked for humans in a browser. Crawlers fetch og:image

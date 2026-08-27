@@ -24,7 +24,7 @@ const published = {
   media: [],
 };
 
-async function get(partyId: string): Promise<{ status: number; html: string; csp: string | null; cache: string | null }> {
+async function get(partyId: string, userAgent?: string): Promise<{ status: number; html: string; csp: string | null; cache: string | null; vary: string | null }> {
   const app = express();
   app.use(helmet());
   app.use(partyLandingRouter);
@@ -32,10 +32,13 @@ async function get(partyId: string): Promise<{ status: number; html: string; csp
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/party/${partyId}`);
+    const res = await fetch(`http://127.0.0.1:${port}/party/${partyId}`, {
+      headers: userAgent ? { 'user-agent': userAgent } : {},
+    });
     return {
       status: res.status, html: await res.text(),
       csp: res.headers.get('content-security-policy'), cache: res.headers.get('cache-control'),
+      vary: res.headers.get('vary'),
     };
   } finally {
     server.close();
@@ -59,6 +62,31 @@ test('The Smart App Banner opens the party, not the app root', async () => {
   const { html } = await get('party-1');
   const banner = /<meta name="apple-itunes-app" content="([^"]+)">/.exec(html)?.[1] ?? '';
   assert.match(banner, /app-argument=\S*\/party\/party-1/);
+});
+
+test('The pass CTA leaves bytspot.app, because a same-domain link cannot invoke the Clip', async () => {
+  const { html } = await get('party-1');
+  const cta = /<a class="cta" href="([^"]+)">([^<]+)<\/a>/.exec(html);
+  assert.equal(cta?.[2], 'Open Pass');
+  // iOS suppresses Universal Links to the page's own domain, so a CTA pointing
+  // back at the share URL can only ever reload the page.
+  assert.match(cta?.[1] ?? '', /^https:\/\/appclip\.apple\.com\/id\?/);
+  assert.match(cta?.[1] ?? '', /p=com\.bytspot\.app\.Clip/);
+  assert.match(cta?.[1] ?? '', /partyId=party-1/);
+});
+
+test('An in-app browser is told to open Safari, and the page stays script-free', async () => {
+  const snap = await get('party-1', 'Mozilla/5.0 (iPhone) Snapchat/12.0.0.0');
+  assert.match(snap.html, /Open in Safari/);
+  // The CSP denies scripts outright, so the hint must be server-rendered.
+  assert.doesNotMatch(snap.html, /<script/i);
+  assert.match(snap.csp ?? '', /default-src 'none'/);
+
+  const safari = await get('party-1', 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) AppleWebKit/605.1.15 Version/18.0 Safari/604.1');
+  assert.doesNotMatch(safari.html, /Open in Safari/);
+
+  // Both variants are cacheable, so a shared cache must key on the UA.
+  assert.match(snap.vary ?? '', /User-Agent/i);
 });
 
 test('A withheld venue never reaches the preview', async () => {

@@ -55,6 +55,10 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Starting rate until an admin appends a PlatformFeeSetting row. 100 bps
+      # = 1% of the gross ticket price, frozen onto each party at publish.
+      - key: DEFAULT_PLATFORM_FEE_BPS
+        value: 100
       - key: DATABASE_URL
         sync: false
       - key: RESEND_API_KEY

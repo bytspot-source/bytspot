@@ -39,6 +39,15 @@ model User {
   membershipTier String @default("green") @map("membership_tier")
   stripeCustomerId String? @unique @map("stripe_customer_id")
 
+  /// Host payout rail. The connected account is the destination for a paid
+  /// party's ticket revenue; the two flags are Stripe's own verdict, mirrored
+  /// here only so a read does not always need a Stripe round trip. Stripe
+  /// stays the source of truth and is re-read at the moments that matter.
+  stripeAccountId          String?   @unique @map("stripe_account_id")
+  stripeChargesEnabled     Boolean   @default(false) @map("stripe_charges_enabled")
+  stripePayoutsEnabled     Boolean   @default(false) @map("stripe_payouts_enabled")
+  stripeAccountRefreshedAt DateTime? @map("stripe_account_refreshed_at")
+
   hostProfile    HostProfile?
   valetProfile   ValetProfile?
   checkIns       CheckIn[]
@@ -310,6 +319,9 @@ model PartyCheckout {
   platformFeeBps        Int?     @map("platform_fee_bps")
   platformFeeCents      Int?     @map("platform_fee_cents")
   hostNetCents          Int?     @map("host_net_cents")
+  /// The connected account the host's net was actually sent to. Null means the
+  /// sale predates the payout rail and Bytspot still holds the whole charge.
+  destinationAccountId  String?  @map("destination_account_id")
   currency              String   @default("usd")
   status                String   @default("creating")
   reservationExpiresAt  DateTime @map("reservation_expires_at")

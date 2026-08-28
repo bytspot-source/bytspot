@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { config } from '../config';
 import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitTicketAmount } from '../services/platformFee';
+import { currentHostPayoutReadiness, payoutReadiness } from '../services/hostPayouts';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
@@ -380,6 +381,21 @@ export const partyPublish = protectedProcedure
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
     if (party.status === 'published' && party.passCode) return { id: party.id, shareUrl: partyShareUrl(party.id), passCode: party.passCode };
     if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be published from its current state.' });
+    // Selling tickets a host can never be paid for is the one failure that
+    // cannot be apologised away, so a paid party may not go live until Stripe
+    // says the host can both take charges and receive payouts. Free RSVP
+    // parties move no money and are never gated.
+    if (party.accessMode === 'paid-ticket') {
+      const payouts = await currentHostPayoutReadiness(ctx.user.userId);
+      if (!payouts.ready) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: payouts.accountId
+            ? 'Finish your payout setup before publishing a paid party.'
+            : 'Set up payouts before publishing a paid party.',
+        });
+      }
+    }
     // Snapshot the Official Host identity so later profile edits never
     // rewrite an already-shared pass. The profile remains the source of truth
     // for the next party.
@@ -478,7 +494,7 @@ async function publishedParty(partyId: string) {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
     include: {
-      host: { select: { name: true } },
+      host: { select: { name: true, stripeAccountId: true, stripeChargesEnabled: true, stripePayoutsEnabled: true } },
       media: { orderBy: { position: 'asc' } },
       arrivalVenue: { select: { id: true, name: true, lat: true, lng: true } },
     },
@@ -1080,11 +1096,14 @@ export const partyTicketsRouter = router({
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
       // The party's frozen rate, so a mid-sale rate change cannot alter what
-      // this host was promised. The split is recorded, not transferred: there
-      // is no Connect destination yet, so Bytspot holds the whole charge and
-      // owes the host net. See STRIPE_CAPITAL_CASH_FLOW.md.
+      // this host was promised.
       const ticketFeeBps = effectiveFeeBps(party.platformFeeBps, await currentPlatformFeeBps());
       const { feeCents, hostNetCents } = splitTicketAmount(reservation.amountCents, ticketFeeBps);
+      // Publish already required a payout-ready host, but a Stripe account can
+      // be disabled after a party goes on sale. Taking the guest's money with
+      // nowhere to send it is worse than refusing the sale.
+      const destination = payoutReadiness(party.host).ready ? party.host.stripeAccountId : null;
+      if (!destination) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This Party cannot take payments right now.' });
       const stripe = new Stripe(config.stripeSecretKey);
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -1102,6 +1121,16 @@ export const partyTicketsRouter = router({
           ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey,
           platformFeeBps: String(ticketFeeBps), platformFeeCents: String(feeCents), hostNetCents: String(hostNetCents),
         },
+        // Destination charge: one charge on the guest's card, split by Stripe.
+        // `on_behalf_of` makes the host the settlement merchant, so Stripe's
+        // processing cost comes out of their share rather than out of a 1.5%
+        // platform fee that would otherwise be underwater on every ticket.
+        payment_intent_data: {
+          application_fee_amount: feeCents,
+          transfer_data: { destination },
+          on_behalf_of: destination,
+          transfer_group: party.id,
+        },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
       }, { idempotencyKey: input.idempotencyKey });
@@ -1110,7 +1139,7 @@ export const partyTicketsRouter = router({
         where: { id: reservation.id },
         data: {
           stripeSessionId: session.id, checkoutUrl: session.url, status: 'pending',
-          platformFeeBps: ticketFeeBps, platformFeeCents: feeCents, hostNetCents,
+          platformFeeBps: ticketFeeBps, platformFeeCents: feeCents, hostNetCents, destinationAccountId: destination,
           reservationExpiresAt: session.expires_at ? new Date(session.expires_at * 1000) : reservation.reservationExpiresAt,
         },
       });

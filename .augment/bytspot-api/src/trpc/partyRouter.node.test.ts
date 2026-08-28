@@ -866,3 +866,43 @@ test('Invite coordinates require a public venue and a real arrival Venue', async
     assert.equal(hidden.longitude, null, `${disclosure} must not leak longitude`);
   }
 });
+
+test('A paid party cannot publish until Stripe will pay the host', async () => {
+  const paidDraft = { ...partyDraft, accessMode: 'paid-ticket' };
+  party.findFirst = async () => paidDraft;
+
+  // No connected account at all.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: null, stripeChargesEnabled: false, stripePayoutsEnabled: false });
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'Set up payouts before publishing a paid party.',
+  });
+
+  // Onboarding started but Stripe will not pay out yet: charges alone would
+  // sell tickets for money the host can never withdraw.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: false });
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'Finish your payout setup before publishing a paid party.',
+  });
+
+  // A free party moves no money and is never gated on payouts.
+  party.findFirst = async () => ({ ...partyDraft, accessMode: 'free-rsvp' });
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: null, stripeChargesEnabled: false, stripePayoutsEnabled: false });
+  const published = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.equal(published.id, 'party-1');
+});
+
+test('Ticket checkout refuses the sale when the host can no longer be paid', async () => {
+  (config as any).stripeSecretKey = 'test-only-key';
+  const paidParty = {
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, ...linkAlive,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  };
+  // Published while payout-ready, then Stripe disabled the account mid-sale.
+  party.findFirst = async () => ({ ...paidParty, host: { name: 'Host', stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: false } });
+  partyCheckout.findFirst = async () => null;
+  partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data, amountCents: 2500, ticketTierName: 'First Drop', status: 'creating', checkoutUrl: null });
+  const disabledCaller = () => createCaller({ user: { userId: 'payout-user', email: 'payout@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  await assert.rejects(() => disabledCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'This Party cannot take payments right now.',
+  });
+});

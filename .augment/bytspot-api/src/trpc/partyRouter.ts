@@ -1117,9 +1117,13 @@ export const partyTicketsRouter = router({
       // Reuse what the reservation froze, so a retry sends Stripe the same body
       // under the same idempotency key.
       const destination = reservation.destinationAccountId ?? payoutAccount.accountId;
-      const frozen = reservation.platformFeeBps === null || reservation.platformFeeCents === null
-        ? split
-        : { ...splitTicketWithProcessing(reservation.amountCents, reservation.platformFeeBps), platformFeeCents: reservation.platformFeeCents };
+      // A legacy party carries no rate of its own, so the current platform rate
+      // could move between the first attempt and a retry. The reservation's own
+      // rate is authoritative wherever it exists.
+      const frozenFeeBps = reservation.platformFeeBps ?? ticketFeeBps;
+      const frozen = reservation.platformFeeCents === null
+        ? splitTicketWithProcessing(reservation.amountCents, frozenFeeBps)
+        : { ...splitTicketWithProcessing(reservation.amountCents, frozenFeeBps), platformFeeCents: reservation.platformFeeCents };
       const stripe = new Stripe(config.stripeSecretKey);
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -1135,7 +1139,7 @@ export const partyTicketsRouter = router({
         metadata: {
           kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId,
           ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey,
-          platformFeeBps: String(ticketFeeBps), platformFeeCents: String(frozen.platformFeeCents), hostNetCents: String(frozen.hostNetCents),
+          platformFeeBps: String(frozenFeeBps), platformFeeCents: String(frozen.platformFeeCents), hostNetCents: String(frozen.hostNetCents),
         },
         // Destination charge: one charge on the guest's card, split by Stripe.
         // Bytspot stays the settlement merchant, so the guest's statement reads
@@ -1159,8 +1163,7 @@ export const partyTicketsRouter = router({
         where: { id: reservation.id },
         data: {
           stripeSessionId: session.id, checkoutUrl: session.url, status: 'pending',
-          platformFeeBps: ticketFeeBps, platformFeeCents: frozen.platformFeeCents, hostNetCents: frozen.hostNetCents, destinationAccountId: destination,
-          stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null,
+          platformFeeBps: frozenFeeBps, platformFeeCents: frozen.platformFeeCents, hostNetCents: frozen.hostNetCents, destinationAccountId: destination,
           reservationExpiresAt: session.expires_at ? new Date(session.expires_at * 1000) : reservation.reservationExpiresAt,
         },
       });

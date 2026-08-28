@@ -76,9 +76,16 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
       && meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement);
     const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible;
+    // Checkout Sessions have no PaymentIntent until they are paid, so this is
+    // the first and only moment the charge can be recorded. Without it a
+    // refund has nothing to reverse.
+    const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
     const updated = await tx.partyCheckout.updateMany({
       where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
-      data: { stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt },
+      data: {
+        stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt,
+        ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+      },
     });
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {

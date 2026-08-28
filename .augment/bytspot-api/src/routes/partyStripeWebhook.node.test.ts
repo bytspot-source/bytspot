@@ -317,3 +317,19 @@ test('Party ticket payments are unaffected by the shared endpoint', async () => 
   assert.equal(membershipTouched, false);
   assert.equal(checkoutUpdate.data.status, 'completed');
 });
+
+test('A refund-required payment records the charge so it can actually be refunded', async () => {
+  let checkoutUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async () => ({ id: 'guest-1' });
+  // The host declined while the guest was paying, so the pass is refused.
+  partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'declined' });
+  // Nothing to refund against yet: the PaymentIntent only exists now that the
+  // Session is paid.
+  partyCheckout.findUnique = async () => ({ ...reservation(), stripePaymentIntentId: null });
+
+  await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
+
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+  assert.equal(checkoutUpdate.data.stripePaymentIntentId, 'pi_live_1');
+});

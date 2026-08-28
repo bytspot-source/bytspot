@@ -20,18 +20,27 @@ export type RefundOutcome = 'refunded' | 'already-refunded' | 'nothing-to-refund
 export async function refundPartyCheckout(checkoutId: string): Promise<RefundOutcome> {
   const checkout = await db.partyCheckout.findUnique({
     where: { id: checkoutId },
-    select: { id: true, stripePaymentIntentId: true, destinationAccountId: true, refundedAt: true, status: true },
+    select: { id: true, stripePaymentIntentId: true, stripeSessionId: true, destinationAccountId: true, refundedAt: true, status: true },
   });
   if (!checkout) return 'nothing-to-refund';
   if (checkout.refundedAt) return 'already-refunded';
-  if (!checkout.stripePaymentIntentId) return 'nothing-to-refund';
+  // No session means no charge was ever made under this reservation.
+  if (!checkout.stripePaymentIntentId && !checkout.stripeSessionId) return 'nothing-to-refund';
   if (!config.stripeSecretKey) return 'failed';
 
   try {
     const stripe = new Stripe(config.stripeSecretKey);
+    // Sales made before the PaymentIntent was recorded - and any row written
+    // by an older build - still have a session to read the charge back from.
+    const paymentIntentId = checkout.stripePaymentIntentId
+      ?? (await stripe.checkout.sessions.retrieve(checkout.stripeSessionId as string)).payment_intent;
+    const intentId = typeof paymentIntentId === 'string' ? paymentIntentId : paymentIntentId?.id ?? null;
+    // A paid checkout with no charge behind it is a contradiction; report
+    // failure so it stays refund-required and visible.
+    if (!intentId) return 'failed';
     await stripe.refunds.create(
       {
-        payment_intent: checkout.stripePaymentIntentId,
+        payment_intent: intentId,
         reverse_transfer: Boolean(checkout.destinationAccountId),
         refund_application_fee: Boolean(checkout.destinationAccountId),
       },
@@ -40,7 +49,7 @@ export async function refundPartyCheckout(checkoutId: string): Promise<RefundOut
       // once by design.
       { idempotencyKey: `party-refund:${checkout.id}` },
     );
-    await db.partyCheckout.update({ where: { id: checkout.id }, data: { refundedAt: new Date() } });
+    await db.partyCheckout.update({ where: { id: checkout.id }, data: { refundedAt: new Date(), stripePaymentIntentId: intentId } });
     return 'refunded';
   } catch (error) {
     // A failed refund must stay visible as refund-required rather than being

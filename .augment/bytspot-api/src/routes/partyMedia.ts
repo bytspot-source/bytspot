@@ -34,6 +34,14 @@ partyMediaRouter.get('/media/parties/:mediaId', async (req, res) => {
   res.setHeader('Content-Length', String(media.byteSize));
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', published ? 'public, max-age=86400' : 'private, no-store');
+  // The share page is served on the share domain and cover art on the API
+  // origin, so this is a cross-origin image. Helmet's default
+  // Cross-Origin-Resource-Policy of same-origin makes the browser discard it
+  // and the guest sees a broken poster. The share page's CSP already allows
+  // this origin; CORP is a separate opt-in and was missed.
+  // Only published media is relaxed. Draft media is owner-only via an
+  // Authorization header, which an <img> cannot send, so it stays same-origin.
+  if (published) res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   return res.status(200).send(media.bytes);
 });
 

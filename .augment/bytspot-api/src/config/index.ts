@@ -36,6 +36,9 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY:      z.string().default(''),
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),
   STRIPE_PREMIUM_PRICE_ID:z.string().default(''),
+  // Starting rate only. The live rate is the newest PlatformFeeSetting row,
+  // which admins change without a deploy.
+  DEFAULT_PLATFORM_FEE_BPS: z.coerce.number().int().min(0).max(5_000).default(0),
   ADMIN_PASSWORD:         z.string().default(''),
   ADMIN_USER_IDS:         z.string().default(''),
   ADMIN_BOOTSTRAP_EMAILS: z.string().default(''),
@@ -114,6 +117,7 @@ export const config = {
   stripeSecretKey: env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
   stripePremiumPriceId: env.STRIPE_PREMIUM_PRICE_ID,
+  defaultPlatformFeeBps: env.DEFAULT_PLATFORM_FEE_BPS,
   frontendUrl: env.FRONTEND_URL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,

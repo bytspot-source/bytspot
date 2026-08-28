@@ -14,6 +14,7 @@ import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
 import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
+import { currentPlatformFeeBps, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE } from '../services/platformFee';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { claimPackedAlert, entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
@@ -996,6 +997,46 @@ const providersRouter = router({
  * ── Admin sub-router ────────────────────────────────────
  */
 const adminRouter = router({
+  /** admin.platformFee query — the live rate plus recent changes. */
+  platformFee: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-platform-fee' }))
+    .input(z.object({ scope: z.string().min(1).max(64).default(PARTY_TICKET_FEE_SCOPE) }).default({ scope: PARTY_TICKET_FEE_SCOPE }))
+    .query(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.platformFee' });
+      const [current, history] = await Promise.all([
+        currentPlatformFeeBps(input.scope),
+        db.platformFeeSetting.findMany({
+          where: { scope: input.scope }, orderBy: { createdAt: 'desc' }, take: 20,
+          select: { feeBps: true, note: true, setByUserId: true, createdAt: true },
+        }),
+      ]);
+      return { scope: input.scope, currentFeeBps: current, maxFeeBps: MAX_FEE_BPS, history };
+    }),
+
+  /**
+   * admin.setPlatformFee mutation — change the market rate without a deploy.
+   * Appends rather than updates, so the rate on any past date stays provable,
+   * and it only affects parties published after this moment: a live party keeps
+   * the rate its host was shown at publish.
+   */
+  setPlatformFee: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin-set-platform-fee' }))
+    .input(z.object({
+      scope: z.string().min(1).max(64).default(PARTY_TICKET_FEE_SCOPE),
+      feeBps: z.number().int().min(0).max(MAX_FEE_BPS),
+      note: z.string().max(280).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.setPlatformFee' });
+      const previousFeeBps = await currentPlatformFeeBps(input.scope);
+      await db.platformFeeSetting.create({
+        data: { scope: input.scope, feeBps: input.feeBps, note: input.note ?? null, setByUserId: ctx.user.userId },
+      });
+      return { scope: input.scope, previousFeeBps, currentFeeBps: input.feeBps, appliesTo: 'parties published from now on' };
+    }),
+
   /** admin.stats query — JWT auth + admin group membership required */
   stats: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-stats' }))

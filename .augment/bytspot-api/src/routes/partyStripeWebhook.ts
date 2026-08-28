@@ -5,6 +5,8 @@ import { db } from '../lib/db';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services/partyAlerts';
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
+import { applyAccountUpdate } from '../services/hostPayouts';
+import { refundPartyCheckout } from '../services/partyRefunds';
 
 const partyStripeWebhookRouter = Router();
 
@@ -52,6 +54,7 @@ function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: stri
 }
 
 export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Session, checkoutId: string, partyId: string, userId: string, paymentOccurredAt: Date): Promise<void> {
+  let refundNeeded = false;
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
   if (!checkout) throw new Error('Party Checkout reservation was not found.');
   const expectedTier = metadataValue(session.metadata, 'ticketTierName');
@@ -80,11 +83,19 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {
       await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+      refundNeeded = true;
       return false;
     }
     await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
     return true;
   });
+
+  // The guest paid for a pass they did not get, so the money goes back rather
+  // than sitting behind a status only staff can see. Outside the transaction:
+  // a Stripe call must not be able to roll back the record of the charge.
+  if (refundNeeded) {
+    await refundPartyCheckout(checkoutId);
+  }
 
   // Courtesy signal to the host, after the money and the pass are both settled.
   // Never inside the transaction: a push must not be able to roll back a ticket.
@@ -124,6 +135,16 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   } catch (error) {
     console.error('[subscription-webhook] membership transition failed', error);
     res.status(500).json({ error: 'Membership transition will be retried.' });
+    return;
+  }
+
+  // Connect account transitions are claimed before the Party cast for the same
+  // reason as subscriptions: the object is not a Checkout Session. Keeping the
+  // mirror current is what lets a host see an accurate payout status; the sale
+  // gates re-read Stripe regardless, so a missed delivery cannot open a sale.
+  if (event.type === 'account.updated') {
+    await applyAccountUpdate(event.data.object as Stripe.Account);
+    res.json({ received: true });
     return;
   }
 

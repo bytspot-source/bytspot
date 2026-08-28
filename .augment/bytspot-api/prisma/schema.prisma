@@ -322,6 +322,10 @@ model PartyCheckout {
   /// The connected account the host's net was actually sent to. Null means the
   /// sale predates the payout rail and Bytspot still holds the whole charge.
   destinationAccountId  String?  @map("destination_account_id")
+  /// Kept so a refund can reverse the host's transfer without first having to
+  /// re-read the Checkout Session from Stripe.
+  stripePaymentIntentId String?  @map("stripe_payment_intent_id")
+  refundedAt            DateTime? @map("refunded_at")
   currency              String   @default("usd")
   status                String   @default("creating")
   reservationExpiresAt  DateTime @map("reservation_expires_at")

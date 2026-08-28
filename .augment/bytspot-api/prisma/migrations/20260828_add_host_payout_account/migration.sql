@@ -12,3 +12,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS "users_stripe_account_id_key" ON "users"("stri
 -- Null on an existing row is the honest record: those sales were made before
 -- the rail existed and were never transferred anywhere.
 ALTER TABLE "party_checkouts" ADD COLUMN IF NOT EXISTS "destination_account_id" TEXT;
+
+-- Refund support: the PaymentIntent is what a reversal is issued against, and
+-- refundedAt records that the reversal actually happened rather than leaving
+-- "refund-required" as the only trace.
+ALTER TABLE "party_checkouts" ADD COLUMN IF NOT EXISTS "stripe_payment_intent_id" TEXT;
+ALTER TABLE "party_checkouts" ADD COLUMN IF NOT EXISTS "refunded_at" TIMESTAMP(3);

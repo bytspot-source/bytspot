@@ -234,6 +234,10 @@ model Party {
   // to startsAt + 6h when the host set no end time).
   shareLinkExpiresAt     DateTime?    @map("share_link_expires_at")
   passCode               String?      @unique @map("pass_code")
+  /// Platform fee in basis points, frozen at publish from the then-current
+  /// PlatformFeeSetting. Null on drafts and on parties published before the
+  /// fee existed; those fall back to the current rate at checkout.
+  platformFeeBps         Int?         @map("platform_fee_bps")
   publishedAt            DateTime?    @map("published_at")
   createdAt              DateTime     @default(now()) @map("created_at")
   updatedAt              DateTime     @updatedAt @map("updated_at")
@@ -250,6 +254,23 @@ model Party {
   @@index([status, startsAt])
   @@index([arrivalVenueId])
   @@map("parties")
+}
+
+// The platform's cut, adjustable at any time to steady the market. Rows are
+// appended, never updated: the current rate is the newest row for a scope, and
+// the history is the audit trail of what the rate was on any past date.
+// A party snapshots the rate at publish, so changing it here never reprices a
+// party whose host has already been shown a number.
+model PlatformFeeSetting {
+  id          String   @id @default(cuid())
+  scope       String   @default("party-ticket")
+  feeBps      Int      @map("fee_bps")
+  note        String?
+  setByUserId String?  @map("set_by_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([scope, createdAt(sort: Desc)])
+  @@map("platform_fee_settings")
 }
 
 model PartyGuest {
@@ -284,6 +305,11 @@ model PartyCheckout {
   checkoutUrl           String?  @map("checkout_url")
   ticketTierName        String   @map("ticket_tier_name")
   amountCents           Int      @map("amount_cents")
+  /// The split as it stood when this sale was made, recorded per checkout so a
+  /// later rate change can never restate what a host already earned.
+  platformFeeBps        Int?     @map("platform_fee_bps")
+  platformFeeCents      Int?     @map("platform_fee_cents")
+  hostNetCents          Int?     @map("host_net_cents")
   currency              String   @default("usd")
   status                String   @default("creating")
   reservationExpiresAt  DateTime @map("reservation_expires_at")

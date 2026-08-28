@@ -5,6 +5,7 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
 import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
+import { currentPlatformFeeBps, effectiveFeeBps, splitTicketAmount } from '../services/platformFee';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
@@ -398,12 +399,15 @@ export const partyPublish = protectedProcedure
       const cached = await redis.get(`idem:party-publish:${ctx.user.userId}:${input.idempotencyKey}`).catch(() => null);
       if (cached) return JSON.parse(cached) as { id: string; shareUrl: string; passCode: string };
     }
+    // Freeze the fee the host was shown. Changing the market rate later must
+    // never reprice a party that is already selling.
+    const platformFeeBps = await currentPlatformFeeBps();
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = { id: party.id, shareUrl, passCode: newPassCode() };
       try {
         const published = await db.party.updateMany({
           where: { id: party.id, hostUserId: ctx.user.userId, status: 'draft' },
-          data: { status: 'published', passCode: result.passCode, publishedAt: new Date() },
+          data: { status: 'published', passCode: result.passCode, publishedAt: new Date(), platformFeeBps },
         });
         if (published.count === 1) {
           if (redis) redis.set(`idem:party-publish:${ctx.user.userId}:${input.idempotencyKey}`, JSON.stringify(result), 'EX', 86_400).catch(() => {});
@@ -718,6 +722,23 @@ export const partyControlRouter = router({
    * Control is a published-party console. Newest first so the room they
    * just left is on top.
    */
+  /**
+   * The fee a host would be charged if they published now. Surfaced before
+   * publish so nobody sells a ticket without having been told the rate.
+   * `payoutsEnabled` is false while no Connect rail exists: a host can be told
+   * the split honestly, but must not be told the money is on its way.
+   */
+  ticketFeeQuote: protectedProcedure.query(async () => {
+    const feeBps = await currentPlatformFeeBps();
+    return {
+      feeBps,
+      feePercent: feeBps / 100,
+      hostSharePercent: (10_000 - feeBps) / 100,
+      payoutsEnabled: false,
+      note: 'This rate is locked to your party when you publish. Later changes to the platform rate do not affect a party that is already live.',
+    };
+  }),
+
   hosted: protectedProcedure.query(async ({ ctx }) => {
     const parties = await db.party.findMany({
       where: { hostUserId: ctx.user.userId, status: 'published' },
@@ -1058,6 +1079,12 @@ export const partyTicketsRouter = router({
       }, 'Party ticket inventory changed. Please retry.');
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
+      // The party's frozen rate, so a mid-sale rate change cannot alter what
+      // this host was promised. The split is recorded, not transferred: there
+      // is no Connect destination yet, so Bytspot holds the whole charge and
+      // owes the host net. See STRIPE_CAPITAL_CASH_FLOW.md.
+      const ticketFeeBps = effectiveFeeBps(party.platformFeeBps, await currentPlatformFeeBps());
+      const { feeCents, hostNetCents } = splitTicketAmount(reservation.amountCents, ticketFeeBps);
       const stripe = new Stripe(config.stripeSecretKey);
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -1070,7 +1097,11 @@ export const partyTicketsRouter = router({
           },
           quantity: 1,
         }],
-        metadata: { kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId, ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey },
+        metadata: {
+          kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId,
+          ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey,
+          platformFeeBps: String(ticketFeeBps), platformFeeCents: String(feeCents), hostNetCents: String(hostNetCents),
+        },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
       }, { idempotencyKey: input.idempotencyKey });
@@ -1079,6 +1110,7 @@ export const partyTicketsRouter = router({
         where: { id: reservation.id },
         data: {
           stripeSessionId: session.id, checkoutUrl: session.url, status: 'pending',
+          platformFeeBps: ticketFeeBps, platformFeeCents: feeCents, hostNetCents,
           reservationExpiresAt: session.expires_at ? new Date(session.expires_at * 1000) : reservation.reservationExpiresAt,
         },
       });

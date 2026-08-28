@@ -333,3 +333,19 @@ test('A refund-required payment records the charge so it can actually be refunde
   assert.equal(checkoutUpdate.data.status, 'refund-required');
   assert.equal(checkoutUpdate.data.stripePaymentIntentId, 'pi_live_1');
 });
+
+test('A redelivered webhook retries a refund that was owed but never issued', async () => {
+  // The first delivery committed refund-required and the charge, then died
+  // before Stripe was called. The guest is still owed money.
+  partyCheckout.findUnique = async () => ({ ...reservation(), status: 'refund-required', refundedAt: null, stripePaymentIntentId: 'pi_live_1' });
+  partyCheckout.updateMany = async () => ({ count: 0 });
+  partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'declined' });
+
+  // Stripe is unreachable, so the webhook must not be acknowledged: a 500
+  // buys another delivery instead of stranding the refund.
+  await assert.rejects(() => reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date()));
+
+  // Already refunded: a redelivery must not attempt a second refund.
+  partyCheckout.findUnique = async () => ({ ...reservation(), status: 'refund-required', refundedAt: new Date(), stripePaymentIntentId: 'pi_live_1' });
+  await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
+});

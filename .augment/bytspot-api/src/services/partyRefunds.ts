@@ -17,7 +17,9 @@ export type RefundOutcome = 'refunded' | 'already-refunded' | 'nothing-to-refund
  * A sale made before the payout rail existed has no destination, so there is
  * no transfer to reverse and a plain refund is the whole job.
  */
-export async function refundPartyCheckout(checkoutId: string): Promise<RefundOutcome> {
+export type RefundStripe = Pick<Stripe, 'refunds'> & { checkout: Pick<Stripe['checkout'], 'sessions'> };
+
+export async function refundPartyCheckout(checkoutId: string, stripeClient?: RefundStripe): Promise<RefundOutcome> {
   const checkout = await db.partyCheckout.findUnique({
     where: { id: checkoutId },
     select: { id: true, stripePaymentIntentId: true, stripeSessionId: true, destinationAccountId: true, refundedAt: true, status: true },
@@ -29,7 +31,7 @@ export async function refundPartyCheckout(checkoutId: string): Promise<RefundOut
   if (!config.stripeSecretKey) return 'failed';
 
   try {
-    const stripe = new Stripe(config.stripeSecretKey);
+    const stripe = stripeClient ?? new Stripe(config.stripeSecretKey);
     // Sales made before the PaymentIntent was recorded - and any row written
     // by an older build - still have a session to read the charge back from.
     const paymentIntentId = checkout.stripePaymentIntentId

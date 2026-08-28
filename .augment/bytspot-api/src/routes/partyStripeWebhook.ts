@@ -64,7 +64,14 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
 
   const granted = await db.$transaction(async (tx) => {
     const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
-    if (!current || current.status === 'completed' || current.status === 'refund-required') return false;
+    if (!current || current.status === 'completed') return false;
+    if (current.status === 'refund-required') {
+      // A redelivery of a refund that never went through. The refund call is
+      // keyed per checkout, so re-entering it cannot double-refund, and
+      // leaving it un-attempted would owe a guest money indefinitely.
+      refundNeeded = !current.refundedAt && Boolean(current.stripePaymentIntentId || current.stripeSessionId);
+      return false;
+    }
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
     const [guest, party, user] = await Promise.all([
       tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
@@ -101,7 +108,11 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
   // than sitting behind a status only staff can see. Outside the transaction:
   // a Stripe call must not be able to roll back the record of the charge.
   if (refundNeeded) {
-    await refundPartyCheckout(checkoutId);
+    const outcome = await refundPartyCheckout(checkoutId);
+    // Ask Stripe to deliver again rather than acknowledging a refund that did
+    // not happen. The record of the charge is already committed, so the retry
+    // resumes at the redelivery branch above.
+    if (outcome === 'failed') throw new Error('Party Checkout refund could not be completed.');
   }
 
   // Courtesy signal to the host, after the money and the pass are both settled.

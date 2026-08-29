@@ -858,6 +858,7 @@ export const partyControlRouter = router({
           status: guest.status,
           source: guest.ticketTierName ? 'ticket' : 'rsvp',
           ticketTierName: guest.ticketTierName,
+          accessGranted: guest.accessGranted,
           checkedInAt: guest.checkedInAt?.toISOString() ?? null,
           person: { userId: guest.user.id, name: guest.user.name ?? 'Bytspot member', profileImage: guest.user.profileImage },
         })),

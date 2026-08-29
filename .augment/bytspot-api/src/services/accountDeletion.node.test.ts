@@ -58,33 +58,32 @@ test('a failing Redis fails open rather than denying every request', async () =>
   assert.equal(await isSessionRevoked('usr_gone', broken), false);
 });
 
-test('A purge is held back while a party payment is still unsettled', async () => {
+test('A purge cancels and refunds a host\'s sales, and is held back if it cannot', async () => {
   const user = (db.user as any);
+  const party = (db.party as any);
   const checkout = (db.partyCheckout as any);
+  const guest = (db.partyGuest as any);
   const identityHash = (db.userIdentityHash as any);
   const deleted: string[] = [];
 
-  user.findMany = async () => [{ id: 'user-owed' }, { id: 'user-clear' }];
+  user.findMany = async () => [{ id: 'host-unrefundable' }, { id: 'user-clear' }];
   user.delete = async ({ where }: any) => { deleted.push(where.id); return {}; };
   identityHash.deleteMany = async () => ({ count: 0 });
-
-  // The guard must look at the member as buyer and as host: a purge cascades
-  // both their own checkouts and every checkout of parties they host.
-  let askedFor: any;
-  checkout.findFirst = async ({ where }: any) => {
-    askedFor = where;
-    const subjects = where.AND[0].OR;
-    return subjects.some((clause: any) => clause.userId === 'user-owed' || clause.party?.hostUserId === 'user-owed')
-      ? { id: 'checkout-owed' }
-      : null;
-  };
+  party.findMany = async ({ where }: any) => (where.hostUserId === 'host-unrefundable' ? [{ id: 'party-1' }] : []);
+  party.updateMany = async () => ({ count: 1 });
+  guest.updateMany = async () => ({ count: 1 });
+  checkout.updateMany = async () => ({ count: 1 });
+  // A sale that took money and has not been refunded. Stripe is unconfigured
+  // here, so the refund fails and the account must not be purged mid-refund.
+  checkout.findMany = async ({ where }: any) => (where.status?.in?.includes('completed') ? [{ id: 'checkout-1', partyGuestId: 'guest-1' }] : []);
+  checkout.findUnique = async () => ({ id: 'checkout-1', stripePaymentIntentId: 'pi_1', stripeSessionId: 'cs_1', destinationAccountId: 'acct_1', refundedAt: null, status: 'completed' });
+  checkout.findFirst = async () => null;
 
   const result = await purgeExpiredAccounts(new Date());
 
-  // Only the account with nothing owed is purged; the other survives so the
-  // refund it owes can still be identified and settled.
+  // The host who still owes ticket buyers survives; the member with nothing
+  // outstanding is purged, and their payment ledger detaches rather than dying
+  // with them, so a later refund is still possible.
   assert.deepEqual(deleted, ['user-clear']);
   assert.deepEqual(result, { purged: 1, heldForOwedMoney: 1 });
-  assert.deepEqual(askedFor.AND[0].OR, [{ userId: 'user-clear' }, { party: { hostUserId: 'user-clear' } }]);
-  assert.deepEqual(askedFor.AND[1], owedCheckout);
 });

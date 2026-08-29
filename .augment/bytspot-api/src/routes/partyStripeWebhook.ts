@@ -57,6 +57,22 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
   let refundNeeded = false;
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
   if (!checkout) throw new Error('Party Checkout reservation was not found.');
+  // Erasure detaches this ledger from its party, guest row and buyer instead of
+  // deleting it, so a late payment can arrive against a row that points at
+  // nobody. It cannot be matched against the event and no pass can be granted,
+  // so the money is owed back. Handled before the ownership comparison, which
+  // a detached row can never satisfy.
+  if (!checkout.partyId || !checkout.partyGuestId || !checkout.userId) {
+    if (!checkout.refundedAt) {
+      await db.partyCheckout.updateMany({
+        where: { id: checkout.id, refundedAt: null },
+        data: { status: 'refund-required', completedAt: paymentOccurredAt },
+      });
+      const outcome = await refundPartyCheckout(checkout.id);
+      if (outcome === 'failed') throw new Error('Refund for a detached Party Checkout failed.');
+    }
+    return;
+  }
   const expectedTier = metadataValue(session.metadata, 'ticketTierName');
   if (checkout.partyId !== partyId || checkout.userId !== userId || checkout.ticketTierName !== expectedTier || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
     throw new PartyCheckoutValidationError('Party Checkout values did not match the reservation.');
@@ -73,6 +89,9 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
       return false;
     }
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
+    // Detached between the outer read and here. Throwing hands it back to
+    // Stripe's retry, which re-enters through the refund path above.
+    if (!current.partyId || !current.partyGuestId || !current.userId) throw new Error('Party Checkout was detached mid-reconciliation.');
     const [guest, party, user] = await Promise.all([
       tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
       tx.party.findUnique({ where: { id: current.partyId }, select: { requiredMembershipTier: true, ticketTiers: true } }),

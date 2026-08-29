@@ -349,3 +349,25 @@ test('A redelivered webhook retries a refund that was owed but never issued', as
   partyCheckout.findUnique = async () => ({ ...reservation(), status: 'refund-required', refundedAt: new Date(), stripePaymentIntentId: 'pi_live_1' });
   await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
 });
+
+test('A paid event for a ledger whose party or buyer is gone becomes refund-required', async () => {
+  const checkout = db.partyCheckout as any;
+  let update: any;
+  checkout.findUnique = async () => ({
+    id: 'checkout-1', partyId: null, partyGuestId: null, userId: null, status: 'pending',
+    ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', stripeSessionId: null, refundedAt: null,
+    reservationExpiresAt: new Date(Date.now() + 60_000),
+  });
+  checkout.updateMany = async (args: any) => { update = args; return { count: 1 }; };
+
+  // Erasure detaches the ledger rather than deleting it, so a late payment can
+  // still arrive against a row that points at nobody. No pass is possible, so
+  // the only honest outcome is that the money is owed back.
+  await reconcilePartyCheckoutPayment(
+    { id: 'cs_test_1', amount_total: 2500, currency: 'usd', metadata: { ticketTierName: 'First Drop' } } as any,
+    'checkout-1', 'party-1', 'user-1', new Date(),
+  );
+
+  assert.equal(update.data.status, 'refund-required');
+  assert.equal(update.where.refundedAt, null);
+});

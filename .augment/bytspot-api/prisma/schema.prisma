@@ -304,11 +304,15 @@ model PartyGuest {
   @@map("party_guests")
 }
 
+/// A financial ledger, not a profile record. Money that moved has to remain
+/// provable and reversible after the people involved are gone, so every
+/// identity link below is nullable and detaches on delete instead of taking
+/// the row with it. Erasure clears who; it must never clear what was charged.
 model PartyCheckout {
   id                    String   @id @default(cuid())
-  partyId               String   @map("party_id")
-  partyGuestId          String   @map("party_guest_id")
-  userId                String   @map("user_id")
+  partyId               String?  @map("party_id")
+  partyGuestId          String?  @map("party_guest_id")
+  userId                String?  @map("user_id")
   idempotencyKey        String   @map("idempotency_key")
   stripeSessionId       String?  @unique @map("stripe_session_id")
   checkoutUrl           String?  @map("checkout_url")
@@ -333,9 +337,9 @@ model PartyCheckout {
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
-  party                 Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
-  guest                 PartyGuest @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
-  user                  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  party                 Party?      @relation(fields: [partyId], references: [id], onDelete: SetNull)
+  guest                 PartyGuest? @relation(fields: [partyGuestId], references: [id], onDelete: SetNull)
+  user                  User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([partyId, userId, idempotencyKey])
   @@index([partyId, ticketTierName, status, reservationExpiresAt])

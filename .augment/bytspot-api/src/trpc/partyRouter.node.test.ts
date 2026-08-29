@@ -972,3 +972,22 @@ test('Ticket checkout refuses the sale when the host can no longer be paid', asy
     code: 'PRECONDITION_FAILED', message: 'This Party cannot take payments right now.',
   });
 });
+
+test('A host on their way out cannot be sold another ticket', async () => {
+  (config as any).stripeSecretKey = 'test-only-key';
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,
+    hostUserId: 'leaving-host', host: { name: 'Host' }, ...linkAlive,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+  // The purge cancels and refunds this host's sales, so a ticket sold during
+  // the grace period would only have to be refunded again.
+  user.findUnique = async ({ where }: any) => (where.id === 'leaving-host'
+    ? { deletedAt: new Date(), stripeAccountId: 'acct_1' }
+    : { membershipTier: 'green' });
+  // Its own rate-limit subject: earlier checkout tests spend test-user-id's budget.
+  const buyer = () => createCaller({ user: { userId: 'leaving-host-buyer', email: 'buyer@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  await assert.rejects(() => buyer().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'This Party is no longer selling tickets.',
+  });
+});

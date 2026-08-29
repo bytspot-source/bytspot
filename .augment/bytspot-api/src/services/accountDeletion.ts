@@ -1,6 +1,6 @@
 import type Redis from 'ioredis';
 import { db } from '../lib/db';
-import { owedCheckout } from './partyCheckoutSettlement';
+import { refundHostedPartiesForPurge } from './partyCheckoutSettlement';
 import { getRedis } from '../lib/redis';
 
 /**
@@ -90,10 +90,12 @@ export async function isSessionRevoked(userId: string, redis: Redis | null = get
  * number of rows purged, and the number held back, so the cron response is
  * observable.
  *
- * A purge cascades away party checkouts — as buyer and as host — so an account
- * with money still owed is skipped rather than purged: deleting the row would
- * not settle the obligation, only destroy the record of it. These need an
- * operator to finish the refund, after which the next run purges them.
+ * A purge no longer destroys the payment ledger: PartyCheckout detaches from
+ * the member and the party instead of cascading, so a refund stays possible
+ * after erasure. What a purge must not do is quietly keep a guest's money for
+ * an event that will never happen, so a host's parties are cancelled and their
+ * sales refunded first. An account whose parties cannot be settled is held
+ * back for an operator rather than purged mid-refund.
  */
 export async function purgeExpiredAccounts(now = new Date()): Promise<{ purged: number; heldForOwedMoney: number }> {
   const due = await db.user.findMany({
@@ -105,12 +107,9 @@ export async function purgeExpiredAccounts(now = new Date()): Promise<{ purged: 
   let purged = 0;
   let heldForOwedMoney = 0;
   for (const { id } of due) {
-    const owed = await db.partyCheckout.findFirst({
-      where: { AND: [{ OR: [{ userId: id }, { party: { hostUserId: id } }] }, owedCheckout] },
-      select: { id: true },
-    });
-    if (owed) {
-      console.warn('[account-purge] held back: party payment still unsettled', { userId: id, checkoutId: owed.id });
+    const { settled } = await refundHostedPartiesForPurge(id);
+    if (!settled) {
+      console.warn('[account-purge] held back: hosted Party sales could not be refunded', { userId: id });
       heldForOwedMoney += 1;
       continue;
     }

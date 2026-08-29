@@ -1047,6 +1047,12 @@ export const partyTicketsRouter = router({
       if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
 
+      // A host on their way out cannot be sold against: their parties are
+      // cancelled and refunded at purge, so a ticket sold during the grace
+      // period would only have to be refunded again.
+      const host = await db.user.findUnique({ where: { id: party.hostUserId }, select: { deletedAt: true } });
+      if (host?.deletedAt) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This Party is no longer selling tickets.' });
+
       // Asked before any reservation exists: a party that cannot pay its host
       // must not be able to hold ticket inventory, and this always asks Stripe
       // rather than trusting a mirror Stripe can revoke without telling us.

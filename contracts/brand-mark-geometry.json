@@ -85,5 +85,30 @@
         "#FF00FF"
       ]
     }
+  },
+  "icons": {
+    "$comment": "The app icon is the design of record for the favicon, the home-screen icon and the schema.org logo; the derived files are downscales of it. Pinned by hash, not decoded: no image library is a declared dependency here (sharp is only transitive via @capacitor/assets), and a CI gate must not rest on a transitive dep. Hash pinning also forces the derived set to be regenerated together -- icon-192 had gone stale as a blank purple square and icon-512 as an unrelated graphic.",
+    "repo": "bytspot-beta",
+    "source": {
+      "path": "ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png",
+      "sha256": "d8847120b10f54e45efc46bedf232fcfc9e6e4f696cdaafc66182e4293e5bc10",
+      "width": 1024,
+      "height": 1024
+    },
+    "derived": [
+      {
+        "path": "public/icon-192.png",
+        "sha256": "5060d7e8f657184ccc13936df5e3ce3ebcfbd90cd5e86990650e9a8a9767634d",
+        "width": 192,
+        "height": 192
+      },
+      {
+        "path": "public/icon-512.png",
+        "sha256": "872f6b17d73d27608349bc5ecb77c7640281d8d17759e5ee15f00fd60834e187",
+        "width": 512,
+        "height": 512
+      }
+    ],
+    "regenerate": "python3 -c \"from PIL import Image; s=Image.open('ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png').convert('RGB'); [s.resize((n,n), Image.LANCZOS).save(f'public/icon-{n}.png', optimize=True) for n in (192,512)]\""
   }
 }

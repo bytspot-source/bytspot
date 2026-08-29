@@ -178,6 +178,38 @@ function checkSurfaces(repoLabel, root, surfaces) {
   return surfaces.length;
 }
 
+// The app icon is the design of record. Nothing verified it, and the icons
+// derived from it had gone stale: icon-192 -- the home-screen and notification
+// icon -- was a blank purple square, and icon-512, the schema.org logo, an
+// unrelated graphic. Pinned by hash and PNG header, so the gate needs no image
+// library; regenerating the app icon fails here until the derived set follows.
+function checkIcons(repoLabel, root) {
+  const I = contract.icons;
+  let n = 0;
+  for (const [role, entry] of [['source', I.source], ...I.derived.map((d) => ['derived', d])]) {
+    const surface = `${repoLabel}/${entry.path}`;
+    const full = path.join(root, entry.path);
+    n += 1;
+    if (!fs.existsSync(full)) { fail(surface, `${role} icon listed in the contract does not exist`); continue; }
+    const buf = fs.readFileSync(full);
+    if (buf.length < 24 || buf.subarray(0, 8).toString('binary') !== '\x89PNG\r\n\x1a\n') {
+      fail(surface, 'not a PNG'); continue;
+    }
+    const width = buf.readUInt32BE(16);
+    const height = buf.readUInt32BE(20);
+    if (width !== entry.width || height !== entry.height) {
+      fail(surface, `is ${width}x${height}, canonical is ${entry.width}x${entry.height}`);
+    }
+    const sha = crypto.createHash('sha256').update(buf).digest('hex');
+    if (sha !== entry.sha256) {
+      fail(surface, role === 'source'
+        ? `app icon changed (${sha.slice(0, 12)}); it is the design of record, so regenerate the derived icons and re-pin all three: ${I.regenerate}`
+        : `does not match the icon of record (${sha.slice(0, 12)}); regenerate from the app icon: ${I.regenerate}`);
+    }
+  }
+  return n;
+}
+
 let checked = checkSurfaces('bytspot', '.', contract.surfaces.bytspot);
 
 // The authoring repo carries four more surfaces. Check them when co-checked-out.
@@ -189,13 +221,14 @@ if (fs.existsSync(path.join(sibling, CONTRACT))) {
     fail(`bytspot-beta/${CONTRACT}`, 'vendored contract differs from this repo\'s copy; the two gates would disagree about canonical geometry');
   }
   checked += checkSurfaces('bytspot-beta', sibling, contract.surfaces['bytspot-beta']);
+  checked += checkIcons('bytspot-beta', sibling);
 } else {
-  notes.push(`SKIPPED ${contract.surfaces['bytspot-beta'].length} surfaces in the authoring repo: no checkout at ${sibling} (set BYTSPOT_BETA_REPO). That repo gates them itself.`);
+  notes.push(`SKIPPED ${contract.surfaces['bytspot-beta'].length} surfaces in the authoring repo: no checkout at ${sibling} (set BYTSPOT_BETA_REPO). That repo gates them, and the app icon, itself.`);
 }
 
 for (const note of notes) console.log(note);
 if (failures.length) {
-  console.error('Brand mark geometry drift:\n' + failures.map((f) => `  - ${f}`).join('\n'));
+  console.error('Brand mark drift:\n' + failures.map((f) => `  - ${f}`).join('\n'));
   process.exit(1);
 }
-console.log(`Brand mark geometry consistent across ${checked} surfaces.`);
+console.log(`Brand mark consistent across ${checked} surfaces and icons (geometry, colour, icon of record).`);

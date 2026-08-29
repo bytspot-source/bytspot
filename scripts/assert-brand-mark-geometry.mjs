@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-// Brand mark drift gate.
+// Brand mark drift gate: geometry and colour.
 //
 // The mark is drawn independently on nine surfaces across two repos because iOS
 // cannot read the SVG -- asset-catalog rendering drops gradient fills in Release
@@ -25,6 +25,45 @@ const CENTRE = contract.viewBox / 2;
 // The gem, its dot and its glow ride above the rings' centre; the rings do not.
 const GEM_CENTRE_Y = G.concentric ? CENTRE : G.gemCentreY;
 const GEM_OFFSET = CENTRE - GEM_CENTRE_Y;
+
+const COL = contract.colours;
+// Roles are resolved by which element references a gradient, not by its id: the
+// funnel banners name theirs a/b/c/d and the print sheet pl-outer/pl-mid/etc.
+function gradientRoles(src) {
+  const roles = {};
+  for (const el of src.match(/<(?:circle|path)\b[^>]*?\/?>/gs) ?? []) {
+    const fill = el.match(/fill="url\(#([^)]+)\)"/);
+    const stroke = el.match(/stroke="url\(#([^)]+)\)"/);
+    const r = el.match(/\br="([\d.]+)"/);
+    const d = el.match(/\bd="([^"]+)"/);
+    if (r) {
+      const radius = Number(r[1]);
+      if (stroke && radius === G.outerRingRadius) roles[stroke[1]] = 'outerRing';
+      if (stroke && radius === G.middleRingRadius) roles[stroke[1]] = 'middleRing';
+    }
+    if (d && d[1].trim() === G.hexPath) {
+      if (fill) roles[fill[1]] = 'hexFill';
+      if (stroke) roles[stroke[1]] = 'hexBorder';
+    }
+  }
+  return roles;
+}
+
+function checkColours(surface, src) {
+  const roles = gradientRoles(src);
+  for (const role of ['outerRing', 'middleRing', 'hexFill', 'hexBorder']) {
+    const ids = Object.entries(roles).filter(([, r]) => r === role).map(([id]) => id);
+    if (!ids.length) { fail(surface, `no gradient resolves to ${role}`); continue; }
+    for (const id of ids) {
+      const block = src.match(new RegExp(`<(?:linear|radial)Gradient[^>]*id="${id}"[^>]*>(.*?)</(?:linear|radial)Gradient>`, 's'));
+      if (!block) { fail(surface, `gradient "${id}" (${role}) has no definition`); continue; }
+      const stops = [...block[1].matchAll(/(?:stop-color|stopColor)="(#[0-9A-Fa-f]{6})"/g)].map((m) => m[1].toUpperCase());
+      const wrong = stops.filter((c) => c !== COL[role].toUpperCase());
+      // The icon's rings and gem are flat; a second colour is the gradient drift.
+      if (wrong.length) fail(surface, `${role} carries ${[...new Set(wrong)].join(', ')}, canonical is flat ${COL[role]}`);
+    }
+  }
+}
 
 const failures = [];
 const notes = [];
@@ -73,6 +112,7 @@ function checkSvg(surface, file) {
   for (const [name, radius] of [['outer ring', G.outerRingRadius], ['middle ring', G.middleRingRadius]]) {
     if (!new RegExp(`r="${radius}"`).test(src)) fail(surface, `no ${name} at r="${radius}"`);
   }
+  checkColours(surface, src);
 }
 
 function checkSwift(surface, file) {
@@ -101,6 +141,15 @@ function checkSwift(surface, file) {
     const actual = read(re);
     if (actual === null) fail(surface, `could not read ${name}`);
     else if (actual !== expected) fail(surface, `${name} is ${actual}/120, canonical is ${expected}/120`);
+  }
+// Flat gradients in Swift too: one token, repeated.
+  for (const [name, token] of Object.entries(COL.swiftTokens)) {
+    const block = mark.match(new RegExp(`private var ${name}Gradient[^{]*\\{([^}]*)\\}`, 's'));
+    if (!block) { fail(surface, `could not read ${name}Gradient`); continue; }
+    const used = [...new Set([...block[1].matchAll(/NativeLaunchTheme\.(\w+)/g)].map((m) => m[1]))];
+    if (used.length !== 1 || used[0] !== token) {
+      fail(surface, `${name}Gradient uses ${used.join(', ') || 'no theme colour'}, canonical is flat ${token}`);
+    }
   }
   const offsets = [...mark.matchAll(/\.offset\(y: (-?)size \* \(([\d.]+) \/ 120\.0\)\)/g)]
     .map((m) => (m[1] === '-' ? -Number(m[2]) : Number(m[2])));

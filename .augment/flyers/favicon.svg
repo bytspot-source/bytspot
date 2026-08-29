@@ -19,24 +19,24 @@
     <!-- Outer ring: Cyan → Purple → Cyan -->
     <linearGradient id="gradient-outer-ring" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#00BFFF"/>
-      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="50%" stop-color="#00BFFF"/>
       <stop offset="100%" stop-color="#00BFFF"/>
     </linearGradient>
     <!-- Middle ring: Purple → Pink -->
     <linearGradient id="gradient-middle" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#A855F7"/>
-      <stop offset="100%" stop-color="#D946EF"/>
+      <stop offset="100%" stop-color="#A855F7"/>
     </linearGradient>
     <!-- Hexagon fill: Purple → Pink → Magenta -->
     <linearGradient id="gradient-hexagon" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#A855F7"/>
-      <stop offset="50%" stop-color="#D946EF"/>
-      <stop offset="100%" stop-color="#FF00FF"/>
+      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#A855F7"/>
     </linearGradient>
     <!-- Hexagon border: Cyan → Magenta -->
     <linearGradient id="gradient-hex-border" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#00BFFF"/>
-      <stop offset="100%" stop-color="#FF00FF"/>
+      <stop offset="0%" stop-color="#20A9FB"/>
+      <stop offset="100%" stop-color="#20A9FB"/>
     </linearGradient>
     <!-- Center dot: Cyan radial -->
     <radialGradient id="gradient-center-dot" cx="50%" cy="50%" r="50%">

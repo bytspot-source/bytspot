@@ -317,35 +317,3 @@ test('Party ticket payments are unaffected by the shared endpoint', async () => 
   assert.equal(membershipTouched, false);
   assert.equal(checkoutUpdate.data.status, 'completed');
 });
-
-test('A refund-required payment records the charge so it can actually be refunded', async () => {
-  let checkoutUpdate: any;
-  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
-  partyGuest.update = async () => ({ id: 'guest-1' });
-  // The host declined while the guest was paying, so the pass is refused.
-  partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'declined' });
-  // Nothing to refund against yet: the PaymentIntent only exists now that the
-  // Session is paid.
-  partyCheckout.findUnique = async () => ({ ...reservation(), stripePaymentIntentId: null });
-
-  await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
-
-  assert.equal(checkoutUpdate.data.status, 'refund-required');
-  assert.equal(checkoutUpdate.data.stripePaymentIntentId, 'pi_live_1');
-});
-
-test('A redelivered webhook retries a refund that was owed but never issued', async () => {
-  // The first delivery committed refund-required and the charge, then died
-  // before Stripe was called. The guest is still owed money.
-  partyCheckout.findUnique = async () => ({ ...reservation(), status: 'refund-required', refundedAt: null, stripePaymentIntentId: 'pi_live_1' });
-  partyCheckout.updateMany = async () => ({ count: 0 });
-  partyGuest.findUnique = async () => ({ id: 'guest-1', status: 'declined' });
-
-  // Stripe is unreachable, so the webhook must not be acknowledged: a 500
-  // buys another delivery instead of stranding the refund.
-  await assert.rejects(() => reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date()));
-
-  // Already refunded: a redelivery must not attempt a second refund.
-  partyCheckout.findUnique = async () => ({ ...reservation(), status: 'refund-required', refundedAt: new Date(), stripePaymentIntentId: 'pi_live_1' });
-  await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
-});

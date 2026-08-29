@@ -5,8 +5,7 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
 import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
-import { currentPlatformFeeBps, effectiveFeeBps, splitTicketWithProcessing } from '../services/platformFee';
-import { saleablePayoutAccount } from '../services/hostPayouts';
+import { currentPlatformFeeBps, effectiveFeeBps, splitTicketAmount } from '../services/platformFee';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
@@ -381,23 +380,6 @@ export const partyPublish = protectedProcedure
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
     if (party.status === 'published' && party.passCode) return { id: party.id, shareUrl: partyShareUrl(party.id), passCode: party.passCode };
     if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be published from its current state.' });
-    // Selling tickets a host can never be paid for is the one failure that
-    // cannot be apologised away, so a paid party may not go live until Stripe
-    // says the host can both take charges and receive payouts. Free RSVP
-    // parties move no money and are never gated.
-    if (party.accessMode === 'paid-ticket') {
-      const payouts = await saleablePayoutAccount(ctx.user.userId);
-      if (!payouts.ok) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message: payouts.reason === 'no-account'
-            ? 'Set up payouts before publishing a paid party.'
-            : payouts.reason === 'incomplete'
-              ? 'Finish your payout setup before publishing a paid party.'
-              : 'Your payout status could not be verified. Try again shortly.',
-        });
-      }
-    }
     // Snapshot the Official Host identity so later profile edits never
     // rewrite an already-shared pass. The profile remains the source of truth
     // for the next party.
@@ -496,7 +478,7 @@ async function publishedParty(partyId: string) {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
     include: {
-      host: { select: { name: true, stripeAccountId: true, stripeChargesEnabled: true, stripePayoutsEnabled: true } },
+      host: { select: { name: true } },
       media: { orderBy: { position: 'asc' } },
       arrivalVenue: { select: { id: true, name: true, lat: true, lng: true } },
     },
@@ -858,7 +840,6 @@ export const partyControlRouter = router({
           status: guest.status,
           source: guest.ticketTierName ? 'ticket' : 'rsvp',
           ticketTierName: guest.ticketTierName,
-          accessGranted: guest.accessGranted,
           checkedInAt: guest.checkedInAt?.toISOString() ?? null,
           person: { userId: guest.user.id, name: guest.user.name ?? 'Bytspot member', profileImage: guest.user.profileImage },
         })),
@@ -1047,26 +1028,11 @@ export const partyTicketsRouter = router({
       if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
 
-      // Asked before any reservation exists: a party that cannot pay its host
-      // must not be able to hold ticket inventory, and this always asks Stripe
-      // rather than trusting a mirror Stripe can revoke without telling us.
-      const payoutAccount = await saleablePayoutAccount(party.hostUserId);
-      if (!payoutAccount.ok) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This Party cannot take payments right now.' });
-      // Frozen before the reservation so a retry can never be priced by a rate
-      // or a destination that changed in between.
-      const ticketFeeBps = effectiveFeeBps(party.platformFeeBps, await currentPlatformFeeBps());
-      const split = splitTicketWithProcessing(ticketTier.priceCents, ticketFeeBps);
-
       const now = new Date();
       const reservation = await serializableTransaction(async (tx) => {
         const existing = await tx.partyCheckout.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
         if (existing) {
           if (existing.ticketTierName !== ticketTier.name || existing.amountCents !== ticketTier.priceCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match its original ticket tier.' });
-          // Stripe rejects a reused idempotency key whose body changed, so a
-          // retry has to reuse the frozen split rather than today's numbers.
-          if (existing.destinationAccountId && existing.destinationAccountId !== payoutAccount.accountId) {
-            throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry no longer matches the host payout account.' });
-          }
           if (existing.status === 'completed') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket is already confirmed.' });
           if (existing.status === 'expired') throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout expired. Start a new checkout.' });
           return existing;
@@ -1107,24 +1073,18 @@ export const partyTicketsRouter = router({
           data: {
             partyId: party.id, partyGuestId: partyGuest.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey,
             ticketTierName: ticketTier.name, amountCents: ticketTier.priceCents, currency: 'usd', status: 'creating',
-            platformFeeBps: ticketFeeBps, platformFeeCents: split.platformFeeCents, hostNetCents: split.hostNetCents,
-            destinationAccountId: payoutAccount.accountId,
             reservationExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
           },
         });
       }, 'Party ticket inventory changed. Please retry.');
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
-      // Reuse what the reservation froze, so a retry sends Stripe the same body
-      // under the same idempotency key.
-      const destination = reservation.destinationAccountId ?? payoutAccount.accountId;
-      // A legacy party carries no rate of its own, so the current platform rate
-      // could move between the first attempt and a retry. The reservation's own
-      // rate is authoritative wherever it exists.
-      const frozenFeeBps = reservation.platformFeeBps ?? ticketFeeBps;
-      const frozen = reservation.platformFeeCents === null
-        ? splitTicketWithProcessing(reservation.amountCents, frozenFeeBps)
-        : { ...splitTicketWithProcessing(reservation.amountCents, frozenFeeBps), platformFeeCents: reservation.platformFeeCents };
+      // The party's frozen rate, so a mid-sale rate change cannot alter what
+      // this host was promised. The split is recorded, not transferred: there
+      // is no Connect destination yet, so Bytspot holds the whole charge and
+      // owes the host net. See STRIPE_CAPITAL_CASH_FLOW.md.
+      const ticketFeeBps = effectiveFeeBps(party.platformFeeBps, await currentPlatformFeeBps());
+      const { feeCents, hostNetCents } = splitTicketAmount(reservation.amountCents, ticketFeeBps);
       const stripe = new Stripe(config.stripeSecretKey);
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -1140,21 +1100,7 @@ export const partyTicketsRouter = router({
         metadata: {
           kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId,
           ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey,
-          platformFeeBps: String(frozenFeeBps), platformFeeCents: String(frozen.platformFeeCents), hostNetCents: String(frozen.hostNetCents),
-        },
-        // Destination charge: one charge on the guest's card, split by Stripe.
-        // Bytspot stays the settlement merchant, so the guest's statement reads
-        // Bytspot and disputes land where the guest expects them.
-        //
-        // Stripe bills the platform for a destination charge whether or not
-        // `on_behalf_of` is set, so the host's share of processing has to be
-        // collected inside the application fee. `on_behalf_of` is deliberately
-        // absent: it would move merchant of record to the host without moving
-        // a cent of the processing cost.
-        payment_intent_data: {
-          application_fee_amount: frozen.applicationFeeCents,
-          transfer_data: { destination },
-          transfer_group: party.id,
+          platformFeeBps: String(ticketFeeBps), platformFeeCents: String(feeCents), hostNetCents: String(hostNetCents),
         },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
@@ -1164,7 +1110,7 @@ export const partyTicketsRouter = router({
         where: { id: reservation.id },
         data: {
           stripeSessionId: session.id, checkoutUrl: session.url, status: 'pending',
-          platformFeeBps: frozenFeeBps, platformFeeCents: frozen.platformFeeCents, hostNetCents: frozen.hostNetCents, destinationAccountId: destination,
+          platformFeeBps: ticketFeeBps, platformFeeCents: feeCents, hostNetCents,
           reservationExpiresAt: session.expires_at ? new Date(session.expires_at * 1000) : reservation.reservationExpiresAt,
         },
       });

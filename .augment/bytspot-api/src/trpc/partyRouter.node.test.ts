@@ -6,6 +6,10 @@ import { appRouter } from './router';
 import { db } from '../lib/db';
 import type { Context } from './context';
 import { config } from '../config';
+import { setReadinessStripeForTests } from '../services/hostPayouts';
+
+const stripeReady = { accounts: { retrieve: async () => ({ charges_enabled: true, payouts_enabled: true }) } };
+const stripeChargesOnly = { accounts: { retrieve: async () => ({ charges_enabled: true, payouts_enabled: false }) } };
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000001';
 const draftInput = {
@@ -69,9 +73,11 @@ beforeEach(() => {
   partyCheckout.update = async () => ({ id: 'checkout-1' });
   partyCheckout.updateMany = async () => ({ count: 0 });
   venue.findUnique = async () => null;
-  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
-  // sale gates do not reach for Stripe in tests.
+  // Default: a host Stripe itself confirms as payout-ready. The mirror alone
+  // is never enough, so the gates always re-read and the stub must supply it.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  user.update = async () => ({});
+  setReadinessStripeForTests(stripeReady);
   (config as any).stripeSecretKey = '';
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
@@ -129,6 +135,9 @@ test('Party deletion is host-only, allows drafts, and refuses committed guests',
   assert.deepEqual(deleteWhere.guests, { none: { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] } });
   assert.deepEqual(deleteWhere.checkouts.none.OR[0], { status: 'completed' });
   assert.deepEqual(deleteWhere.checkouts.none.OR[1].status, { in: ['creating', 'pending'] });
+  // An owed refund must be in the atomic guard, not only the pre-check: the
+  // checkout row is the only local pointer to the charge to refund from.
+  assert.deepEqual(deleteWhere.checkouts.none.OR[2], { status: 'refund-required', refundedAt: null });
 
   // Published party with a ticketed guest is refused before any delete.
   party.findFirst = async () => ({ ...partyDraft, status: 'published' });
@@ -139,6 +148,15 @@ test('Party deletion is host-only, allows drafts, and refuses committed guests',
   // reservation) is refused so the webhook can still reconcile/refund.
   partyGuest.findFirst = async () => null;
   partyCheckout.findFirst = async () => ({ id: 'checkout-1' });
+  await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
+
+  // A guest who paid into a party that cannot admit them is owed a refund.
+  // Deleting the party would cascade the checkout away and strand them, so it
+  // is refused until the refund lands.
+  partyCheckout.findFirst = async (args: any) => {
+    const owed = args?.where?.OR?.some((clause: any) => clause.status === 'refund-required' && clause.refundedAt === null);
+    return owed ? { id: 'checkout-owed-refund' } : null;
+  };
   await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
 
   // Race guard: guest commits or checkout opens between the check and the delete.
@@ -277,9 +295,11 @@ test('Party handoff derives its destination from the bound venue and enforces pr
     id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
   });
   partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
-  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
-  // sale gates do not reach for Stripe in tests.
+  // Default: a host Stripe itself confirms as payout-ready. The mirror alone
+  // is never enough, so the gates always re-read and the stub must supply it.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  user.update = async () => ({});
+  setReadinessStripeForTests(stripeReady);
   await assert.rejects(() => caller().events.arrival.handoff({ partyId: 'party-1', provider: 'uber' }), { code: 'FORBIDDEN' });
 
   user.findUnique = async () => ({ membershipTier: 'black' });
@@ -480,9 +500,11 @@ test('Expired paid-ticket share link still reports already-confirmed to a ticket
   // Dedicated user: protected procedures rate-limit per user, and earlier
   // checkout tests consume test-user-id's party-ticket-checkout budget.
   const expiredCaller = () => createCaller({ user: { userId: 'expired-link-user', email: 'expired@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
-  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
-  // sale gates do not reach for Stripe in tests.
+  // Default: a host Stripe itself confirms as payout-ready. The mirror alone
+  // is never enough, so the gates always re-read and the stub must supply it.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  user.update = async () => ({});
+  setReadinessStripeForTests(stripeReady);
 
   // Without a confirmed pass the expired link is a 404, not a checkout error.
   partyGuest.findUnique = async () => null;
@@ -701,9 +723,11 @@ test('A host holds a confirmed pass to their own party regardless of tier or acc
     ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 20, requiredMembershipTier: 'platinum' }],
   });
   partyGuest.findUnique = async () => null;
-  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
-  // sale gates do not reach for Stripe in tests.
+  // Default: a host Stripe itself confirms as payout-ready. The mirror alone
+  // is never enough, so the gates always re-read and the stub must supply it.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  user.update = async () => ({});
+  setReadinessStripeForTests(stripeReady);
 
   const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
   assert.equal(pass.action, 'view-pass');
@@ -718,9 +742,11 @@ test('A non-host on the same party is still gated by membership tier', async () 
     endsAt: null, shareLinkExpiresAt: null, arrivalVenueId: 'venue-1', ticketTiers: [],
   });
   partyGuest.findUnique = async () => null;
-  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
-  // sale gates do not reach for Stripe in tests.
+  // Default: a host Stripe itself confirms as payout-ready. The mirror alone
+  // is never enough, so the gates always re-read and the stub must supply it.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  user.update = async () => ({});
+  setReadinessStripeForTests(stripeReady);
 
   const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
   assert.equal(pass.action, 'unavailable');
@@ -734,9 +760,11 @@ test('A host still reaches their own party after the share link expires', async 
     shareLinkExpiresAt: null, ticketTiers: [],
   };
   partyGuest.findUnique = async () => null;
-  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
-  // sale gates do not reach for Stripe in tests.
+  // Default: a host Stripe itself confirms as payout-ready. The mirror alone
+  // is never enough, so the gates always re-read and the stub must supply it.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  user.update = async () => ({});
+  setReadinessStripeForTests(stripeReady);
 
   party.findFirst = async () => ({ ...expired, hostUserId: 'someone-else' });
   await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
@@ -892,9 +920,23 @@ test('A paid party cannot publish until Stripe will pay the host', async () => {
   // Onboarding started but Stripe will not pay out yet: charges alone would
   // sell tickets for money the host can never withdraw.
   user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: false, stripeAccountRefreshedAt: new Date() });
+  setReadinessStripeForTests(stripeChargesOnly);
   await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
     code: 'PRECONDITION_FAILED', message: 'Finish your payout setup before publishing a paid party.',
   });
+
+  // A mirror that says ready is never enough on its own. Stripe is unreachable
+  // here, so the publish fails closed even though the local row looks good.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
+  setReadinessStripeForTests({ accounts: { retrieve: async () => { throw new Error('stripe unreachable'); } } });
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'Your payout status could not be verified. Try again shortly.',
+  });
+
+  // Stripe itself confirming both capabilities is the only thing that opens the sale.
+  setReadinessStripeForTests(stripeReady);
+  assert.equal((await caller().events.publish({ partyId: 'party-1', idempotencyKey })).id, 'party-1');
+  setReadinessStripeForTests(undefined);
 
   // A free party moves no money and is never gated on payouts.
   party.findFirst = async () => ({ ...partyDraft, accessMode: 'free-rsvp' });
@@ -909,11 +951,14 @@ test('Ticket checkout refuses the sale when the host can no longer be paid', asy
     id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, ...linkAlive,
     ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
   };
-  // Published while payout-ready, then Stripe disabled the account mid-sale.
+  // Published while payout-ready, then Stripe disabled payouts mid-sale. The
+  // local mirror still says ready and was refreshed a moment ago: only asking
+  // Stripe catches this, which is the whole point of the gate.
   party.findFirst = async () => ({ ...paidParty, hostUserId: 'host-user', host: { name: 'Host' } });
   user.findUnique = async ({ where }: any) => (where.id === 'host-user'
-    ? { stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: false, stripeAccountRefreshedAt: new Date() }
+    ? { stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() }
     : { membershipTier: 'green' });
+  setReadinessStripeForTests(stripeChargesOnly);
   partyCheckout.findFirst = async () => null;
   partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data, amountCents: 2500, ticketTierName: 'First Drop', status: 'creating', checkoutUrl: null });
   const disabledCaller = () => createCaller({ user: { userId: 'payout-user', email: 'payout@bytspot.com' }, clientRateLimitKey: 'test-party-client' });

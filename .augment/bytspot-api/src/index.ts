@@ -66,6 +66,10 @@ app.use(
   trpcExpress.createExpressMiddleware({
     router: appRouter,
     createContext,
+    // Nothing on /trpc is cacheable: responses are per-member, and some carry
+    // bearer material such as a Stripe onboarding link that would let whoever
+    // replayed it change a host's bank details.
+    responseMeta: () => ({ headers: { 'cache-control': 'no-store' } }),
   }),
 );
 

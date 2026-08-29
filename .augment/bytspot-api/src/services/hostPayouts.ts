@@ -72,8 +72,8 @@ export async function hostOnboardingLink(accountId: string, returnPath: string):
  * that decide money — a host checking their status, and a paid party trying to
  * publish — so a stale mirror can never gate or ungate a sale on its own.
  */
-export async function refreshHostAccount(userId: string, accountId: string): Promise<HostPayoutReadiness> {
-  const account = await stripeClient().accounts.retrieve(accountId);
+export async function refreshHostAccount(userId: string, accountId: string, stripe?: ReadinessStripe): Promise<HostPayoutReadiness> {
+  const account = await (stripe ?? readinessOverride ?? stripeClient()).accounts.retrieve(accountId);
   const chargesEnabled = Boolean(account.charges_enabled);
   const payoutsEnabled = Boolean(account.payouts_enabled);
   await db.user.update({
@@ -98,37 +98,45 @@ export async function currentHostPayoutReadiness(userId: string): Promise<HostPa
   return refreshHostAccount(userId, mirrored.accountId).catch(() => mirrored);
 }
 
+/** The single Stripe call a readiness check makes, so a test can supply it. */
+export type ReadinessStripe = { accounts: { retrieve: (id: string) => Promise<{ charges_enabled?: boolean; payouts_enabled?: boolean }> } };
+
+let readinessOverride: ReadinessStripe | undefined;
+
+/**
+ * Lets a test exercise the sale gates, which reach Stripe through the router
+ * and so cannot be passed a client. Refused outright in production: a live
+ * deployment must never be able to substitute its own readiness verdict.
+ */
+export function setReadinessStripeForTests(client?: ReadinessStripe): void {
+  if (config.nodeEnv === 'production') throw new Error('Readiness client cannot be overridden in production.');
+  readinessOverride = client;
+}
+
 export type SaleableAccount =
   | { ok: true; accountId: string }
   | { ok: false; reason: 'no-account' | 'incomplete' | 'unverifiable' };
 
 /**
- * How long Stripe's last verdict is allowed to stand for a sale. Stripe pushes
- * `account.updated` when this changes, so the mirror is normally current; this
- * window only bounds how long a missed delivery could matter.
+ * The only readiness check a sale may rely on. It always asks Stripe, with no
+ * freshness window: a mirror that says ready is exactly the state Stripe can
+ * revoke without a delivered `account.updated`, so trusting it for even a
+ * minute can transfer a guest's money to an account the host cannot withdraw
+ * from. It fails closed when Stripe cannot be reached, because refusing a sale
+ * is recoverable and taking money with nowhere to send it is not.
+ *
+ * The local mirror remains for display only. See `hostPayoutStatus`.
  */
-export const READINESS_FRESH_WINDOW_MS = 60_000;
-
-/**
- * The only readiness check a sale may rely on. It always asks Stripe, because
- * a mirror that says ready is exactly the state Stripe can revoke without
- * telling us, and it fails closed when Stripe cannot be reached: refusing a
- * sale is recoverable, taking a guest's money with nowhere to send it is not.
- */
-export async function saleablePayoutAccount(userId: string, now = Date.now()): Promise<SaleableAccount> {
+export async function saleablePayoutAccount(userId: string, stripe?: ReadinessStripe): Promise<SaleableAccount> {
   const row = await db.user.findUnique({
     where: { id: userId },
-    select: { stripeAccountId: true, stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: true },
+    select: { stripeAccountId: true },
   });
   const accountId = row?.stripeAccountId ?? null;
   if (!accountId) return { ok: false, reason: 'no-account' };
 
-  const refreshedAt = row?.stripeAccountRefreshedAt?.getTime() ?? 0;
-  if (now - refreshedAt <= READINESS_FRESH_WINDOW_MS) {
-    return payoutReadiness(row).ready ? { ok: true, accountId } : { ok: false, reason: 'incomplete' };
-  }
   try {
-    const fresh = await refreshHostAccount(userId, accountId);
+    const fresh = await refreshHostAccount(userId, accountId, stripe);
     return fresh.ready ? { ok: true, accountId } : { ok: false, reason: 'incomplete' };
   } catch {
     return { ok: false, reason: 'unverifiable' };

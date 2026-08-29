@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { db } from '../lib/db';
-import { PAYOUT_DELAY_DAYS, payoutReadiness, READINESS_FRESH_WINDOW_MS, saleablePayoutAccount } from './hostPayouts';
+import { PAYOUT_DELAY_DAYS, payoutReadiness, saleablePayoutAccount } from './hostPayouts';
 
 test('A host is payout-ready only with an account and both Stripe flags', () => {
   assert.equal(payoutReadiness(null).ready, false);
@@ -21,23 +21,17 @@ test('Payouts stay reversible until after a party has happened', () => {
   assert.equal(PAYOUT_DELAY_DAYS, 7);
 });
 
-test('A stale ready mirror is re-verified before it can decide a sale', async () => {
+test('A sale never trusts the local mirror, however recently Stripe confirmed it', async () => {
   const user = (db.user as any);
   const original = user.findUnique;
 
-  // Mirror says ready, but Stripe last spoke long ago. Stripe is unreachable
-  // here, so the sale gate must fail closed rather than trust the mirror.
-  user.findUnique = async () => ({
-    stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: true,
-    stripeAccountRefreshedAt: new Date(Date.now() - READINESS_FRESH_WINDOW_MS - 1_000),
-  });
-  assert.deepEqual(await saleablePayoutAccount('user-1'), { ok: false, reason: 'unverifiable' });
-
-  // The same mirror, confirmed by Stripe moments ago, is allowed to stand.
+  // A mirror that says ready, confirmed by Stripe a moment ago, is still not
+  // evidence: Stripe can revoke readiness without a delivered account.updated,
+  // so the gate re-reads and fails closed when Stripe is unreachable.
   user.findUnique = async () => ({
     stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date(),
   });
-  assert.deepEqual(await saleablePayoutAccount('user-1'), { ok: true, accountId: 'acct_1' });
+  assert.deepEqual(await saleablePayoutAccount('user-1'), { ok: false, reason: 'unverifiable' });
 
   // A host who never started onboarding is refused without asking Stripe.
   user.findUnique = async () => ({ stripeAccountId: null, stripeChargesEnabled: false, stripePayoutsEnabled: false, stripeAccountRefreshedAt: null });

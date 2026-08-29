@@ -315,6 +315,10 @@ export const partyDraftsRouter = router({
         OR: [
           { status: 'completed' },
           { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: new Date() } },
+          // An owed refund is money in motion. Deleting the party cascades the
+          // checkout away, and with it the only local pointer to the charge a
+          // redelivered webhook would refund from, stranding a guest who paid.
+          { status: 'refund-required', refundedAt: null },
         ],
       };
       if (party.status === 'published') {
@@ -323,7 +327,7 @@ export const partyDraftsRouter = router({
           db.partyCheckout.findFirst({ where: { partyId: party.id, ...activeCheckouts }, select: { id: true } }),
         ]);
         if (committedGuest || activeCheckout) {
-          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests and can no longer be deleted.' });
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests, or a refund still owed, and can no longer be deleted.' });
         }
       }
       // Guard against a guest paying between the check and the delete: the
@@ -338,7 +342,7 @@ export const partyDraftsRouter = router({
         },
       });
       if (deleted.count === 0) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests and can no longer be deleted.' });
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests, or a refund still owed, and can no longer be deleted.' });
       }
       return { success: true };
     }),

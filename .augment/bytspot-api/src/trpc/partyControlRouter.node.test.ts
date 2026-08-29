@@ -101,17 +101,31 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
 
 test('Guest list projects person fields and infers source from ticket tier', async () => {
   partyGuest.findMany = async () => [
-    { id: 'guest-1', status: 'rsvp', ticketTierName: null, checkedInAt: null, user: { id: 'user-1', name: 'Ada', profileImage: null } },
-    { id: 'guest-2', status: 'checked-in', ticketTierName: 'First Drop', checkedInAt: new Date('2026-08-10T21:00:00Z'), user: { id: 'user-2', name: null, profileImage: 'img' } },
+    { id: 'guest-1', status: 'rsvp', ticketTierName: null, checkedInAt: null, accessGranted: false, user: { id: 'user-1', name: 'Ada', profileImage: null } },
+    { id: 'guest-2', status: 'checked-in', ticketTierName: 'First Drop', checkedInAt: new Date('2026-08-10T21:00:00Z'), accessGranted: true, user: { id: 'user-2', name: null, profileImage: 'img' } },
   ];
   const { guests } = await caller().events.control.guests({ partyId: 'party-1', status: 'all' });
   assert.deepEqual(guests[0], {
-    id: 'guest-1', status: 'rsvp', source: 'rsvp', ticketTierName: null, checkedInAt: null,
+    id: 'guest-1', status: 'rsvp', source: 'rsvp', ticketTierName: null, checkedInAt: null, accessGranted: false,
     person: { userId: 'user-1', name: 'Ada', profileImage: null },
   });
   assert.equal(guests[1].source, 'ticket');
   assert.equal(guests[1].checkedInAt, '2026-08-10T21:00:00.000Z');
   assert.equal(guests[1].person.name, 'Bytspot member');
+});
+
+test('Guest list reports access separately from status, so a paid guest who lost access is not counted as holding one', async () => {
+  // Both paid. Only one still holds a pass: a refund-required guest paid and
+  // was then revoked, and must never be mistaken for an admitted guest.
+  partyGuest.findMany = async () => [
+    { id: 'guest-1', status: 'ticketed', ticketTierName: 'First Drop', checkedInAt: null, accessGranted: true, user: { id: 'user-1', name: 'Ada', profileImage: null } },
+    { id: 'guest-2', status: 'refund-required', ticketTierName: 'First Drop', checkedInAt: null, accessGranted: false, user: { id: 'user-2', name: 'Kofi', profileImage: null } },
+  ];
+  const { guests } = await caller().events.control.guests({ partyId: 'party-1', status: 'all' });
+  assert.deepEqual(guests.map((guest: any) => [guest.status, guest.source, guest.accessGranted]), [
+    ['ticketed', 'ticket', true],
+    ['refund-required', 'ticket', false],
+  ]);
 });
 
 test('setAdmissionPaused updates only a host-owned published Party', async () => {

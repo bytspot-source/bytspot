@@ -39,6 +39,17 @@ export const owedCheckout = {
   ],
 };
 
+/**
+ * Sales that took money and have not returned it. Distinct from owedCheckout,
+ * which deliberately excludes clean completed sales: when a host is leaving,
+ * a completed sale is exactly the obligation, because the event it paid for is
+ * about to stop existing.
+ */
+export const unrefundedSale = {
+  status: { in: ['completed', 'refund-required'] },
+  refundedAt: null,
+};
+
 type SettlementStripe = { checkout: { sessions: { retrieve: (id: string) => Promise<Stripe.Checkout.Session> } } };
 
 /**
@@ -130,6 +141,13 @@ export async function refundHostedPartiesForPurge(hostUserId: string): Promise<{
         settled = false;
         continue;
       }
+      if (outcome === 'nothing-to-refund') {
+        // Marked as a sale but with no charge behind it, so there is nothing to
+        // return. Retired explicitly, because leaving it unrefunded would block
+        // this host's purge on an obligation that does not exist.
+        await db.partyCheckout.updateMany({ where: { id: checkout.id, refundedAt: null }, data: { status: ABANDONED } });
+        continue;
+      }
       await db.partyCheckout.updateMany({
         where: { id: checkout.id, status: 'completed' },
         data: { status: 'refund-required' },
@@ -142,10 +160,12 @@ export async function refundHostedPartiesForPurge(hostUserId: string): Promise<{
       }
     }
 
-    // Anything still unsettled — an open session, a failed refund — leaves the
-    // party as it is so the next run tries again.
+    // Anything still unsettled leaves the party as it is so the next run tries
+    // again. This has to include completed sales: the batch above is capped, so
+    // a party with more sales than one run can refund must not be treated as
+    // settled. Each run refunds a batch and shrinks the set, so runs progress.
     const unresolved = await db.partyCheckout.findFirst({
-      where: { partyId: party.id, ...owedCheckout },
+      where: { partyId: party.id, OR: [owedCheckout, unrefundedSale] },
       select: { id: true },
     });
     if (unresolved) {

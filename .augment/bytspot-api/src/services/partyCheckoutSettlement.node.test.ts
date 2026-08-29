@@ -115,7 +115,7 @@ test('A ledger whose buyer is gone is refunded, never granted a pass', async () 
   assert.equal(update.where.refundedAt, null);
 });
 
-test('A host purge refunds every charged sale and cancels the party', async () => {
+test('A re-entered host purge voids the pass and cancels the party', async () => {
   const party = db.party as any;
   const guest = db.partyGuest as any;
   const cancelled: any[] = [];
@@ -127,15 +127,16 @@ test('A host purge refunds every charged sale and cancels the party', async () =
   checkout.findMany = async ({ where }: any) => (where.status?.in?.includes('completed')
     ? [{ id: 'checkout-1', partyGuestId: 'guest-1' }]
     : []);
-  checkout.findUnique = async () => ({ id: 'checkout-1', stripePaymentIntentId: null, stripeSessionId: null, destinationAccountId: null, refundedAt: null, status: 'completed' });
+  // A refund that already went through on an earlier run: the money is back,
+  // so settlement continues rather than starting over.
+  checkout.findUnique = async () => ({ id: 'checkout-1', stripePaymentIntentId: 'pi_1', stripeSessionId: 'cs_1', destinationAccountId: null, refundedAt: new Date(), status: 'completed' });
   checkout.findFirst = async () => null;
   checkout.updateMany = async () => ({ count: 1 });
 
   const { settled } = await refundHostedPartiesForPurge('host-1');
 
-  // A sale with no charge behind it is nothing to refund, so settlement can
-  // finish: the pass is voided and the party is cancelled rather than left
-  // published under an account that no longer exists.
+  // The pass is voided and the party cancelled rather than left published under
+  // an account that no longer exists.
   assert.equal(settled, true);
   assert.equal(guestUpdates[0].data.accessGranted, false);
   assert.equal(cancelled.at(-1).data.status, 'cancelled');
@@ -152,4 +153,46 @@ test('A host purge is not settled while a sale remains owed', async () => {
   // An unresolved obligation must not be papered over by cancelling the party:
   // the purge waits instead, so the refund stays someone's job.
   assert.deepEqual(await refundHostedPartiesForPurge('host-1'), { settled: false });
+});
+
+test('A host with more sales than one run can refund is not treated as settled', async () => {
+  const party = db.party as any;
+  const guest = db.partyGuest as any;
+  let cancelled = false;
+  let remaining = 51;
+
+  party.findMany = async () => [{ id: 'party-1' }];
+  party.updateMany = async () => { cancelled = true; return { count: 1 }; };
+  guest.updateMany = async () => ({ count: 1 });
+  checkout.updateMany = async () => { remaining -= 1; return { count: 1 }; };
+  checkout.findUnique = async () => ({ id: 'checkout-1', stripePaymentIntentId: 'pi_1', stripeSessionId: 'cs_1', destinationAccountId: null, refundedAt: null, status: 'completed' });
+  checkout.findMany = async ({ where, take }: any) => (where.status?.in?.includes('completed')
+    ? Array.from({ length: Math.min(take ?? 0, remaining) }, (_, i) => ({ id: `checkout-${i}`, partyGuestId: `guest-${i}` }))
+    : []);
+  // The cap means a 51st paid sale is still owed after the first pass. It is a
+  // completed row, which owedCheckout deliberately ignores, so the completion
+  // check has to see it or the host is purged owing a refund.
+  checkout.findFirst = async ({ where }: any) => (where.OR?.some((clause: any) => clause.status?.in?.includes('completed')) && remaining > 0
+    ? { id: 'checkout-50' }
+    : null);
+
+  assert.deepEqual(await refundHostedPartiesForPurge('host-1'), { settled: false });
+  assert.equal(cancelled, false);
+});
+
+test('A sale with no charge behind it is retired instead of blocking forever', async () => {
+  const party = db.party as any;
+  const updates: any[] = [];
+  party.findMany = async () => [{ id: 'party-1' }];
+  party.updateMany = async () => ({ count: 1 });
+  (db.partyGuest as any).updateMany = async () => ({ count: 1 });
+  checkout.updateMany = async (args: any) => { updates.push(args); return { count: 1 }; };
+  checkout.findMany = async ({ where }: any) => (where.status?.in?.includes('completed') ? [{ id: 'checkout-1', partyGuestId: null }] : []);
+  // No payment intent and no session: refundPartyCheckout reports there is
+  // nothing to return, so the row must stop counting as an obligation.
+  checkout.findUnique = async () => ({ id: 'checkout-1', stripePaymentIntentId: null, stripeSessionId: null, destinationAccountId: null, refundedAt: null, status: 'completed' });
+  checkout.findFirst = async () => null;
+
+  assert.deepEqual(await refundHostedPartiesForPurge('host-1'), { settled: true });
+  assert.equal(updates.at(-1).data.status, ABANDONED);
 });

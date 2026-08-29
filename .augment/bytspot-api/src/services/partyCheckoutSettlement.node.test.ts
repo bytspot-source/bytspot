@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { ABANDONED, owedCheckout, refundHostedPartiesForPurge, settlePartyCheckoutsForDeletion, unsettledCheckout } from './partyCheckoutSettlement';
+import { ABANDONED, owedCheckoutAt, refundHostedPartiesForPurge, settlePartyCheckoutsForDeletion, sweepDetachedCheckouts, unsettledCheckoutAt } from './partyCheckoutSettlement';
 
 const checkout = db.partyCheckout as any;
 const pendingRow = { id: 'checkout-1', userId: 'guest-user', stripeSessionId: 'cs_test_1' };
@@ -15,16 +15,16 @@ beforeEach(() => {
 test('A hold that timed out locally is still treated as payable', () => {
   // Our own hold expiring says nothing about Stripe's session, which can still
   // be paid. `expired` must therefore stay in both money predicates.
-  const payable = unsettledCheckout.OR[2] as any;
+  const payable = unsettledCheckoutAt().OR[2] as any;
   assert.deepEqual(payable.status.in, ['creating', 'pending', 'expired']);
   assert.deepEqual(payable.stripeSessionId, { not: null });
   assert.equal(payable.refundedAt, null);
 
   // A completed sale is an obligation for deletion but is not money owed, so a
   // buyer who paid cleanly can still be purged.
-  assert.deepEqual(unsettledCheckout.OR[0], { status: 'completed' });
-  assert.equal(owedCheckout.OR.some((clause: any) => clause.status === 'completed'), false);
-  assert.deepEqual(owedCheckout.OR[0], { status: 'refund-required', refundedAt: null });
+  assert.deepEqual(unsettledCheckoutAt().OR[0], { status: 'completed' });
+  assert.equal(owedCheckoutAt().OR.some((clause: any) => clause.status === 'completed'), false);
+  assert.deepEqual(owedCheckoutAt().OR[0], { status: 'refund-required', refundedAt: null });
 });
 
 test('A session Stripe reports expired and unpaid is marked abandoned', async () => {
@@ -195,4 +195,32 @@ test('A sale with no charge behind it is retired instead of blocking forever', a
 
   assert.deepEqual(await refundHostedPartiesForPurge('host-1'), { settled: true });
   assert.equal(updates.at(-1).data.status, ABANDONED);
+});
+
+test('A live reservation with no session recorded still blocks a delete', async () => {
+  const now = new Date();
+  const clause = unsettledCheckoutAt(now).OR.find((entry: any) => entry.stripeSessionId === null) as any;
+
+  // Stripe creates the session before the row can record it, so a crash in
+  // that window leaves a payable session with no local pointer. While the
+  // reservation is live that row has to keep blocking, or deletion detaches a
+  // checkout that is about to be paid.
+  assert.deepEqual(clause.reservationExpiresAt, { gt: now });
+  assert.deepEqual(clause.status, { in: ['creating', 'pending', 'expired'] });
+  assert.equal(owedCheckoutAt(now).OR.some((entry: any) => entry.stripeSessionId === null), true);
+});
+
+test('The detached sweep refunds orphaned sales and escalates the unrefundable', async () => {
+  checkout.findMany = async ({ where }: any) => (where.partyId === null
+    ? [{ id: 'with-pointer', stripePaymentIntentId: 'pi_1', stripeSessionId: null },
+       { id: 'no-pointer', stripePaymentIntentId: null, stripeSessionId: null }]
+    : []);
+  checkout.findUnique = async () => ({ id: 'with-pointer', stripePaymentIntentId: 'pi_1', stripeSessionId: null, destinationAccountId: null, refundedAt: new Date(), status: 'completed' });
+  checkout.updateMany = async () => ({ count: 1 });
+
+  const result = await sweepDetachedCheckouts();
+
+  // A row with a Stripe pointer can still be reversed. One without cannot be
+  // resolved by retrying, so it is escalated rather than counted as handled.
+  assert.deepEqual(result, { refunded: 1, failed: 0, needsReview: 1 });
 });

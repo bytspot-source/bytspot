@@ -7,7 +7,7 @@ import { config } from '../config';
 import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitTicketWithProcessing } from '../services/platformFee';
 import { saleablePayoutAccount } from '../services/hostPayouts';
-import { settlePartyCheckoutsForDeletion, unsettledCheckout } from '../services/partyCheckoutSettlement';
+import { settlePartyCheckoutsForDeletion, unsettledCheckoutAt } from '../services/partyCheckoutSettlement';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
@@ -317,7 +317,7 @@ export const partyDraftsRouter = router({
       // or refund from. Ask Stripe about anything that might still be holding
       // money first, then refuse the delete for whatever remains unsettled.
       await settlePartyCheckoutsForDeletion(party.id);
-      const activeCheckouts = unsettledCheckout;
+      const activeCheckouts = unsettledCheckoutAt();
       if (party.status === 'published') {
         const [committedGuest, activeCheckout] = await Promise.all([
           db.partyGuest.findFirst({ where: { partyId: party.id, ...committedGuests }, select: { id: true } }),

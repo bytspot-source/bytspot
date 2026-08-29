@@ -57,6 +57,12 @@ export async function refundPartyCheckout(checkoutId: string, stripeClient?: Ref
     // A failed refund must stay visible as refund-required rather than being
     // silently marked done; the guest is owed money either way.
     captureError(error, { checkoutId: checkout.id, scope: 'party-refund' });
+    // Recorded on the row so a repeatedly failing refund is queryable as an
+    // outstanding obligation, not just an entry in an error feed.
+    await db.partyCheckout.update({
+      where: { id: checkout.id },
+      data: { refundAttempts: { increment: 1 }, lastRefundFailureAt: new Date() },
+    }).catch(() => undefined);
     return 'failed';
   }
 }

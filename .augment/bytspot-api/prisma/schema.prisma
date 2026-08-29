@@ -330,6 +330,11 @@ model PartyCheckout {
   /// re-read the Checkout Session from Stripe.
   stripePaymentIntentId String?  @map("stripe_payment_intent_id")
   refundedAt            DateTime? @map("refunded_at")
+  /// Durable escalation state for refunds. A refund that keeps failing has to
+  /// be visible as a standing obligation rather than only as a log line, so the
+  /// attempt count and the last failure are kept on the row itself.
+  refundAttempts        Int       @default(0) @map("refund_attempts")
+  lastRefundFailureAt   DateTime? @map("last_refund_failure_at")
   currency              String   @default("usd")
   status                String   @default("creating")
   reservationExpiresAt  DateTime @map("reservation_expires_at")

@@ -5,6 +5,7 @@ import { captureError } from '../lib/observability';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { purgeExpiredAccounts } from '../services/accountDeletion';
+import { sweepDetachedCheckouts } from '../services/partyCheckoutSettlement';
 
 const router = Router();
 
@@ -77,7 +78,11 @@ router.post('/cron/purge-accounts', async (req, res) => {
   }
   try {
     const result = await purgeExpiredAccounts();
-    res.json({ ok: true, ...result });
+    // Runs after the purge that creates them: a checkout detached from its
+    // party is invisible to every party-scoped settlement path, so this is the
+    // only thing that will ever find money still owed on those rows.
+    const detached = await sweepDetachedCheckouts();
+    res.json({ ok: true, ...result, detached });
   } catch (err) {
     console.error('[cron/purge-accounts] error:', err);
     captureError(err, { job: 'purge-accounts' });

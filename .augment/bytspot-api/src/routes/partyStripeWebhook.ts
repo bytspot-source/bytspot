@@ -64,12 +64,21 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
   // a detached row can never satisfy.
   if (!checkout.partyId || !checkout.partyGuestId || !checkout.userId) {
     if (!checkout.refundedAt) {
+      // The charge pointers are written before the refund is attempted: this
+      // event may be the only place they ever appear, and without them the
+      // refund has nothing to reverse and later sweeps have nothing to find.
+      const intentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
       await db.partyCheckout.updateMany({
         where: { id: checkout.id, refundedAt: null },
-        data: { status: 'refund-required', completedAt: paymentOccurredAt },
+        data: { status: 'refund-required', completedAt: paymentOccurredAt, stripeSessionId: session.id, ...(intentId ? { stripePaymentIntentId: intentId } : {}) },
       });
       const outcome = await refundPartyCheckout(checkout.id);
-      if (outcome === 'failed') throw new Error('Refund for a detached Party Checkout failed.');
+      // Stripe told us this session was paid, so "nothing to refund" is a
+      // contradiction, not a success. Throwing keeps the retry coming rather
+      // than acknowledging money we never returned.
+      if (outcome === 'failed' || outcome === 'nothing-to-refund') {
+        throw new Error(`Refund for a detached Party Checkout did not complete: ${outcome}`);
+      }
     }
     return;
   }

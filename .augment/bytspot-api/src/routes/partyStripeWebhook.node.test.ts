@@ -350,24 +350,60 @@ test('A redelivered webhook retries a refund that was owed but never issued', as
   await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_live_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
 });
 
-test('A paid event for a ledger whose party or buyer is gone becomes refund-required', async () => {
+test('A paid event for a ledger whose party or buyer is gone records the charge and owes it back', async () => {
   const checkout = db.partyCheckout as any;
   let update: any;
   checkout.findUnique = async () => ({
     id: 'checkout-1', partyId: null, partyGuestId: null, userId: null, status: 'pending',
-    ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', stripeSessionId: null, refundedAt: null,
+    ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', refundedAt: null,
     reservationExpiresAt: new Date(Date.now() + 60_000),
+    // Reflects the write below: the refund reads the pointers this event just
+    // persisted, which is what makes the reversal possible at all.
+    ...(update ? { stripeSessionId: update.data.stripeSessionId, stripePaymentIntentId: update.data.stripePaymentIntentId, destinationAccountId: null } : { stripeSessionId: null, stripePaymentIntentId: null }),
   });
   checkout.updateMany = async (args: any) => { update = args; return { count: 1 }; };
 
   // Erasure detaches the ledger rather than deleting it, so a late payment can
   // still arrive against a row that points at nobody. No pass is possible, so
   // the only honest outcome is that the money is owed back.
-  await reconcilePartyCheckoutPayment(
-    { id: 'cs_test_1', amount_total: 2500, currency: 'usd', metadata: { ticketTierName: 'First Drop' } } as any,
-    'checkout-1', 'party-1', 'user-1', new Date(),
+  // The refund cannot complete here because Stripe is not configured, and that
+  // is the point: the event is refused rather than acknowledged, so the retry
+  // keeps coming until the money is actually returned.
+  await assert.rejects(
+    () => reconcilePartyCheckoutPayment(
+      { id: 'cs_test_1', amount_total: 2500, currency: 'usd', payment_intent: 'pi_test_1', metadata: { ticketTierName: 'First Drop' } } as any,
+      'checkout-1', 'party-1', 'user-1', new Date(),
+    ),
+    /did not complete: failed/,
   );
 
   assert.equal(update.data.status, 'refund-required');
   assert.equal(update.where.refundedAt, null);
+  // The charge pointers are written from the event itself: this may be the only
+  // place they ever appear, and a refund with nothing to reverse would report
+  // success while keeping the money.
+  assert.equal(update.data.stripeSessionId, 'cs_test_1');
+  assert.equal(update.data.stripePaymentIntentId, 'pi_test_1');
+});
+
+test('A paid detached event that cannot be refunded is not acknowledged', async () => {
+  const checkout = db.partyCheckout as any;
+  checkout.findUnique = async () => ({
+    id: 'checkout-1', partyId: null, partyGuestId: null, userId: null, status: 'pending',
+    ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', stripeSessionId: null, refundedAt: null,
+    stripePaymentIntentId: null, destinationAccountId: null,
+    reservationExpiresAt: new Date(Date.now() + 60_000),
+  });
+  checkout.updateMany = async () => ({ count: 1 });
+
+  // Stripe said this session was paid, so "nothing to refund" is a
+  // contradiction. Throwing keeps the retry coming instead of acknowledging
+  // money that was never returned.
+  await assert.rejects(
+    () => reconcilePartyCheckoutPayment(
+      { id: 'cs_test_1', amount_total: 2500, currency: 'usd', payment_intent: null, metadata: {} } as any,
+      'checkout-1', 'party-1', 'user-1', new Date(),
+    ),
+    /did not complete/,
+  );
 });

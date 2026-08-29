@@ -23,21 +23,31 @@ const PAYABLE_STATUSES = ['creating', 'pending', 'expired'];
  * money that may yet arrive. The row is the only local pointer to the Stripe
  * charge, so anything matching this must survive until it is settled.
  */
-export const unsettledCheckout = {
-  OR: [
-    { status: 'completed' },
-    { status: 'refund-required', refundedAt: null },
-    { status: { in: PAYABLE_STATUSES }, stripeSessionId: { not: null }, refundedAt: null },
-  ],
-};
+export function unsettledCheckoutAt(now: Date = new Date()) {
+  return {
+    OR: [
+      { status: 'completed' },
+      { status: 'refund-required', refundedAt: null },
+      { status: { in: PAYABLE_STATUSES }, stripeSessionId: { not: null }, refundedAt: null },
+      // A reservation with no session recorded is not proof that no session
+      // exists: Stripe creates the session before the row can be updated, so a
+      // crash in that window leaves a payable session nobody knows about. While
+      // the reservation is still live, treat it as money that may yet arrive.
+      { status: { in: PAYABLE_STATUSES }, stripeSessionId: null, refundedAt: null, reservationExpiresAt: { gt: now } },
+    ],
+  };
+}
 
 /** Money actually owed to someone, as opposed to a sale that completed cleanly. */
-export const owedCheckout = {
-  OR: [
-    { status: 'refund-required', refundedAt: null },
-    { status: { in: PAYABLE_STATUSES }, stripeSessionId: { not: null }, refundedAt: null },
-  ],
-};
+export function owedCheckoutAt(now: Date = new Date()) {
+  return {
+    OR: [
+      { status: 'refund-required', refundedAt: null },
+      { status: { in: PAYABLE_STATUSES }, stripeSessionId: { not: null }, refundedAt: null },
+      { status: { in: PAYABLE_STATUSES }, stripeSessionId: null, refundedAt: null, reservationExpiresAt: { gt: now } },
+    ],
+  };
+}
 
 /**
  * Sales that took money and have not returned it. Distinct from owedCheckout,
@@ -165,7 +175,7 @@ export async function refundHostedPartiesForPurge(hostUserId: string): Promise<{
     // a party with more sales than one run can refund must not be treated as
     // settled. Each run refunds a batch and shrinks the set, so runs progress.
     const unresolved = await db.partyCheckout.findFirst({
-      where: { partyId: party.id, OR: [owedCheckout, unrefundedSale] },
+      where: { partyId: party.id, OR: [owedCheckoutAt(), unrefundedSale] },
       select: { id: true },
     });
     if (unresolved) {
@@ -176,4 +186,45 @@ export async function refundHostedPartiesForPurge(hostUserId: string): Promise<{
   }
 
   return { settled };
+}
+
+/**
+ * Erasure detaches a checkout from its party, its guest row and its buyer, so
+ * every party-scoped settlement path stops being able to see it. A ledger that
+ * survives but cannot be found is not much better than one that was deleted,
+ * so this sweeps detached rows that still owe money and refunds them directly.
+ *
+ * Rows with no Stripe pointer at all cannot be refunded from here and are
+ * reported for review rather than quietly skipped.
+ */
+export async function sweepDetachedCheckouts(limit = SETTLEMENT_BATCH): Promise<{ refunded: number; failed: number; needsReview: number }> {
+  const detached = await db.partyCheckout.findMany({
+    where: { partyId: null, ...unrefundedSale },
+    select: { id: true, stripePaymentIntentId: true, stripeSessionId: true },
+    take: limit,
+  });
+
+  let refunded = 0;
+  let failed = 0;
+  let needsReview = 0;
+  for (const checkout of detached) {
+    if (!checkout.stripePaymentIntentId && !checkout.stripeSessionId) {
+      // Money may have moved with no local pointer to reverse it. This needs a
+      // human against Stripe's own records; retrying here would never resolve.
+      console.error('[detached-ledger] unrefundable row with no Stripe pointer', { checkoutId: checkout.id });
+      captureError(new Error('Detached Party Checkout has no Stripe pointer to refund'), { checkoutId: checkout.id, scope: 'detached-ledger' });
+      needsReview += 1;
+      continue;
+    }
+    const outcome = await refundPartyCheckout(checkout.id);
+    if (outcome === 'refunded' || outcome === 'already-refunded') {
+      refunded += 1;
+    } else if (outcome === 'nothing-to-refund') {
+      await db.partyCheckout.updateMany({ where: { id: checkout.id, refundedAt: null }, data: { status: ABANDONED } });
+    } else {
+      failed += 1;
+    }
+  }
+
+  return { refunded, failed, needsReview };
 }

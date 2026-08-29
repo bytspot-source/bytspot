@@ -8,7 +8,6 @@ import {
   purgeExpiredAccounts,
   revokeSessions,
 } from './accountDeletion';
-import { owedCheckout } from './partyCheckoutSettlement';
 import { db } from '../lib/db';
 
 function fakeRedis(store = new Map<string, string>()) {

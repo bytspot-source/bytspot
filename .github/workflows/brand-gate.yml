@@ -1,0 +1,49 @@
+name: Brand Gate
+
+# The brand mark is drawn independently on nine surfaces across this repo and
+# bytspot-beta, because iOS cannot read the SVG (asset-catalog rendering drops
+# gradient fills in Release builds). Three of bytspot-beta's four surfaces had
+# silently fallen a revision behind the favicon before anything checked.
+#
+# API CI only triggers on .augment/bytspot-api/**, so the flyer and funnel
+# surfaces need their own trigger rather than a step bolted onto that workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.augment/flyers/**'
+      - '.augment/beta-funnel/**'
+      - 'contracts/brand-mark-geometry.json'
+      - 'scripts/assert-brand-mark-geometry.mjs'
+      - '.github/workflows/brand-gate.yml'
+  pull_request:
+    paths:
+      - '.augment/flyers/**'
+      - '.augment/beta-funnel/**'
+      - 'contracts/brand-mark-geometry.json'
+      - 'scripts/assert-brand-mark-geometry.mjs'
+      - '.github/workflows/brand-gate.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: brand-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  brand-mark-geometry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      # bytspot-beta is not checked out here, so its four surfaces are reported
+      # as SKIPPED and gated by its own Release Gate run.
+      - name: Brand mark geometry
+        run: node scripts/assert-brand-mark-geometry.mjs

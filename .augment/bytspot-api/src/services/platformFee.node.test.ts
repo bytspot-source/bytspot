@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clampFeeBps, effectiveFeeBps, MAX_FEE_BPS, splitTicketAmount } from './platformFee';
+import { clampFeeBps, effectiveFeeBps, MAX_FEE_BPS, splitTicketAmount, splitTicketWithProcessing } from './platformFee';
 
 test('a party keeps the rate it was published with when the market rate moves', () => {
   // Host published at 10%, Bytspot later moved the market rate to 25%.
@@ -39,4 +39,24 @@ test('rounding never favours the platform over the host', () => {
 
 test('a zero fee leaves the whole ticket with the host', () => {
   assert.deepEqual(splitTicketAmount(5_000, 0), { feeCents: 0, hostNetCents: 5_000 });
+});
+
+test('The application fee covers Stripe so 1.5% is what the platform actually keeps', () => {
+  // A $25 ticket at 150 bps: Stripe bills the platform 2.9% + 30c for a
+  // destination charge, so collecting only the 37c platform fee would lose 66c
+  // on the sale.
+  const split = splitTicketWithProcessing(2500, 150);
+  assert.equal(split.platformFeeCents, 37);
+  assert.equal(split.processingCents, 103);
+  assert.equal(split.applicationFeeCents, 140);
+  assert.equal(split.hostNetCents, 2360);
+  // What Bytspot is left with after Stripe takes its cut of the application fee.
+  assert.equal(split.applicationFeeCents - split.processingCents, split.platformFeeCents);
+});
+
+test('A ticket too small to cover processing never transfers more than the charge', () => {
+  const split = splitTicketWithProcessing(20, 150);
+  assert.equal(split.applicationFeeCents, 20);
+  assert.equal(split.hostNetCents, 0);
+  assert.ok(split.applicationFeeCents + split.hostNetCents === 20);
 });

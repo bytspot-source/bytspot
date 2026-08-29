@@ -69,7 +69,9 @@ beforeEach(() => {
   partyCheckout.update = async () => ({ id: 'checkout-1' });
   partyCheckout.updateMany = async () => ({ count: 0 });
   venue.findUnique = async () => null;
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
+  // sale gates do not reach for Stripe in tests.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
   (config as any).stripeSecretKey = '';
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
@@ -275,7 +277,9 @@ test('Party handoff derives its destination from the bound venue and enforces pr
     id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },
   });
   partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
+  // sale gates do not reach for Stripe in tests.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
   await assert.rejects(() => caller().events.arrival.handoff({ partyId: 'party-1', provider: 'uber' }), { code: 'FORBIDDEN' });
 
   user.findUnique = async () => ({ membershipTier: 'black' });
@@ -476,7 +480,9 @@ test('Expired paid-ticket share link still reports already-confirmed to a ticket
   // Dedicated user: protected procedures rate-limit per user, and earlier
   // checkout tests consume test-user-id's party-ticket-checkout budget.
   const expiredCaller = () => createCaller({ user: { userId: 'expired-link-user', email: 'expired@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
+  // sale gates do not reach for Stripe in tests.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
 
   // Without a confirmed pass the expired link is a 404, not a checkout error.
   partyGuest.findUnique = async () => null;
@@ -695,7 +701,9 @@ test('A host holds a confirmed pass to their own party regardless of tier or acc
     ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 20, requiredMembershipTier: 'platinum' }],
   });
   partyGuest.findUnique = async () => null;
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
+  // sale gates do not reach for Stripe in tests.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
 
   const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
   assert.equal(pass.action, 'view-pass');
@@ -710,7 +718,9 @@ test('A non-host on the same party is still gated by membership tier', async () 
     endsAt: null, shareLinkExpiresAt: null, arrivalVenueId: 'venue-1', ticketTiers: [],
   });
   partyGuest.findUnique = async () => null;
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
+  // sale gates do not reach for Stripe in tests.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
 
   const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
   assert.equal(pass.action, 'unavailable');
@@ -724,7 +734,9 @@ test('A host still reaches their own party after the share link expires', async 
     shareLinkExpiresAt: null, ticketTiers: [],
   };
   partyGuest.findUnique = async () => null;
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  // Default: a payout-ready host whose readiness Stripe confirmed just now, so
+  // sale gates do not reach for Stripe in tests.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_host', stripeChargesEnabled: true, stripePayoutsEnabled: true, stripeAccountRefreshedAt: new Date() });
 
   party.findFirst = async () => ({ ...expired, hostUserId: 'someone-else' });
   await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
@@ -865,4 +877,47 @@ test('Invite coordinates require a public venue and a real arrival Venue', async
     assert.equal(hidden.latitude, null, `${disclosure} must not leak latitude`);
     assert.equal(hidden.longitude, null, `${disclosure} must not leak longitude`);
   }
+});
+
+test('A paid party cannot publish until Stripe will pay the host', async () => {
+  const paidDraft = { ...partyDraft, accessMode: 'paid-ticket' };
+  party.findFirst = async () => paidDraft;
+
+  // No connected account at all.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: null, stripeChargesEnabled: false, stripePayoutsEnabled: false, stripeAccountRefreshedAt: null });
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'Set up payouts before publishing a paid party.',
+  });
+
+  // Onboarding started but Stripe will not pay out yet: charges alone would
+  // sell tickets for money the host can never withdraw.
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: false, stripeAccountRefreshedAt: new Date() });
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'Finish your payout setup before publishing a paid party.',
+  });
+
+  // A free party moves no money and is never gated on payouts.
+  party.findFirst = async () => ({ ...partyDraft, accessMode: 'free-rsvp' });
+  user.findUnique = async () => ({ membershipTier: 'green', stripeAccountId: null, stripeChargesEnabled: false, stripePayoutsEnabled: false, stripeAccountRefreshedAt: null });
+  const published = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.equal(published.id, 'party-1');
+});
+
+test('Ticket checkout refuses the sale when the host can no longer be paid', async () => {
+  (config as any).stripeSecretKey = 'test-only-key';
+  const paidParty = {
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, ...linkAlive,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  };
+  // Published while payout-ready, then Stripe disabled the account mid-sale.
+  party.findFirst = async () => ({ ...paidParty, hostUserId: 'host-user', host: { name: 'Host' } });
+  user.findUnique = async ({ where }: any) => (where.id === 'host-user'
+    ? { stripeAccountId: 'acct_1', stripeChargesEnabled: true, stripePayoutsEnabled: false, stripeAccountRefreshedAt: new Date() }
+    : { membershipTier: 'green' });
+  partyCheckout.findFirst = async () => null;
+  partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data, amountCents: 2500, ticketTierName: 'First Drop', status: 'creating', checkoutUrl: null });
+  const disabledCaller = () => createCaller({ user: { userId: 'payout-user', email: 'payout@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  await assert.rejects(() => disabledCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), {
+    code: 'PRECONDITION_FAILED', message: 'This Party cannot take payments right now.',
+  });
 });

@@ -5,6 +5,8 @@ import { db } from '../lib/db';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services/partyAlerts';
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
+import { applyAccountUpdate } from '../services/hostPayouts';
+import { refundPartyCheckout } from '../services/partyRefunds';
 
 const partyStripeWebhookRouter = Router();
 
@@ -52,6 +54,7 @@ function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: stri
 }
 
 export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Session, checkoutId: string, partyId: string, userId: string, paymentOccurredAt: Date): Promise<void> {
+  let refundNeeded = false;
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
   if (!checkout) throw new Error('Party Checkout reservation was not found.');
   const expectedTier = metadataValue(session.metadata, 'ticketTierName');
@@ -61,7 +64,14 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
 
   const granted = await db.$transaction(async (tx) => {
     const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
-    if (!current || current.status === 'completed' || current.status === 'refund-required') return false;
+    if (!current || current.status === 'completed') return false;
+    if (current.status === 'refund-required') {
+      // A redelivery of a refund that never went through. The refund call is
+      // keyed per checkout, so re-entering it cannot double-refund, and
+      // leaving it un-attempted would owe a guest money indefinitely.
+      refundNeeded = !current.refundedAt && Boolean(current.stripePaymentIntentId || current.stripeSessionId);
+      return false;
+    }
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
     const [guest, party, user] = await Promise.all([
       tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
@@ -73,18 +83,37 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
       && meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement);
     const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible;
+    // Checkout Sessions have no PaymentIntent until they are paid, so this is
+    // the first and only moment the charge can be recorded. Without it a
+    // refund has nothing to reverse.
+    const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
     const updated = await tx.partyCheckout.updateMany({
       where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
-      data: { stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt },
+      data: {
+        stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt,
+        ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+      },
     });
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {
       await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+      refundNeeded = true;
       return false;
     }
     await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
     return true;
   });
+
+  // The guest paid for a pass they did not get, so the money goes back rather
+  // than sitting behind a status only staff can see. Outside the transaction:
+  // a Stripe call must not be able to roll back the record of the charge.
+  if (refundNeeded) {
+    const outcome = await refundPartyCheckout(checkoutId);
+    // Ask Stripe to deliver again rather than acknowledging a refund that did
+    // not happen. The record of the charge is already committed, so the retry
+    // resumes at the redelivery branch above.
+    if (outcome === 'failed') throw new Error('Party Checkout refund could not be completed.');
+  }
 
   // Courtesy signal to the host, after the money and the pass are both settled.
   // Never inside the transaction: a push must not be able to roll back a ticket.
@@ -124,6 +153,16 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   } catch (error) {
     console.error('[subscription-webhook] membership transition failed', error);
     res.status(500).json({ error: 'Membership transition will be retried.' });
+    return;
+  }
+
+  // Connect account transitions are claimed before the Party cast for the same
+  // reason as subscriptions: the object is not a Checkout Session. Keeping the
+  // mirror current is what lets a host see an accurate payout status; the sale
+  // gates re-read Stripe regardless, so a missed delivery cannot open a sale.
+  if (event.type === 'account.updated') {
+    await applyAccountUpdate(event.data.object as Stripe.Account);
+    res.json({ received: true });
     return;
   }
 

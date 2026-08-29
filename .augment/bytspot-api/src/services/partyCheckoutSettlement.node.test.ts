@@ -56,6 +56,22 @@ test('A session Stripe reports paid is reconciled, never abandoned', async () =>
   assert.equal(updated, false);
 });
 
+test('An expired session Stripe will not call unpaid is left blocking', async () => {
+  let updated = false;
+  checkout.updateMany = async () => { updated = true; return { count: 1 }; };
+
+  // Expiry alone is not proof no money moved. Only the explicit pair — expired
+  // and unpaid — retires a row, so a discount, a free trial or a delayed
+  // method that leaves another payment_status keeps the ledger.
+  for (const paymentStatus of ['paid', 'no_payment_required', undefined]) {
+    await settlePartyCheckoutsForDeletion('party-1', {
+      checkout: { sessions: { retrieve: async () => ({ status: 'expired', payment_status: paymentStatus }) as any } },
+    });
+  }
+
+  assert.equal(updated, false);
+});
+
 test('A session Stripe cannot be reached about is left blocking the delete', async () => {
   let updated = false;
   checkout.updateMany = async () => { updated = true; return { count: 1 }; };

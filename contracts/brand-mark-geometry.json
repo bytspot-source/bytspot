@@ -7,6 +7,8 @@
     "middleRingRadius": 38,
     "middleRingStroke": 2,
     "hexPath": "M60 32 L74 41 L74 59 L60 68 L46 59 L46 41 Z",
+    "orientation": "pointy-top",
+    "$orientationComment": "Vertex at top and bottom, vertical left and right edges. A written description of the icon once called this flat-top; the icon and every surface are pointy-top, and that was confirmed as intended. No separate check is needed: flat-top would be 36x28, which hexWidth/hexHeight already reject.",
     "hexWidth": 28,
     "hexHeight": 36,
     "hexBorderStroke": 1.5,

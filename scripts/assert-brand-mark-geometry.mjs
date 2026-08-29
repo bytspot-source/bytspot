@@ -41,7 +41,7 @@ function gradientRoles(src) {
       if (stroke && radius === G.outerRingRadius) roles[stroke[1]] = 'outerRing';
       if (stroke && radius === G.middleRingRadius) roles[stroke[1]] = 'middleRing';
     }
-    if (d && d[1].trim() === G.hexPath) {
+    if (d && new RegExp(/d="(M[\d.]+ [\d.]+(?: L[\d.]+ [\d.]+){5} Z)"/.source.replace(/^d="|"$/g, '') + '$').test(`${d[1].trim()}`)) {
       if (fill) roles[fill[1]] = 'hexFill';
       if (stroke) roles[stroke[1]] = 'hexBorder';
     }
@@ -84,7 +84,7 @@ function hexBounds(hexPath) {
 
 function checkSvg(surface, file) {
   const src = fs.readFileSync(file, 'utf8');
-  const paths = [...src.matchAll(/d="(M60[^"]+Z)"/g)].map((m) => m[1]);
+  const paths = [...src.matchAll(/d="(M[\d.]+ [\d.]+(?: L[\d.]+ [\d.]+){5} Z)"/g)].map((m) => m[1]);
   if (paths.length !== 2) {
     fail(surface, `expected 2 hexagon paths (fill + border), found ${paths.length}`);
     return;

@@ -1,5 +1,6 @@
 import type Redis from 'ioredis';
 import { db } from '../lib/db';
+import { owedCheckout } from './partyCheckoutSettlement';
 import { getRedis } from '../lib/redis';
 
 /**
@@ -86,20 +87,38 @@ export async function isSessionRevoked(userId: string, redis: Redis | null = get
 
 /**
  * Irreversibly remove accounts whose grace period has elapsed. Returns the
- * number of rows purged so the cron response is observable.
+ * number of rows purged, and the number held back, so the cron response is
+ * observable.
+ *
+ * A purge cascades away party checkouts — as buyer and as host — so an account
+ * with money still owed is skipped rather than purged: deleting the row would
+ * not settle the obligation, only destroy the record of it. These need an
+ * operator to finish the refund, after which the next run purges them.
  */
-export async function purgeExpiredAccounts(now = new Date()): Promise<{ purged: number }> {
+export async function purgeExpiredAccounts(now = new Date()): Promise<{ purged: number; heldForOwedMoney: number }> {
   const due = await db.user.findMany({
     where: { deletedAt: { not: null }, purgeAfter: { lte: now } },
     select: { id: true },
   });
-  if (due.length === 0) return { purged: 0 };
+  if (due.length === 0) return { purged: 0, heldForOwedMoney: 0 };
 
+  let purged = 0;
+  let heldForOwedMoney = 0;
   for (const { id } of due) {
+    const owed = await db.partyCheckout.findFirst({
+      where: { AND: [{ OR: [{ userId: id }, { party: { hostUserId: id } }] }, owedCheckout] },
+      select: { id: true },
+    });
+    if (owed) {
+      console.warn('[account-purge] held back: party payment still unsettled', { userId: id, checkoutId: owed.id });
+      heldForOwedMoney += 1;
+      continue;
+    }
     // Relations cascade at the schema level; identity hashes are removed first
     // so a purged member can never resurface in contact discovery.
     await db.userIdentityHash.deleteMany({ where: { userId: id } });
     await db.user.delete({ where: { id } });
+    purged += 1;
   }
-  return { purged: due.length };
+  return { purged, heldForOwedMoney };
 }

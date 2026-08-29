@@ -202,7 +202,7 @@ test('Party webhook makes an out-of-order paid event for an expired reservation 
 
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date(Date.now() - 120_000));
 
-  assert.deepEqual(checkoutUpdate.where.status.in, ['creating', 'pending', 'expired']);
+  assert.deepEqual(checkoutUpdate.where.status.in, ['creating', 'pending', 'expired', 'abandoned']);
   assert.equal(checkoutUpdate.data.status, 'refund-required');
 });
 

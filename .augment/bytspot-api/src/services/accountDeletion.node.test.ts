@@ -5,8 +5,11 @@ import {
   isSessionRevoked,
   isWithinGracePeriod,
   purgeDateFrom,
+  purgeExpiredAccounts,
   revokeSessions,
 } from './accountDeletion';
+import { owedCheckout } from './partyCheckoutSettlement';
+import { db } from '../lib/db';
 
 function fakeRedis(store = new Map<string, string>()) {
   return {
@@ -53,4 +56,35 @@ test('a failing Redis fails open rather than denying every request', async () =>
   } as any;
   await revokeSessions('usr_gone', broken);
   assert.equal(await isSessionRevoked('usr_gone', broken), false);
+});
+
+test('A purge is held back while a party payment is still unsettled', async () => {
+  const user = (db.user as any);
+  const checkout = (db.partyCheckout as any);
+  const identityHash = (db.userIdentityHash as any);
+  const deleted: string[] = [];
+
+  user.findMany = async () => [{ id: 'user-owed' }, { id: 'user-clear' }];
+  user.delete = async ({ where }: any) => { deleted.push(where.id); return {}; };
+  identityHash.deleteMany = async () => ({ count: 0 });
+
+  // The guard must look at the member as buyer and as host: a purge cascades
+  // both their own checkouts and every checkout of parties they host.
+  let askedFor: any;
+  checkout.findFirst = async ({ where }: any) => {
+    askedFor = where;
+    const subjects = where.AND[0].OR;
+    return subjects.some((clause: any) => clause.userId === 'user-owed' || clause.party?.hostUserId === 'user-owed')
+      ? { id: 'checkout-owed' }
+      : null;
+  };
+
+  const result = await purgeExpiredAccounts(new Date());
+
+  // Only the account with nothing owed is purged; the other survives so the
+  // refund it owes can still be identified and settled.
+  assert.deepEqual(deleted, ['user-clear']);
+  assert.deepEqual(result, { purged: 1, heldForOwedMoney: 1 });
+  assert.deepEqual(askedFor.AND[0].OR, [{ userId: 'user-clear' }, { party: { hostUserId: 'user-clear' } }]);
+  assert.deepEqual(askedFor.AND[1], owedCheckout);
 });

@@ -16,8 +16,8 @@ async function main(): Promise<void> {
   const { purgeExpiredAccounts } = await import('../services/accountDeletion');
   const { initErrorTracking } = await import('../lib/observability');
   initErrorTracking();
-  const { purged } = await purgeExpiredAccounts();
-  console.log(`[purge-accounts] purged ${purged} account(s)`);
+  const { purged, heldForOwedMoney } = await purgeExpiredAccounts();
+  console.log(`[purge-accounts] purged ${purged} account(s), held ${heldForOwedMoney} with an unsettled payment`);
 }
 
 async function disconnect(): Promise<void> {

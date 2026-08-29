@@ -7,6 +7,7 @@ import { config } from '../config';
 import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitTicketWithProcessing } from '../services/platformFee';
 import { saleablePayoutAccount } from '../services/hostPayouts';
+import { settlePartyCheckoutsForDeletion, unsettledCheckout } from '../services/partyCheckoutSettlement';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
@@ -311,23 +312,19 @@ export const partyDraftsRouter = router({
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
       const committedGuests = { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] };
-      const activeCheckouts = {
-        OR: [
-          { status: 'completed' },
-          { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: new Date() } },
-          // An owed refund is money in motion. Deleting the party cascades the
-          // checkout away, and with it the only local pointer to the charge a
-          // redelivered webhook would refund from, stranding a guest who paid.
-          { status: 'refund-required', refundedAt: null },
-        ],
-      };
+      // Deleting the party cascades its checkouts away, and with them the only
+      // local pointer to the Stripe charge a redelivered webhook would settle
+      // or refund from. Ask Stripe about anything that might still be holding
+      // money first, then refuse the delete for whatever remains unsettled.
+      await settlePartyCheckoutsForDeletion(party.id);
+      const activeCheckouts = unsettledCheckout;
       if (party.status === 'published') {
         const [committedGuest, activeCheckout] = await Promise.all([
           db.partyGuest.findFirst({ where: { partyId: party.id, ...committedGuests }, select: { id: true } }),
           db.partyCheckout.findFirst({ where: { partyId: party.id, ...activeCheckouts }, select: { id: true } }),
         ]);
         if (committedGuest || activeCheckout) {
-          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests, or a refund still owed, and can no longer be deleted.' });
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests, or a payment still unsettled, and can no longer be deleted.' });
         }
       }
       // Guard against a guest paying between the check and the delete: the
@@ -342,7 +339,7 @@ export const partyDraftsRouter = router({
         },
       });
       if (deleted.count === 0) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests, or a refund still owed, and can no longer be deleted.' });
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Party has ticketed, checked-in, or mid-checkout guests, or a payment still unsettled, and can no longer be deleted.' });
       }
       return { success: true };
     }),

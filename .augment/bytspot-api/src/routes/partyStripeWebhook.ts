@@ -88,7 +88,10 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     // refund has nothing to reverse.
     const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null;
     const updated = await tx.partyCheckout.updateMany({
-      where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
+      // `abandoned` is only set after Stripe reports the session expired and
+      // unpaid, so a paid event for one should be impossible; accepted anyway
+      // rather than letting the update miss and retry forever.
+      where: { id: current.id, status: { in: ['creating', 'pending', 'expired', 'abandoned'] } },
       data: {
         stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt,
         ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),

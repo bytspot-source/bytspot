@@ -68,6 +68,7 @@ beforeEach(() => {
   partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', ...data });
   partyCheckout.findUnique = async () => null;
   partyCheckout.findFirst = async () => null;
+  partyCheckout.findMany = async () => [];
   partyCheckout.count = async () => 0;
   partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data });
   partyCheckout.update = async () => ({ id: 'checkout-1' });
@@ -134,30 +135,35 @@ test('Party deletion is host-only, allows drafts, and refuses committed guests',
   assert.equal(deleteWhere.hostUserId, 'test-user-id');
   assert.deepEqual(deleteWhere.guests, { none: { OR: [{ status: 'ticketed' }, { checkedInAt: { not: null } }] } });
   assert.deepEqual(deleteWhere.checkouts.none.OR[0], { status: 'completed' });
-  assert.deepEqual(deleteWhere.checkouts.none.OR[1].status, { in: ['creating', 'pending'] });
-  // An owed refund must be in the atomic guard, not only the pre-check: the
-  // checkout row is the only local pointer to the charge to refund from.
-  assert.deepEqual(deleteWhere.checkouts.none.OR[2], { status: 'refund-required', refundedAt: null });
+  // Unsettled money must be in the atomic guard, not only the pre-check: the
+  // checkout row is the only local pointer to the Stripe charge. An owed
+  // refund, and any session that could still be paid, both have to block.
+  assert.deepEqual(deleteWhere.checkouts.none.OR[1], { status: 'refund-required', refundedAt: null });
+  assert.deepEqual(deleteWhere.checkouts.none.OR[2], {
+    status: { in: ['creating', 'pending', 'expired'] }, stripeSessionId: { not: null }, refundedAt: null,
+  });
 
   // Published party with a ticketed guest is refused before any delete.
   party.findFirst = async () => ({ ...partyDraft, status: 'published' });
   partyGuest.findFirst = async () => ({ id: 'guest-1' });
   await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
 
-  // Published party with an in-flight Stripe checkout (unpaid, unexpired
-  // reservation) is refused so the webhook can still reconcile/refund.
+  // Published party with an in-flight Stripe checkout is refused so the
+  // webhook can still reconcile or refund it.
   partyGuest.findFirst = async () => null;
   partyCheckout.findFirst = async () => ({ id: 'checkout-1' });
   await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
 
-  // A guest who paid into a party that cannot admit them is owed a refund.
-  // Deleting the party would cascade the checkout away and strand them, so it
-  // is refused until the refund lands.
-  partyCheckout.findFirst = async (args: any) => {
-    const owed = args?.where?.OR?.some((clause: any) => clause.status === 'refund-required' && clause.refundedAt === null);
-    return owed ? { id: 'checkout-owed-refund' } : null;
-  };
-  await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
+  // A guest who paid into a party that cannot admit them is owed a refund, and
+  // a hold that timed out locally can still be paid by Stripe. Both hold the
+  // only pointer to the charge, so both refuse the delete.
+  for (const unsettled of [
+    (c: any) => c.status === 'refund-required' && c.refundedAt === null,
+    (c: any) => c.stripeSessionId?.not === null && c.refundedAt === null,
+  ]) {
+    partyCheckout.findFirst = async (args: any) => (args?.where?.OR?.some(unsettled) ? { id: 'checkout-unsettled' } : null);
+    await assert.rejects(() => caller().events.drafts.delete({ partyId: 'party-1' }), { code: 'CONFLICT' });
+  }
 
   // Race guard: guest commits or checkout opens between the check and the delete.
   partyCheckout.findFirst = async () => null;

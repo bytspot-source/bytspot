@@ -62,5 +62,28 @@
       "file": "bytspot-beta/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png",
       "reason": "Flat 1024px raster, so it cannot be text-extracted. Measured against this contract and matching: gem 28x36 with 9.5 units of rise, opaque, no alpha. Re-measure it by colour bbox if the geometry ever changes, since no gate covers it."
     }
-  ]
+  ],
+  "colours": {
+    "$comment": "Measured off the 1024px app icon, which is the design of record: the rings and the gem are flat, not gradients. The code carried cyan->purple->cyan on the outer ring and purple->magenta on the gem, which the icon does not have.",
+    "outerRing": "#00BFFF",
+    "middleRing": "#A855F7",
+    "middleRingOpacity": 0.4,
+    "hexFill": "#A855F7",
+    "hexBorder": "#20A9FB",
+    "dotCore": "#00BFFF",
+    "dotEdge": "#0099CC",
+    "swiftTokens": {
+      "outerRing": "cyan",
+      "middleRing": "purple",
+      "hexFill": "purple",
+      "hexBorder": "azure"
+    },
+    "retired": {
+      "$comment": "Removed from the mark only. The wordmark lockup on the flyers and the print sheet still runs cyan->purple->magenta by design, so these are not forbidden file-wide.",
+      "colours": [
+        "#D946EF",
+        "#FF00FF"
+      ]
+    }
+  }
 }

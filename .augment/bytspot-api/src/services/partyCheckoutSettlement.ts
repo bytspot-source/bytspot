@@ -198,24 +198,24 @@ export async function refundHostedPartiesForPurge(hostUserId: string): Promise<{
  * reported for review rather than quietly skipped.
  */
 export async function sweepDetachedCheckouts(limit = SETTLEMENT_BATCH): Promise<{ refunded: number; failed: number; needsReview: number }> {
-  const detached = await db.partyCheckout.findMany({
-    where: { partyId: null, ...unrefundedSale },
-    select: { id: true, stripePaymentIntentId: true, stripeSessionId: true },
+  // Rows that can actually be reversed are taken first and in a fixed order.
+  // A single query would let a backlog of unrefundable rows occupy the whole
+  // capped batch on every run, so money that could have been returned would
+  // wait behind money that never can be.
+  const refundable = await db.partyCheckout.findMany({
+    where: {
+      partyId: null,
+      ...unrefundedSale,
+      OR: [{ stripePaymentIntentId: { not: null } }, { stripeSessionId: { not: null } }],
+    },
+    select: { id: true },
+    orderBy: { createdAt: 'asc' },
     take: limit,
   });
 
   let refunded = 0;
   let failed = 0;
-  let needsReview = 0;
-  for (const checkout of detached) {
-    if (!checkout.stripePaymentIntentId && !checkout.stripeSessionId) {
-      // Money may have moved with no local pointer to reverse it. This needs a
-      // human against Stripe's own records; retrying here would never resolve.
-      console.error('[detached-ledger] unrefundable row with no Stripe pointer', { checkoutId: checkout.id });
-      captureError(new Error('Detached Party Checkout has no Stripe pointer to refund'), { checkoutId: checkout.id, scope: 'detached-ledger' });
-      needsReview += 1;
-      continue;
-    }
+  for (const checkout of refundable) {
     const outcome = await refundPartyCheckout(checkout.id);
     if (outcome === 'refunded' || outcome === 'already-refunded') {
       refunded += 1;
@@ -226,5 +226,26 @@ export async function sweepDetachedCheckouts(limit = SETTLEMENT_BATCH): Promise<
     }
   }
 
-  return { refunded, failed, needsReview };
+  // No local pointer means money may have moved with nothing here to reverse
+  // it. Retrying can never resolve that, so each row is marked once for a human
+  // against Stripe's own records and then stops competing for the batch. The
+  // status is left alone: this is not proof that no money moved.
+  const unrefundable = await db.partyCheckout.findMany({
+    where: { partyId: null, ...unrefundedSale, stripePaymentIntentId: null, stripeSessionId: null, reviewRequiredAt: null },
+    select: { id: true },
+    orderBy: { createdAt: 'asc' },
+    take: limit,
+  });
+  for (const checkout of unrefundable) {
+    console.error('[detached-ledger] unrefundable row with no Stripe pointer', { checkoutId: checkout.id });
+    captureError(new Error('Detached Party Checkout has no Stripe pointer to refund'), { checkoutId: checkout.id, scope: 'detached-ledger' });
+  }
+  if (unrefundable.length > 0) {
+    await db.partyCheckout.updateMany({
+      where: { id: { in: unrefundable.map((row) => row.id) } },
+      data: { reviewRequiredAt: new Date() },
+    });
+  }
+
+  return { refunded, failed, needsReview: unrefundable.length };
 }

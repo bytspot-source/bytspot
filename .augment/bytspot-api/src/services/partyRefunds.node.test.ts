@@ -69,3 +69,17 @@ test('A destination-charge refund claws back the host transfer and gives up the 
   // Bytspot keeps no fee on a refunded sale.
   assert.deepEqual(refundArgs, { payment_intent: 'pi_2', reverse_transfer: true, refund_application_fee: true });
 });
+
+test('An unconfigured refund is recorded as a failed attempt, not a silent skip', async () => {
+  const checkout = db.partyCheckout as any;
+  let update: any;
+  checkout.findUnique = async () => ({ id: 'checkout-1', stripePaymentIntentId: 'pi_1', stripeSessionId: null, destinationAccountId: null, refundedAt: null, status: 'completed' });
+  checkout.update = async (args: any) => { update = args; return {}; };
+  (config as any).stripeSecretKey = '';
+
+  // The scheduled purge job used to run without Stripe, so every refund failed
+  // here and left no trace: the row stayed owed and the attempt was invisible.
+  assert.equal(await refundPartyCheckout('checkout-1'), 'failed');
+  assert.deepEqual(update.data.refundAttempts, { increment: 1 });
+  assert.ok(update.data.lastRefundFailureAt instanceof Date);
+});

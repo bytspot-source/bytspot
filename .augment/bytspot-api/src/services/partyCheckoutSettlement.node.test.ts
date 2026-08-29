@@ -211,16 +211,36 @@ test('A live reservation with no session recorded still blocks a delete', async 
 });
 
 test('The detached sweep refunds orphaned sales and escalates the unrefundable', async () => {
-  checkout.findMany = async ({ where }: any) => (where.partyId === null
-    ? [{ id: 'with-pointer', stripePaymentIntentId: 'pi_1', stripeSessionId: null },
-       { id: 'no-pointer', stripePaymentIntentId: null, stripeSessionId: null }]
-    : []);
+  const queries: any[] = [];
+  let marked: any;
+  checkout.findMany = async ({ where, orderBy }: any) => {
+    queries.push({ where, orderBy });
+    if (where.OR) return [{ id: 'with-pointer' }];
+    return [{ id: 'no-pointer' }];
+  };
   checkout.findUnique = async () => ({ id: 'with-pointer', stripePaymentIntentId: 'pi_1', stripeSessionId: null, destinationAccountId: null, refundedAt: new Date(), status: 'completed' });
-  checkout.updateMany = async () => ({ count: 1 });
+  checkout.updateMany = async (args: any) => { marked = args; return { count: 1 }; };
 
   const result = await sweepDetachedCheckouts();
 
-  // A row with a Stripe pointer can still be reversed. One without cannot be
-  // resolved by retrying, so it is escalated rather than counted as handled.
   assert.deepEqual(result, { refunded: 1, failed: 0, needsReview: 1 });
+  // Refundable rows are asked for first and in a fixed order, so a backlog of
+  // rows that can never be reversed cannot fill the capped batch and starve
+  // money that could have been returned.
+  assert.deepEqual(queries[0].orderBy, { createdAt: 'asc' });
+  assert.equal(Array.isArray(queries[0].where.OR), true);
+  // The unrefundable row is marked for review, which takes it out of the batch
+  // without claiming its money never moved.
+  assert.equal(queries[1].where.reviewRequiredAt, null);
+  assert.ok(marked.data.reviewRequiredAt instanceof Date);
+  assert.equal(marked.data.status, undefined);
+});
+
+test('An unrefundable row is marked once and stops competing for the batch', async () => {
+  // Second run: the marker is part of the query, so a row already escalated is
+  // not selected again and the next refundable row gets the slot.
+  checkout.findMany = async ({ where }: any) => (where.reviewRequiredAt === null ? [] : []);
+  checkout.updateMany = async () => ({ count: 1 });
+
+  assert.deepEqual(await sweepDetachedCheckouts(), { refunded: 0, failed: 0, needsReview: 0 });
 });

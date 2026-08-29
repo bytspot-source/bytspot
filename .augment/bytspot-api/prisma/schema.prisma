@@ -335,6 +335,10 @@ model PartyCheckout {
   /// attempt count and the last failure are kept on the row itself.
   refundAttempts        Int       @default(0) @map("refund_attempts")
   lastRefundFailureAt   DateTime? @map("last_refund_failure_at")
+  /// Stamped when a row cannot be refunded automatically and needs a human
+  /// against Stripe's own records. Keeps the row out of the automatic batch so
+  /// it cannot starve rows that are still refundable, while staying queryable.
+  reviewRequiredAt      DateTime? @map("review_required_at")
   currency              String   @default("usd")
   status                String   @default("creating")
   reservationExpiresAt  DateTime @map("reservation_expires_at")

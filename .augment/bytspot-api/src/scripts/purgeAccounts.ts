@@ -14,10 +14,25 @@ process.env.BYTSPOT_RUNTIME = 'job';
 
 async function main(): Promise<void> {
   const { purgeExpiredAccounts } = await import('../services/accountDeletion');
+  const { sweepDetachedCheckouts } = await import('../services/partyCheckoutSettlement');
   const { initErrorTracking } = await import('../lib/observability');
+  const { config } = await import('../config');
   initErrorTracking();
+
+  // Purging a host refunds their ticket sales first, so a run without Stripe
+  // cannot settle anything: every refund would fail and every account would be
+  // held. Refusing to start is the honest outcome, because a "successful" run
+  // that returned nobody's money is worse than a visibly failed one.
+  if (!config.stripeSecretKey) throw new Error('Purge job cannot settle refunds without STRIPE_SECRET_KEY.');
+
   const { purged, heldForOwedMoney } = await purgeExpiredAccounts();
   console.log(`[purge-accounts] purged ${purged} account(s), held ${heldForOwedMoney} with an unsettled payment`);
+
+  // Runs in the same process as the purge that detaches these rows. The HTTP
+  // route is not what the schedule calls, so leaving the sweep only there
+  // meant it never ran in production.
+  const detached = await sweepDetachedCheckouts();
+  console.log(`[purge-accounts] detached ledger: refunded ${detached.refunded}, failed ${detached.failed}, needs review ${detached.needsReview}`);
 }
 
 async function disconnect(): Promise<void> {

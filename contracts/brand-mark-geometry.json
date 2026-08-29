@@ -60,7 +60,7 @@
   "unGated": [
     {
       "file": "bytspot-beta/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png",
-      "reason": "Flat 1024px raster. Cannot be text-extracted, so it must be re-rendered whenever the geometry changes."
+      "reason": "Flat 1024px raster, so it cannot be text-extracted. Measured against this contract and matching: gem 28x36 with 9.5 units of rise, opaque, no alpha. Re-measure it by colour bbox if the geometry ever changes, since no gate covers it."
     }
   ]
 }

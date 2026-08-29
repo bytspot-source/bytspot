@@ -56,12 +56,12 @@
   <!-- Middle ring -->
   <circle class="middle-ring" cx="60" cy="60" r="38" fill="none" stroke="url(#gradient-middle)"/>
   <!-- Hexagon fill -->
-  <path d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="url(#gradient-hexagon)"/>
+  <path d="M60 32 L74 41 L74 59 L60 68 L46 59 L46 41 Z" fill="url(#gradient-hexagon)"/>
   <!-- Hexagon border -->
-  <path class="hex-border" d="M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z" fill="none" stroke="url(#gradient-hex-border)"/>
+  <path class="hex-border" d="M60 32 L74 41 L74 59 L60 68 L46 59 L46 41 Z" fill="none" stroke="url(#gradient-hex-border)"/>
   <!-- Center glow -->
-  <circle class="glow" cx="60" cy="60" r="12" fill="url(#gradient-center-glow)"/>
+  <circle class="glow" cx="60" cy="50" r="12" fill="url(#gradient-center-glow)"/>
   <!-- Center dot -->
-  <circle class="dot" cx="60" cy="60" r="8" fill="url(#gradient-center-dot)"/>
+  <circle class="dot" cx="60" cy="50" r="8" fill="url(#gradient-center-dot)"/>
 </svg>
 

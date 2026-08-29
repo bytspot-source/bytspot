@@ -1,38 +1,66 @@
 {
-  "$comment": "Canonical Bytspot brand mark geometry, in the shared 120-unit viewBox. The mark is drawn independently on nine surfaces across two repos because iOS cannot read the SVG (asset-catalog rendering drops gradient fills in Release builds), so drift is structural rather than accidental. Both repos vendor this file byte-identically and gate against it: bytspot-beta/scripts/assert-brand-mark-geometry.mjs and bytspot/scripts/assert-brand-mark-geometry.mjs. Edit the geometry here, copy to the other repo, and both gates fail until every surface is updated.",
+  "$comment": "Canonical Bytspot brand mark geometry, in the shared 120-unit viewBox. The mark is drawn independently on nine surfaces across two repos because iOS cannot read the SVG (asset-catalog rendering drops gradient fills in Release builds), so drift is structural rather than accidental. Geometry matches the supplied reference render of the landing screen. Both repos vendor this file byte-identically and gate against it: bytspot-beta/scripts/assert-brand-mark-geometry.mjs and bytspot/scripts/assert-brand-mark-geometry.mjs. Edit the geometry here, copy to the other repo, and both gates fail until every surface is updated.",
   "viewBox": 120,
   "geometry": {
     "outerRingRadius": 48,
     "outerRingStroke": 3,
     "middleRingRadius": 38,
     "middleRingStroke": 2,
-    "hexPath": "M60 30 L86 45 L86 75 L60 90 L34 75 L34 45 Z",
-    "hexWidth": 52,
-    "hexHeight": 60,
+    "hexPath": "M60 32 L74 41 L74 59 L60 68 L46 59 L46 41 Z",
+    "hexWidth": 28,
+    "hexHeight": 36,
     "hexBorderStroke": 1.5,
     "dotRadius": 8,
     "glowRadius": 12,
-    "concentric": true
+    "concentric": false,
+    "gemCentreY": 50
   },
   "surfaces": {
     "bytspot-beta": [
-      { "file": "public/favicon.svg", "kind": "svg" },
-      { "file": "src/components/BrandLogo.tsx", "kind": "svg" },
-      { "file": "src/components/PrintableMarketingAssets.tsx", "kind": "svg" },
-      { "file": "ios/App/App/BytspotNativeAppRoot.swift", "kind": "swift" }
+      {
+        "file": "public/favicon.svg",
+        "kind": "svg"
+      },
+      {
+        "file": "src/components/BrandLogo.tsx",
+        "kind": "svg"
+      },
+      {
+        "file": "src/components/PrintableMarketingAssets.tsx",
+        "kind": "svg"
+      },
+      {
+        "file": "ios/App/App/BytspotNativeAppRoot.swift",
+        "kind": "swift"
+      }
     ],
     "bytspot": [
-      { "file": ".augment/flyers/favicon.svg", "kind": "svg" },
-      { "file": ".augment/flyers/flyer.html", "kind": "svg" },
-      { "file": ".augment/beta-funnel/public/favicon.svg", "kind": "svg" },
-      { "file": ".augment/beta-funnel/public/banner-3x3-vibecheck.html", "kind": "svg" },
-      { "file": ".augment/beta-funnel/public/car-banner-vibecheck.html", "kind": "svg" }
+      {
+        "file": ".augment/flyers/favicon.svg",
+        "kind": "svg"
+      },
+      {
+        "file": ".augment/flyers/flyer.html",
+        "kind": "svg"
+      },
+      {
+        "file": ".augment/beta-funnel/public/favicon.svg",
+        "kind": "svg"
+      },
+      {
+        "file": ".augment/beta-funnel/public/banner-3x3-vibecheck.html",
+        "kind": "svg"
+      },
+      {
+        "file": ".augment/beta-funnel/public/car-banner-vibecheck.html",
+        "kind": "svg"
+      }
     ]
   },
   "unGated": [
     {
       "file": "bytspot-beta/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png",
-      "reason": "Flat 1024px raster. Cannot be text-extracted, so it must be re-rendered from the revised SVG whenever the geometry changes."
+      "reason": "Flat 1024px raster. Cannot be text-extracted, so it must be re-rendered whenever the geometry changes."
     }
   ]
 }

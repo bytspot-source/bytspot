@@ -22,6 +22,9 @@ const CONTRACT = 'contracts/brand-mark-geometry.json';
 const contract = JSON.parse(fs.readFileSync(CONTRACT, 'utf8'));
 const G = contract.geometry;
 const CENTRE = contract.viewBox / 2;
+// The gem, its dot and its glow ride above the rings' centre; the rings do not.
+const GEM_CENTRE_Y = G.concentric ? CENTRE : G.gemCentreY;
+const GEM_OFFSET = CENTRE - GEM_CENTRE_Y;
 
 const failures = [];
 const notes = [];
@@ -57,16 +60,15 @@ function checkSvg(surface, file) {
     if (bounds.width !== G.hexWidth || bounds.height !== G.hexHeight) {
       fail(surface, `hexagon is ${bounds.width}x${bounds.height}, canonical is ${G.hexWidth}x${G.hexHeight}`);
     }
-    const centre = CENTRE;
-    if (G.concentric && (bounds.centreX !== centre || bounds.centreY !== centre)) {
-      fail(surface, `hexagon centre is (${bounds.centreX}, ${bounds.centreY}), canonical is concentric at (${centre}, ${centre})`);
+    if (bounds.centreX !== CENTRE || bounds.centreY !== GEM_CENTRE_Y) {
+      fail(surface, `hexagon centre is (${bounds.centreX}, ${bounds.centreY}), canonical is (${CENTRE}, ${GEM_CENTRE_Y})`);
     }
   }
   // The dot and its glow ride with the gem, so they must be concentric too.
   for (const [name, radius] of [['dot', G.dotRadius], ['glow', G.glowRadius]]) {
     const match = src.match(new RegExp(`cx="60"\\s+cy="(\\d+)"\\s+r="${radius}"`));
     if (!match) fail(surface, `no r="${radius}" ${name} circle at cx="60"`);
-    else if (Number(match[1]) !== CENTRE) fail(surface, `${name} is at cy="${match[1]}", canonical is concentric at cy="${CENTRE}"`);
+    else if (Number(match[1]) !== GEM_CENTRE_Y) fail(surface, `${name} is at cy="${match[1]}", canonical is cy="${GEM_CENTRE_Y}" with the gem`);
   }
   for (const [name, radius] of [['outer ring', G.outerRingRadius], ['middle ring', G.middleRingRadius]]) {
     if (!new RegExp(`r="${radius}"`).test(src)) fail(surface, `no ${name} at r="${radius}"`);
@@ -100,8 +102,16 @@ function checkSwift(surface, file) {
     if (actual === null) fail(surface, `could not read ${name}`);
     else if (actual !== expected) fail(surface, `${name} is ${actual}/120, canonical is ${expected}/120`);
   }
-  if (G.concentric && /\.offset\(y: -?size \* \([\d.]+ \/ 120\.0\)\)/.test(mark)) {
-    fail(surface, 'a mark layer still carries a vertical offset; canonical geometry is concentric');
+  const offsets = [...mark.matchAll(/\.offset\(y: (-?)size \* \(([\d.]+) \/ 120\.0\)\)/g)]
+    .map((m) => (m[1] === '-' ? -Number(m[2]) : Number(m[2])));
+  if (GEM_OFFSET === 0) {
+    if (offsets.length) fail(surface, 'a mark layer carries a vertical offset; canonical geometry is concentric');
+  } else {
+    // Gem, glow and dot each carry it; a layer left behind is the drift to catch.
+    if (offsets.length !== 3) fail(surface, `expected 3 offset gem layers (hexagon, glow, dot), found ${offsets.length}`);
+    for (const actual of offsets) {
+      if (actual !== -GEM_OFFSET) fail(surface, `gem layer offset is ${actual}/120, canonical is ${-GEM_OFFSET}/120`);
+    }
   }
 }
 

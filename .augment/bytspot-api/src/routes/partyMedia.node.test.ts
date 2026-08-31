@@ -16,7 +16,7 @@ function mediaRow(status: string) {
   };
 }
 
-async function get(): Promise<{ status: number; corp: string | null }> {
+async function get(): Promise<{ status: number; corp: string | null; contentType: string | null; body: Buffer }> {
   const app = express();
   // Mirrors src/index.ts, where the default helmet policy applies to this route.
   app.use(helmet());
@@ -26,8 +26,13 @@ async function get(): Promise<{ status: number; corp: string | null }> {
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/media/parties/media-1`);
-    await res.arrayBuffer();
-    return { status: res.status, corp: res.headers.get('cross-origin-resource-policy') };
+    const body = Buffer.from(await res.arrayBuffer());
+    return {
+      status: res.status,
+      corp: res.headers.get('cross-origin-resource-policy'),
+      contentType: res.headers.get('content-type'),
+      body,
+    };
   } finally {
     server.close();
   }
@@ -44,6 +49,18 @@ test('published party media is readable cross-origin', async () => {
   const res = await get();
   assert.equal(res.status, 200);
   assert.equal(res.corp, 'cross-origin');
+});
+
+// Prisma 6 hands back a Uint8Array for a Bytes column, not a Buffer. Express
+// only recognises a real Buffer as a binary body, so the raw column value was
+// serialised as `{"0":255,"1":216,...}` — a 12x larger payload that no image
+// decoder accepts, which is why every published cover rendered broken.
+test('party media is served as raw binary, not a JSON-serialised byte map', async () => {
+  partyMedia.findUnique = async () => ({ ...mediaRow('published'), bytes: new Uint8Array(pngBytes) });
+  const res = await get();
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, pngBytes);
+  assert.equal(res.contentType, 'image/png');
 });
 
 test('draft media stays same-origin', async () => {

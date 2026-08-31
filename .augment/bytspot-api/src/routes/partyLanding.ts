@@ -229,7 +229,9 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
   try {
     party = await db.party.findFirst({
       where: { id: partyId, status: 'published' },
-      include: { host: { select: { name: true } }, media: { where: { kind: 'cover' }, take: 1 } },
+      // Only the media id is needed to build the cover URL. Selecting the row
+      // wholesale would stream the image binary out of Postgres on every open.
+      include: { host: { select: { name: true } }, media: { where: { kind: 'cover' }, take: 1, select: { id: true } } },
     });
   } catch (err) {
     // A database outage is not "this party does not exist". Telling a guest the

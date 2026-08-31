@@ -154,6 +154,44 @@ test('Party draft creation accepts iOS standard templates and Black tier', async
   }));
 });
 
+test('Party draft creation enforces the Host Studio taxonomy instead of trusting its tags', async () => {
+  // Dedicated user: party-draft-create allows 10 calls per user per minute and
+  // the shared test user's budget is spent by the drafts tests above.
+  const taxonomyCaller = () => createCaller({ user: { userId: 'taxonomy-user', email: 'taxonomy@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+
+  // Nightlife runs a venue door, so a paid club night is accepted.
+  await assert.doesNotReject(() => taxonomyCaller().events.drafts.create({
+    ...draftInput, templateId: 'pop-up', accessMode: 'paid-ticket',
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 80, requiredMembershipTier: 'green' as const }],
+    templateConfig: { kind: 'pop-up' as const, locationDisclosure: 'public', hostCategory: 'nightlife', hostType: 'club', hostFormat: 'lounge', hostAge: '21-plus' },
+  }));
+
+  // A house party is approval-only, and its category tag must match.
+  await assert.rejects(() => taxonomyCaller().events.drafts.create({
+    ...draftInput, templateId: 'private-party', accessMode: 'private-approval',
+    templateConfig: { kind: 'private-party' as const, guestPolicy: 'named-guests', hostCategory: 'nightlife', hostType: 'house' },
+  }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => taxonomyCaller().events.drafts.create({
+    ...draftInput, templateId: 'pop-up', accessMode: 'free-rsvp',
+    templateConfig: { kind: 'pop-up' as const, locationDisclosure: 'public', hostCategory: 'party', hostType: 'house' },
+  }), { code: 'BAD_REQUEST' });
+
+  // Unknown tags are rejected rather than stored.
+  for (const config of [
+    { hostCategory: 'nightlife', hostType: 'warehouse-rave' },
+    { hostCategory: 'nightlife', hostType: 'club', hostFormat: 'submarine' },
+    { hostCategory: 'nightlife', hostType: 'club', hostAge: '30-plus' },
+  ]) {
+    await assert.rejects(() => taxonomyCaller().events.drafts.create({
+      ...draftInput, templateId: 'pop-up',
+      templateConfig: { kind: 'pop-up' as const, locationDisclosure: 'public', ...config },
+    }), { code: 'BAD_REQUEST' });
+  }
+
+  // Untagged drafts stay valid: the taxonomy is additive, not required.
+  await assert.doesNotReject(() => taxonomyCaller().events.drafts.create(draftInput));
+});
+
 test('Party draft creation accepts withheld locations and rejects insecure official destinations', async () => {
   await assert.doesNotReject(() => caller().events.drafts.create({
     ...draftInput, locationDisclosure: 'withheld', templateId: 'comedy-night', templateConfig: { kind: 'standard' },

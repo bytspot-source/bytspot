@@ -224,6 +224,25 @@ test('Party webhook refunds a checkout paid after the host closed the room', asy
   assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
 });
 
+test('Party webhook refunds a checkout paid in the same second the host closed the room', async () => {
+  const closedAt = new Date('2026-08-31T12:00:00.700Z');
+  const paymentOccurredAt = new Date('2026-08-31T12:00:00.000Z');
+  party.findUnique = async () => ({
+    requiredMembershipTier: 'black',
+    ticketTiers: [{ name: 'First Drop', requiredMembershipTier: 'black' }],
+    closedAt,
+  });
+  let checkoutUpdate: any;
+  let guestUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1' }; };
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', paymentOccurredAt);
+
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+  assert.deepEqual(guestUpdate.data, { status: 'refund-required', accessGranted: false });
+});
+
 test('Party webhook still grants a payment that occurred before close when the webhook is delayed', async () => {
   const closedAt = new Date();
   const paymentOccurredAt = new Date(closedAt.getTime() - 60_000);

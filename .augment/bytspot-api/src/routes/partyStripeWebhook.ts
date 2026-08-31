@@ -75,7 +75,14 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     // A delayed webhook for a payment that happened before close still grants
     // the pass. A payment that completed after closedAt is a new arrival and
     // must not confirm — the host closed the room.
-    const paidAfterClose = Boolean(party?.closedAt && paymentOccurredAt.getTime() >= party.closedAt.getTime());
+    // Stripe event.created is second-granularity; closedAt is milliseconds.
+    // Same-second payments cannot be ordered, so they refund: a close at
+    // 12:00:00.700 and a checkout at 12:00:00.800 would otherwise look like
+    // the payment happened first.
+    const paidAfterClose = Boolean(
+      party?.closedAt
+      && Math.floor(paymentOccurredAt.getTime() / 1000) >= Math.floor(party.closedAt.getTime() / 1000),
+    );
     const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible || paidAfterClose;
     const updated = await tx.partyCheckout.updateMany({
       where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },

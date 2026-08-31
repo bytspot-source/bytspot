@@ -65,14 +65,18 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
     const [guest, party, user] = await Promise.all([
       tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
-      tx.party.findUnique({ where: { id: current.partyId }, select: { requiredMembershipTier: true, ticketTiers: true } }),
+      tx.party.findUnique({ where: { id: current.partyId }, select: { requiredMembershipTier: true, ticketTiers: true, closedAt: true } }),
       tx.user.findUnique({ where: { id: current.userId }, select: { membershipTier: true } }),
     ]);
     if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
     const ticketTierRequirement = ticketRequiredMembershipTier(party?.ticketTiers, current.ticketTierName);
     const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
       && meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement);
-    const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible;
+    // A delayed webhook for a payment that happened before close still grants
+    // the pass. A payment that completed after closedAt is a new arrival and
+    // must not confirm — the host closed the room.
+    const paidAfterClose = Boolean(party?.closedAt && paymentOccurredAt.getTime() >= party.closedAt.getTime());
+    const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible || paidAfterClose;
     const updated = await tx.partyCheckout.updateMany({
       where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
       data: { stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt },

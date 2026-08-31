@@ -412,6 +412,36 @@ test('Party media upload rejects unsupported, mislabeled, and non-owner content'
   await assert.rejects(() => caller().events.media.reset({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
 });
 
+// A heavily compressed 4K frame still fits the 600 KB ceiling, which is how a
+// 3840x2160 cover reached production. Dimensions are checked independently.
+test('Party media upload rejects oversized dimensions and accepts in-range ones', async () => {
+  const png = (width: number, height: number) => {
+    const bytes = Buffer.alloc(24);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+    bytes.write('IHDR', 12, 'ascii');
+    bytes.writeUInt32BE(width, 16);
+    bytes.writeUInt32BE(height, 20);
+    return `data:image/png;base64,${bytes.toString('base64')}`;
+  };
+
+  party.findFirst = async () => partyDraft;
+  partyMedia.upsert = async () => ({ id: 'media-1' });
+
+  await assert.rejects(() => caller().events.media.upload({
+    partyId: 'party-1', kind: 'cover', dataUri: png(8000, 6000),
+  }), { code: 'BAD_REQUEST' });
+
+  assert.deepEqual(await caller().events.media.upload({
+    partyId: 'party-1', kind: 'cover', dataUri: png(1600, 900),
+  }), { url: 'https://bytspot-api.onrender.com/media/parties/media-1' });
+
+  // A JPEG whose frame header is never reached must not be rejected outright;
+  // the byte ceiling stays the only limit for anything we cannot measure.
+  assert.deepEqual(await caller().events.media.upload({
+    partyId: 'party-1', kind: 'cover', dataUri: 'data:image/jpeg;base64,/9j/',
+  }), { url: 'https://bytspot-api.onrender.com/media/parties/media-1' });
+});
+
 test('Party publishing atomically produces one allowed share link and pass code', async () => {
   party.findFirst = async () => partyDraft;
   let updateWhere: any;

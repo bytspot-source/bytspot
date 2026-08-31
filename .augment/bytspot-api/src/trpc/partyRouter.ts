@@ -14,6 +14,7 @@ import { handoffUrl } from './mobilityRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
 const maxMediaBytes = 600_000;
+const maxMediaPixels = 4_096;
 const maxAlbumImages = 6;
 const partyKinds = ['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up'] as const;
 const templateConfigKinds = [...partyKinds, 'standard'] as const;
@@ -261,7 +262,50 @@ function parseImageDataUri(dataUri: string): { bytes: Buffer; mimeType: string }
   if (bytes.toString('base64') !== match[2] || !hasImageSignature(bytes, match[1])) {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'Party media bytes do not match the declared image type.' });
   }
+  // The byte ceiling alone let a 3840x2160 cover through, because a heavily
+  // compressed 4K frame still fits in 600 KB. Clients target 1600px; this is a
+  // generous backstop so the invariant does not depend on the client alone.
+  const dimensions = imageDimensions(bytes, match[1]);
+  if (dimensions && Math.max(dimensions.width, dimensions.height) > maxMediaPixels) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: `Party media must be no larger than ${maxMediaPixels}px on its long edge.` });
+  }
   return { bytes, mimeType: match[1] };
+}
+
+/**
+ * Reads intrinsic dimensions from an image header. Returns null when the format
+ * is one we cannot measure cheaply (animated or extended WebP), in which case
+ * the byte ceiling remains the only limit rather than rejecting a valid upload.
+ */
+function imageDimensions(bytes: Buffer, mimeType: string): { width: number; height: number } | null {
+  if (mimeType === 'image/png') {
+    return bytes.length >= 24 ? { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) } : null;
+  }
+  if (mimeType === 'image/jpeg') {
+    // Walk the segment chain to the frame header; SOF0-SOF15 carry the size,
+    // excluding the four marker codes that are not frame headers.
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) return null;
+      const marker = bytes[offset + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
+      }
+      if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd9)) { offset += 2; continue; }
+      offset += 2 + bytes.readUInt16BE(offset + 2);
+    }
+    return null;
+  }
+  // Lossy and lossless WebP keep the size in the first chunk; VP8X does not.
+  const chunk = bytes.length >= 16 ? bytes.toString('ascii', 12, 16) : '';
+  if (chunk === 'VP8 ' && bytes.length >= 30) {
+    return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+  }
+  if (chunk === 'VP8L' && bytes.length >= 25) {
+    const header = bytes.readUInt32LE(21);
+    return { width: (header & 0x3fff) + 1, height: ((header >> 14) & 0x3fff) + 1 };
+  }
+  return null;
 }
 
 function hasImageSignature(bytes: Buffer, mimeType: string): boolean {

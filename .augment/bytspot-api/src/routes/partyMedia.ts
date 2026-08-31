@@ -30,8 +30,13 @@ partyMediaRouter.get('/media/parties/:mediaId', async (req, res) => {
   const published = media.party.status === 'published';
   if (!owner && !published) return res.status(404).json({ error: 'Not found' });
 
+  // Prisma 6 returns a Bytes column as Uint8Array, and Express only treats a
+  // real Buffer as a binary body — a Uint8Array falls through to res.json()
+  // and ships `{"0":255,"1":216,...}`, which no image decoder accepts.
+  const bytes = Buffer.from(media.bytes);
+
   res.setHeader('Content-Type', media.mimeType);
-  res.setHeader('Content-Length', String(media.byteSize));
+  res.setHeader('Content-Length', String(bytes.length));
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', published ? 'public, max-age=86400' : 'private, no-store');
   // The share page is served on the share domain and cover art on the API
@@ -42,7 +47,7 @@ partyMediaRouter.get('/media/parties/:mediaId', async (req, res) => {
   // Only published media is relaxed. Draft media is owner-only via an
   // Authorization header, which an <img> cannot send, so it stays same-origin.
   if (published) res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-  return res.status(200).send(media.bytes);
+  return res.status(200).send(bytes);
 });
 
 export default partyMediaRouter;

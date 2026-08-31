@@ -550,7 +550,7 @@ async function publishedParty(partyId: string) {
     where: { id: partyId, status: 'published' },
     include: {
       host: { select: { name: true } },
-      media: { orderBy: { position: 'asc' } },
+      media: { orderBy: { position: 'asc' }, select: { id: true, kind: true } },
       arrivalVenue: { select: { id: true, name: true, lat: true, lng: true } },
     },
   });

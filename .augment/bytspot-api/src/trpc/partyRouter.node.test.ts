@@ -552,7 +552,7 @@ test('Host share-link expiry override wins and setShareLinkExpiry validates its 
   const result = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: future.toISOString() });
   assert.equal(result.shareLinkExpiresAt, future.toISOString());
   assert.equal(result.shareLinkExpiryIsDefault, false);
-  assert.deepEqual(updateArgs.where, { id: 'party-1', hostUserId: 'test-user-id', status: 'published' });
+  assert.deepEqual(updateArgs.where, { id: 'party-1', hostUserId: 'test-user-id', status: 'published', closedAt: null });
   assert.deepEqual(updateArgs.data, { shareLinkExpiresAt: future });
 
   await assert.rejects(
@@ -563,6 +563,67 @@ test('Host share-link expiry override wins and setShareLinkExpiry validates its 
   // Null restores the default policy (dies at party end).
   const restored = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: null });
   assert.equal(restored.shareLinkExpiryIsDefault, true);
+});
+
+test('Closed rooms 404 unconfirmed arrivals even if the share link was extended, but host and confirmed guests still resolve', async () => {
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const closedParty = {
+    id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 40, arrivalVenueId: null,
+    title: 'Closed Set', tagline: 'Done.', templateId: 'pop-up', venueName: 'Somewhere', locationDisclosure: 'public',
+    itinerary: [], ticketTiers: [], hostDestinations: null, host: { name: 'Host' }, media: [],
+    startsAt: future, endsAt: future, shareLinkExpiresAt: future, closedAt: new Date(), hostUserId: 'host-user',
+  };
+  party.findFirst = async () => closedParty;
+  partyGuest.findUnique = async () => null;
+
+  await assert.rejects(() => caller().events.pass.resolve({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'NOT_FOUND' });
+
+  const closedTicketed = {
+    ...closedParty,
+    accessMode: 'paid-ticket',
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  };
+  party.findFirst = async () => closedTicketed;
+  const closedCaller = () => createCaller({ user: { userId: 'closed-link-user', email: 'closed@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  await assert.rejects(() => closedCaller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'NOT_FOUND' });
+
+  party.findFirst = async () => closedParty;
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  const pass = await caller().events.pass.resolve({ partyId: 'party-1' });
+  assert.equal(pass.action, 'view-pass');
+  assert.equal(pass.guest.accessGranted, true);
+
+  partyGuest.findUnique = async () => null;
+  const hostCaller = createCaller({ user: { userId: 'host-user', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-party-host' });
+  const hostPass = await hostCaller.events.pass.resolve({ partyId: 'party-1' });
+  assert.equal(hostPass.action, 'view-pass');
+  assert.equal(hostPass.guest.accessGranted, true);
+});
+
+test('setShareLinkExpiry refuses a closed room and works again after reopen', async () => {
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const openParty = {
+    id: 'party-1', hostUserId: 'test-user-id', status: 'published',
+    startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
+    shareLinkExpiresAt: null, closedAt: null,
+  };
+  party.findFirst = async () => ({ ...openParty, closedAt: new Date() });
+  let wrote = false;
+  party.updateMany = async () => { wrote = true; return { count: 1 }; };
+  await assert.rejects(
+    () => caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: future.toISOString() }),
+    { code: 'BAD_REQUEST' },
+  );
+  assert.equal(wrote, false);
+
+  await caller().events.control.reopen({ partyId: 'party-1' });
+  party.findFirst = async () => openParty;
+  wrote = false;
+  const result = await caller().events.control.setShareLinkExpiry({ partyId: 'party-1', expiresAt: future.toISOString() });
+  assert.equal(result.shareLinkExpiresAt, future.toISOString());
+  assert.equal(wrote, true);
 });
 
 test('Official Host identity lives on the host profile: handle + ordered destinations', async () => {

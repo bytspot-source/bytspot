@@ -21,6 +21,55 @@ const accessModes = ['free-rsvp', 'paid-ticket', 'private-approval'] as const;
 const tiers = ['green', 'platinum', 'black'] as const;
 const hostRoles = ['cohost', 'door', 'finance'] as const;
 const locationDisclosures = ['public', 'after-approval', 'withheld'] as const;
+const hostFormats = ['rooftop', 'house', 'pool', 'lounge', 'patio', 'room', 'garage', 'cafe', 'theater'] as const;
+const hostAgeRules = ['all-ages', '18-plus', '21-plus'] as const;
+
+/**
+ * Host Studio taxonomy. The client sends hostCategory/hostType as tags on the
+ * template config, and the door a type may open is a product rule, not a
+ * client preference — so it is enforced here too. Mirrors
+ * `NativeHostType.catalog` in NativeHostTaxonomy.swift; the parity test in
+ * partyRouter.node.test.ts pins the shape, but a Swift-side rename still has
+ * to be made here by hand.
+ */
+const approvalOnlyDoors = ['private-approval'] as const;
+const publicDoors = ['free-rsvp', 'paid-ticket', 'private-approval'] as const;
+const hostTypeCatalog: Record<string, { category: string; doors: readonly string[] }> = {
+  house: { category: 'party', doors: approvalOnlyDoors },
+  'rooftop-party': { category: 'party', doors: approvalOnlyDoors },
+  pool: { category: 'party', doors: approvalOnlyDoors },
+  birthday: { category: 'party', doors: approvalOnlyDoors },
+  afrobeats: { category: 'nightlife', doors: publicDoors },
+  club: { category: 'nightlife', doors: publicDoors },
+  lounge: { category: 'nightlife', doors: publicDoors },
+  'after-hours': { category: 'nightlife', doors: publicDoors },
+  listening: { category: 'music', doors: publicDoors },
+  release: { category: 'music', doors: publicDoors },
+  showcase: { category: 'music', doors: publicDoors },
+  'live-set': { category: 'music', doors: publicDoors },
+  'watch-party': { category: 'sports', doors: publicDoors },
+  tailgate: { category: 'sports', doors: publicDoors },
+  'game-night': { category: 'sports', doors: publicDoors },
+  dinner: { category: 'food-drink', doors: publicDoors },
+  brunch: { category: 'food-drink', doors: publicDoors },
+  'pop-up-table': { category: 'food-drink', doors: publicDoors },
+  meetup: { category: 'social', doors: publicDoors },
+  networking: { category: 'social', doors: publicDoors },
+  'fan-meetup': { category: 'social', doors: publicDoors },
+  premiere: { category: 'culture', doors: publicDoors },
+  comedy: { category: 'culture', doors: publicDoors },
+  'art-night': { category: 'culture', doors: publicDoors },
+  workshop: { category: 'culture', doors: publicDoors },
+  cruise: { category: 'cars', doors: publicDoors },
+  'garage-meet': { category: 'cars', doors: approvalOnlyDoors },
+  yoga: { category: 'outdoor', doors: publicDoors },
+  fitness: { category: 'outdoor', doors: publicDoors },
+  hike: { category: 'outdoor', doors: publicDoors },
+  market: { category: 'community', doors: publicDoors },
+  neighborhood: { category: 'community', doors: publicDoors },
+};
+export const hostTypeIds = Object.keys(hostTypeCatalog);
+export const hostCategoryIds = [...new Set(Object.values(hostTypeCatalog).map((entry) => entry.category))];
 const httpsUrl = z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Official destinations must use HTTPS.');
 const ticketTierInput = z.object({ name: z.string().trim().min(1).max(100), priceCents: z.number().int().min(0).max(10_000_000), quantity: z.number().int().min(1).max(10_000), requiredMembershipTier: z.enum(tiers) });
 const hostDestinationsInput = z.object({
@@ -142,6 +191,28 @@ const draftInput = z.object({
   }
   if (input.templateId === 'private-party' && input.accessMode !== 'private-approval') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'Private Parties require approval access.' });
+  }
+  // Taxonomy tags ride on the passthrough template config, so they are checked
+  // here rather than trusted. An unknown tag is rejected instead of stored.
+  const hostType = input.templateConfig.hostType;
+  const hostCategory = input.templateConfig.hostCategory;
+  if (hostType !== undefined || hostCategory !== undefined) {
+    const entry = typeof hostType === 'string' ? hostTypeCatalog[hostType] : undefined;
+    if (!entry) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['templateConfig', 'hostType'], message: 'Unknown Host Studio type.' });
+    } else if (hostCategory !== entry.category) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['templateConfig', 'hostCategory'], message: 'Host Studio type does not belong to that category.' });
+    } else if (!entry.doors.includes(input.accessMode)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'That Host Studio type cannot open this door.' });
+    }
+  }
+  const hostFormat = input.templateConfig.hostFormat;
+  if (hostFormat !== undefined && !(hostFormats as readonly unknown[]).includes(hostFormat)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['templateConfig', 'hostFormat'], message: 'Unknown Host Studio format.' });
+  }
+  const hostAge = input.templateConfig.hostAge;
+  if (hostAge !== undefined && !(hostAgeRules as readonly unknown[]).includes(hostAge)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['templateConfig', 'hostAge'], message: 'Unknown Host Studio age rule.' });
   }
   if (input.locationDisclosure === 'after-approval' && input.accessMode !== 'private-approval') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['accessMode'], message: 'Locations revealed after approval require approval access.' });

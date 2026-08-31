@@ -233,6 +233,11 @@ model Party {
   // default policy: the link dies when the party ends (endsAt, falling back
   // to startsAt + 6h when the host set no end time).
   shareLinkExpiresAt     DateTime?    @map("share_link_expires_at")
+  /// Set when the host closes the room. The party keeps `status = 'published'`
+  /// so confirmed guests keep their passes and the guest and payment records
+  /// that block deletion survive; closing only removes the room from the host
+  /// console and stops new arrivals.
+  closedAt               DateTime?    @map("closed_at")
   passCode               String?      @unique @map("pass_code")
   /// Platform fee in basis points, frozen at publish from the then-current
   /// PlatformFeeSetting. Null on drafts and on parties published before the

@@ -11,7 +11,7 @@ const guestContext: Context = { user: { userId: 'guest-user', email: 'guest@byts
 const credential = 'A'.repeat(43);
 const idempotencyKey = '00000000-0000-4000-8000-000000000011';
 const partyEndsAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
-const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null, passCode: 'BYT-EXISTING' };
+const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null, closedAt: null, passCode: 'BYT-EXISTING' };
 const party = db.party as any;
 const partyGuest = db.partyGuest as any;
 const user = db.user as any;
@@ -46,15 +46,17 @@ test('Hosted rooms list is authenticated and returns only this host\'s published
   let listedWhere: any;
   party.findMany = async ({ where, take }: any) => {
     listedWhere = where;
-    assert.equal(take, 50);
+    // Over-fetched so the closed and stale rooms filtered out in memory do
+    // not eat into the page the host actually sees.
+    assert.equal(take, 100);
     return [{
       id: 'party-1', title: 'First Listen', venueName: 'The Basement',
       startsAt: publishedParty.startsAt, endsAt: publishedParty.endsAt,
-      admissionPaused: false, shareLinkExpiresAt: null, passCode: 'BYT-EXISTING', capacity: 80,
+      admissionPaused: false, shareLinkExpiresAt: null, closedAt: null, passCode: 'BYT-EXISTING', capacity: 80,
     }];
   };
   const { parties } = await caller().events.control.hosted();
-  assert.deepEqual(listedWhere, { hostUserId: 'host-user', status: 'published' });
+  assert.deepEqual(listedWhere, { hostUserId: 'host-user', status: 'published', closedAt: null });
   assert.equal(parties.length, 1);
   assert.equal(parties[0].id, 'party-1');
   assert.equal(parties[0].title, 'First Listen');
@@ -63,6 +65,109 @@ test('Hosted rooms list is authenticated and returns only this host\'s published
   assert.equal(parties[0].shareLinkExpired, false);
   assert.equal(parties[0].shareUrl, 'https://bytspot.app/party/party-1');
   assert.equal(parties[0].passCode, 'BYT-EXISTING');
+  assert.equal(parties[0].closedAt, null);
+});
+
+const roomRow = (over: Record<string, unknown> = {}) => ({
+  id: 'party-1', title: 'First Listen', venueName: 'The Basement',
+  startsAt: publishedParty.startsAt, endsAt: partyEndsAt,
+  admissionPaused: false, shareLinkExpiresAt: null, closedAt: null,
+  passCode: 'BYT-EXISTING', capacity: 80, ...over,
+});
+
+test('Closing a room hides it from the console and expires the link without touching status', async () => {
+  const publicCaller = createCaller({ user: null, clientRateLimitKey: 'test-control-anon' });
+  await assert.rejects(() => publicCaller.events.control.close({ partyId: 'party-1' }), { code: 'UNAUTHORIZED' });
+
+  // A party this host does not own is indistinguishable from a missing one.
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller(guestContext).events.control.close({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  party.findFirst = async () => publishedParty;
+  let written: any;
+  party.updateMany = async ({ where, data }: any) => { written = { where, data }; return { count: 1 }; };
+  const closed = await caller().events.control.close({ partyId: 'party-1' });
+  assert.equal(closed.partyId, 'party-1');
+  assert.ok(closed.closedAt);
+  // Status is deliberately left alone: every other party query reads
+  // `published`, so a terminal status would revoke every confirmed pass.
+  assert.equal(written.data.status, undefined);
+  assert.equal(written.where.status, 'published');
+  assert.equal(written.where.closedAt, null);
+  assert.deepEqual(written.data.closedAt, written.data.shareLinkExpiresAt);
+  assert.ok(written.data.closedAt.getTime() <= Date.now());
+});
+
+test('Close is idempotent and a closed room moves to the closed list', async () => {
+  const closedAt = new Date(Date.now() - 60 * 60 * 1000);
+  party.findFirst = async () => ({ ...publishedParty, closedAt });
+  let updated = false;
+  party.updateMany = async () => { updated = true; return { count: 1 }; };
+  const again = await caller().events.control.close({ partyId: 'party-1' });
+  assert.equal(again.closedAt, closedAt.toISOString());
+  assert.equal(updated, false, 'closing an already-closed room must not write again');
+
+  party.findMany = async ({ where }: any) => (where.closedAt === null ? [] : [roomRow({ closedAt })]);
+  assert.deepEqual((await caller().events.control.hosted()).parties, []);
+  const closedList = (await caller().events.control.closedRooms()).parties;
+  assert.equal(closedList.length, 1);
+  assert.equal(closedList[0].closedAt, closedAt.toISOString());
+});
+
+test('A room whose link died over a day ago leaves the console without being closed', async () => {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const roomsFor = (where: any, openRows: any[]) => (where.closedAt === null ? openRows : []);
+  // Still visible while the link has been dead under a day, so a late-running
+  // party never vanishes mid-event.
+  party.findMany = async ({ where }: any) => roomsFor(where, [roomRow({ shareLinkExpiresAt: new Date(Date.now() - dayMs / 2) })]);
+  assert.equal((await caller().events.control.hosted()).parties.length, 1);
+  assert.deepEqual((await caller().events.control.closedRooms()).parties, []);
+
+  party.findMany = async ({ where }: any) => roomsFor(where, [roomRow({ shareLinkExpiresAt: new Date(Date.now() - dayMs - 60_000) })]);
+  assert.deepEqual((await caller().events.control.hosted()).parties, []);
+  const stale = (await caller().events.control.closedRooms()).parties;
+  assert.equal(stale.length, 1);
+  assert.equal(stale[0].closedAt, null, 'stale rooms are derived, never written');
+});
+
+test('Reopen clears the close and restores the default link policy', async () => {
+  party.findFirst = async () => ({ ...publishedParty, closedAt: new Date() });
+  let written: any;
+  party.updateMany = async ({ data, where }: any) => { written = { data, where }; return { count: 1 }; };
+  const reopened = await caller().events.control.reopen({ partyId: 'party-1' });
+  assert.equal(written.data.closedAt, null);
+  assert.equal(written.data.shareLinkExpiresAt, null, 'reopen restores the default, it does not mint a new window');
+  assert.deepEqual(written.where.closedAt, { not: null });
+  assert.equal(reopened.closedAt, null);
+  assert.equal(reopened.shareLinkExpiresAt, partyEndsAt.toISOString());
+
+  const publicCaller = createCaller({ user: null, clientRateLimitKey: 'test-control-anon' });
+  await assert.rejects(() => publicCaller.events.control.reopen({ partyId: 'party-1' }), { code: 'UNAUTHORIZED' });
+});
+
+test('Reopen on an already-open room does not clear a custom share-link expiry', async () => {
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  party.findFirst = async () => ({ ...publishedParty, closedAt: null, shareLinkExpiresAt: future });
+  let wrote = false;
+  party.updateMany = async () => { wrote = true; return { count: 1 }; };
+  const result = await caller().events.control.reopen({ partyId: 'party-1' });
+  assert.equal(wrote, false);
+  assert.equal(result.closedAt, null);
+  assert.equal(result.shareLinkExpiresAt, future.toISOString());
+  assert.equal(result.shareLinkExpired, false);
+});
+
+test('An older closed room still appears in closedRooms when 100 newer rooms are open', async () => {
+  const closedAt = new Date(Date.now() - 60 * 60 * 1000);
+  const olderClosed = roomRow({ id: 'party-old', closedAt, startsAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+  const openRooms = Array.from({ length: 100 }, (_, index) => roomRow({
+    id: `party-open-${index}`,
+    startsAt: new Date(Date.now() + (100 - index) * 60 * 60 * 1000),
+  }));
+  party.findMany = async ({ where }: any) => (where.closedAt === null ? openRooms : [olderClosed]);
+  const closedList = (await caller().events.control.closedRooms()).parties;
+  assert.equal(closedList.some((row) => row.id === 'party-old'), true);
+  assert.equal(closedList[0].id, 'party-old');
 });
 
 test('Party Control routes require authentication and host ownership', async () => {
@@ -89,7 +194,7 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
     partyId: 'party-1', title: 'First Listen', admissionPaused: false,
     capacity: 80, confirmed: 41, spacesRemaining: 39, pending: 6, checkedIn: 12,
     shareUrl: 'https://bytspot.app/party/party-1', passCode: 'BYT-EXISTING',
-    shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true,
+    shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true, closedAt: null,
   });
 
   // Missing pass codes stay null — Control retrieves the issued code, it never mints a new one.

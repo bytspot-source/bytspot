@@ -591,7 +591,7 @@ export function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsA
  * and the host keeps Party Control (both use host/guest-scoped procedures).
  */
 function assertShareLinkUsable(
-  party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date; hostUserId?: string },
+  party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date; hostUserId?: string; closedAt?: Date | null },
   guest: { accessGranted: boolean } | null,
   viewerUserId?: string | null,
 ): void {
@@ -599,7 +599,7 @@ function assertShareLinkUsable(
   // A host must always be able to open their own party, including after the
   // share link has stopped admitting new arrivals.
   if (viewerUserId && party.hostUserId && viewerUserId === party.hostUserId) return;
-  if (shareLinkExpired(party)) {
+  if (party.closedAt || shareLinkExpired(party)) {
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   }
 }
@@ -779,6 +779,50 @@ export const partyPassRouter = router({
  * Every procedure is host-only: the authenticated user must own the
  * published Party or the request fails closed with NOT_FOUND.
  */
+/**
+ * A room leaves the host console once it has been closed, or once its share
+ * link has been dead for a day. The stale rule is derived, never written: a
+ * host who never taps Close still gets a clean list, and no scheduled job or
+ * write-on-read is needed. A day of grace keeps a late-running party visible
+ * while it is still happening.
+ */
+const HOST_ROOM_STALE_MS = 24 * 60 * 60 * 1000;
+const HOST_ROOM_PAGE = 50;
+
+type HostRoomRow = {
+  id: string; title: string; venueName: string; startsAt: Date; endsAt: Date | null;
+  admissionPaused: boolean; shareLinkExpiresAt: Date | null; closedAt: Date | null;
+  passCode: string | null; capacity: number;
+};
+
+const hostRoomSelect = {
+  id: true, title: true, venueName: true, startsAt: true, endsAt: true,
+  admissionPaused: true, shareLinkExpiresAt: true, closedAt: true,
+  passCode: true, capacity: true,
+} as const;
+
+function hostRoomIsOpen(party: HostRoomRow): boolean {
+  if (party.closedAt) return false;
+  return shareLinkExpiry(party).getTime() > Date.now() - HOST_ROOM_STALE_MS;
+}
+
+function hostRoomView(party: HostRoomRow) {
+  return {
+    id: party.id,
+    title: party.title,
+    venueName: party.venueName,
+    startsAt: party.startsAt.toISOString(),
+    endsAt: party.endsAt?.toISOString() ?? null,
+    admissionPaused: party.admissionPaused,
+    shareUrl: partyShareUrl(party.id),
+    passCode: party.passCode ?? null,
+    shareLinkExpiresAt: shareLinkExpiry(party).toISOString(),
+    shareLinkExpired: shareLinkExpired(party),
+    closedAt: party.closedAt?.toISOString() ?? null,
+    capacity: party.capacity,
+  };
+}
+
 async function hostControlledParty(partyId: string, userId: string) {
   const party = await db.party.findFirst({ where: { id: partyId, hostUserId: userId, status: 'published' } });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
@@ -812,37 +856,94 @@ export const partyControlRouter = router({
 
   hosted: protectedProcedure.query(async ({ ctx }) => {
     const parties = await db.party.findMany({
-      where: { hostUserId: ctx.user.userId, status: 'published' },
+      where: { hostUserId: ctx.user.userId, status: 'published', closedAt: null },
       orderBy: [{ startsAt: 'desc' }],
-      take: 50,
-      select: {
-        id: true,
-        title: true,
-        venueName: true,
-        startsAt: true,
-        endsAt: true,
-        admissionPaused: true,
-        shareLinkExpiresAt: true,
-        passCode: true,
-        capacity: true,
-      },
+      take: HOST_ROOM_PAGE * 2,
+      select: hostRoomSelect,
     });
-    return {
-      parties: parties.map((party) => ({
-        id: party.id,
-        title: party.title,
-        venueName: party.venueName,
-        startsAt: party.startsAt.toISOString(),
-        endsAt: party.endsAt?.toISOString() ?? null,
-        admissionPaused: party.admissionPaused,
-        shareUrl: partyShareUrl(party.id),
-        passCode: party.passCode ?? null,
-        shareLinkExpiresAt: shareLinkExpiry(party).toISOString(),
-        shareLinkExpired: shareLinkExpired(party),
-        capacity: party.capacity,
-      })),
-    };
+    return { parties: parties.filter((party) => hostRoomIsOpen(party)).slice(0, HOST_ROOM_PAGE).map(hostRoomView) };
   }),
+
+  /**
+   * Rooms the host closed, plus rooms that fell off the console on their own.
+   * Closing never deletes: the guest list and payment records are exactly why
+   * a party with ticketed or checked-in guests cannot be deleted, so they stay
+   * reachable here.
+   */
+  closedRooms: protectedProcedure.query(async ({ ctx }) => {
+    const [closed, openCandidates] = await Promise.all([
+      db.party.findMany({
+        where: { hostUserId: ctx.user.userId, status: 'published', closedAt: { not: null } },
+        orderBy: [{ closedAt: 'desc' }],
+        take: HOST_ROOM_PAGE,
+        select: hostRoomSelect,
+      }),
+      db.party.findMany({
+        where: { hostUserId: ctx.user.userId, status: 'published', closedAt: null },
+        orderBy: [{ startsAt: 'desc' }],
+        take: HOST_ROOM_PAGE * 2,
+        select: hostRoomSelect,
+      }),
+    ]);
+    const seen = new Set(closed.map((party) => party.id));
+    const stale = openCandidates.filter((party) => !hostRoomIsOpen(party) && !seen.has(party.id));
+    return { parties: [...closed, ...stale].slice(0, HOST_ROOM_PAGE).map(hostRoomView) };
+  }),
+
+  /**
+   * Close a room. Two writes, both reversible: `closedAt` takes it off the
+   * host console, and expiring the share link stops new arrivals through the
+   * machinery that already exempts confirmed guests and the host. `status` is
+   * deliberately untouched — every other party query reads `published`, so a
+   * terminal status here would revoke every guest's pass.
+   */
+  close: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-close' }))
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      if (party.closedAt) return { partyId: party.id, closedAt: party.closedAt.toISOString() };
+      const closedAt = new Date();
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: null },
+        data: { closedAt, shareLinkExpiresAt: closedAt },
+      });
+      if (updated.count === 1) return { partyId: party.id, closedAt: closedAt.toISOString() };
+      const current = await hostControlledParty(input.partyId, ctx.user.userId);
+      if (current.closedAt) return { partyId: current.id, closedAt: current.closedAt.toISOString() };
+      throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+    }),
+
+  /**
+   * Undo a close. The share link returns to its default policy rather than a
+   * fresh window: reopening a party that already ended puts the room back on
+   * the console without silently re-admitting strangers. The host extends the
+   * link from the expiry control if they want new arrivals again.
+   */
+  reopen: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-close' }))
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      if (!party.closedAt) {
+        const effective = shareLinkExpiry(party);
+        return { partyId: party.id, closedAt: null, shareLinkExpiresAt: effective.toISOString(), shareLinkExpired: effective.getTime() <= Date.now() };
+      }
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: { not: null } },
+        data: { closedAt: null, shareLinkExpiresAt: null },
+      });
+      if (updated.count !== 1) {
+        const current = await hostControlledParty(input.partyId, ctx.user.userId);
+        if (!current.closedAt) {
+          const effective = shareLinkExpiry(current);
+          return { partyId: current.id, closedAt: null, shareLinkExpiresAt: effective.toISOString(), shareLinkExpired: effective.getTime() <= Date.now() };
+        }
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      }
+      const effective = shareLinkExpiry({ shareLinkExpiresAt: null, endsAt: party.endsAt, startsAt: party.startsAt });
+      return { partyId: party.id, closedAt: null, shareLinkExpiresAt: effective.toISOString(), shareLinkExpired: effective.getTime() <= Date.now() };
+    }),
 
   summary: protectedProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
@@ -867,6 +968,7 @@ export const partyControlRouter = router({
         shareLinkExpiresAt: shareLinkExpiry(party).toISOString(),
         shareLinkExpired: shareLinkExpired(party),
         shareLinkExpiryIsDefault: party.shareLinkExpiresAt === null,
+        closedAt: party.closedAt?.toISOString() ?? null,
       };
     }),
 
@@ -880,12 +982,15 @@ export const partyControlRouter = router({
     .input(z.object({ partyId: z.string().min(1).max(128), expiresAt: z.string().datetime().nullable() }))
     .mutation(async ({ ctx, input }) => {
       const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      if (party.closedAt) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Reopen this room before changing the share link expiry.' });
+      }
       const expiresAt = input.expiresAt === null ? null : new Date(input.expiresAt);
       if (expiresAt && expiresAt.getTime() <= Date.now()) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'The share link expiry must be in the future. To stop new arrivals now, pause admissions instead.' });
       }
       const updated = await db.party.updateMany({
-        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published' },
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: null },
         data: { shareLinkExpiresAt: expiresAt },
       });
       if (updated.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });

@@ -1051,9 +1051,9 @@ test('A recap reports the position of each photo, so a sparse album stays addres
 
   const recap = await caller().events.recap.get({ partyId: 'party-1' });
   assert.deepEqual(recap.photos, [
-    { position: 0, url: `${config.publicApiUrl}/media/parties/recap-1` },
-    { position: 2, url: `${config.publicApiUrl}/media/parties/recap-2` },
-    { position: 5, url: `${config.publicApiUrl}/media/parties/recap-4` },
+    { id: 'recap-1', position: 0, url: `${config.publicApiUrl}/media/parties/recap-1` },
+    { id: 'recap-2', position: 2, url: `${config.publicApiUrl}/media/parties/recap-2` },
+    { id: 'recap-4', position: 5, url: `${config.publicApiUrl}/media/parties/recap-4` },
   ]);
   // photoURLs stays the ordered list a reader wants, in the same order.
   assert.deepEqual(recap.photoURLs, recap.photos.map((photo) => photo.url));
@@ -1187,6 +1187,63 @@ test('A recap photo can always be taken down, whatever state the party is in', a
   assert.deepEqual(removed, { removed: true, remaining: 2, published: false });
   assert.deepEqual(deletedWhere, { partyId: 'party-1', kind: 'recap', position: 3 });
   assert.equal(unpublished, false);
+});
+
+test('A takedown names the photo, not the slot it happens to sit in', async () => {
+  // A slot is reused the moment a photo is removed, so a host acting on a stale
+  // album can ask for slot 2 and take down whatever replaced what they saw.
+  // Deleting a photograph of the wrong person is the failure this operation
+  // exists to prevent, so identity wins wherever the client can supply it.
+  let deletedWhere: any;
+  party.findFirst = async () => ({ id: 'party-1', recapPublishedAt: null, ...overParty });
+  partyMedia.deleteMany = async (input: any) => { deletedWhere = input.where; return { count: 1 }; };
+  partyMedia.count = async () => 1;
+
+  await caller().events.recap.remove({ partyId: 'party-1', mediaId: 'recap-7' });
+  // Scoped to this party's recap, so a media id belonging to another party or
+  // to the cover cannot be deleted through the recap door.
+  assert.deepEqual(deletedWhere, { id: 'recap-7', partyId: 'party-1', kind: 'recap' });
+
+  // Naming neither is refused rather than guessed at.
+  await assert.rejects(() => caller().events.recap.remove({ partyId: 'party-1' } as any), { name: 'TRPCError' });
+});
+
+test('An unslotted upload is allocated by the database, so two devices cannot claim one slot', async () => {
+  party.findFirst = async () => ({ id: 'party-1', ...overParty });
+  partyMedia.count = async () => 0;
+
+  // Both devices see the same album and would both compute slot 1. The unique
+  // index on (partyId, kind, position) decides it; the loser retries against
+  // the album as it actually is rather than overwriting the winner.
+  let existing = [{ position: 0 }];
+  let creates = 0;
+  partyMedia.findMany = async () => existing;
+  partyMedia.create = async (input: any) => {
+    creates += 1;
+    if (creates === 1) {
+      existing = [{ position: 0 }, { position: 1 }];
+      throw Object.assign(new Error('unique'), { code: 'P2002' });
+    }
+    return { id: 'recap-new', position: input.data.position };
+  };
+
+  const added = await caller().events.recap.upload({ partyId: 'party-1', dataUri: pngDataUri });
+  assert.equal(creates, 2);
+  assert.deepEqual(added, { id: 'recap-new', position: 2, url: `${config.publicApiUrl}/media/parties/recap-new` });
+
+  // A full album is a conflict, never a silent overwrite.
+  existing = Array.from({ length: 12 }, (_, position) => ({ position }));
+  await assert.rejects(() => caller().events.recap.upload({ partyId: 'party-1', dataUri: pngDataUri }), { code: 'CONFLICT' });
+});
+
+test('A named slot still replaces, because a re-shoot of one photo is deliberate', async () => {
+  party.findFirst = async () => ({ id: 'party-1', ...overParty });
+  let upsertWhere: any;
+  partyMedia.upsert = async (input: any) => { upsertWhere = input.where; return { id: 'recap-2', position: 2 }; };
+
+  const replaced = await caller().events.recap.upload({ partyId: 'party-1', index: 2, dataUri: pngDataUri });
+  assert.deepEqual(upsertWhere, { partyId_kind_position: { partyId: 'party-1', kind: 'recap', position: 2 } });
+  assert.deepEqual(replaced, { id: 'recap-2', position: 2, url: `${config.publicApiUrl}/media/parties/recap-2` });
 });
 
 test('Taking down the last photo retracts the recap instead of leaving an empty room', async () => {

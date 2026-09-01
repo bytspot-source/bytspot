@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
-import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
+import { alertGuestOfDecision, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitTicketAmount } from '../services/platformFee';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
@@ -486,6 +486,171 @@ export const partyMediaRouter = router({
     }),
 });
 
+const maxRecapImages = 12;
+
+const recapInput = z.object({
+  partyId: z.string().min(1),
+  index: z.number().int().min(0).max(maxRecapImages - 1),
+  dataUri: z.string().max(900_000),
+});
+
+/**
+ * Who may read a recap. Cover and album ride on the invitation, so holding the
+ * URL is the whole test for them. A recap is the room from the inside, so it is
+ * a second authorization surface: the host reads it while staging, and after
+ * publish only members the door actually admitted.
+ *
+ * Everyone else — anonymous, stranger, declined, and a guest whose access was
+ * withdrawn — gets the same NOT_FOUND a party with no recap gives, so a staged
+ * album is indistinguishable from one that does not exist.
+ *
+ * Admission, not attendance: accessGranted is RSVP, ticket, or approval rather
+ * than checkedInAt, so a confirmed no-show can see the photographs. That is the
+ * same set the recap alert reaches.
+ */
+/**
+ * A recap is the room from the inside, so there is nothing to recap until the
+ * room is over. Without this the whole path is open from the moment a party is
+ * published — which is before it happens — and "The recap is up" could reach
+ * everyone who RSVP'd to a party whose doors have not opened.
+ */
+function assertPartyOver(party: { endsAt: Date | null; startsAt: Date }): void {
+  if (partyEndedAt(party).getTime() > Date.now()) {
+    throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'A recap can only be added once the Party is over.' });
+  }
+}
+
+function assertRecapReadable(
+  party: { status: string; hostUserId: string; recapPublishedAt: Date | null },
+  guest: { accessGranted: boolean } | null,
+  viewerUserId?: string | null,
+): void {
+  if (viewerUserId && viewerUserId === party.hostUserId) return;
+  if (party.status !== 'published' || !party.recapPublishedAt || !guest?.accessGranted) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  }
+}
+
+export const partyRecapRouter = router({
+  /**
+   * A recap belongs to a room that already happened, so unlike cover and album
+   * it is uploaded after publish and cannot use the draft-media lock.
+   */
+  upload: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 24, label: 'party-recap-upload' }))
+    .input(recapInput)
+    .mutation(async ({ ctx, input }) => {
+      const { bytes, mimeType } = parseImageDataUri(input.dataUri);
+      const imageBytes = Uint8Array.from(bytes);
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' },
+        select: { id: true, startsAt: true, endsAt: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      assertPartyOver(party);
+      const media = await db.partyMedia.upsert({
+        where: { partyId_kind_position: { partyId: party.id, kind: 'recap', position: input.index } },
+        create: { partyId: party.id, kind: 'recap', position: input.index, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+        update: { mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+      });
+      return { url: partyMediaUrl(media.id) };
+    }),
+  publish: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-recap-publish' }))
+    .input(z.object({ partyId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' },
+        include: { media: { where: { kind: 'recap' }, select: { id: true } } },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      assertPartyOver(party);
+      if (party.media.length === 0) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Add at least one recap photo before publishing.' });
+      }
+
+      // Reading recapPublishedAt and then writing it would let a double-tap or
+      // two host devices both see null and both notify the room. The write is
+      // the test instead: exactly one caller can move the column off null, and
+      // only that caller alerts.
+      const publishedAt = new Date();
+      const claimed = await db.party.updateMany({
+        where: { id: party.id, recapPublishedAt: null },
+        data: { recapPublishedAt: publishedAt },
+      });
+      if (claimed.count === 0) {
+        const current = await db.party.findUnique({ where: { id: party.id }, select: { recapPublishedAt: true } });
+        return { publishedAt: current?.recapPublishedAt?.toISOString() ?? null, photoCount: party.media.length };
+      }
+      dispatchPartyAlert(alertGuestsOfRecap({ partyId: party.id, partyTitle: party.title, photoCount: party.media.length }));
+      return { publishedAt: publishedAt.toISOString(), photoCount: party.media.length };
+    }),
+  /**
+   * Takedown. A recap is photographs of identifiable people, so removal is the
+   * one recap operation with no window, no publish-state condition, and no
+   * party-status condition: whatever else is true, a host asked for a photo of
+   * someone to come down and it comes down. The bytes route re-checks
+   * authorization on every read and sends no-store, so this is effective on the
+   * next request with no cache to invalidate.
+   */
+  remove: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 24, label: 'party-recap-remove' }))
+    .input(z.object({ partyId: z.string().min(1), index: z.number().int().min(0).max(maxRecapImages - 1) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId },
+        select: { id: true, recapPublishedAt: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      const deleted = await db.partyMedia.deleteMany({ where: { partyId: party.id, kind: 'recap', position: input.index } });
+      const remaining = await db.partyMedia.count({ where: { partyId: party.id, kind: 'recap' } });
+      // Publishing refuses an empty album, so a published empty one must not be
+      // reachable from the other direction either: taking down the last photo
+      // retracts the recap rather than leaving guests an empty room.
+      if (remaining === 0) {
+        await db.party.updateMany({ where: { id: party.id, recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
+      }
+      // Whether guests can see the album, not whether photos survived: a staged
+      // recap with photos left is still unpublished, and a client that reads
+      // this as availability must not be told otherwise.
+      return { removed: deleted.count > 0, remaining, published: remaining > 0 && party.recapPublishedAt !== null };
+    }),
+  /**
+   * Retracts the whole album without deleting it, so a host can fix a recap and
+   * publish again. Idempotent, and deliberately not gated on the window: a
+   * takedown must never be blocked by the state the party is in.
+   */
+  unpublish: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-recap-unpublish' }))
+    .input(z.object({ partyId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId },
+        select: { id: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      await db.party.updateMany({ where: { id: party.id, recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
+      return { published: false };
+    }),
+  get: publicProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .query(async ({ ctx, input }) => {
+      const party = await db.party.findUnique({
+        where: { id: input.partyId },
+        include: { media: { where: { kind: 'recap' }, orderBy: { position: 'asc' }, select: { id: true } } },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+      const guest = ctx.user
+        ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } }, select: { accessGranted: true } })
+        : null;
+      assertRecapReadable(party, guest, ctx.user?.userId);
+      return {
+        publishedAt: party.recapPublishedAt?.toISOString() ?? null,
+        photoURLs: party.media.map((media) => partyMediaUrl(media.id)),
+      };
+    }),
+});
+
 export const partyPublish = protectedProcedure
   .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-publish' }))
   .input(z.object({ partyId: z.string().min(1), idempotencyKey: z.string().uuid() }))
@@ -615,14 +780,23 @@ function publicArrivalCoordinate(party: { locationDisclosure: string; arrivalVen
 }
 
 /**
+ * When the room is over: the host's end time, or a 6-hour grace window after
+ * startsAt when no end was set — the same fallback People You Met uses. This is
+ * a property of the party itself, so it deliberately ignores the share-link
+ * override: a host who keeps the link open for a week has not made the party
+ * last a week.
+ */
+export function partyEndedAt(party: { endsAt: Date | null; startsAt: Date }): Date {
+  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+}
+
+/**
  * When the share link stops resolving for members without access. The host
- * override wins; otherwise the link dies when the party ends (endsAt, with a
- * 6-hour grace window after startsAt when no end time was set — the same
- * fallback People You Met uses).
+ * override wins; otherwise the link dies when the party ends.
  */
 export function shareLinkExpiry(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): Date {
   if (party.shareLinkExpiresAt) return party.shareLinkExpiresAt;
-  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+  return partyEndedAt(party);
 }
 
 export function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): boolean {
@@ -710,6 +884,7 @@ export const partyInvite = publicProcedure
     const destinations = identity ? null : safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
     const album = party.media.filter((media) => media.kind === 'album');
+    const recapPhotoCount = party.recapPublishedAt ? party.media.filter((media) => media.kind === 'recap').length : 0;
     return {
       id: party.id,
       source: 'host-studio-party' as const,
@@ -741,6 +916,11 @@ export const partyInvite = publicProcedure
       heroImageURL: cover ? partyMediaUrl(cover.id) : null,
       thumbnailURL: cover ? partyMediaUrl(cover.id) : null,
       photoURLs: album.map((media) => partyMediaUrl(media.id)),
+      // Existence and a count only — never recap URLs. The bytes come from
+      // events.recap.get, which re-checks the guest list. Zero while staging,
+      // so an unpublished recap does not leak through the count either.
+      recapAvailable: recapPhotoCount > 0,
+      recapPhotoCount,
     };
   });
 

@@ -244,6 +244,9 @@ model Party {
   /// fee existed; those fall back to the current rate at checkout.
   platformFeeBps         Int?         @map("platform_fee_bps")
   publishedAt            DateTime?    @map("published_at")
+  /// Set when the host publishes the recap album. While null the recap is
+  /// staged and host-only, and must stay indistinguishable from no recap.
+  recapPublishedAt       DateTime?    @map("recap_published_at")
   createdAt              DateTime     @default(now()) @map("created_at")
   updatedAt              DateTime     @updatedAt @map("updated_at")
 

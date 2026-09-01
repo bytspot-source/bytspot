@@ -995,3 +995,218 @@ test('Invite coordinates require a public venue and a real arrival Venue', async
     assert.equal(hidden.longitude, null, `${disclosure} must not leak longitude`);
   }
 });
+
+// A recap is the room from the inside, so unlike cover and album it is a second
+// authorization surface: existence, count, and bytes are all gated on the door.
+const stagedRecap = {
+  id: 'party-1', status: 'published', hostUserId: 'host-1', recapPublishedAt: null,
+  title: 'First Listen', media: [{ id: 'recap-1' }, { id: 'recap-2' }],
+};
+
+test('A staged recap is invisible to everyone except its host', async () => {
+  party.findUnique = async () => stagedRecap;
+
+  // Anonymous and a signed-in stranger are indistinguishable from no recap.
+  await assert.rejects(() => createCaller(anonymousContext).events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  // So is a confirmed guest, while the host is still staging.
+  partyGuest.findUnique = async () => ({ accessGranted: true });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  // The host reviews their own unpublished album.
+  const hostView = await createCaller({ user: { userId: 'host-1', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-recap-host' }).events.recap.get({ partyId: 'party-1' });
+  assert.equal(hostView.publishedAt, null);
+  assert.equal(hostView.photoURLs.length, 2);
+});
+
+test('A published recap opens to the guests the door admitted, and nobody else', async () => {
+  const publishedAt = new Date('2026-08-11T04:00:00Z');
+  party.findUnique = async () => ({ ...stagedRecap, recapPublishedAt: publishedAt });
+
+  // A guest row with access withdrawn, declined, or still pending gets the same
+  // NOT_FOUND as a party with no recap.
+  partyGuest.findUnique = async () => ({ accessGranted: false });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  let guestLookup: any;
+  partyGuest.findUnique = async (input: any) => { guestLookup = input.where; return { accessGranted: true }; };
+  const recap = await caller().events.recap.get({ partyId: 'party-1' });
+  // Scoped to this party's guest list, not merely to a signed-in member who
+  // holds a pass to some other party.
+  assert.deepEqual(guestLookup, { partyId_userId: { partyId: 'party-1', userId: 'test-user-id' } });
+  assert.equal(recap.publishedAt, publishedAt.toISOString());
+  assert.deepEqual(recap.photoURLs, [`${config.publicApiUrl}/media/parties/recap-1`, `${config.publicApiUrl}/media/parties/recap-2`]);
+});
+
+// The room is over: a party that has ended, so the recap window is open.
+const overParty = { startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000) };
+// Published, but the doors have not opened yet.
+const upcomingParty = { startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 4 * 60 * 60 * 1000) };
+const pngDataUri = `data:image/png;base64,${Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0, 0, 0x01, 0x40, 0, 0, 0x01, 0x40,
+]).toString('base64')}`;
+
+test('A recap closes to guests if the party leaves published, on both read surfaces', async () => {
+  // The bytes route already pins this. The whole thesis is that the two
+  // implementations of the read rule stay identical, so the tRPC surface has to
+  // pin it too rather than inherit it by assumption.
+  party.findUnique = async () => ({ ...stagedRecap, status: 'draft', recapPublishedAt: new Date('2026-08-11T04:00:00Z') });
+  partyGuest.findUnique = async () => ({ accessGranted: true });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  // The host still reviews their own album.
+  const hostView = await createCaller({ user: { userId: 'host-1', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-recap-host-2' }).events.recap.get({ partyId: 'party-1' });
+  assert.equal(hostView.photoURLs.length, 2);
+});
+
+test('A recap cannot exist before the room does', async () => {
+  // Nothing to recap until the party is over. Without this the whole path is
+  // open from publish, which is before the party happens, and the alert could
+  // reach everyone who RSVP'd to a party whose doors have not opened.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...upcomingParty });
+  await assert.rejects(() => caller().events.recap.upload({ partyId: 'party-1', index: 0, dataUri: pngDataUri }), { code: 'PRECONDITION_FAILED' });
+  await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
+
+  // A party with no explicit end falls back to the same 6-hour grace window the
+  // share link uses, rather than being recappable the moment it starts.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], startsAt: new Date(Date.now() - 60 * 60 * 1000), endsAt: null });
+  await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
+
+  // A host who holds the share link open for a week has not made the party last
+  // a week: the recap window follows the room, not the link.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...overParty, shareLinkExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) });
+  party.updateMany = async () => ({ count: 1 });
+  assert.equal((await caller().events.recap.publish({ partyId: 'party-1' })).photoCount, 1);
+});
+
+test('Publishing a recap needs a photo, belongs to the host, and tells the room exactly once', async () => {
+  let claims = 0;
+  let where: any;
+  party.updateMany = async (input: any) => { claims += 1; where = input.where; return { count: 1 }; };
+
+  // Not the host, or not published: the party is simply not found.
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  // An empty album cannot be published, so the alert can never promise nothing.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [], ...overParty });
+  await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
+  assert.equal(claims, 0);
+
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...overParty });
+  const first = await caller().events.recap.publish({ partyId: 'party-1' });
+  assert.equal(first.photoCount, 1);
+  assert.equal(claims, 1);
+  // The write is the test, not a prior read: only a row still at null can be
+  // claimed, so a double-tap cannot notify the room twice.
+  assert.deepEqual(where, { id: 'party-1', recapPublishedAt: null });
+});
+
+test('A losing concurrent publish reports the winner\'s moment and does not re-notify', async () => {
+  // Both callers saw recapPublishedAt as null; only one can claim the column.
+  const winnersMoment = new Date('2026-08-11T04:00:00Z');
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...overParty });
+  party.updateMany = async () => ({ count: 0 });
+  party.findUnique = async () => ({ recapPublishedAt: winnersMoment });
+
+  const loser = await caller().events.recap.publish({ partyId: 'party-1' });
+  assert.equal(loser.publishedAt, winnersMoment.toISOString());
+});
+
+test('An invitation reports that a recap exists without handing over its photos', async () => {
+  const invited = {
+    id: 'party-1', title: 'First Listen', tagline: 'One moment.', templateId: 'listening-party', requiredMembershipTier: 'green',
+    venueName: 'Sample Venue', locationDisclosure: 'public', accessMode: 'free-rsvp',
+    capacity: 80, hostDestinations: {}, itinerary: [], ticketTiers: [], host: { name: 'Host' }, ...linkAlive,
+    media: [{ id: 'cover-1', kind: 'cover' }, { id: 'album-1', kind: 'album' }, { id: 'recap-1', kind: 'recap' }],
+  };
+
+  // Staged: the count stays at zero, so the invitation does not leak that the
+  // host is assembling an album.
+  party.findFirst = async () => ({ ...invited, recapPublishedAt: null });
+  const staged = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(staged.recapAvailable, false);
+  assert.equal(staged.recapPhotoCount, 0);
+
+  party.findFirst = async () => ({ ...invited, recapPublishedAt: new Date('2026-08-11T04:00:00Z') });
+  const published = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(published.recapAvailable, true);
+  assert.equal(published.recapPhotoCount, 1);
+  // Existence and a count only. Bytes come from events.recap.get, which
+  // re-checks the guest list, so the invitation issues no recap URL at all.
+  assert.deepEqual(published.photoURLs, [`${config.publicApiUrl}/media/parties/album-1`]);
+  assert.equal(JSON.stringify(published).includes('recap-1'), false);
+});
+
+test('A recap photo can always be taken down, whatever state the party is in', async () => {
+  let unpublished = false;
+  party.updateMany = async (input: any) => {
+    if (input.data?.recapPublishedAt === null) unpublished = true;
+    return { count: 1 };
+  };
+  let deletedWhere: any;
+  partyMedia.deleteMany = async (input: any) => { deletedWhere = input.where; return { count: 1 }; };
+  partyMedia.count = async () => 2;
+
+  // Only the host, and a stranger cannot learn the party exists.
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.recap.remove({ partyId: 'party-1', index: 0 }), { code: 'NOT_FOUND' });
+
+  // Takedown has no window and no publish-state condition: an upcoming party,
+  // a staged album, and a published one all remove the same way. Nothing about
+  // the party's state may keep a photograph of someone up, so ownership is the
+  // entire lookup — asserted on the query itself, since a mock would happily
+  // return a party for any narrower where clause.
+  let lookup: any;
+  party.findFirst = async (input: any) => { lookup = input.where; return { id: 'party-1', recapPublishedAt: null, ...upcomingParty }; };
+  const removed = await caller().events.recap.remove({ partyId: 'party-1', index: 3 });
+  assert.deepEqual(lookup, { id: 'party-1', hostUserId: 'test-user-id' });
+  // published is whether guests can see the album, not whether photos survived:
+  // this one is still staged, so removing from it publishes nothing.
+  assert.deepEqual(removed, { removed: true, remaining: 2, published: false });
+  assert.deepEqual(deletedWhere, { partyId: 'party-1', kind: 'recap', position: 3 });
+  assert.equal(unpublished, false);
+});
+
+test('Taking down the last photo retracts the recap instead of leaving an empty room', async () => {
+  // Publishing refuses an empty album, so published-with-zero-photos must not
+  // be reachable from the other direction either.
+  let retracted: any;
+  party.findFirst = async () => ({ id: 'party-1', recapPublishedAt: new Date('2026-08-11T04:00:00Z'), ...overParty });
+  party.updateMany = async (input: any) => { retracted = input; return { count: 1 }; };
+  partyMedia.deleteMany = async () => ({ count: 1 });
+  partyMedia.count = async () => 0;
+
+  const removed = await caller().events.recap.remove({ partyId: 'party-1', index: 0 });
+  assert.deepEqual(removed, { removed: true, remaining: 0, published: false });
+  assert.deepEqual(retracted, { where: { id: 'party-1', recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
+});
+
+test('Unpublishing retracts the album without destroying it, and repeats harmlessly', async () => {
+  let updates = 0;
+  partyMedia.deleteMany = async () => ({ count: 0 });
+  party.updateMany = async () => { updates += 1; return { count: 1 } };
+
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.recap.unpublish({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  let lookup: any;
+  party.findFirst = async (input: any) => { lookup = input.where; return { id: 'party-1', ...overParty }; };
+  assert.deepEqual(await caller().events.recap.unpublish({ partyId: 'party-1' }), { published: false });
+  // Ownership only: retraction must not be blocked by the window or by the
+  // party's status either.
+  assert.deepEqual(lookup, { id: 'party-1', hostUserId: 'test-user-id' });
+  // Idempotent: a second call is a no-op rather than an error, and the photos
+  // are still there to publish again.
+  assert.deepEqual(await caller().events.recap.unpublish({ partyId: 'party-1' }), { published: false });
+  assert.equal(updates, 2);
+});
+
+test('A retracted recap closes to guests again immediately', async () => {
+  // The bytes route re-checks on every read, so retraction needs no cache
+  // invalidation: recap.get applies the same rule and shuts at once.
+  party.findUnique = async () => ({ ...stagedRecap, recapPublishedAt: null });
+  partyGuest.findUnique = async () => ({ accessGranted: true });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+});

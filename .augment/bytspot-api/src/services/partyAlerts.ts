@@ -20,7 +20,8 @@ import { config } from '../config';
 
 export type PartyAlertAudience =
   | { kind: 'host'; partyId: string }
-  | { kind: 'guest'; partyId: string; userId: string };
+  | { kind: 'guest'; partyId: string; userId: string }
+  | { kind: 'confirmed-guests'; partyId: string };
 
 const NO_DELIVERY: NotificationDeliveryResult = {
   targetedUsers: 0, devices: 0, sent: 0, skipped: 0, permanentFailures: 0, temporaryFailures: 0,
@@ -36,15 +37,26 @@ export function partyAlertUrl(partyId: string): string {
  * to that Party: a declined or withdrawn guest stops being addressable, so a
  * later alert cannot reach someone the host has already turned away.
  */
-export async function partyAlertRecipient(audience: PartyAlertAudience): Promise<string | null> {
+export async function partyAlertRecipients(audience: PartyAlertAudience): Promise<string[]> {
   const party = await db.party.findUnique({
     where: { id: audience.partyId },
     select: { hostUserId: true, status: true },
   });
-  // A Party that is not published is not addressable by either audience: an
+  // A Party that is not published is not addressable by any audience: an
   // unpublished or withdrawn Party must not be able to notify anyone.
-  if (!party || party.status !== 'published') return null;
-  if (audience.kind === 'host') return party.hostUserId;
+  if (!party || party.status !== 'published') return [];
+  if (audience.kind === 'host') return [party.hostUserId];
+
+  // The one broadcast audience. It is admission, not attendance: a confirmed
+  // no-show is still someone the door said yes to, and this is the same set the
+  // recap itself is readable by, so the alert cannot promise more than it opens.
+  if (audience.kind === 'confirmed-guests') {
+    const guests = await db.partyGuest.findMany({
+      where: { partyId: audience.partyId, accessGranted: true },
+      select: { userId: true },
+    });
+    return guests.map((guest) => guest.userId);
+  }
 
   const guest = await db.partyGuest.findUnique({
     where: { partyId_userId: { partyId: audience.partyId, userId: audience.userId } },
@@ -53,7 +65,13 @@ export async function partyAlertRecipient(audience: PartyAlertAudience): Promise
   // Membership of the guest list is the whole eligibility test: a declined
   // guest is still owed the decision that declined them, and someone with no
   // row on this Party is never addressable.
-  return guest?.userId ?? null;
+  return guest ? [guest.userId] : [];
+}
+
+/** Single-recipient audiences, which is every audience except the broadcast. */
+export async function partyAlertRecipient(audience: PartyAlertAudience): Promise<string | null> {
+  const [userId] = await partyAlertRecipients(audience);
+  return userId ?? null;
 }
 
 async function send(input: {
@@ -62,11 +80,11 @@ async function send(input: {
   body: string;
   type: string;
 }): Promise<NotificationDeliveryResult> {
-  const userId = await partyAlertRecipient(input.audience);
-  if (!userId) return NO_DELIVERY;
+  const userIds = await partyAlertRecipients(input.audience);
+  if (userIds.length === 0) return NO_DELIVERY;
 
   return deliverPushNotification({
-    userIds: [userId],
+    userIds,
     category: 'party',
     title: input.title,
     body: input.body,
@@ -171,6 +189,27 @@ export async function alertHostOfCircleTicketPurchase(input: {
     title: 'Someone from your circle is in',
     body: `${who} bought a ticket to your Party.`,
     type: 'party.rsvp',
+  });
+}
+
+/**
+ * The recap is up. Reaches everyone the door admitted, and nobody else — the
+ * same set that can read the album, so this never advertises photographs the
+ * recipient would then get a 404 for.
+ */
+export async function alertGuestsOfRecap(input: {
+  partyId: string;
+  partyTitle: string | null;
+  photoCount: number;
+}): Promise<NotificationDeliveryResult> {
+  const title = input.partyTitle?.trim() || 'the Party';
+  return send({
+    audience: { kind: 'confirmed-guests', partyId: input.partyId },
+    title: 'The recap is up',
+    body: input.photoCount === 1
+      ? `One photo from ${title} is ready.`
+      : `${input.photoCount} photos from ${title} are ready.`,
+    type: 'party.recap',
   });
 }
 

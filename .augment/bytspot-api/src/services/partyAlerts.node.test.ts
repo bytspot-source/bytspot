@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { alertHostOfCircleTicketPurchase, partyAlertRecipient, partyAlertUrl } from './partyAlerts';
+import { alertHostOfCircleTicketPurchase, partyAlertRecipient, partyAlertRecipients, partyAlertUrl } from './partyAlerts';
 import { DEFAULT_PUSH_PREFERENCES, permitsCategory } from './iosPushDevices';
 import { isAllowedBytspotUrl } from './notificationDelivery';
 
@@ -84,4 +84,21 @@ test('a circle-member ticket purchase tells the host, and nothing else does', as
   // Hosts buying into their own Party do not notify themselves.
   party.findUnique = async () => ({ hostUserId: 'usr_buyer', status: 'published', audienceCircleIds: ['circle-1'] });
   assert.equal(await alertHostOfCircleTicketPurchase(buyer), null);
+});
+
+test('the recap alert reaches every confirmed guest and stops at the door', async () => {
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'published' });
+  let queried: any;
+  (db.partyGuest as any).findMany = async (input: any) => {
+    queried = input;
+    return [{ userId: 'usr_guest' }, { userId: 'usr_ticketed' }];
+  };
+  assert.deepEqual(await partyAlertRecipients({ kind: 'confirmed-guests', partyId: 'party-1' }), ['usr_guest', 'usr_ticketed']);
+  // Admission, not attendance: the same accessGranted set that can read the
+  // album, so the alert never announces photos the recipient would be 404'd on.
+  assert.deepEqual(queried.where, { partyId: 'party-1', accessGranted: true });
+
+  // An unpublished or withdrawn Party still addresses nobody.
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'draft' });
+  assert.deepEqual(await partyAlertRecipients({ kind: 'confirmed-guests', partyId: 'party-1' }), []);
 });

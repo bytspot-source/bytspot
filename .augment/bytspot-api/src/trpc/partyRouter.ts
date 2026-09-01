@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
-import { alertGuestOfDecision, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
+import { alertGuestOfDecision, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitTicketAmount } from '../services/platformFee';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
@@ -486,6 +486,105 @@ export const partyMediaRouter = router({
     }),
 });
 
+const maxRecapImages = 12;
+
+const recapInput = z.object({
+  partyId: z.string().min(1),
+  index: z.number().int().min(0).max(maxRecapImages - 1),
+  dataUri: z.string().max(900_000),
+});
+
+/**
+ * Who may read a recap. Cover and album ride on the invitation, so holding the
+ * URL is the whole test for them. A recap is the room from the inside, so it is
+ * a second authorization surface: the host reads it while staging, and after
+ * publish only members the door actually admitted.
+ *
+ * Everyone else — anonymous, stranger, declined, and a guest whose access was
+ * withdrawn — gets the same NOT_FOUND a party with no recap gives, so a staged
+ * album is indistinguishable from one that does not exist.
+ *
+ * Admission, not attendance: accessGranted is RSVP, ticket, or approval rather
+ * than checkedInAt, so a confirmed no-show can see the photographs. That is the
+ * same set the recap alert reaches.
+ */
+function assertRecapReadable(
+  party: { status: string; hostUserId: string; recapPublishedAt: Date | null },
+  guest: { accessGranted: boolean } | null,
+  viewerUserId?: string | null,
+): void {
+  if (viewerUserId && viewerUserId === party.hostUserId) return;
+  if (party.status !== 'published' || !party.recapPublishedAt || !guest?.accessGranted) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  }
+}
+
+export const partyRecapRouter = router({
+  /**
+   * A recap belongs to a room that already happened, so unlike cover and album
+   * it is uploaded after publish and cannot use the draft-media lock.
+   */
+  upload: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 24, label: 'party-recap-upload' }))
+    .input(recapInput)
+    .mutation(async ({ ctx, input }) => {
+      const { bytes, mimeType } = parseImageDataUri(input.dataUri);
+      const imageBytes = Uint8Array.from(bytes);
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' },
+        select: { id: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      const media = await db.partyMedia.upsert({
+        where: { partyId_kind_position: { partyId: party.id, kind: 'recap', position: input.index } },
+        create: { partyId: party.id, kind: 'recap', position: input.index, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+        update: { mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+      });
+      return { url: partyMediaUrl(media.id) };
+    }),
+  publish: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-recap-publish' }))
+    .input(z.object({ partyId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' },
+        include: { media: { where: { kind: 'recap' }, select: { id: true } } },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      if (party.media.length === 0) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Add at least one recap photo before publishing.' });
+      }
+      // Idempotent: a second publish must not re-notify the room.
+      if (party.recapPublishedAt) {
+        return { publishedAt: party.recapPublishedAt.toISOString(), photoCount: party.media.length };
+      }
+      const updated = await db.party.update({
+        where: { id: party.id },
+        data: { recapPublishedAt: new Date() },
+        select: { recapPublishedAt: true },
+      });
+      dispatchPartyAlert(alertGuestsOfRecap({ partyId: party.id, partyTitle: party.title, photoCount: party.media.length }));
+      return { publishedAt: updated.recapPublishedAt!.toISOString(), photoCount: party.media.length };
+    }),
+  get: publicProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .query(async ({ ctx, input }) => {
+      const party = await db.party.findUnique({
+        where: { id: input.partyId },
+        include: { media: { where: { kind: 'recap' }, orderBy: { position: 'asc' }, select: { id: true } } },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+      const guest = ctx.user
+        ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } }, select: { accessGranted: true } })
+        : null;
+      assertRecapReadable(party, guest, ctx.user?.userId);
+      return {
+        publishedAt: party.recapPublishedAt?.toISOString() ?? null,
+        photoURLs: party.media.map((media) => partyMediaUrl(media.id)),
+      };
+    }),
+});
+
 export const partyPublish = protectedProcedure
   .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-publish' }))
   .input(z.object({ partyId: z.string().min(1), idempotencyKey: z.string().uuid() }))
@@ -710,6 +809,7 @@ export const partyInvite = publicProcedure
     const destinations = identity ? null : safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
     const album = party.media.filter((media) => media.kind === 'album');
+    const recapPhotoCount = party.recapPublishedAt ? party.media.filter((media) => media.kind === 'recap').length : 0;
     return {
       id: party.id,
       source: 'host-studio-party' as const,
@@ -741,6 +841,11 @@ export const partyInvite = publicProcedure
       heroImageURL: cover ? partyMediaUrl(cover.id) : null,
       thumbnailURL: cover ? partyMediaUrl(cover.id) : null,
       photoURLs: album.map((media) => partyMediaUrl(media.id)),
+      // Existence and a count only — never recap URLs. The bytes come from
+      // events.recap.get, which re-checks the guest list. Zero while staging,
+      // so an unpublished recap does not leak through the count either.
+      recapAvailable: recapPhotoCount > 0,
+      recapPhotoCount,
     };
   });
 

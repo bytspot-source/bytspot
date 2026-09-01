@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { router, publicProcedure } from './trpc';
-import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
+import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 
@@ -68,6 +68,7 @@ export const eventsRouter = router({
   drafts: partyDraftsRouter,
   hostDestinations: hostDestinationsRouter,
   media: partyMediaRouter,
+  recap: partyRecapRouter,
   publish: partyPublish,
   invite: partyInvite,
   pass: partyPassRouter,

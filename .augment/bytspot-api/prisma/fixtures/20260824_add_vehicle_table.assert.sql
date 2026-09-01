@@ -1,11 +1,18 @@
--- What the backfill must have done to prisma/fixtures/hostile-shapes.sql.
+-- What 20260824_add_vehicle_table must have done to hostile-shapes.sql.
 --
 -- Exit code is not enough. The defect that reached production exited 0: it
 -- invented a vehicle out of a JSON string. Only a row assertion catches that
 -- class, so this file asserts on the result, not on the run.
 --
--- Grows alongside the fixture. A migration that does not touch these tables
--- leaves these assertions trivially true, which is the correct outcome.
+-- Named for its migration because that is the only change it describes. It ran
+-- unconditionally at first, against a baseline that already included the
+-- vehicle backfill, so it demanded 7 rows from a fixture seeded after the
+-- backfill had already run — unsatisfiable, and inherited by every later
+-- migration. It now runs only if its own migration is the change under test,
+-- which for a merged migration means it stands as the recorded proof.
+--
+-- A new migration that needs row-level proof adds
+-- prisma/fixtures/<migration-dir>.assert.sql alongside it.
 
 DO $$
 DECLARE

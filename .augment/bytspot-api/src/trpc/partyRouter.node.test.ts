@@ -1117,7 +1117,7 @@ test('A losing concurrent publish reports the winner\'s moment and does not re-n
 test('An invitation reports that a recap exists without handing over its photos', async () => {
   const invited = {
     id: 'party-1', title: 'First Listen', tagline: 'One moment.', templateId: 'listening-party', requiredMembershipTier: 'green',
-    startsAt: new Date('2026-08-10T20:00:00Z'), venueName: 'Sample Venue', locationDisclosure: 'public', accessMode: 'free-rsvp',
+    venueName: 'Sample Venue', locationDisclosure: 'public', accessMode: 'free-rsvp',
     capacity: 80, hostDestinations: {}, itinerary: [], ticketTiers: [], host: { name: 'Host' }, ...linkAlive,
     media: [{ id: 'cover-1', kind: 'cover' }, { id: 'album-1', kind: 'album' }, { id: 'recap-1', kind: 'recap' }],
   };

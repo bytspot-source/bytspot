@@ -1035,31 +1035,67 @@ test('A published recap opens to the guests the door admitted, and nobody else',
   assert.deepEqual(recap.photoURLs, [`${config.publicApiUrl}/media/parties/recap-1`, `${config.publicApiUrl}/media/parties/recap-2`]);
 });
 
-test('Publishing a recap needs a photo, belongs to the host, and never re-notifies the room', async () => {
-  let updates = 0;
-  party.update = async () => { updates += 1; return { recapPublishedAt: new Date('2026-08-11T04:00:00Z') }; };
+// The room is over: a party that has ended, so the recap window is open.
+const overParty = { startsAt: new Date(Date.now() - 8 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 60 * 1000) };
+// Published, but the doors have not opened yet.
+const upcomingParty = { startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 4 * 60 * 60 * 1000) };
+const pngDataUri = `data:image/png;base64,${Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0, 0, 0x01, 0x40, 0, 0, 0x01, 0x40,
+]).toString('base64')}`;
+
+test('A recap cannot exist before the room does', async () => {
+  // Nothing to recap until the party is over. Without this the whole path is
+  // open from publish, which is before the party happens, and the alert could
+  // reach everyone who RSVP'd to a party whose doors have not opened.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...upcomingParty });
+  await assert.rejects(() => caller().events.recap.upload({ partyId: 'party-1', index: 0, dataUri: pngDataUri }), { code: 'PRECONDITION_FAILED' });
+  await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
+
+  // A party with no explicit end falls back to the same 6-hour grace window the
+  // share link uses, rather than being recappable the moment it starts.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], startsAt: new Date(Date.now() - 60 * 60 * 1000), endsAt: null });
+  await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
+
+  // A host who holds the share link open for a week has not made the party last
+  // a week: the recap window follows the room, not the link.
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...overParty, shareLinkExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) });
+  party.updateMany = async () => ({ count: 1 });
+  assert.equal((await caller().events.recap.publish({ partyId: 'party-1' })).photoCount, 1);
+});
+
+test('Publishing a recap needs a photo, belongs to the host, and tells the room exactly once', async () => {
+  let claims = 0;
+  let where: any;
+  party.updateMany = async (input: any) => { claims += 1; where = input.where; return { count: 1 }; };
 
   // Not the host, or not published: the party is simply not found.
   party.findFirst = async () => null;
   await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
 
   // An empty album cannot be published, so the alert can never promise nothing.
-  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [] });
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [], ...overParty });
   await assert.rejects(() => caller().events.recap.publish({ partyId: 'party-1' }), { code: 'PRECONDITION_FAILED' });
-  assert.equal(updates, 0);
+  assert.equal(claims, 0);
 
-  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }] });
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...overParty });
   const first = await caller().events.recap.publish({ partyId: 'party-1' });
-  assert.equal(first.publishedAt, '2026-08-11T04:00:00.000Z');
   assert.equal(first.photoCount, 1);
-  assert.equal(updates, 1);
+  assert.equal(claims, 1);
+  // The write is the test, not a prior read: only a row still at null can be
+  // claimed, so a double-tap cannot notify the room twice.
+  assert.deepEqual(where, { id: 'party-1', recapPublishedAt: null });
+});
 
-  // Idempotent: a second publish returns the original moment and writes nothing,
-  // so the room is not told twice.
-  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: new Date('2026-08-11T04:00:00Z'), media: [{ id: 'recap-1' }] });
-  const second = await caller().events.recap.publish({ partyId: 'party-1' });
-  assert.equal(second.publishedAt, first.publishedAt);
-  assert.equal(updates, 1);
+test('A losing concurrent publish reports the winner\'s moment and does not re-notify', async () => {
+  // Both callers saw recapPublishedAt as null; only one can claim the column.
+  const winnersMoment = new Date('2026-08-11T04:00:00Z');
+  party.findFirst = async () => ({ id: 'party-1', title: 'First Listen', recapPublishedAt: null, media: [{ id: 'recap-1' }], ...overParty });
+  party.updateMany = async () => ({ count: 0 });
+  party.findUnique = async () => ({ recapPublishedAt: winnersMoment });
+
+  const loser = await caller().events.recap.publish({ partyId: 'party-1' });
+  assert.equal(loser.publishedAt, winnersMoment.toISOString());
 });
 
 test('An invitation reports that a recap exists without handing over its photos', async () => {

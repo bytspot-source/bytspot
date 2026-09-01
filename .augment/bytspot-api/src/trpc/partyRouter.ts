@@ -508,6 +508,18 @@ const recapInput = z.object({
  * than checkedInAt, so a confirmed no-show can see the photographs. That is the
  * same set the recap alert reaches.
  */
+/**
+ * A recap is the room from the inside, so there is nothing to recap until the
+ * room is over. Without this the whole path is open from the moment a party is
+ * published — which is before it happens — and "The recap is up" could reach
+ * everyone who RSVP'd to a party whose doors have not opened.
+ */
+function assertPartyOver(party: { endsAt: Date | null; startsAt: Date }): void {
+  if (partyEndedAt(party).getTime() > Date.now()) {
+    throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'A recap can only be added once the Party is over.' });
+  }
+}
+
 function assertRecapReadable(
   party: { status: string; hostUserId: string; recapPublishedAt: Date | null },
   guest: { accessGranted: boolean } | null,
@@ -532,9 +544,10 @@ export const partyRecapRouter = router({
       const imageBytes = Uint8Array.from(bytes);
       const party = await db.party.findFirst({
         where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' },
-        select: { id: true },
+        select: { id: true, startsAt: true, endsAt: true },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      assertPartyOver(party);
       const media = await db.partyMedia.upsert({
         where: { partyId_kind_position: { partyId: party.id, kind: 'recap', position: input.index } },
         create: { partyId: party.id, kind: 'recap', position: input.index, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
@@ -551,20 +564,26 @@ export const partyRecapRouter = router({
         include: { media: { where: { kind: 'recap' }, select: { id: true } } },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      assertPartyOver(party);
       if (party.media.length === 0) {
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Add at least one recap photo before publishing.' });
       }
-      // Idempotent: a second publish must not re-notify the room.
-      if (party.recapPublishedAt) {
-        return { publishedAt: party.recapPublishedAt.toISOString(), photoCount: party.media.length };
-      }
-      const updated = await db.party.update({
-        where: { id: party.id },
-        data: { recapPublishedAt: new Date() },
-        select: { recapPublishedAt: true },
+
+      // Reading recapPublishedAt and then writing it would let a double-tap or
+      // two host devices both see null and both notify the room. The write is
+      // the test instead: exactly one caller can move the column off null, and
+      // only that caller alerts.
+      const publishedAt = new Date();
+      const claimed = await db.party.updateMany({
+        where: { id: party.id, recapPublishedAt: null },
+        data: { recapPublishedAt: publishedAt },
       });
+      if (claimed.count === 0) {
+        const current = await db.party.findUnique({ where: { id: party.id }, select: { recapPublishedAt: true } });
+        return { publishedAt: current?.recapPublishedAt?.toISOString() ?? null, photoCount: party.media.length };
+      }
       dispatchPartyAlert(alertGuestsOfRecap({ partyId: party.id, partyTitle: party.title, photoCount: party.media.length }));
-      return { publishedAt: updated.recapPublishedAt!.toISOString(), photoCount: party.media.length };
+      return { publishedAt: publishedAt.toISOString(), photoCount: party.media.length };
     }),
   get: publicProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
@@ -714,14 +733,23 @@ function publicArrivalCoordinate(party: { locationDisclosure: string; arrivalVen
 }
 
 /**
+ * When the room is over: the host's end time, or a 6-hour grace window after
+ * startsAt when no end was set — the same fallback People You Met uses. This is
+ * a property of the party itself, so it deliberately ignores the share-link
+ * override: a host who keeps the link open for a week has not made the party
+ * last a week.
+ */
+export function partyEndedAt(party: { endsAt: Date | null; startsAt: Date }): Date {
+  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+}
+
+/**
  * When the share link stops resolving for members without access. The host
- * override wins; otherwise the link dies when the party ends (endsAt, with a
- * 6-hour grace window after startsAt when no end time was set — the same
- * fallback People You Met uses).
+ * override wins; otherwise the link dies when the party ends.
  */
 export function shareLinkExpiry(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): Date {
   if (party.shareLinkExpiresAt) return party.shareLinkExpiresAt;
-  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+  return partyEndedAt(party);
 }
 
 export function shareLinkExpired(party: { shareLinkExpiresAt: Date | null; endsAt: Date | null; startsAt: Date }): boolean {

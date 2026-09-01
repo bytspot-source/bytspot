@@ -490,7 +490,14 @@ const maxRecapImages = 12;
 
 const recapInput = z.object({
   partyId: z.string().min(1),
-  index: z.number().int().min(0).max(maxRecapImages - 1),
+  /**
+   * Omit to let the server take the lowest free slot. Two devices holding the
+   * same view of an album both compute the same free slot, and an upsert keyed
+   * on position lets the second silently overwrite the first; the client cannot
+   * close that race on its own. Naming a slot is still allowed, and still means
+   * replace, because that is what a deliberate re-shoot of one photo is.
+   */
+  index: z.number().int().min(0).max(maxRecapImages - 1).optional(),
   dataUri: z.string().max(900_000),
 });
 
@@ -548,12 +555,39 @@ export const partyRecapRouter = router({
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
       assertPartyOver(party);
-      const media = await db.partyMedia.upsert({
-        where: { partyId_kind_position: { partyId: party.id, kind: 'recap', position: input.index } },
-        create: { partyId: party.id, kind: 'recap', position: input.index, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
-        update: { mimeType, bytes: imageBytes, byteSize: imageBytes.length },
-      });
-      return { url: partyMediaUrl(media.id) };
+
+      // An explicit slot replaces; an omitted one is allocated here, where the
+      // unique index on (partyId, kind, position) is the arbiter. A create that
+      // loses the race violates that index rather than overwriting a photo, so
+      // the loser retries against the album as it actually is.
+      if (input.index !== undefined) {
+        const media = await db.partyMedia.upsert({
+          where: { partyId_kind_position: { partyId: party.id, kind: 'recap', position: input.index } },
+          create: { partyId: party.id, kind: 'recap', position: input.index, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+          update: { mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+        });
+        return { id: media.id, position: media.position, url: partyMediaUrl(media.id) };
+      }
+
+      for (let attempt = 0; attempt < maxRecapImages; attempt += 1) {
+        const taken = new Set(
+          (await db.partyMedia.findMany({ where: { partyId: party.id, kind: 'recap' }, select: { position: true } }))
+            .map((media) => media.position),
+        );
+        const free = Array.from({ length: maxRecapImages }, (_, slot) => slot).find((slot) => !taken.has(slot));
+        if (free === undefined) {
+          throw new TRPCError({ code: 'CONFLICT', message: `A recap holds at most ${maxRecapImages} photos.` });
+        }
+        try {
+          const media = await db.partyMedia.create({
+            data: { partyId: party.id, kind: 'recap', position: free, mimeType, bytes: imageBytes, byteSize: imageBytes.length },
+          });
+          return { id: media.id, position: media.position, url: partyMediaUrl(media.id) };
+        } catch (error) {
+          if (!isUniqueConstraint(error)) throw error;
+        }
+      }
+      throw new TRPCError({ code: 'CONFLICT', message: 'The recap changed while this photo was being added. Try again.' });
     }),
   publish: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-recap-publish' }))
@@ -595,14 +629,31 @@ export const partyRecapRouter = router({
    */
   remove: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 24, label: 'party-recap-remove' }))
-    .input(z.object({ partyId: z.string().min(1), index: z.number().int().min(0).max(maxRecapImages - 1) }))
+    /**
+     * Prefer mediaId. A position is a slot, not a photo: remove one and the
+     * next upload reuses the hole, so a device acting on a stale album can ask
+     * for slot 2 and take down a photo that replaced the one it was looking at.
+     * Deleting a photograph of the wrong person is the failure this operation
+     * exists to prevent, so identity wins wherever the client can supply it.
+     */
+    .input(z.object({
+      partyId: z.string().min(1),
+      mediaId: z.string().min(1).max(128).optional(),
+      index: z.number().int().min(0).max(maxRecapImages - 1).optional(),
+    }).refine((input) => input.mediaId !== undefined || input.index !== undefined, {
+      message: 'Name the photo to remove, by mediaId or index.',
+    }))
     .mutation(async ({ ctx, input }) => {
       const party = await db.party.findFirst({
         where: { id: input.partyId, hostUserId: ctx.user.userId },
         select: { id: true, recapPublishedAt: true },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
-      const deleted = await db.partyMedia.deleteMany({ where: { partyId: party.id, kind: 'recap', position: input.index } });
+      const deleted = await db.partyMedia.deleteMany({
+        where: input.mediaId !== undefined
+          ? { id: input.mediaId, partyId: party.id, kind: 'recap' }
+          : { partyId: party.id, kind: 'recap', position: input.index },
+      });
       const remaining = await db.partyMedia.count({ where: { partyId: party.id, kind: 'recap' } });
       // Publishing refuses an empty album, so a published empty one must not be
       // reachable from the other direction either: taking down the last photo
@@ -647,11 +698,11 @@ export const partyRecapRouter = router({
       return {
         publishedAt: party.recapPublishedAt?.toISOString() ?? null,
         photoURLs: party.media.map((media) => partyMediaUrl(media.id)),
-        // upload and remove are keyed by position, and positions go sparse the
-        // moment one photo is removed. A host surface that read the array index
-        // as the position would delete a different photo than the one tapped,
-        // and would overwrite a live one on the next upload.
-        photos: party.media.map((media) => ({ position: media.position, url: partyMediaUrl(media.id) })),
+        // id is what a takedown should name. A position is a slot, and slots are
+        // reused: a host acting on a stale album can ask for slot 2 and take
+        // down whatever now sits there. position stays because it still orders
+        // the album and still names a deliberate replacement.
+        photos: party.media.map((media) => ({ id: media.id, position: media.position, url: partyMediaUrl(media.id) })),
       };
     }),
 });

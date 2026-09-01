@@ -1122,3 +1122,73 @@ test('An invitation reports that a recap exists without handing over its photos'
   assert.deepEqual(published.photoURLs, [`${config.publicApiUrl}/media/parties/album-1`]);
   assert.equal(JSON.stringify(published).includes('recap-1'), false);
 });
+
+test('A recap photo can always be taken down, whatever state the party is in', async () => {
+  let unpublished = false;
+  party.updateMany = async (input: any) => {
+    if (input.data?.recapPublishedAt === null) unpublished = true;
+    return { count: 1 };
+  };
+  let deletedWhere: any;
+  partyMedia.deleteMany = async (input: any) => { deletedWhere = input.where; return { count: 1 }; };
+  partyMedia.count = async () => 2;
+
+  // Only the host, and a stranger cannot learn the party exists.
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.recap.remove({ partyId: 'party-1', index: 0 }), { code: 'NOT_FOUND' });
+
+  // Takedown has no window and no publish-state condition: an upcoming party,
+  // a staged album, and a published one all remove the same way. Nothing about
+  // the party's state may keep a photograph of someone up, so ownership is the
+  // entire lookup — asserted on the query itself, since a mock would happily
+  // return a party for any narrower where clause.
+  let lookup: any;
+  party.findFirst = async (input: any) => { lookup = input.where; return { id: 'party-1', ...upcomingParty }; };
+  const removed = await caller().events.recap.remove({ partyId: 'party-1', index: 3 });
+  assert.deepEqual(lookup, { id: 'party-1', hostUserId: 'test-user-id' });
+  assert.deepEqual(removed, { removed: true, remaining: 2, published: true });
+  assert.deepEqual(deletedWhere, { partyId: 'party-1', kind: 'recap', position: 3 });
+  assert.equal(unpublished, false);
+});
+
+test('Taking down the last photo retracts the recap instead of leaving an empty room', async () => {
+  // Publishing refuses an empty album, so published-with-zero-photos must not
+  // be reachable from the other direction either.
+  let retracted: any;
+  party.findFirst = async () => ({ id: 'party-1', ...overParty });
+  party.updateMany = async (input: any) => { retracted = input; return { count: 1 }; };
+  partyMedia.deleteMany = async () => ({ count: 1 });
+  partyMedia.count = async () => 0;
+
+  const removed = await caller().events.recap.remove({ partyId: 'party-1', index: 0 });
+  assert.deepEqual(removed, { removed: true, remaining: 0, published: false });
+  assert.deepEqual(retracted, { where: { id: 'party-1', recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
+});
+
+test('Unpublishing retracts the album without destroying it, and repeats harmlessly', async () => {
+  let updates = 0;
+  partyMedia.deleteMany = async () => ({ count: 0 });
+  party.updateMany = async () => { updates += 1; return { count: 1 } };
+
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.recap.unpublish({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+
+  let lookup: any;
+  party.findFirst = async (input: any) => { lookup = input.where; return { id: 'party-1', ...overParty }; };
+  assert.deepEqual(await caller().events.recap.unpublish({ partyId: 'party-1' }), { published: false });
+  // Ownership only: retraction must not be blocked by the window or by the
+  // party's status either.
+  assert.deepEqual(lookup, { id: 'party-1', hostUserId: 'test-user-id' });
+  // Idempotent: a second call is a no-op rather than an error, and the photos
+  // are still there to publish again.
+  assert.deepEqual(await caller().events.recap.unpublish({ partyId: 'party-1' }), { published: false });
+  assert.equal(updates, 2);
+});
+
+test('A retracted recap closes to guests again immediately', async () => {
+  // The bytes route re-checks on every read, so retraction needs no cache
+  // invalidation: recap.get applies the same rule and shuts at once.
+  party.findUnique = async () => ({ ...stagedRecap, recapPublishedAt: null });
+  partyGuest.findUnique = async () => ({ accessGranted: true });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+});

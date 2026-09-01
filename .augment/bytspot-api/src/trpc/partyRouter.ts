@@ -585,6 +585,50 @@ export const partyRecapRouter = router({
       dispatchPartyAlert(alertGuestsOfRecap({ partyId: party.id, partyTitle: party.title, photoCount: party.media.length }));
       return { publishedAt: publishedAt.toISOString(), photoCount: party.media.length };
     }),
+  /**
+   * Takedown. A recap is photographs of identifiable people, so removal is the
+   * one recap operation with no window, no publish-state condition, and no
+   * party-status condition: whatever else is true, a host asked for a photo of
+   * someone to come down and it comes down. The bytes route re-checks
+   * authorization on every read and sends no-store, so this is effective on the
+   * next request with no cache to invalidate.
+   */
+  remove: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 24, label: 'party-recap-remove' }))
+    .input(z.object({ partyId: z.string().min(1), index: z.number().int().min(0).max(maxRecapImages - 1) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId },
+        select: { id: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      const deleted = await db.partyMedia.deleteMany({ where: { partyId: party.id, kind: 'recap', position: input.index } });
+      const remaining = await db.partyMedia.count({ where: { partyId: party.id, kind: 'recap' } });
+      // Publishing refuses an empty album, so a published empty one must not be
+      // reachable from the other direction either: taking down the last photo
+      // retracts the recap rather than leaving guests an empty room.
+      if (remaining === 0) {
+        await db.party.updateMany({ where: { id: party.id, recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
+      }
+      return { removed: deleted.count > 0, remaining, published: remaining > 0 };
+    }),
+  /**
+   * Retracts the whole album without deleting it, so a host can fix a recap and
+   * publish again. Idempotent, and deliberately not gated on the window: a
+   * takedown must never be blocked by the state the party is in.
+   */
+  unpublish: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-recap-unpublish' }))
+    .input(z.object({ partyId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId },
+        select: { id: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+      await db.party.updateMany({ where: { id: party.id, recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
+      return { published: false };
+    }),
   get: publicProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {

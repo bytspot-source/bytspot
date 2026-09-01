@@ -111,9 +111,13 @@ test('a recap is withheld from everyone the door did not admit', async () => {
 
 test('a confirmed guest reads the recap, privately and same-origin', async () => {
   partyMedia.findUnique = async () => recapRow();
-  partyGuest.findUnique = async () => ({ accessGranted: true });
+  let guestLookup: any;
+  partyGuest.findUnique = async (input: any) => { guestLookup = input.where; return { accessGranted: true }; };
   const res = await get(bearer('usr_guest'));
   assert.equal(res.status, 200);
+  // Scoped to this party's guest list. A lookup by user alone would let a pass
+  // to any other party unlock this album.
+  assert.deepEqual(guestLookup, { partyId_userId: { partyId: 'party-1', userId: 'usr_guest' } });
   assert.deepEqual(res.body, pngBytes);
   // Authorization is re-checked per read, so the response must not be cached
   // and must not be reachable from a cross-origin <img>, which cannot send the

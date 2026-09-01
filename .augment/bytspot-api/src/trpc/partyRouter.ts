@@ -599,7 +599,7 @@ export const partyRecapRouter = router({
     .mutation(async ({ ctx, input }) => {
       const party = await db.party.findFirst({
         where: { id: input.partyId, hostUserId: ctx.user.userId },
-        select: { id: true },
+        select: { id: true, recapPublishedAt: true },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
       const deleted = await db.partyMedia.deleteMany({ where: { partyId: party.id, kind: 'recap', position: input.index } });
@@ -610,7 +610,10 @@ export const partyRecapRouter = router({
       if (remaining === 0) {
         await db.party.updateMany({ where: { id: party.id, recapPublishedAt: { not: null } }, data: { recapPublishedAt: null } });
       }
-      return { removed: deleted.count > 0, remaining, published: remaining > 0 };
+      // Whether guests can see the album, not whether photos survived: a staged
+      // recap with photos left is still unpublished, and a client that reads
+      // this as availability must not be told otherwise.
+      return { removed: deleted.count > 0, remaining, published: remaining > 0 && party.recapPublishedAt !== null };
     }),
   /**
    * Retracts the whole album without deleting it, so a host can fix a recap and

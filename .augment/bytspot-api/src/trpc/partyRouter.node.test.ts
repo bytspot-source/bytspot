@@ -1029,8 +1029,12 @@ test('A published recap opens to the guests the door admitted, and nobody else',
   partyGuest.findUnique = async () => ({ accessGranted: false });
   await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
 
-  partyGuest.findUnique = async () => ({ accessGranted: true });
+  let guestLookup: any;
+  partyGuest.findUnique = async (input: any) => { guestLookup = input.where; return { accessGranted: true }; };
   const recap = await caller().events.recap.get({ partyId: 'party-1' });
+  // Scoped to this party's guest list, not merely to a signed-in member who
+  // holds a pass to some other party.
+  assert.deepEqual(guestLookup, { partyId_userId: { partyId: 'party-1', userId: 'test-user-id' } });
   assert.equal(recap.publishedAt, publishedAt.toISOString());
   assert.deepEqual(recap.photoURLs, [`${config.publicApiUrl}/media/parties/recap-1`, `${config.publicApiUrl}/media/parties/recap-2`]);
 });
@@ -1043,6 +1047,18 @@ const pngDataUri = `data:image/png;base64,${Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
   0, 0, 0x01, 0x40, 0, 0, 0x01, 0x40,
 ]).toString('base64')}`;
+
+test('A recap closes to guests if the party leaves published, on both read surfaces', async () => {
+  // The bytes route already pins this. The whole thesis is that the two
+  // implementations of the read rule stay identical, so the tRPC surface has to
+  // pin it too rather than inherit it by assumption.
+  party.findUnique = async () => ({ ...stagedRecap, status: 'draft', recapPublishedAt: new Date('2026-08-11T04:00:00Z') });
+  partyGuest.findUnique = async () => ({ accessGranted: true });
+  await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  // The host still reviews their own album.
+  const hostView = await createCaller({ user: { userId: 'host-1', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-recap-host-2' }).events.recap.get({ partyId: 'party-1' });
+  assert.equal(hostView.photoURLs.length, 2);
+});
 
 test('A recap cannot exist before the room does', async () => {
   // Nothing to recap until the party is over. Without this the whole path is
@@ -1143,10 +1159,12 @@ test('A recap photo can always be taken down, whatever state the party is in', a
   // entire lookup — asserted on the query itself, since a mock would happily
   // return a party for any narrower where clause.
   let lookup: any;
-  party.findFirst = async (input: any) => { lookup = input.where; return { id: 'party-1', ...upcomingParty }; };
+  party.findFirst = async (input: any) => { lookup = input.where; return { id: 'party-1', recapPublishedAt: null, ...upcomingParty }; };
   const removed = await caller().events.recap.remove({ partyId: 'party-1', index: 3 });
   assert.deepEqual(lookup, { id: 'party-1', hostUserId: 'test-user-id' });
-  assert.deepEqual(removed, { removed: true, remaining: 2, published: true });
+  // published is whether guests can see the album, not whether photos survived:
+  // this one is still staged, so removing from it publishes nothing.
+  assert.deepEqual(removed, { removed: true, remaining: 2, published: false });
   assert.deepEqual(deletedWhere, { partyId: 'party-1', kind: 'recap', position: 3 });
   assert.equal(unpublished, false);
 });
@@ -1155,7 +1173,7 @@ test('Taking down the last photo retracts the recap instead of leaving an empty 
   // Publishing refuses an empty album, so published-with-zero-photos must not
   // be reachable from the other direction either.
   let retracted: any;
-  party.findFirst = async () => ({ id: 'party-1', ...overParty });
+  party.findFirst = async () => ({ id: 'party-1', recapPublishedAt: new Date('2026-08-11T04:00:00Z'), ...overParty });
   party.updateMany = async (input: any) => { retracted = input; return { count: 1 }; };
   partyMedia.deleteMany = async () => ({ count: 1 });
   partyMedia.count = async () => 0;

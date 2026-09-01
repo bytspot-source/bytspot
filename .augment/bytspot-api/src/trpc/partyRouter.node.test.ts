@@ -1000,7 +1000,7 @@ test('Invite coordinates require a public venue and a real arrival Venue', async
 // authorization surface: existence, count, and bytes are all gated on the door.
 const stagedRecap = {
   id: 'party-1', status: 'published', hostUserId: 'host-1', recapPublishedAt: null,
-  title: 'First Listen', media: [{ id: 'recap-1' }, { id: 'recap-2' }],
+  title: 'First Listen', media: [{ id: 'recap-1', position: 0 }, { id: 'recap-2', position: 1 }],
 };
 
 test('A staged recap is invisible to everyone except its host', async () => {
@@ -1037,6 +1037,26 @@ test('A published recap opens to the guests the door admitted, and nobody else',
   assert.deepEqual(guestLookup, { partyId_userId: { partyId: 'party-1', userId: 'test-user-id' } });
   assert.equal(recap.publishedAt, publishedAt.toISOString());
   assert.deepEqual(recap.photoURLs, [`${config.publicApiUrl}/media/parties/recap-1`, `${config.publicApiUrl}/media/parties/recap-2`]);
+});
+
+test('A recap reports the position of each photo, so a sparse album stays addressable', async () => {
+  // Position 1 was removed, so array index and position no longer agree. A host
+  // surface keyed on the index would delete recap-4 when asked for recap-2, and
+  // would overwrite recap-4 on the next upload.
+  party.findUnique = async () => ({
+    ...stagedRecap, recapPublishedAt: new Date('2026-08-11T04:00:00Z'),
+    media: [{ id: 'recap-1', position: 0 }, { id: 'recap-2', position: 2 }, { id: 'recap-4', position: 5 }],
+  });
+  partyGuest.findUnique = async () => ({ accessGranted: true });
+
+  const recap = await caller().events.recap.get({ partyId: 'party-1' });
+  assert.deepEqual(recap.photos, [
+    { position: 0, url: `${config.publicApiUrl}/media/parties/recap-1` },
+    { position: 2, url: `${config.publicApiUrl}/media/parties/recap-2` },
+    { position: 5, url: `${config.publicApiUrl}/media/parties/recap-4` },
+  ]);
+  // photoURLs stays the ordered list a reader wants, in the same order.
+  assert.deepEqual(recap.photoURLs, recap.photos.map((photo) => photo.url));
 });
 
 // The room is over: a party that has ended, so the recap window is open.

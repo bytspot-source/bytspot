@@ -637,7 +637,7 @@ export const partyRecapRouter = router({
     .query(async ({ ctx, input }) => {
       const party = await db.party.findUnique({
         where: { id: input.partyId },
-        include: { media: { where: { kind: 'recap' }, orderBy: { position: 'asc' }, select: { id: true } } },
+        include: { media: { where: { kind: 'recap' }, orderBy: { position: 'asc' }, select: { id: true, position: true } } },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
       const guest = ctx.user
@@ -647,6 +647,11 @@ export const partyRecapRouter = router({
       return {
         publishedAt: party.recapPublishedAt?.toISOString() ?? null,
         photoURLs: party.media.map((media) => partyMediaUrl(media.id)),
+        // upload and remove are keyed by position, and positions go sparse the
+        // moment one photo is removed. A host surface that read the array index
+        // as the position would delete a different photo than the one tapped,
+        // and would overwrite a live one on the next upload.
+        photos: party.media.map((media) => ({ position: media.position, url: partyMediaUrl(media.id) })),
       };
     }),
 });

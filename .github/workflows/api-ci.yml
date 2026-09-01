@@ -101,6 +101,11 @@ jobs:
           --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bytspot_backfill?schema=public
+      # psql rejects ?schema=public as an invalid URI query parameter, so it
+      # cannot be handed the URL Prisma needs. Passing DATABASE_URL to psql
+      # failed this step on the first change that added a migration after the
+      # gate was written.
+      PSQL_URL: postgresql://postgres:postgres@localhost:5432/bytspot_backfill
       PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
@@ -135,13 +140,32 @@ jobs:
           npx prisma migrate deploy
           for d in ${{ steps.added.outputs.dirs }}; do mv "/tmp/held/$d" prisma/migrations/; done
 
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f prisma/fixtures/hostile-shapes.sql
+          psql "$PSQL_URL" -v ON_ERROR_STOP=1 -q -f prisma/fixtures/hostile-shapes.sql
           npx prisma migrate deploy
 
       # Exit code is not the assertion. The rows are.
-      - name: The backfill did not drop or invent anything
+      #
+      # Assertions are per-migration, because a backfill assertion describes one
+      # migration's effect on the fixture and cannot describe a later one's. The
+      # vehicle assertions ran against a baseline that already contained the
+      # vehicle backfill, so they asserted 7 rows a migration seeded before them
+      # could never produce, and every future migration inherited that failure.
+      - name: The migration did not drop or invent anything
         if: steps.added.outputs.dirs != ''
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f prisma/fixtures/hostile-shapes.assert.sql
+        run: |
+          set -euo pipefail
+          ran=0
+          for d in ${{ steps.added.outputs.dirs }}; do
+            f="prisma/fixtures/$d.assert.sql"
+            if [ -f "$f" ]; then
+              echo "asserting $d"
+              psql "$PSQL_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+              ran=$((ran + 1))
+            fi
+          done
+          if [ "$ran" -eq 0 ]; then
+            echo "no per-migration assertions; the hostile shapes still had to survive the migration above"
+          fi
 
   build-and-test:
     runs-on: ubuntu-latest

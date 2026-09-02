@@ -567,8 +567,12 @@ test('Party Pass history lists only rooms the guest was admitted to and that are
   // results. Trimming afterwards would let a page of rooms still to come push
   // a guest's finished rooms out of reach entirely.
   const [ended, fallback] = listedWhere.party.OR;
-  assert.ok(ended.endsAt.lte instanceof Date, 'a stated end is compared in the query');
   assert.equal(fallback.endsAt, null);
+  // `lte`, not `lt`: a room whose stated end is exactly now is over, and so is
+  // one with no stated end that started exactly six hours ago. Pinning the
+  // operator pins both equality boundaries.
+  assert.deepEqual(Object.keys(ended.endsAt), ['lte']);
+  assert.deepEqual(Object.keys(fallback.startsAt), ['lte']);
   const cutoff = Date.now() - 6 * hourMs;
   assert.ok(Math.abs(fallback.startsAt.lte.getTime() - cutoff) < 5_000, 'six hours is the assumed run without a stated end');
 

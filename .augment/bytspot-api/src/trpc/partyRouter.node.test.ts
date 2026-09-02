@@ -1137,26 +1137,47 @@ test('A losing concurrent publish reports the winner\'s moment and does not re-n
 test('An invitation reports that a recap exists without handing over its photos', async () => {
   const invited = {
     id: 'party-1', title: 'First Listen', tagline: 'One moment.', templateId: 'listening-party', requiredMembershipTier: 'green',
-    venueName: 'Sample Venue', locationDisclosure: 'public', accessMode: 'free-rsvp',
+    status: 'published', venueName: 'Sample Venue', locationDisclosure: 'public', accessMode: 'free-rsvp',
     capacity: 80, hostDestinations: {}, itinerary: [], ticketTiers: [], host: { name: 'Host' }, ...linkAlive,
     media: [{ id: 'cover-1', kind: 'cover' }, { id: 'album-1', kind: 'album' }, { id: 'recap-1', kind: 'recap' }],
   };
 
-  // Staged: the count stays at zero, so the invitation does not leak that the
-  // host is assembling an album.
-  party.findFirst = async () => ({ ...invited, recapPublishedAt: null });
-  const staged = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  // Staged: the count stays at zero even for a guest who was in the room, so
+  // the invitation does not leak that the host is assembling an album.
+  party.findFirst = async () => ({ ...invited, recapPublishedAt: null, hostUserId: 'host-user' });
+  partyGuest.findUnique = async () => ({ accessGranted: true, status: 'rsvp' });
+  const staged = await caller().events.invite({ partyId: 'party-1' });
   assert.equal(staged.recapAvailable, false);
   assert.equal(staged.recapPhotoCount, 0);
 
-  party.findFirst = async () => ({ ...invited, recapPublishedAt: new Date('2026-08-11T04:00:00Z') });
-  const published = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  party.findFirst = async () => ({ ...invited, recapPublishedAt: new Date('2026-08-11T04:00:00Z'), hostUserId: 'host-user' });
+
+  // Whoever may read the bytes may know the album is there, and nobody else.
+  // A stranger holding the share link was never in the room: telling them a
+  // recap of it exists confirms what the read rule refuses to, and would offer
+  // the pass an album the server then declines to serve.
+  const stranger = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(stranger.recapAvailable, false);
+  assert.equal(stranger.recapPhotoCount, 0);
+
+  // Signed in but not admitted is the same answer as never having been there.
+  partyGuest.findUnique = async () => ({ accessGranted: false, status: 'pending' });
+  const notAdmitted = await caller().events.invite({ partyId: 'party-1' });
+  assert.equal(notAdmitted.recapAvailable, false);
+
+  partyGuest.findUnique = async () => ({ accessGranted: true, status: 'rsvp' });
+  const published = await caller().events.invite({ partyId: 'party-1' });
   assert.equal(published.recapAvailable, true);
   assert.equal(published.recapPhotoCount, 1);
   // Existence and a count only. Bytes come from events.recap.get, which
   // re-checks the guest list, so the invitation issues no recap URL at all.
   assert.deepEqual(published.photoURLs, [`${config.publicApiUrl}/media/parties/album-1`]);
   assert.equal(JSON.stringify(published).includes('recap-1'), false);
+
+  // The host reads their own staged album, because the bytes route lets them.
+  party.findFirst = async () => ({ ...invited, recapPublishedAt: null, hostUserId: 'test-user-id' });
+  partyGuest.findUnique = async () => null;
+  assert.equal((await caller().events.invite({ partyId: 'party-1' })).recapAvailable, true);
 });
 
 test('A recap photo can always be taken down, whatever state the party is in', async () => {

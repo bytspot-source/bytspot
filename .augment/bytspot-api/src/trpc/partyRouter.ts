@@ -527,13 +527,26 @@ function assertPartyOver(party: { endsAt: Date | null; startsAt: Date }): void {
   }
 }
 
+/**
+ * The same rule as a question rather than a refusal, for surfaces that report
+ * whether an album is there instead of serving it. One rule, so a surface
+ * cannot advertise a recap the bytes route will not hand over.
+ */
+function canReadRecap(
+  party: { status: string; hostUserId: string; recapPublishedAt: Date | null },
+  guest: { accessGranted: boolean } | null,
+  viewerUserId?: string | null,
+): boolean {
+  if (viewerUserId && viewerUserId === party.hostUserId) return true;
+  return party.status === 'published' && party.recapPublishedAt !== null && guest?.accessGranted === true;
+}
+
 function assertRecapReadable(
   party: { status: string; hostUserId: string; recapPublishedAt: Date | null },
   guest: { accessGranted: boolean } | null,
   viewerUserId?: string | null,
 ): void {
-  if (viewerUserId && viewerUserId === party.hostUserId) return;
-  if (party.status !== 'published' || !party.recapPublishedAt || !guest?.accessGranted) {
+  if (!canReadRecap(party, guest, viewerUserId)) {
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   }
 }
@@ -940,7 +953,13 @@ export const partyInvite = publicProcedure
     const destinations = identity ? null : safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
     const album = party.media.filter((media) => media.kind === 'album');
-    const recapPhotoCount = party.recapPublishedAt ? party.media.filter((media) => media.kind === 'recap').length : 0;
+    // Whoever may read the bytes may know the album is there, and nobody else.
+    // A stranger holding the share link was never in the room, so telling them
+    // a recap of it exists confirms what the read rule refuses to, and offers
+    // the pass an album the server will not serve.
+    const recapPhotoCount = canReadRecap(party, guest, ctx.user?.userId)
+      ? party.media.filter((media) => media.kind === 'recap').length
+      : 0;
     return {
       id: party.id,
       source: 'host-studio-party' as const,

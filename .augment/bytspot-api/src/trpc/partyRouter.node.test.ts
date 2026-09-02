@@ -539,7 +539,7 @@ test('Party Pass history lists only rooms the guest was admitted to and that are
   const room = (over: Record<string, unknown> = {}) => ({
     status: 'rsvp', checkedInAt: null,
     party: {
-      id: 'party-1', title: 'First Listen', venueName: 'The Basement',
+      id: 'party-1', title: 'First Listen', venueName: 'The Basement', locationDisclosure: 'public',
       startsAt: new Date(Date.now() - 8 * hourMs), endsAt: new Date(Date.now() - hourMs),
       recapPublishedAt: null, media: [],
       ...over,
@@ -554,24 +554,35 @@ test('Party Pass history lists only rooms the guest was admitted to and that are
   };
 
   const history = await caller().events.pass.history();
-  // Admission is the whole filter, and it is applied by the database rather
-  // than trimmed afterwards.
-  assert.deepEqual(listedWhere, { userId: 'test-user-id', accessGranted: true, party: { status: 'published' } });
-  assert.equal(listedTake, 100, 'over-fetched so running rooms do not eat the page');
+  assert.equal(listedWhere.userId, 'test-user-id');
+  assert.equal(listedWhere.accessGranted, true);
+  assert.equal(listedWhere.party.status, 'published');
+  assert.equal(listedTake, 50);
   assert.equal(history.rooms.length, 1);
   assert.equal(history.rooms[0].id, 'party-1');
   assert.equal(history.rooms[0].recapAvailable, false);
   assert.equal(history.rooms[0].attended, false);
 
-  // A room still running is not history yet, even though the guest is admitted.
-  partyGuest.findMany = async () => [room({ startsAt: new Date(Date.now() - hourMs), endsAt: new Date(Date.now() + hourMs) })];
-  assert.deepEqual((await caller().events.pass.history()).rooms, []);
+  // Whether a room is over is asked of the database, not trimmed off the
+  // results. Trimming afterwards would let a page of rooms still to come push
+  // a guest's finished rooms out of reach entirely.
+  const [ended, fallback] = listedWhere.party.OR;
+  assert.ok(ended.endsAt.lte instanceof Date, 'a stated end is compared in the query');
+  assert.equal(fallback.endsAt, null);
+  const cutoff = Date.now() - 6 * hourMs;
+  assert.ok(Math.abs(fallback.startsAt.lte.getTime() - cutoff) < 5_000, 'six hours is the assumed run without a stated end');
 
-  // No endsAt: the room is over six hours after it started, not before.
-  partyGuest.findMany = async () => [room({ startsAt: new Date(Date.now() - 2 * hourMs), endsAt: null })];
-  assert.deepEqual((await caller().events.pass.history()).rooms, []);
-  partyGuest.findMany = async () => [room({ startsAt: new Date(Date.now() - 7 * hourMs), endsAt: null })];
-  assert.equal((await caller().events.pass.history()).rooms.length, 1);
+  // The location obeys the same disclosure the Party Pass obeys: a room the
+  // host kept unplaced must not be named by the list that leads back to it.
+  for (const disclosure of ['withheld', 'after-approval']) {
+    partyGuest.findMany = async () => [room({ locationDisclosure: disclosure })];
+    const listed = (await caller().events.pass.history()).rooms[0];
+    assert.equal(listed.locationLabel, null, `${disclosure} must not name the venue`);
+    assert.equal(listed.locationDisclosure, disclosure);
+    assert.equal(JSON.stringify(listed).includes('The Basement'), false, 'the venue must not survive anywhere in the row');
+  }
+  partyGuest.findMany = async () => [room()];
+  assert.equal((await caller().events.pass.history()).rooms[0].locationLabel, 'The Basement');
 
   // Staged photos are not a recap to a guest: unpublished counts as none.
   partyGuest.findMany = async () => [room({ media: [{ id: 'media-1' }, { id: 'media-2' }] })];

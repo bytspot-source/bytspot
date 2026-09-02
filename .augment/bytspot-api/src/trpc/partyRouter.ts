@@ -855,8 +855,11 @@ function publicArrivalCoordinate(party: { locationDisclosure: string; arrivalVen
  * override: a host who keeps the link open for a week has not made the party
  * last a week.
  */
+/** How long a room without a stated end is assumed to run. */
+export const PARTY_FALLBACK_DURATION_MS = 6 * 60 * 60 * 1000;
+
 export function partyEndedAt(party: { endsAt: Date | null; startsAt: Date }): Date {
-  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+  return party.endsAt ?? new Date(party.startsAt.getTime() + PARTY_FALLBACK_DURATION_MS);
 }
 
 /**
@@ -1039,20 +1042,36 @@ export const partyPassRouter = router({
    * Admission is the whole filter. `accessGranted` with a published party is
    * the same pair `canReadRecap` requires, so a room can never be listed as
    * holding a recap that `events.recap.get` would then refuse.
+   *
+   * The location obeys the same disclosure the Party Pass obeys. A room the
+   * host kept unplaced stays unplaced in the list that leads back to it.
    */
   history: protectedProcedure.query(async ({ ctx }) => {
+    const now = new Date();
     const guests = await db.partyGuest.findMany({
-      where: { userId: ctx.user.userId, accessGranted: true, party: { status: 'published' } },
+      where: {
+        userId: ctx.user.userId,
+        accessGranted: true,
+        party: {
+          status: 'published',
+          // `partyEndedAt` as a query rather than a pass over the results.
+          // Filtering afterwards would let a guest with a full page of rooms
+          // still to come push their finished rooms out of reach.
+          OR: [
+            { endsAt: { lte: now } },
+            { endsAt: null, startsAt: { lte: new Date(now.getTime() - PARTY_FALLBACK_DURATION_MS) } },
+          ],
+        },
+      },
       orderBy: { party: { startsAt: 'desc' } },
-      // Over-fetched so the rooms still running, which are filtered out in
-      // memory, do not eat into the page the guest actually sees.
-      take: GUEST_ROOM_PAGE * 2,
+      take: GUEST_ROOM_PAGE,
       select: {
         status: true,
         checkedInAt: true,
         party: {
           select: {
-            id: true, title: true, venueName: true, startsAt: true, endsAt: true,
+            id: true, title: true, venueName: true, locationDisclosure: true,
+            startsAt: true, endsAt: true,
             recapPublishedAt: true,
             media: { where: { kind: 'recap' }, select: { id: true } },
           },
@@ -1061,8 +1080,6 @@ export const partyPassRouter = router({
     });
 
     const rooms = guests
-      .filter((guest) => partyEndedAt(guest.party).getTime() <= Date.now())
-      .slice(0, GUEST_ROOM_PAGE)
       .map((guest) => {
         // Staged photos are not a recap to anyone but the host, so an
         // unpublished album counts as zero here rather than as a locked one.
@@ -1070,7 +1087,10 @@ export const partyPassRouter = router({
         return {
           id: guest.party.id,
           title: guest.party.title,
-          venueName: guest.party.venueName,
+          // The same rule as the pass: a venue is named only where the host
+          // made it public. Anything else is the disclosure, not the place.
+          locationLabel: guest.party.locationDisclosure === 'public' ? guest.party.venueName : null,
+          locationDisclosure: guest.party.locationDisclosure,
           startsAt: guest.party.startsAt.toISOString(),
           endsAt: guest.party.endsAt?.toISOString() ?? null,
           status: guest.status,

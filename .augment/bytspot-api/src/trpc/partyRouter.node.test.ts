@@ -534,6 +534,79 @@ test('Share link dies when the party ends: expired links 404 for new arrivals bu
   assert.deepEqual(await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { status: 'rsvp', accessGranted: true });
 });
 
+test('Party Pass history lists only rooms the guest was admitted to and that are over', async () => {
+  const hourMs = 60 * 60 * 1000;
+  const room = (over: Record<string, unknown> = {}) => ({
+    status: 'rsvp', checkedInAt: null,
+    party: {
+      id: 'party-1', title: 'First Listen', venueName: 'The Basement', locationDisclosure: 'public',
+      startsAt: new Date(Date.now() - 8 * hourMs), endsAt: new Date(Date.now() - hourMs),
+      recapPublishedAt: null, media: [],
+      ...over,
+    },
+  });
+
+  let listedWhere: any;
+  let listedTake: number | undefined;
+  partyGuest.findMany = async ({ where, take }: any) => {
+    listedWhere = where; listedTake = take;
+    return [room()];
+  };
+
+  const history = await caller().events.pass.history();
+  assert.equal(listedWhere.userId, 'test-user-id');
+  assert.equal(listedWhere.accessGranted, true);
+  assert.equal(listedWhere.party.status, 'published');
+  assert.equal(listedTake, 50);
+  assert.equal(history.rooms.length, 1);
+  assert.equal(history.rooms[0].id, 'party-1');
+  assert.equal(history.rooms[0].recapAvailable, false);
+  assert.equal(history.rooms[0].attended, false);
+
+  // Whether a room is over is asked of the database, not trimmed off the
+  // results. Trimming afterwards would let a page of rooms still to come push
+  // a guest's finished rooms out of reach entirely.
+  const [ended, fallback] = listedWhere.party.OR;
+  assert.equal(fallback.endsAt, null);
+  // `lte`, not `lt`: a room whose stated end is exactly now is over, and so is
+  // one with no stated end that started exactly six hours ago. Pinning the
+  // operator pins both equality boundaries.
+  assert.deepEqual(Object.keys(ended.endsAt), ['lte']);
+  assert.deepEqual(Object.keys(fallback.startsAt), ['lte']);
+  const cutoff = Date.now() - 6 * hourMs;
+  assert.ok(Math.abs(fallback.startsAt.lte.getTime() - cutoff) < 5_000, 'six hours is the assumed run without a stated end');
+
+  // The location obeys the same disclosure the Party Pass obeys: a room the
+  // host kept unplaced must not be named by the list that leads back to it.
+  for (const disclosure of ['withheld', 'after-approval']) {
+    partyGuest.findMany = async () => [room({ locationDisclosure: disclosure })];
+    const listed = (await caller().events.pass.history()).rooms[0];
+    assert.equal(listed.locationLabel, null, `${disclosure} must not name the venue`);
+    assert.equal(listed.locationDisclosure, disclosure);
+    assert.equal(JSON.stringify(listed).includes('The Basement'), false, 'the venue must not survive anywhere in the row');
+  }
+  partyGuest.findMany = async () => [room()];
+  assert.equal((await caller().events.pass.history()).rooms[0].locationLabel, 'The Basement');
+
+  // Staged photos are not a recap to a guest: unpublished counts as none.
+  partyGuest.findMany = async () => [room({ media: [{ id: 'media-1' }, { id: 'media-2' }] })];
+  let listed = (await caller().events.pass.history()).rooms[0];
+  assert.equal(listed.recapAvailable, false, 'an unpublished album must not be advertised');
+  assert.equal(listed.recapPhotoCount, 0);
+
+  // Published, and the count is the one events.recap.get would serve.
+  partyGuest.findMany = async () => [room({ media: [{ id: 'media-1' }, { id: 'media-2' }], recapPublishedAt: new Date() })];
+  listed = (await caller().events.pass.history()).rooms[0];
+  assert.equal(listed.recapAvailable, true);
+  assert.equal(listed.recapPhotoCount, 2);
+
+  // Checking in is reported, but it is never what makes a room reachable.
+  partyGuest.findMany = async () => [{ ...room(), checkedInAt: new Date() }];
+  assert.equal((await caller().events.pass.history()).rooms[0].attended, true);
+
+  await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'anon' }).events.pass.history(), { code: 'UNAUTHORIZED' });
+});
+
 test('Expired paid-ticket share link still reports already-confirmed to a ticketed guest', async () => {
   party.findFirst = async () => ({
     id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,

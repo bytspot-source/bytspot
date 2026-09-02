@@ -855,8 +855,11 @@ function publicArrivalCoordinate(party: { locationDisclosure: string; arrivalVen
  * override: a host who keeps the link open for a week has not made the party
  * last a week.
  */
+/** How long a room without a stated end is assumed to run. */
+export const PARTY_FALLBACK_DURATION_MS = 6 * 60 * 60 * 1000;
+
 export function partyEndedAt(party: { endsAt: Date | null; startsAt: Date }): Date {
-  return party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000);
+  return party.endsAt ?? new Date(party.startsAt.getTime() + PARTY_FALLBACK_DURATION_MS);
 }
 
 /**
@@ -1028,7 +1031,78 @@ export const hostDestinationsRouter = router({
     }),
 });
 
+const GUEST_ROOM_PAGE = 50;
+
 export const partyPassRouter = router({
+  /**
+   * Rooms this guest was admitted to and that are now over: the way back to a
+   * Party Pass once the room has closed. Without it a recap is reachable only
+   * by whoever still has the original invitation link.
+   *
+   * Admission is the whole filter. `accessGranted` with a published party is
+   * the same pair `canReadRecap` requires, so a room can never be listed as
+   * holding a recap that `events.recap.get` would then refuse.
+   *
+   * The location obeys the same disclosure the Party Pass obeys. A room the
+   * host kept unplaced stays unplaced in the list that leads back to it.
+   */
+  history: protectedProcedure.query(async ({ ctx }) => {
+    const now = new Date();
+    const guests = await db.partyGuest.findMany({
+      where: {
+        userId: ctx.user.userId,
+        accessGranted: true,
+        party: {
+          status: 'published',
+          // `partyEndedAt` as a query rather than a pass over the results.
+          // Filtering afterwards would let a guest with a full page of rooms
+          // still to come push their finished rooms out of reach.
+          OR: [
+            { endsAt: { lte: now } },
+            { endsAt: null, startsAt: { lte: new Date(now.getTime() - PARTY_FALLBACK_DURATION_MS) } },
+          ],
+        },
+      },
+      orderBy: { party: { startsAt: 'desc' } },
+      take: GUEST_ROOM_PAGE,
+      select: {
+        status: true,
+        checkedInAt: true,
+        party: {
+          select: {
+            id: true, title: true, venueName: true, locationDisclosure: true,
+            startsAt: true, endsAt: true,
+            recapPublishedAt: true,
+            media: { where: { kind: 'recap' }, select: { id: true } },
+          },
+        },
+      },
+    });
+
+    const rooms = guests
+      .map((guest) => {
+        // Staged photos are not a recap to anyone but the host, so an
+        // unpublished album counts as zero here rather than as a locked one.
+        const recapPhotoCount = guest.party.recapPublishedAt !== null ? guest.party.media.length : 0;
+        return {
+          id: guest.party.id,
+          title: guest.party.title,
+          // The same rule as the pass: a venue is named only where the host
+          // made it public. Anything else is the disclosure, not the place.
+          locationLabel: guest.party.locationDisclosure === 'public' ? guest.party.venueName : null,
+          locationDisclosure: guest.party.locationDisclosure,
+          startsAt: guest.party.startsAt.toISOString(),
+          endsAt: guest.party.endsAt?.toISOString() ?? null,
+          status: guest.status,
+          attended: guest.checkedInAt !== null,
+          recapAvailable: recapPhotoCount > 0,
+          recapPhotoCount,
+        };
+      });
+
+    return { rooms };
+  }),
+
   resolve: publicProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
@@ -1092,12 +1166,16 @@ type HostRoomRow = {
   id: string; title: string; venueName: string; startsAt: Date; endsAt: Date | null;
   admissionPaused: boolean; shareLinkExpiresAt: Date | null; closedAt: Date | null;
   passCode: string | null; capacity: number;
+  recapPublishedAt: Date | null; media: { id: string }[];
 };
 
+// The recap ids rather than a count: an album is capped at `maxRecapImages`,
+// so this stays a handful of rows per room and needs no relation aggregate.
 const hostRoomSelect = {
   id: true, title: true, venueName: true, startsAt: true, endsAt: true,
   admissionPaused: true, shareLinkExpiresAt: true, closedAt: true,
-  passCode: true, capacity: true,
+  passCode: true, capacity: true, recapPublishedAt: true,
+  media: { where: { kind: 'recap' }, select: { id: true } },
 } as const;
 
 function hostRoomIsOpen(party: HostRoomRow): boolean {
@@ -1119,6 +1197,10 @@ function hostRoomView(party: HostRoomRow) {
     shareLinkExpired: shareLinkExpired(party),
     closedAt: party.closedAt?.toISOString() ?? null,
     capacity: party.capacity,
+    // Staged and published are separate facts to the host, because only the
+    // second one is the fact the guests can see.
+    recapPhotoCount: party.media.length,
+    recapPublished: party.recapPublishedAt !== null,
   };
 }
 

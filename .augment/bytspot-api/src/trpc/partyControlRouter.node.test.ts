@@ -53,6 +53,7 @@ test('Hosted rooms list is authenticated and returns only this host\'s published
       id: 'party-1', title: 'First Listen', venueName: 'The Basement',
       startsAt: publishedParty.startsAt, endsAt: publishedParty.endsAt,
       admissionPaused: false, shareLinkExpiresAt: null, closedAt: null, passCode: 'BYT-EXISTING', capacity: 80,
+      recapPublishedAt: null, media: [],
     }];
   };
   const { parties } = await caller().events.control.hosted();
@@ -72,7 +73,7 @@ const roomRow = (over: Record<string, unknown> = {}) => ({
   id: 'party-1', title: 'First Listen', venueName: 'The Basement',
   startsAt: publishedParty.startsAt, endsAt: partyEndsAt,
   admissionPaused: false, shareLinkExpiresAt: null, closedAt: null,
-  passCode: 'BYT-EXISTING', capacity: 80, ...over,
+  passCode: 'BYT-EXISTING', capacity: 80, recapPublishedAt: null, media: [], ...over,
 });
 
 test('Closing a room hides it from the console and expires the link without touching status', async () => {
@@ -112,6 +113,34 @@ test('Close is idempotent and a closed room moves to the closed list', async () 
   const closedList = (await caller().events.control.closedRooms()).parties;
   assert.equal(closedList.length, 1);
   assert.equal(closedList[0].closedAt, closedAt.toISOString());
+});
+
+test('A closed room reports staged and published recap photos as separate facts', async () => {
+  const closedAt = new Date(Date.now() - 60_000);
+  const closedWith = (over: Record<string, unknown>) => {
+    party.findMany = async ({ where }: any) => (where.closedAt === null ? [] : [roomRow({ closedAt, ...over })]);
+    return caller().events.control.closedRooms();
+  };
+
+  // No album at all.
+  let room = (await closedWith({})).parties[0];
+  assert.equal(room.recapPhotoCount, 0);
+  assert.equal(room.recapPublished, false);
+
+  // Staged but never published: the host has photos, the guests have nothing.
+  room = (await closedWith({ media: [{ id: 'media-1' }, { id: 'media-2' }] })).parties[0];
+  assert.equal(room.recapPhotoCount, 2);
+  assert.equal(room.recapPublished, false, 'uploading is not publishing');
+
+  // Published: the same photos, now readable by the guests the door admitted.
+  room = (await closedWith({ media: [{ id: 'media-1' }, { id: 'media-2' }], recapPublishedAt: new Date() })).parties[0];
+  assert.equal(room.recapPhotoCount, 2);
+  assert.equal(room.recapPublished, true);
+
+  // An unpublish leaves the photos staged rather than deleting them.
+  room = (await closedWith({ media: [{ id: 'media-1' }] })).parties[0];
+  assert.equal(room.recapPhotoCount, 1);
+  assert.equal(room.recapPublished, false);
 });
 
 test('A room whose link died over a day ago leaves the console without being closed', async () => {

@@ -1,0 +1,564 @@
+{
+  "id": "bytspot.vendor-console",
+  "version": 4,
+  "$comment": "Console UX only. The ontology lives in bookable-templates.json and is shared with Swift and Kotlin; this file is read by the vendor web console alone, so navigation and wizard copy never force the native clients to model vendor screens.",
+  "$modelComment": "A Bookable is a SKU printer, not a listing and not a SKU. The vendor configures one Bookable; availability prints the SKUs that carry the state machine. The word SKU is never shown to a vendor.",
+  "model": {
+    "chain": [
+      "SELLER",
+      "LOCATION",
+      "BOOKABLE",
+      "AVAILABILITY",
+      "SKU",
+      "BOOKING",
+      "PAYMENT",
+      "PASS",
+      "PAYOUT"
+    ],
+    "printer": {
+      "config": "BOOKABLE",
+      "multiplier": "AVAILABILITY",
+      "prints": "SKU"
+    },
+    "fulfillmentIsPassState": "ADMITTED",
+    "vendorFacingNouns": [
+      "Bookable",
+      "Availability",
+      "Booking",
+      "Pass",
+      "Payout"
+    ]
+  },
+  "$copyComment": "The ontology nouns in model.chain are for engineers reading the code, not for vendors reading the screen. SKU, BOOKABLE, PIN and SELLER never appear in visible text: a vendor asked to 'configure a bookable' has to learn our data model before they can list a table. Every id a screen renders is looked up here first, and copy.test asserts no internal noun survives into JSX.",
+  "copy": {
+    "internalOnly": [
+      "SKU",
+      "BOOKABLE",
+      "PIN",
+      "SELLER",
+      "STALL",
+      "HANG",
+      "STAY",
+      "AVAILABILITY",
+      "inventory",
+      "printer",
+      "prints"
+    ],
+    "$nounComment": "Left is what the code calls it. Right is what a vendor calls it.",
+    "nouns": {
+      "BOOKABLE": "service",
+      "SKU": "opening",
+      "AVAILABILITY": "schedule",
+      "LOCATION": "place",
+      "PIN": "exact spot on the map",
+      "SELLER": "business",
+      "BOOKING": "booking",
+      "PASS": "pass",
+      "PAYOUT": "payout",
+      "PAYMENT": "payment"
+    },
+    "$stateComment": "Vendors should never read a database state name. PAUSED is not 'paused' to a vendor; it means guests cannot book right now.",
+    "locationStates": {
+      "DRAFT": {
+        "label": "Not live yet",
+        "detail": "Only you can see this place."
+      },
+      "ACTIVE": {
+        "label": "Live",
+        "detail": "Guests can find and book here."
+      },
+      "PAUSED": {
+        "label": "Paused",
+        "detail": "Hidden from guests. Existing bookings still stand."
+      },
+      "CLOSED": {
+        "label": "Closed",
+        "detail": "Closed for good. This cannot be undone."
+      }
+    }
+  },
+  "$typesComment": "Every type resolves to a domain and variants that already exist in bookable-templates.json. Nothing here invents a noun. Types the ontology cannot express yet are listed in unsupportedTypes rather than faked.",
+  "bookableTypes": [
+    {
+      "id": "table",
+      "label": "Table",
+      "question": "Seating you reserve",
+      "domain": "dining",
+      "variants": [
+        "table",
+        "patio",
+        "booth",
+        "private-dining",
+        "chefs-table"
+      ],
+      "icon": "fork.knife"
+    },
+    {
+      "id": "parking",
+      "label": "Parking",
+      "question": "A space a car occupies",
+      "domain": "stall",
+      "variants": [
+        "reserved",
+        "valet"
+      ],
+      "icon": "car.fill"
+    },
+    {
+      "id": "stay",
+      "label": "Stay",
+      "question": "A room or property for a night",
+      "domain": "stay",
+      "variants": [
+        "hotel",
+        "villa",
+        "retreat",
+        "movie-room"
+      ],
+      "icon": "bed.double.fill"
+    },
+    {
+      "id": "experience",
+      "label": "Experience",
+      "question": "A night out you host",
+      "domain": "nightlife",
+      "variants": [
+        "vip",
+        "bottle-service",
+        "lounge"
+      ],
+      "icon": "sparkles"
+    },
+    {
+      "id": "ticket",
+      "label": "Ticket",
+      "question": "Entry to something",
+      "domain": "nightlife",
+      "variants": [
+        "guest-list"
+      ],
+      "icon": "ticket.fill"
+    },
+    {
+      "id": "ride",
+      "label": "Ride",
+      "question": "A vehicle or driver",
+      "domain": "automotive",
+      "variants": [
+        "rental",
+        "valet",
+        "driving-experience",
+        "transfer"
+      ],
+      "icon": "steeringwheel"
+    },
+    {
+      "id": "service",
+      "label": "Service",
+      "question": "Time with a person",
+      "domain": "wellness",
+      "variants": [
+        "massage",
+        "sauna",
+        "facial",
+        "appointment"
+      ],
+      "icon": "hands.sparkles.fill"
+    },
+    {
+      "id": "coffee",
+      "label": "Coffee",
+      "question": "A seat, a room or a class at your cafe",
+      "domain": "coffee",
+      "variants": [
+        "reserved-table",
+        "private-room",
+        "workspace",
+        "tasting",
+        "class"
+      ],
+      "icon": "cup.and.saucer.fill"
+    },
+    {
+      "id": "shopping",
+      "label": "Shopping",
+      "question": "An appointment on your shop floor",
+      "domain": "shopping",
+      "variants": [
+        "personal-shopping",
+        "styling",
+        "appointment",
+        "private-showroom"
+      ],
+      "icon": "bag.fill"
+    },
+    {
+      "id": "events",
+      "label": "Event",
+      "question": "Entry to something you are putting on",
+      "domain": "events",
+      "variants": [
+        "general-admission",
+        "vip",
+        "reserved-seat",
+        "class",
+        "private-event"
+      ],
+      "icon": "ticket.fill"
+    },
+    {
+      "id": "fitness",
+      "label": "Fitness",
+      "question": "A session, a class or a court",
+      "domain": "fitness",
+      "variants": [
+        "session",
+        "class",
+        "personal-training",
+        "court",
+        "recovery"
+      ],
+      "icon": "figure.run"
+    },
+    {
+      "id": "local",
+      "label": "Local",
+      "question": "Something you make or do from home",
+      "domain": "green",
+      "variants": [
+        "local-service",
+        "farm-stand",
+        "baked-goods"
+      ],
+      "icon": "leaf.fill",
+      "cottageDefault": true
+    }
+  ],
+  "$unsupportedComment": "Named so a gap is visible instead of silently mapped onto the wrong domain. Each would need a new variant on an existing domain, never a new core noun. Class now lands on fitness.class and events.class, and Space on coffee.workspace, so the list is empty; it stays here because the next gap should be recorded rather than faked.",
+  "unsupportedTypes": [],
+  "$navComment": "Primary tabs are identical for every business: a home baker deserves the same demand feed as a hotel. Cottage mode collapses the secondary menu instead, which matches guidanceForRole in providerDashboardAccess.ts. Every item names the capability that unlocks it, so navigation is derived from the same staff roles the ontology enforces rather than a second copy of the rules.",
+  "navigation": {
+    "primary": [
+      {
+        "id": "home",
+        "label": "Home",
+        "icon": "house.fill"
+      },
+      {
+        "id": "bookables",
+        "label": "Bookables",
+        "icon": "square.grid.2x2.fill",
+        "requiresCapability": "PUBLISH"
+      },
+      {
+        "id": "demand",
+        "label": "Demand",
+        "icon": "waveform.path.ecg",
+        "requiresCapability": "SELL"
+      },
+      {
+        "id": "bookings",
+        "label": "Bookings",
+        "icon": "calendar"
+      },
+      {
+        "id": "earnings",
+        "label": "Earnings",
+        "icon": "dollarsign.circle.fill",
+        "requiresFinancials": true
+      }
+    ],
+    "secondary": [
+      {
+        "id": "scanner",
+        "label": "Pass scanner",
+        "icon": "qrcode.viewfinder",
+        "requiresCapability": "VERIFY"
+      },
+      {
+        "id": "patches",
+        "label": "QR / NFC patches",
+        "icon": "wave.3.right",
+        "requiresCapability": "PUBLISH"
+      },
+      {
+        "id": "availability",
+        "label": "Availability",
+        "icon": "clock.fill",
+        "requiresCapability": "SCHEDULE"
+      },
+      {
+        "id": "business",
+        "label": "Business",
+        "icon": "building.2.fill",
+        "standardOnly": true,
+        "requiresCapability": "SELL"
+      },
+      {
+        "id": "locations",
+        "label": "Locations",
+        "icon": "mappin.and.ellipse",
+        "standardOnly": true,
+        "requiresCapability": "SELL"
+      },
+      {
+        "id": "staff",
+        "label": "Staff",
+        "icon": "person.2.fill",
+        "standardOnly": true,
+        "requiresCapability": "SELL"
+      },
+      {
+        "id": "analytics",
+        "label": "Analytics",
+        "icon": "chart.bar.fill",
+        "requiresFinancials": true
+      },
+      {
+        "id": "webhooks",
+        "label": "Webhooks",
+        "icon": "antenna.radiowaves.left.and.right",
+        "requiresOwner": true
+      },
+      {
+        "id": "payouts",
+        "label": "Payouts",
+        "icon": "banknote.fill",
+        "requiresPayouts": true
+      },
+      {
+        "id": "partnerships",
+        "label": "Partnerships",
+        "icon": "handshake.fill",
+        "standardOnly": true,
+        "requiresPayouts": true
+      },
+      {
+        "id": "settings",
+        "label": "Settings",
+        "icon": "gearshape.fill"
+      }
+    ]
+  },
+  "$wizardComment": "Eight steps, Shopify-shaped. Steps map one to one onto fields the ontology already carries, so the wizard cannot produce a Bookable the contract rejects.",
+  "createBookableSteps": [
+    {
+      "id": "type",
+      "title": "What are you selling?",
+      "field": "bookableType"
+    },
+    {
+      "id": "detail",
+      "title": "What exactly?",
+      "field": "title"
+    },
+    {
+      "id": "when",
+      "title": "When?",
+      "field": "availabilityWindow"
+    },
+    {
+      "id": "quantity",
+      "title": "How many?",
+      "field": "quantity"
+    },
+    {
+      "id": "price",
+      "title": "Price",
+      "field": "priceCents"
+    },
+    {
+      "id": "rules",
+      "title": "Rules",
+      "field": "durationMins,maxGuests,timing"
+    },
+    {
+      "id": "where",
+      "title": "Where?",
+      "field": "locationId"
+    },
+    {
+      "id": "publish",
+      "title": "Publish",
+      "field": "capabilities"
+    }
+  ],
+  "$authComment": "Auth is web-only and lives here rather than in bookable-templates.json, because the native app never signs a vendor in. The flow is email plus a one-time code: a console that stores no password cannot leak one. A code is single-use, short-lived and attempt-capped, and the refusals are deliberately coarse so the endpoint cannot be used to discover which emails are registered.",
+  "auth": {
+    "flow": [
+      "email",
+      "code",
+      "seat",
+      "console"
+    ],
+    "steps": [
+      {
+        "id": "email",
+        "title": "Who are you?",
+        "field": "email"
+      },
+      {
+        "id": "code",
+        "title": "Enter your code",
+        "field": "code"
+      },
+      {
+        "id": "seat",
+        "title": "Which business?",
+        "field": "sellerId"
+      },
+      {
+        "id": "console",
+        "title": "Console",
+        "field": "session"
+      }
+    ],
+    "$codeComment": "Six digits is a compromise: long enough that guessing inside three attempts is impractical, short enough to read off a phone. Ten minutes because a vendor is usually at a counter, not a desk.",
+    "code": {
+      "length": 6,
+      "ttlSecs": 600,
+      "maxAttempts": 3,
+      "resendCooldownSecs": 60
+    },
+    "$tokenComment": "The access token is short-lived and held in memory only. The refresh token is never visible to this code at all: it lives in an httpOnly, SameSite=Strict, Secure cookie scoped to the vendor origin, so a script injected into the page cannot read it and the consumer origin cannot send it.",
+    "token": {
+      "accessTtlSecs": 900,
+      "refreshTtlSecs": 2592000,
+      "refreshBeforeExpirySecs": 120,
+      "accessStorage": "memory",
+      "refreshStorage": "httponly-cookie",
+      "cookieSameSite": "Strict",
+      "cookieSecure": true
+    },
+    "$storageComment": "An allowlist, not a guideline. Anything not named here must never reach localStorage, sessionStorage, IndexedDB or a URL, and the contract check fails if a token-shaped key is ever added to it.",
+    "persistableKeys": [
+      "lastSellerId"
+    ],
+    "$refusalComment": "invalid-code covers an unknown email, a wrong code, an expired code and an already-used code, on purpose: four distinguishable answers would be an account enumeration oracle. locked and rate-limited are safe to distinguish because they say nothing about whether the account exists.",
+    "refusals": [
+      {
+        "id": "invalid-code",
+        "message": "That code did not work. Check it and try again."
+      },
+      {
+        "id": "locked",
+        "message": "Too many attempts. Request a new code."
+      },
+      {
+        "id": "rate-limited",
+        "message": "Wait a moment before requesting another code."
+      },
+      {
+        "id": "no-seats",
+        "message": "This email is not on any business yet. Ask an owner to invite you."
+      },
+      {
+        "id": "expired-session",
+        "message": "Signed out. Please sign in again."
+      }
+    ]
+  },
+  "$webhookUiComment": "Registering a receiver is minting a credential, so the tab is owner-only even though every individual scope is capability-gated as well. The secret is shown exactly once at creation and is unreadable afterwards, which is the whole reason rotation exists.",
+  "webhookUi": {
+    "urlScheme": "https",
+    "secretRevealedOnce": true,
+    "operations": [
+      {
+        "id": "REGISTER",
+        "label": "Add endpoint",
+        "from": [],
+        "to": "ACTIVE"
+      },
+      {
+        "id": "PAUSE",
+        "label": "Pause",
+        "from": [
+          "ACTIVE"
+        ],
+        "to": "PAUSED"
+      },
+      {
+        "id": "RESUME",
+        "label": "Resume",
+        "from": [
+          "PAUSED",
+          "DISABLED"
+        ],
+        "to": "ACTIVE"
+      },
+      {
+        "id": "ROTATE",
+        "label": "Rotate secret",
+        "from": [
+          "ACTIVE",
+          "PAUSED",
+          "DISABLED"
+        ],
+        "to": "ACTIVE"
+      }
+    ]
+  },
+  "$onboardingComment": "Onboarding is not a phase with progress of its own. It is the gap between what a SELLER has satisfied and what the lifecycle requires, so it is derived on every render and reappears if a requirement stops being met - a business whose only location closed is unfinished again, and saying so is more useful than silently refusing to publish. Each step names the one requirement it closes; ordering comes from where that requirement's blocked state sits in the lifecycle, so inserting a state reorders the wizard without anyone editing it. Steps are reached through the gate rather than through a tab, which is what makes every requirement satisfiable in cottage mode where the Locations tab does not exist.",
+  "onboarding": {
+    "steps": [
+      {
+        "requirement": "legalName",
+        "title": "What is the business called?",
+        "question": "The name on your registration, not your trading name.",
+        "field": "legalName",
+        "kind": "text"
+      },
+      {
+        "requirement": "contactEmail",
+        "title": "Where should we reach you?",
+        "question": "Used for bookings and payout notices. Not shown to guests.",
+        "field": "contactEmail",
+        "kind": "email"
+      },
+      {
+        "requirement": "activeLocation",
+        "title": "Where do you operate?",
+        "question": "A location is the pin a guest is sent to. Its kind decides who travels.",
+        "field": "locationId",
+        "kind": "location",
+        "managedIn": "locations",
+        "cottageKind": "visiting"
+      },
+      {
+        "requirement": "payoutAccount",
+        "title": "Where should money go?",
+        "question": "Needed before you can take a booking, not before you can build one.",
+        "field": "payoutAccount",
+        "kind": "payout",
+        "managedIn": "payouts"
+      }
+    ],
+    "$statesComment": "What the gate says in each state a console can be open in. PENDING is the only one with nothing for the vendor to do, so it is the only one that is not a checklist.",
+    "states": [
+      {
+        "state": "DRAFT",
+        "title": "Finish setting up",
+        "body": "You can build bookables now. You cannot sell one until this is done.",
+        "checklist": true
+      },
+      {
+        "state": "PENDING",
+        "title": "With us for review",
+        "body": "Nothing for you to do. We will email the contact address when this moves.",
+        "checklist": false
+      },
+      {
+        "state": "ACTIVE",
+        "title": "Something needs attention",
+        "body": "You are live, but this is unmet, so new inventory will not publish.",
+        "checklist": true
+      },
+      {
+        "state": "SUSPENDED",
+        "title": "Selling is paused",
+        "body": "You can still admit guests who already paid. Reach out to lift this.",
+        "checklist": false
+      }
+    ]
+  }
+}

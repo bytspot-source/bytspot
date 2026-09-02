@@ -131,3 +131,43 @@ export async function sendCrowdAlertEmail(to: string, firstName: string, venueNa
   }
 }
 
+/** Whether a code can actually be delivered. Checked before a challenge is minted. */
+export function mailerIsConfigured(): boolean {
+  return Boolean(getResend());
+}
+
+/**
+ * A vendor sign-in code.
+ *
+ * Unlike the rest of this file, a failure here is thrown rather than logged.
+ * The others are notifications, and a dropped notification is a nuisance; this
+ * one is the only way into the console, and swallowing it would return a
+ * cheerful 200 to a vendor who will never receive anything.
+ *
+ * The email body is the one place the code exists in plaintext. It must not
+ * also reach a log, a push, or an analytics event.
+ */
+export async function sendVendorSignInCode(to: string, code: string, ttlMins: number): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a vendor sign-in code');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `${code} is your Bytspot sign-in code`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Sign in to Bytspot</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+          Enter this code to open your business console. It expires in ${ttlMins} minutes.
+        </p>
+        <div style="font-size: 34px; font-weight: 700; letter-spacing: 8px; padding: 18px 0; text-align: center; background: #161616; border-radius: 12px;">
+          ${code}
+        </div>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If you did not try to sign in, you can ignore this email — nobody can use this code without it.
+        </p>
+      </div>
+    `,
+  });
+}

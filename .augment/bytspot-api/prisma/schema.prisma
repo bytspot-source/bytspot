@@ -46,6 +46,7 @@ model User {
   savedVehicles  Vehicle[]
   iosPushDevices      IOSPushDevice[]
   providerIdentities ProviderIdentity[]
+  vendorSeats    VendorSeat[]
   collections    SpotCollection[]
   pointTxns      PointTransaction[]
   achievements   UserAchievement[]
@@ -742,4 +743,207 @@ model Tip {
   @@index([fromUserId])
   @@index([toValetId])
   @@map("tips")
+}
+
+// ─── Vendor console ──────────────────────────────────
+// The vendor half of the marketplace: a business, the people who hold seats in
+// it, the places it operates from, and the receivers it wants told about
+// changes. Shapes mirror contracts/bookable-templates.json in bytspot-beta;
+// the enums exist so an invalid state is a migration failure rather than a
+// string nobody validated.
+
+enum VendorSellerState {
+  DRAFT
+  PENDING
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum VendorBusinessMode {
+  standard
+  cottage
+}
+
+enum VendorSeatRole {
+  owner
+  manager
+  staff
+  door
+  serviceProvider
+}
+
+enum VendorSeatState {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+enum VendorLocationState {
+  DRAFT
+  ACTIVE
+  PAUSED
+  CLOSED
+}
+
+enum VendorPayoutStatus {
+  pending
+  active
+  restricted
+}
+
+enum VendorEndpointState {
+  ACTIVE
+  PAUSED
+  DISABLED
+}
+
+/// A business. Identity only; what it sells lives on its bookables.
+///
+/// There is deliberately no `satisfied` column. Which requirements a seller has
+/// met is derived from these records on every read, because a stored list is a
+/// claim that goes stale the moment a location is paused — and a stale tick
+/// tells a vendor they are live when they are not.
+model VendorSeller {
+  id           String             @id @default(cuid())
+  legalName    String?            @map("legal_name")
+  contactEmail String?            @map("contact_email")
+  state        VendorSellerState  @default(DRAFT)
+  businessMode VendorBusinessMode @default(standard) @map("business_mode")
+
+  /// The processor's account reference and the status it decided. Never written
+  /// by us and never a bank detail: the hosted flow collects those. `last4` is
+  /// display text the processor handed back, not a fragment we derived.
+  payoutReference String?             @map("payout_reference")
+  payoutStatus    VendorPayoutStatus? @map("payout_status")
+  payoutLast4     String?             @map("payout_last4")
+  payoutDetail    String?             @map("payout_detail")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  seats     VendorSeat[]
+  locations VendorLocation[]
+  endpoints VendorWebhookEndpoint[]
+
+  @@index([state])
+  @@map("vendor_sellers")
+}
+
+/// One person's seat in one business. Identity is the existing User, because a
+/// person who books a table and a person who runs the restaurant are the same
+/// person and must not be two accounts.
+model VendorSeat {
+  id       String          @id @default(cuid())
+  sellerId String          @map("seller_id")
+  userId   String          @map("user_id")
+  role     VendorSeatRole
+  state    VendorSeatState @default(INVITED)
+
+  /// Consulted only for an assigned-scope role. Postgres arrays rather than
+  /// join tables: an empty list must mean nothing rather than everything, and
+  /// bookables have no table yet to point a foreign key at.
+  locationIds String[] @map("location_ids")
+  bookableIds String[] @map("bookable_ids")
+
+  invitedAt DateTime? @map("invited_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  seller    VendorSeller            @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  user      User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoints VendorWebhookEndpoint[]
+
+  /// One seat per person per business, so an invite cannot silently duplicate
+  /// a seat someone already holds.
+  @@unique([sellerId, userId])
+  /// Sign-in reads every seat a person holds, in one query.
+  @@index([userId, state])
+  @@index([sellerId, state])
+  @@map("vendor_seats")
+}
+
+/// A PIN a seller holds. The same PIN the guest is sent to.
+model VendorLocation {
+  id       String              @id @default(cuid())
+  sellerId String              @map("seller_id")
+  label    String
+  kind     String
+  state    VendorLocationState @default(DRAFT)
+
+  /// Absent only for a visiting provider, who publishes no address.
+  address String?
+  lat     Float
+  lng     Float
+  /// Only meaningful when the vendor is the one travelling.
+  radiusMiles Float?  @map("radius_miles")
+  timezone    String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  seller VendorSeller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  /// Every profile read filters a seller's places by state.
+  @@index([sellerId, state])
+  @@map("vendor_locations")
+}
+
+/// A registered receiver. It carries the seat that created it rather than its
+/// own permission list, so revoking a seat silences its endpoints without
+/// anyone remembering to go and delete them.
+model VendorWebhookEndpoint {
+  id       String              @id @default(cuid())
+  sellerId String              @map("seller_id")
+  seatId   String              @map("seat_id")
+  url      String
+  scopes   String[]
+  state    VendorEndpointState @default(ACTIVE)
+
+  /// Encrypted, not hashed: the sender has to reproduce the HMAC, so it needs
+  /// the secret back. Must never be selected into a list response — only the
+  /// sender reads this column.
+  secretEncrypted String @map("secret_encrypted")
+
+  /// Consecutive, so one success anywhere resets it. A flaky receiver should be
+  /// disabled for being down, not for being flaky.
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+  lastDeliveryAt      DateTime? @map("last_delivery_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  seller     VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  seat       VendorSeat                @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  deliveries VendorWebhookDelivery[]
+
+  @@index([sellerId])
+  @@index([seatId])
+  @@map("vendor_webhook_endpoints")
+}
+
+/// The delivery queue, durable on purpose. Held in memory it would lose every
+/// pending retry on deploy, and a webhook that vanishes on restart is worse
+/// than one that never existed: the receiver has no way to know it was owed.
+model VendorWebhookDelivery {
+  id         String @id @default(cuid())
+  endpointId String @map("endpoint_id")
+  eventId    String @map("event_id")
+  event      String
+  body       String
+
+  attempt       Int      @default(0)
+  nextAttemptAt DateTime @map("next_attempt_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  endpoint VendorWebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  /// The dedupe key. A retry reuses the event id; a genuinely new event never
+  /// does, so this also stops a double-enqueue becoming a double-delivery.
+  @@unique([endpointId, eventId])
+  /// The sender's only query: what is due now, oldest first.
+  @@index([nextAttemptAt])
+  @@map("vendor_webhook_deliveries")
 }

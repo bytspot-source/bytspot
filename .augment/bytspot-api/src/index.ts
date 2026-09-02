@@ -21,7 +21,8 @@ import partyMediaRouter from './routes/partyMedia';
 import partyLandingRouter from './routes/partyLanding'; // server-rendered share-link page (link previews need real HTML)
 import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
-import vendorAuthRouter from './routes/vendorAuth';   // vendor console sign-in (separate origin, cookie-based refresh)
+import vendorAuthRouter from './routes/vendorAuth';
+import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-in (separate origin, cookie-based refresh)
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -79,6 +80,7 @@ app.use(partyMediaRouter);
 app.use(partyLandingRouter);
 app.use(diagnosticsRouter);
 app.use(vendorAuthRouter);
+app.use(vendorSetupRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

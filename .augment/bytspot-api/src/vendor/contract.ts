@@ -109,3 +109,41 @@ export function effectiveCapabilities(role: SeatRole, state: SellerState): strin
   const ceiling = new Set(stateAllows(state));
   return roleCapabilities(role).filter((capability) => ceiling.has(capability));
 }
+
+/* ── Locations ─────────────────────────────────────────────────────────── */
+
+export type LocationState = 'DRAFT' | 'ACTIVE' | 'PAUSED' | 'CLOSED';
+export type LocationKindId = 'fixed' | 'zone' | 'mobile' | 'visiting';
+export type LocationOperationId = 'ACTIVATE_LOCATION' | 'PAUSE_LOCATION' | 'CLOSE_LOCATION';
+export type Fulfillment = 'guestTravels' | 'vendorTravels';
+
+const locations = (bookableTemplates as {
+  locations: {
+    kinds: { id: LocationKindId; fulfillment: Fulfillment; requiresAddress: boolean; requiresRadius: boolean }[];
+    states: LocationState[];
+    publishableStates: LocationState[];
+    operations: { id: LocationOperationId; from: LocationState[]; to: LocationState; requiresCapability: string }[];
+    defaults: { kind: LocationKindId; radiusMiles: number; maxRadiusMiles: number };
+  };
+}).locations;
+
+export const LOCATION_DEFAULTS = locations.defaults;
+
+export function locationKind(kind: LocationKindId) {
+  return locations.kinds.find((entry) => entry.id === kind);
+}
+
+export function locationCanPublish(state: LocationState): boolean {
+  return locations.publishableStates.includes(state);
+}
+
+/**
+ * The operation a vendor pressed, resolved against the catalog.
+ *
+ * The console sends the operation rather than the state to land in, so this is
+ * the only place a transition is decided. A client posting a target state would
+ * be asserting a transition is legal instead of asking.
+ */
+export function locationOperation(id: LocationOperationId) {
+  return locations.operations.find((entry) => entry.id === id);
+}

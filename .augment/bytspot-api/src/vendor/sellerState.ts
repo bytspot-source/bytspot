@@ -1,5 +1,12 @@
 import type { VendorLocation, VendorSeat, VendorSeller } from '@prisma/client';
-import { requirementsForState, sellerRequirements, type SeatRole, type SellerState } from './contract';
+import { db } from '../lib/db';
+import {
+  requirementsForState,
+  sellerCanTransition,
+  sellerRequirements,
+  type SeatRole,
+  type SellerState,
+} from './contract';
 
 /**
  * The wire shapes the console decodes. Named for what the client calls them
@@ -112,4 +119,35 @@ export function toSeatDto(seat: VendorSeat): SeatDto {
     bookableIds: seat.bookableIds,
     invitedAt: seat.invitedAt?.toISOString(),
   };
+}
+
+/**
+ * Moves a business as far up its lifecycle as its records now justify.
+ *
+ * Derived, like everything else here: the state is a consequence of what the
+ * vendor has filled in, not a flag someone sets. Filling in the last missing
+ * requirement is what makes a business live, so this runs on write, while the
+ * vendor is still looking at the screen that told them what was missing.
+ *
+ * Only ever forward, and only through DRAFT → PENDING → ACTIVE. Falling back
+ * because a place was paused is deliberately not done here: a live business
+ * that loses a requirement keeps its state and shows the gap as outstanding,
+ * because silently un-publishing someone mid-service is worse than telling
+ * them. SUSPENDED and CLOSED are decisions we make about a business, never
+ * consequences of its own edits, so they are left alone.
+ */
+export async function advanceSeller(
+  seller: VendorSeller,
+  locations: VendorLocation[],
+): Promise<VendorSeller> {
+  if (seller.state !== 'DRAFT' && seller.state !== 'PENDING') return seller;
+
+  const met = new Set(satisfiedRequirements(seller, locations));
+  const reaches = (state: SellerState) => requirementsForState(state).every((id) => met.has(id));
+
+  const target: SellerState = reaches('ACTIVE') ? 'ACTIVE' : reaches('PENDING') ? 'PENDING' : 'DRAFT';
+  if (target === seller.state) return seller;
+  if (!sellerCanTransition(seller.state as SellerState, target)) return seller;
+
+  return db.vendorSeller.update({ where: { id: seller.id }, data: { state: target } });
 }

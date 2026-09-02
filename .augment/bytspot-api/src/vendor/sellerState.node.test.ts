@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { VendorLocation, VendorSeat, VendorSeller } from '@prisma/client';
 import { requirementsForState, effectiveCapabilities, sellerCanTransition } from './contract';
-import { outstandingRequirements, satisfiedRequirements, toSeatDto, toSellerDto } from './sellerState';
+import * as dbModule from '../lib/db';
+import {
+  advanceSeller,
+  outstandingRequirements,
+  satisfiedRequirements,
+  toSeatDto,
+  toSellerDto,
+} from './sellerState';
 
 const seller = (over: Partial<VendorSeller> = {}): VendorSeller =>
   ({
@@ -152,4 +159,61 @@ test('closed is terminal', () => {
   assert.ok(sellerCanTransition('ACTIVE', 'SUSPENDED'));
   assert.ok(sellerCanTransition('SUSPENDED', 'ACTIVE'));
   assert.ok(!sellerCanTransition('CLOSED', 'ACTIVE'));
+});
+
+/* ── advanceSeller ─────────────────────────────────────────────────────── */
+
+function captureUpdates() {
+  const updates: { state?: string }[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (dbModule.db.vendorSeller as any).update = async ({ data }: { data: { state?: string } }) => {
+    updates.push(data);
+    return { ...seller(), ...data };
+  };
+  return updates;
+}
+
+test('a business with nothing filled in stays a draft', async () => {
+  const updates = captureUpdates();
+  const empty = seller({ state: 'DRAFT', legalName: null, contactEmail: null, payoutReference: null });
+  const after = await advanceSeller(empty, []);
+
+  assert.equal(after.state, 'DRAFT');
+  assert.equal(updates.length, 0, 'an unchanged state must not write');
+});
+
+test('a named business with a contact reaches pending, and no further', async () => {
+  captureUpdates();
+  const named = seller({ state: 'DRAFT', payoutReference: null, payoutStatus: 'pending' });
+  assert.equal((await advanceSeller(named, [])).state, 'PENDING');
+});
+
+test('the last missing requirement is what makes a business live', async () => {
+  captureUpdates();
+  // Everything filled in, but the only place is paused.
+  const waiting = seller({ state: 'PENDING' });
+  assert.equal((await advanceSeller(waiting, [location({ state: 'PAUSED' })])).state, 'PENDING');
+  // Activating it is the edit that carries the business over.
+  assert.equal((await advanceSeller(waiting, [location()])).state, 'ACTIVE');
+});
+
+test('a live business that loses a requirement is not silently un-published', async () => {
+  const updates = captureUpdates();
+  const live = seller({ state: 'ACTIVE' });
+  const after = await advanceSeller(live, [location({ state: 'PAUSED' })]);
+
+  // It keeps its state and shows the gap as outstanding. Dropping a business
+  // mid-service is worse than telling them.
+  assert.equal(after.state, 'ACTIVE');
+  assert.equal(updates.length, 0);
+  assert.deepEqual(outstandingRequirements(after, [location({ state: 'PAUSED' })]), ['activeLocation']);
+});
+
+test('suspension and closure are decisions about a business, not consequences of its edits', async () => {
+  const updates = captureUpdates();
+  for (const state of ['SUSPENDED', 'CLOSED'] as const) {
+    const held = seller({ state });
+    assert.equal((await advanceSeller(held, [location()])).state, state);
+  }
+  assert.equal(updates.length, 0);
 });

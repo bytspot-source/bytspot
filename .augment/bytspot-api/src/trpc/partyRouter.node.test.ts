@@ -534,6 +534,64 @@ test('Share link dies when the party ends: expired links 404 for new arrivals bu
   assert.deepEqual(await caller().events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { status: 'rsvp', accessGranted: true });
 });
 
+test('Party Pass history lists only rooms the guest was admitted to and that are over', async () => {
+  const hourMs = 60 * 60 * 1000;
+  const room = (over: Record<string, unknown> = {}) => ({
+    status: 'rsvp', checkedInAt: null,
+    party: {
+      id: 'party-1', title: 'First Listen', venueName: 'The Basement',
+      startsAt: new Date(Date.now() - 8 * hourMs), endsAt: new Date(Date.now() - hourMs),
+      recapPublishedAt: null, media: [],
+      ...over,
+    },
+  });
+
+  let listedWhere: any;
+  let listedTake: number | undefined;
+  partyGuest.findMany = async ({ where, take }: any) => {
+    listedWhere = where; listedTake = take;
+    return [room()];
+  };
+
+  const history = await caller().events.pass.history();
+  // Admission is the whole filter, and it is applied by the database rather
+  // than trimmed afterwards.
+  assert.deepEqual(listedWhere, { userId: 'test-user-id', accessGranted: true, party: { status: 'published' } });
+  assert.equal(listedTake, 100, 'over-fetched so running rooms do not eat the page');
+  assert.equal(history.rooms.length, 1);
+  assert.equal(history.rooms[0].id, 'party-1');
+  assert.equal(history.rooms[0].recapAvailable, false);
+  assert.equal(history.rooms[0].attended, false);
+
+  // A room still running is not history yet, even though the guest is admitted.
+  partyGuest.findMany = async () => [room({ startsAt: new Date(Date.now() - hourMs), endsAt: new Date(Date.now() + hourMs) })];
+  assert.deepEqual((await caller().events.pass.history()).rooms, []);
+
+  // No endsAt: the room is over six hours after it started, not before.
+  partyGuest.findMany = async () => [room({ startsAt: new Date(Date.now() - 2 * hourMs), endsAt: null })];
+  assert.deepEqual((await caller().events.pass.history()).rooms, []);
+  partyGuest.findMany = async () => [room({ startsAt: new Date(Date.now() - 7 * hourMs), endsAt: null })];
+  assert.equal((await caller().events.pass.history()).rooms.length, 1);
+
+  // Staged photos are not a recap to a guest: unpublished counts as none.
+  partyGuest.findMany = async () => [room({ media: [{ id: 'media-1' }, { id: 'media-2' }] })];
+  let listed = (await caller().events.pass.history()).rooms[0];
+  assert.equal(listed.recapAvailable, false, 'an unpublished album must not be advertised');
+  assert.equal(listed.recapPhotoCount, 0);
+
+  // Published, and the count is the one events.recap.get would serve.
+  partyGuest.findMany = async () => [room({ media: [{ id: 'media-1' }, { id: 'media-2' }], recapPublishedAt: new Date() })];
+  listed = (await caller().events.pass.history()).rooms[0];
+  assert.equal(listed.recapAvailable, true);
+  assert.equal(listed.recapPhotoCount, 2);
+
+  // Checking in is reported, but it is never what makes a room reachable.
+  partyGuest.findMany = async () => [{ ...room(), checkedInAt: new Date() }];
+  assert.equal((await caller().events.pass.history()).rooms[0].attended, true);
+
+  await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'anon' }).events.pass.history(), { code: 'UNAUTHORIZED' });
+});
+
 test('Expired paid-ticket share link still reports already-confirmed to a ticketed guest', async () => {
   party.findFirst = async () => ({
     id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,

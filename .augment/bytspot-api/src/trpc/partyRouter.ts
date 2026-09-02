@@ -1028,7 +1028,61 @@ export const hostDestinationsRouter = router({
     }),
 });
 
+const GUEST_ROOM_PAGE = 50;
+
 export const partyPassRouter = router({
+  /**
+   * Rooms this guest was admitted to and that are now over: the way back to a
+   * Party Pass once the room has closed. Without it a recap is reachable only
+   * by whoever still has the original invitation link.
+   *
+   * Admission is the whole filter. `accessGranted` with a published party is
+   * the same pair `canReadRecap` requires, so a room can never be listed as
+   * holding a recap that `events.recap.get` would then refuse.
+   */
+  history: protectedProcedure.query(async ({ ctx }) => {
+    const guests = await db.partyGuest.findMany({
+      where: { userId: ctx.user.userId, accessGranted: true, party: { status: 'published' } },
+      orderBy: { party: { startsAt: 'desc' } },
+      // Over-fetched so the rooms still running, which are filtered out in
+      // memory, do not eat into the page the guest actually sees.
+      take: GUEST_ROOM_PAGE * 2,
+      select: {
+        status: true,
+        checkedInAt: true,
+        party: {
+          select: {
+            id: true, title: true, venueName: true, startsAt: true, endsAt: true,
+            recapPublishedAt: true,
+            media: { where: { kind: 'recap' }, select: { id: true } },
+          },
+        },
+      },
+    });
+
+    const rooms = guests
+      .filter((guest) => partyEndedAt(guest.party).getTime() <= Date.now())
+      .slice(0, GUEST_ROOM_PAGE)
+      .map((guest) => {
+        // Staged photos are not a recap to anyone but the host, so an
+        // unpublished album counts as zero here rather than as a locked one.
+        const recapPhotoCount = guest.party.recapPublishedAt !== null ? guest.party.media.length : 0;
+        return {
+          id: guest.party.id,
+          title: guest.party.title,
+          venueName: guest.party.venueName,
+          startsAt: guest.party.startsAt.toISOString(),
+          endsAt: guest.party.endsAt?.toISOString() ?? null,
+          status: guest.status,
+          attended: guest.checkedInAt !== null,
+          recapAvailable: recapPhotoCount > 0,
+          recapPhotoCount,
+        };
+      });
+
+    return { rooms };
+  }),
+
   resolve: publicProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {

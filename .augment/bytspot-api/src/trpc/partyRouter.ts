@@ -1092,12 +1092,16 @@ type HostRoomRow = {
   id: string; title: string; venueName: string; startsAt: Date; endsAt: Date | null;
   admissionPaused: boolean; shareLinkExpiresAt: Date | null; closedAt: Date | null;
   passCode: string | null; capacity: number;
+  recapPublishedAt: Date | null; media: { id: string }[];
 };
 
+// The recap ids rather than a count: an album is capped at `maxRecapImages`,
+// so this stays a handful of rows per room and needs no relation aggregate.
 const hostRoomSelect = {
   id: true, title: true, venueName: true, startsAt: true, endsAt: true,
   admissionPaused: true, shareLinkExpiresAt: true, closedAt: true,
-  passCode: true, capacity: true,
+  passCode: true, capacity: true, recapPublishedAt: true,
+  media: { where: { kind: 'recap' }, select: { id: true } },
 } as const;
 
 function hostRoomIsOpen(party: HostRoomRow): boolean {
@@ -1119,6 +1123,10 @@ function hostRoomView(party: HostRoomRow) {
     shareLinkExpired: shareLinkExpired(party),
     closedAt: party.closedAt?.toISOString() ?? null,
     capacity: party.capacity,
+    // Staged and published are separate facts to the host, because only the
+    // second one is the fact the guests can see.
+    recapPhotoCount: party.media.length,
+    recapPublished: party.recapPublishedAt !== null,
   };
 }
 

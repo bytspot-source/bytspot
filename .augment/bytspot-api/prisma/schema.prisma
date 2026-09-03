@@ -11,19 +11,19 @@ datasource db {
 
 // ─── Users ───────────────────────────────────────────
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String
-  name      String?
-  phone     String?
-  profileImage String? @map("profile_image")
-  address   String?
-  birthday  String?
+  id                String  @id @default(cuid())
+  email             String  @unique
+  password          String
+  name              String?
+  phone             String?
+  profileImage      String? @map("profile_image")
+  address           String?
+  birthday          String?
   // Superseded by the Vehicle relation below. No longer read; dropped in a
   // follow-up migration once the table has been serving for a deploy.
-  vehicles          Json?    // legacy JSON array of saved vehicles
-  notificationPrefs Json?    @map("notification_prefs") // push/email/sms preference toggles
-  ref       String?  // signup source: "qr", "tiktok", "organic"
+  vehicles          Json? // legacy JSON array of saved vehicles
+  notificationPrefs Json?   @map("notification_prefs") // push/email/sms preference toggles
+  ref               String? // signup source: "qr", "tiktok", "organic"
 
   // Account deletion is soft for a fixed grace period so an accidental or
   // coerced deletion is recoverable; `purgeAfter` is when the row becomes
@@ -35,31 +35,33 @@ model User {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  isPremium  Boolean  @default(false) @map("is_premium")
-  membershipTier String @default("green") @map("membership_tier")
+  isPremium        Boolean @default(false) @map("is_premium")
+  membershipTier   String  @default("green") @map("membership_tier")
   stripeCustomerId String? @unique @map("stripe_customer_id")
 
-  hostProfile    HostProfile?
-  valetProfile   ValetProfile?
-  checkIns       CheckIn[]
-  savedSpots     SavedSpot[]
-  savedVehicles  Vehicle[]
-  iosPushDevices      IOSPushDevice[]
-  providerIdentities ProviderIdentity[]
-  vendorSeats    VendorSeat[]
-  collections    SpotCollection[]
-  pointTxns      PointTransaction[]
-  achievements   UserAchievement[]
-  preference     UserPreference?
-  followers      Follow[]          @relation("following") // users who follow me
-  following      Follow[]          @relation("follower")  // users I follow
-  reviews        Review[]
-  tipsGiven      Tip[]             @relation("tipFrom")
-  hostedParties  Party[]           @relation("partyHost")
-  partyGuests    PartyGuest[]
-  partyCheckouts PartyCheckout[]
-  mobilityQuotes MobilityQuote[]
-  mobilityTrips  MobilityTrip[]
+  hostProfile           HostProfile?
+  valetProfile          ValetProfile?
+  checkIns              CheckIn[]
+  savedSpots            SavedSpot[]
+  savedVehicles         Vehicle[]
+  iosPushDevices        IOSPushDevice[]
+  providerIdentities    ProviderIdentity[]
+  vendorSeats           VendorSeat[]
+  collections           SpotCollection[]
+  pointTxns             PointTransaction[]
+  achievements          UserAchievement[]
+  preference            UserPreference?
+  followers             Follow[]              @relation("following") // users who follow me
+  following             Follow[]              @relation("follower") // users I follow
+  reviews               Review[]
+  tipsGiven             Tip[]                 @relation("tipFrom")
+  hostedParties         Party[]               @relation("partyHost")
+  partyGuests           PartyGuest[]
+  createdPlans          Plan[]                @relation("planCreator")
+  planSeats             PlanParticipant[]
+  partyCheckouts        PartyCheckout[]
+  mobilityQuotes        MobilityQuote[]
+  mobilityTrips         MobilityTrip[]
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
   socialInvitesReceived SocialInvitation[]    @relation("socialInviteTo")
   contactHashes         ContactHash[]
@@ -117,18 +119,18 @@ model ProviderIdentity {
 
 // ─── Venues ──────────────────────────────────────────
 model Venue {
-  id          String   @id @default(cuid())
-  name        String
-  slug        String   @unique
-  address     String
-  lat         Float
-  lng         Float
-  category    String   // "bar", "restaurant", "club", "park", "market"
-  imageUrl    String?  @map("image_url")
-  entryType   String   @default("free") @map("entry_type") // "free" or "paid"
-  entryPrice  String?  @map("entry_price") // e.g. "$15", "$25–$50"
-  ticketUrl   String?  @map("ticket_url") // external purchase link
-  createdAt   DateTime @default(now()) @map("created_at")
+  id         String   @id @default(cuid())
+  name       String
+  slug       String   @unique
+  address    String
+  lat        Float
+  lng        Float
+  category   String // "bar", "restaurant", "club", "park", "market"
+  imageUrl   String?  @map("image_url")
+  entryType  String   @default("free") @map("entry_type") // "free" or "paid"
+  entryPrice String?  @map("entry_price") // e.g. "$15", "$25–$50"
+  ticketUrl  String?  @map("ticket_url") // external purchase link
+  createdAt  DateTime @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng
   // Managed via raw SQL; Prisma can't model geometry natively
@@ -137,28 +139,28 @@ model Venue {
   // pgvector: 384-dim embedding for AI similarity search
   // Column: "embedding" vector(384)
 
-  crowdLevels CrowdLevel[]
-  parking     ParkingSpot[]
-  checkIns    CheckIn[]
-  savedBy     SavedSpot[]
-  reviews     Review[]
+  crowdLevels    CrowdLevel[]
+  parking        ParkingSpot[]
+  checkIns       CheckIn[]
+  savedBy        SavedSpot[]
+  reviews        Review[]
   mobilityQuotes MobilityQuote[]
-  arrivalParties Party[] @relation("partyArrivalVenue")
+  arrivalParties Party[]         @relation("partyArrivalVenue")
 
   @@map("venues")
 }
 
 // ─── Crowd Levels (time-series) ──────────────────────
 model CrowdLevel {
-  id        String   @id @default(cuid())
-  venueId   String   @map("venue_id")
-  level     Int      // 1=chill, 2=moderate, 3=busy, 4=packed
-  label     String   // "Chill", "Active", "Busy", "Packed"
-  waitMins  Int?     @map("wait_mins")
-  source    String   @default("manual") // "manual", "sensor", "user_report"
+  id         String   @id @default(cuid())
+  venueId    String   @map("venue_id")
+  level      Int // 1=chill, 2=moderate, 3=busy, 4=packed
+  label      String // "Chill", "Active", "Busy", "Packed"
+  waitMins   Int?     @map("wait_mins")
+  source     String   @default("manual") // "manual", "sensor", "user_report"
   recordedAt DateTime @default(now()) @map("recorded_at")
 
-  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   @@index([venueId, recordedAt(sort: Desc)])
   @@map("crowd_levels")
@@ -166,16 +168,16 @@ model CrowdLevel {
 
 // ─── Parking ─────────────────────────────────────────
 model ParkingSpot {
-  id          String   @id @default(cuid())
-  venueId     String   @map("venue_id")
-  name        String   // "Lot A", "Street — 10th St"
-  type        String   // "lot", "garage", "street"
-  totalSpots  Int      @map("total_spots")
-  available   Int
-  pricePerHr  Float?   @map("price_per_hr")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id         String   @id @default(cuid())
+  venueId    String   @map("venue_id")
+  name       String // "Lot A", "Street — 10th St"
+  type       String // "lot", "garage", "street"
+  totalSpots Int      @map("total_spots")
+  available  Int
+  pricePerHr Float?   @map("price_per_hr")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
-  venue       Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   @@index([venueId])
   @@map("parking_spots")
@@ -183,23 +185,23 @@ model ParkingSpot {
 
 // ─── Provider Profiles ───────────────────────────────
 model HostProfile {
-  id             String    @id @default(cuid())
-  userId         String    @unique @map("user_id")
-  status         String    @default("draft") // draft | pending | approved | rejected
-  currentStep    Int       @default(1) @map("current_step")
-  onboardingData Json?     @map("onboarding_data")
+  id               String    @id @default(cuid())
+  userId           String    @unique @map("user_id")
+  status           String    @default("draft") // draft | pending | approved | rejected
+  currentStep      Int       @default(1) @map("current_step")
+  onboardingData   Json?     @map("onboarding_data")
   /// Official Host identity. `handle` is the public @name; `hostDestinations`
   /// is an ordered list of { kind, value, primary? } where socials store
   /// handles (Bytspot resolves routing) and music/merch/website store HTTPS
   /// URLs that are never shown publicly. Parties snapshot at publish.
-  handle           String?  @unique
-  hostDestinations Json?    @map("host_destinations")
-  submittedAt    DateTime? @map("submitted_at")
-  approvedAt     DateTime? @map("approved_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  handle           String?   @unique
+  hostDestinations Json?     @map("host_destinations")
+  submittedAt      DateTime? @map("submitted_at")
+  approvedAt       DateTime? @map("approved_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("host_profiles")
 }
@@ -208,55 +210,56 @@ model HostProfile {
 // Party media is deliberately bounded and stored in Postgres for the beta
 // release. Move this to object storage/CDN before high-volume rollout.
 model Party {
-  id                     String       @id @default(cuid())
-  hostUserId             String       @map("host_user_id")
-  idempotencyKey         String       @map("idempotency_key")
-  templateId             String       @map("template_id")
+  id                     String    @id @default(cuid())
+  hostUserId             String    @map("host_user_id")
+  idempotencyKey         String    @map("idempotency_key")
+  templateId             String    @map("template_id")
   title                  String
   tagline                String
-  startsAt               DateTime     @map("starts_at")
-  endsAt                 DateTime?    @map("ends_at")
-  venueName              String       @map("venue_name")
-  arrivalVenueId         String?      @map("arrival_venue_id")
-  locationDisclosure     String       @default("public") @map("location_disclosure")
+  startsAt               DateTime  @map("starts_at")
+  endsAt                 DateTime? @map("ends_at")
+  venueName              String    @map("venue_name")
+  arrivalVenueId         String?   @map("arrival_venue_id")
+  locationDisclosure     String    @default("public") @map("location_disclosure")
   capacity               Int
-  accessMode             String       @map("access_mode")
-  requiredMembershipTier String       @map("required_membership_tier")
-  hostDestinations       Json?        @map("host_destinations")
-  audienceCircleIds      String[]     @default([]) @map("audience_circle_ids")
+  accessMode             String    @map("access_mode")
+  requiredMembershipTier String    @map("required_membership_tier")
+  hostDestinations       Json?     @map("host_destinations")
+  audienceCircleIds      String[]  @default([]) @map("audience_circle_ids")
   itinerary              Json
-  ticketTiers            Json         @map("ticket_tiers")
+  ticketTiers            Json      @map("ticket_tiers")
   cohosts                Json
-  templateConfig         Json         @map("template_config")
-  status                 String       @default("draft")
-  admissionPaused        Boolean      @default(false) @map("admission_paused")
+  templateConfig         Json      @map("template_config")
+  status                 String    @default("draft")
+  admissionPaused        Boolean   @default(false) @map("admission_paused")
   // Host override for when the share link stops resolving. Null means the
   // default policy: the link dies when the party ends (endsAt, falling back
   // to startsAt + 6h when the host set no end time).
-  shareLinkExpiresAt     DateTime?    @map("share_link_expires_at")
+  shareLinkExpiresAt     DateTime? @map("share_link_expires_at")
   /// Set when the host closes the room. The party keeps `status = 'published'`
   /// so confirmed guests keep their passes and the guest and payment records
   /// that block deletion survive; closing only removes the room from the host
   /// console and stops new arrivals.
-  closedAt               DateTime?    @map("closed_at")
-  passCode               String?      @unique @map("pass_code")
+  closedAt               DateTime? @map("closed_at")
+  passCode               String?   @unique @map("pass_code")
   /// Platform fee in basis points, frozen at publish from the then-current
   /// PlatformFeeSetting. Null on drafts and on parties published before the
   /// fee existed; those fall back to the current rate at checkout.
-  platformFeeBps         Int?         @map("platform_fee_bps")
-  publishedAt            DateTime?    @map("published_at")
+  platformFeeBps         Int?      @map("platform_fee_bps")
+  publishedAt            DateTime? @map("published_at")
   /// Set when the host publishes the recap album. While null the recap is
   /// staged and host-only, and must stay indistinguishable from no recap.
-  recapPublishedAt       DateTime?    @map("recap_published_at")
-  createdAt              DateTime     @default(now()) @map("created_at")
-  updatedAt              DateTime     @updatedAt @map("updated_at")
+  recapPublishedAt       DateTime? @map("recap_published_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  host                   User         @relation("partyHost", fields: [hostUserId], references: [id], onDelete: Cascade)
-  arrivalVenue           Venue?       @relation("partyArrivalVenue", fields: [arrivalVenueId], references: [id], onDelete: Restrict)
-  media                  PartyMedia[]
-  guests                 PartyGuest[]
-  checkouts              PartyCheckout[]
-  encounterOptIns        PartyEncounterOptIn[]
+  host            User                  @relation("partyHost", fields: [hostUserId], references: [id], onDelete: Cascade)
+  arrivalVenue    Venue?                @relation("partyArrivalVenue", fields: [arrivalVenueId], references: [id], onDelete: Restrict)
+  media           PartyMedia[]
+  guests          PartyGuest[]
+  checkouts       PartyCheckout[]
+  planItems       PlanItem[]
+  encounterOptIns PartyEncounterOptIn[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -283,20 +286,20 @@ model PlatformFeeSetting {
 }
 
 model PartyGuest {
-  id                String   @id @default(cuid())
-  partyId           String   @map("party_id")
-  userId            String   @map("user_id")
-  status            String   @default("pending")
-  accessGranted     Boolean  @default(false) @map("access_granted")
-  ticketTierName    String?  @map("ticket_tier_name")
-  credential        String?  @unique
-  checkedInAt       DateTime? @map("checked_in_at")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  id             String    @id @default(cuid())
+  partyId        String    @map("party_id")
+  userId         String    @map("user_id")
+  status         String    @default("pending")
+  accessGranted  Boolean   @default(false) @map("access_granted")
+  ticketTierName String?   @map("ticket_tier_name")
+  credential     String?   @unique
+  checkedInAt    DateTime? @map("checked_in_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
-  party             Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
-  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  checkouts         PartyCheckout[]
+  party     Party           @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkouts PartyCheckout[]
 
   @@unique([partyId, userId])
   @@index([partyId, status])
@@ -305,30 +308,30 @@ model PartyGuest {
 }
 
 model PartyCheckout {
-  id                    String   @id @default(cuid())
-  partyId               String   @map("party_id")
-  partyGuestId          String   @map("party_guest_id")
-  userId                String   @map("user_id")
-  idempotencyKey        String   @map("idempotency_key")
-  stripeSessionId       String?  @unique @map("stripe_session_id")
-  checkoutUrl           String?  @map("checkout_url")
-  ticketTierName        String   @map("ticket_tier_name")
-  amountCents           Int      @map("amount_cents")
+  id                   String    @id @default(cuid())
+  partyId              String    @map("party_id")
+  partyGuestId         String    @map("party_guest_id")
+  userId               String    @map("user_id")
+  idempotencyKey       String    @map("idempotency_key")
+  stripeSessionId      String?   @unique @map("stripe_session_id")
+  checkoutUrl          String?   @map("checkout_url")
+  ticketTierName       String    @map("ticket_tier_name")
+  amountCents          Int       @map("amount_cents")
   /// The split as it stood when this sale was made, recorded per checkout so a
   /// later rate change can never restate what a host already earned.
-  platformFeeBps        Int?     @map("platform_fee_bps")
-  platformFeeCents      Int?     @map("platform_fee_cents")
-  hostNetCents          Int?     @map("host_net_cents")
-  currency              String   @default("usd")
-  status                String   @default("creating")
-  reservationExpiresAt  DateTime @map("reservation_expires_at")
-  completedAt           DateTime? @map("completed_at")
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @updatedAt @map("updated_at")
+  platformFeeBps       Int?      @map("platform_fee_bps")
+  platformFeeCents     Int?      @map("platform_fee_cents")
+  hostNetCents         Int?      @map("host_net_cents")
+  currency             String    @default("usd")
+  status               String    @default("creating")
+  reservationExpiresAt DateTime  @map("reservation_expires_at")
+  completedAt          DateTime? @map("completed_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  party                 Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
-  guest                 PartyGuest @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
-  user                  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  party Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  guest PartyGuest @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([partyId, userId, idempotencyKey])
   @@index([partyId, ticketTierName, status, reservationExpiresAt])
@@ -360,9 +363,9 @@ model MobilityQuote {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  venue           Venue    @relation(fields: [venueId], references: [id], onDelete: Restrict)
-  trip            MobilityTrip?
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue         @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  trip  MobilityTrip?
 
   @@index([userId, expiresAt])
   @@index([venueId, createdAt(sort: Desc)])
@@ -382,8 +385,8 @@ model MobilityTrip {
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
-  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  quote                 MobilityQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quote MobilityQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
 
   @@unique([userId, idempotencyKey])
   @@index([userId, updatedAt(sort: Desc)])
@@ -401,7 +404,7 @@ model PartyMedia {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  party     Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
 
   @@unique([partyId, kind, position])
   @@index([partyId])
@@ -417,7 +420,7 @@ model ValetProfile {
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
-  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("valet_profiles")
 }
@@ -428,8 +431,8 @@ model ValetProfile {
 model BetaLead {
   id        String   @id @default(cuid())
   email     String   @unique
-  name      String?                       // first name — for personalised welcome email
-  source    String?                       // "bytspot.com", "qr", "tiktok", "organic"
+  name      String? // first name — for personalised welcome email
+  source    String? // "bytspot.com", "qr", "tiktok", "organic"
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("beta_leads")
@@ -437,19 +440,19 @@ model BetaLead {
 
 // ─── Check-In History (per-user) ──────────────────────
 model CheckIn {
-  id            String   @id @default(cuid())
-  userId        String   @map("user_id")
-  venueId       String   @map("venue_id")
-  crowdLevel    Int      @map("crowd_level")
-  crowdLabel    String   @map("crowd_label")
-  pointsEarned  Int      @default(10) @map("points_earned")
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  venueId      String   @map("venue_id")
+  crowdLevel   Int      @map("crowd_level")
+  crowdLabel   String   @map("crowd_label")
+  pointsEarned Int      @default(10) @map("points_earned")
   /// How the check-in was established: self_reported, nearby, or verified.
   /// Existing rows predate any proof and are self_reported by definition.
-  proof         String   @default("self_reported")
+  proof        String   @default("self_reported")
   /// Metres from the venue at the moment of the tap, when the device offered
   /// a coordinate. Null means unknown, which is not the same as far.
-  distanceM     Int?     @map("distance_m")
-  createdAt     DateTime @default(now()) @map("created_at")
+  distanceM    Int?     @map("distance_m")
+  createdAt    DateTime @default(now()) @map("created_at")
 
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
@@ -469,12 +472,12 @@ model CheckIn {
 
 // ─── Saved Spots ──────────────────────────────────────
 model SavedSpot {
-  id        String   @id @default(cuid())
-  userId    String   @map("user_id")
-  venueId   String   @map("venue_id")
-  notes     String?
-  tags      String[] @default([])
-  savedAt   DateTime @default(now()) @map("saved_at")
+  id      String   @id @default(cuid())
+  userId  String   @map("user_id")
+  venueId String   @map("venue_id")
+  notes   String?
+  tags    String[] @default([])
+  savedAt DateTime @default(now()) @map("saved_at")
 
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
@@ -547,10 +550,10 @@ model SpotCollectionItem {
 model PointTransaction {
   id          String   @id @default(cuid())
   userId      String   @map("user_id")
-  type        String   // "earn", "spend", "bonus"
+  type        String // "earn", "spend", "bonus"
   amount      Int
   description String
-  category    String   // "checkin", "achievement", "referral", "review", "streak"
+  category    String // "checkin", "achievement", "referral", "review", "streak"
   createdAt   DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -580,8 +583,8 @@ model UserPreference {
   interests String[] @default([])
   vibes     String[] @default([])
   cuisines  String[] @default([])
-  parking   Json?    // { covered, evCharging, security }
-  behavior  Json?    // { categoryClicks, lastLocations, visitCounts }
+  parking   Json? // { covered, evCharging, security }
+  behavior  Json? // { categoryClicks, lastLocations, visitCounts }
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -715,8 +718,8 @@ model Review {
   id        String   @id @default(cuid())
   userId    String   @map("user_id")
   venueId   String   @map("venue_id")
-  stars     Int      // 1-5
-  vibe      Int      // 1-10
+  stars     Int // 1-5
+  vibe      Int // 1-10
   comment   String   @default("")
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -728,6 +731,83 @@ model Review {
   @@map("reviews")
 }
 
+// ─── Plan (control plane) ─────────────────────────────
+/// A Plan is a structured representation of user intent. It holds no inventory
+/// and no money; it only references them. The creator confirms the Plan,
+/// participants confirm their own attendance, and bookings confirm inventory —
+/// three different owners, never collapsed into one word.
+model Plan {
+  id             String    @id @default(cuid())
+  creatorUserId  String    @map("creator_user_id")
+  idempotencyKey String    @map("idempotency_key")
+  title          String
+  intent         String
+  startsAt       DateTime? @map("starts_at")
+  endsAt         DateTime? @map("ends_at")
+  areaLabel      String?   @map("area_label")
+  latitude       Float?
+  longitude      Float?
+  partySize      Int?      @map("party_size")
+  /// Need kinds the Plan is trying to fill: dining, parking, nightlife, …
+  needs          String[]  @default([])
+  /// Deliberately excludes booked/active/completed. Those are derived from the
+  /// items and the clock so the control plane cannot contradict execution.
+  lifecycle      String    @default("proposed")
+  confirmedAt    DateTime? @map("confirmed_at")
+  cancelledAt    DateTime? @map("cancelled_at")
+  /// Proposed plans must not linger. Read as expired once passed; no sweep job.
+  expiresAt      DateTime? @map("expires_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  creator      User              @relation("planCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  participants PlanParticipant[]
+  items        PlanItem[]
+
+  @@unique([creatorUserId, idempotencyKey])
+  @@index([creatorUserId, createdAt(sort: Desc)])
+  @@map("plans")
+}
+
+/// A participant owns exactly one thing: whether they are going.
+model PlanParticipant {
+  id          String    @id @default(cuid())
+  planId      String    @map("plan_id")
+  userId      String    @map("user_id")
+  role        String    @default("guest")
+  status      String    @default("invited")
+  respondedAt DateTime? @map("responded_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, userId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("plan_participants")
+}
+
+/// Supply attached to a Plan. `capability` is snapshotted from the Discover
+/// listing plug at attach time: a `details` item is a reference, not a booking,
+/// and can never reach `booked`.
+model PlanItem {
+  id         String   @id @default(cuid())
+  planId     String   @map("plan_id")
+  needKind   String   @map("need_kind")
+  title      String
+  partyId    String?  @map("party_id")
+  capability String   @default("details")
+  status     String   @default("available")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  plan  Plan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  party Party? @relation(fields: [partyId], references: [id], onDelete: SetNull)
+
+  @@index([planId, createdAt])
+  @@map("plan_items")
+}
 
 // ─── Tips (Valet Tipping) ─────────────────────────────
 model Tip {

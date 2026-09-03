@@ -19,9 +19,6 @@ model User {
   profileImage String? @map("profile_image")
   address   String?
   birthday  String?
-  // Superseded by the Vehicle relation below. No longer read; dropped in a
-  // follow-up migration once the table has been serving for a deploy.
-  vehicles          Json?    // legacy JSON array of saved vehicles
   notificationPrefs Json?    @map("notification_prefs") // push/email/sms preference toggles
   ref       String?  // signup source: "qr", "tiktok", "organic"
 

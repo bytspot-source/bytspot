@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
+import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { isProposedPlanExpired, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { capabilityForAccessMode, isProposedPlanExpired, openNeeds, planDisplayState, planReadiness } from './planRouter';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
 const createCaller = createCallerFactory(appRouter);
@@ -49,10 +50,14 @@ beforeEach(() => {
   plan.findMany = async () => [];
   plan.create = async () => ({ id: 'plan-1' });
   plan.update = async ({ data }: any) => ({ id: 'plan-1', lifecycle: data.lifecycle ?? 'proposed' });
-  planParticipant.upsert = async ({ create, update }: any) => ({ status: update?.status ?? create?.status ?? 'invited' });
+  plan.updateMany = async () => ({ count: 1 });
+  planParticipant.create = async ({ data }: any) => ({ status: data.status });
   planParticipant.update = async ({ data }: any) => ({ status: data.status });
-  planItem.create = async () => ({ id: 'item-1', status: 'available' });
+  planParticipant.updateMany = async () => ({ count: 1 });
+  planParticipant.findUnique = async () => null;
+  planItem.create = async ({ data }: any) => ({ id: 'item-1', capability: data.capability, status: 'available' });
   planItem.update = async () => ({ id: 'item-1', status: 'cancelled' });
+  planItem.updateMany = async () => ({ count: 1 });
   party.findFirst = async () => null;
   user.findUnique = async () => ({ id: 'guest-id' });
 });
@@ -70,6 +75,9 @@ test('Booked, active, and completed are derived, so the Plan cannot outrun its b
   assert.equal(planDisplayState(base, [{ needKind: 'dining', status: 'booked' }], now), 'booked');
   // A cancelled item is not counted against the Plan.
   assert.equal(planDisplayState(base, [{ needKind: 'dining', status: 'booked' }, { needKind: 'parking', status: 'cancelled' }], now), 'booked');
+  // A details item is a reference Bytspot never booked, so even marked booked
+  // it cannot carry the Plan into Booked.
+  assert.equal(planDisplayState(base, [{ needKind: 'dining', status: 'booked', capability: 'details' }], now), 'confirmed');
   // Every item cancelled is not Booked either.
   assert.equal(planDisplayState(base, [{ needKind: 'dining', status: 'cancelled' }], now), 'confirmed');
 
@@ -88,6 +96,18 @@ test('A proposed Plan expires on read, and confirming clears the clock', () => {
   // Only proposed plans expire; a confirmed Plan completes instead.
   assert.equal(isProposedPlanExpired({ ...stale, lifecycle: 'confirmed' }, now), false);
   assert.equal(planDisplayState({ ...stale, lifecycle: 'cancelled' }, [], now), 'cancelled');
+
+  // A lifecycle the CHECK constraint should make unstorable is clamped rather
+  // than echoed, so a bad row cannot render as a derived state.
+  assert.equal(planDisplayState({ ...stale, lifecycle: 'booked', expiresAt: null }, [], now), 'proposed');
+});
+
+test('Capability is read off the room, so it states who actually controls fulfilment', () => {
+  assert.equal(capabilityForAccessMode('free-rsvp'), 'book');
+  assert.equal(capabilityForAccessMode('paid-ticket'), 'book');
+  assert.equal(capabilityForAccessMode('private-approval'), 'request');
+  // Anything Bytspot does not settle is a reference the user resolves.
+  assert.equal(capabilityForAccessMode('walk-up'), 'details');
 });
 
 test('Readiness travels beside the state, so Confirmed never stands alone', () => {
@@ -130,9 +150,15 @@ test('A participant answers only for themselves, and the creator owns the Plan a
   plan.findUnique = async () => planFixture();
   // The creator confirms without waiting for anyone.
   assert.deepEqual(await caller().plans.confirm({ planId: 'plan-1' }), { id: 'plan-1', lifecycle: 'confirmed' });
+  // The confirm is conditioned on the row still being proposed.
+  let confirmWhere: any = null;
+  plan.updateMany = async (args: any) => { confirmWhere = args.where; return { count: 1 }; };
+  await caller().plans.confirm({ planId: 'plan-1' });
+  assert.deepEqual(confirmWhere, { id: 'plan-1', lifecycle: 'proposed' });
   // There is no procedure to answer on someone else's behalf: respond takes no
   // userId, and remove is the creator's, not a way to decline for a guest.
   await assert.rejects(() => caller().plans.remove({ planId: 'plan-1', userId: 'creator-id' }), { code: 'BAD_REQUEST' });
+  planParticipant.updateMany = async () => ({ count: 0 });
   await assert.rejects(() => caller().plans.remove({ planId: 'plan-1', userId: 'nobody' }), { code: 'NOT_FOUND' });
 });
 
@@ -166,13 +192,65 @@ test('A Plan that starts is given its own start as the deadline', async () => {
 
 test('An expired or cancelled Plan refuses every reshaping call', async () => {
   for (const dead of [{ expiresAt: new Date(Date.now() - 1000) }, { lifecycle: 'cancelled' }]) {
-    plan.findUnique = async () => planFixture(dead);
+    plan.findUnique = async () => planFixture({ ...dead, items: [{ id: 'item-1', needKind: 'dining', title: 'Dinner', status: 'available' }] });
     await assert.rejects(() => caller().plans.confirm({ planId: 'plan-1' }), { code: 'CONFLICT' });
     await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { code: 'CONFLICT' });
     await assert.rejects(() => caller().plans.setNeeds({ planId: 'plan-1', needs: ['dining'] }), { code: 'CONFLICT' });
-    await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Dinner', capability: 'book' }), { code: 'CONFLICT' });
+    await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Dinner' }), { code: 'CONFLICT' });
     await assert.rejects(() => guest().plans.respond({ planId: 'plan-1', response: 'accepted' }), { code: 'CONFLICT' });
+    // Attendance and supply are reshaping too: a dead Plan is done changing.
+    await assert.rejects(() => caller().plans.remove({ planId: 'plan-1', userId: 'guest-id' }), { code: 'CONFLICT' });
+    await assert.rejects(() => caller().plans.detach({ planId: 'plan-1', itemId: 'item-1' }), { code: 'CONFLICT' });
   }
+});
+
+// ─── Concurrency ──────────────────────────────────────────────────────
+
+test('Someone removed mid-call cannot answer their way back onto the Plan', async () => {
+  plan.findUnique = async () => planFixture();
+  let where: any = null;
+  // The removal lands between the read and the write, so the guarded update
+  // matches nothing.
+  planParticipant.updateMany = async (args: any) => { where = args.where; return { count: 0 }; };
+  await assert.rejects(() => guest().plans.respond({ planId: 'plan-1', response: 'accepted' }), { code: 'NOT_FOUND' });
+  assert.deepEqual(where, { planId: 'plan-1', userId: 'guest-id', status: { not: 'removed' } });
+});
+
+test('A concurrent cancel beats a confirm, and cancelling stays terminal', async () => {
+  plan.findUnique = async () => planFixture();
+  // The confirm loses the race: the row is no longer proposed.
+  plan.updateMany = async () => ({ count: 0 });
+  plan.findUnique = async () => planFixture();
+  const reread = { lifecycle: 'cancelled' };
+  const original = plan.findUnique;
+  let call = 0;
+  plan.findUnique = async (args: any) => (call++ === 0 ? original(args) : reread);
+  await assert.rejects(() => caller().plans.confirm({ planId: 'plan-1' }), { code: 'CONFLICT' });
+
+  // A confirm that lost the race to another confirm is idempotent, not an error.
+  call = 0;
+  plan.findUnique = async (args: any) => (call++ === 0 ? original(args) : { lifecycle: 'confirmed' });
+  assert.deepEqual(await caller().plans.confirm({ planId: 'plan-1' }), { id: 'plan-1', lifecycle: 'confirmed' });
+});
+
+test('A concurrent invite cannot reset an answer that was already given', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat] });
+  // The seat was created by a racing invite after this call read the Plan.
+  planParticipant.create = async () => { throw Object.assign(new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' }), {}); };
+  let where: any = null;
+  planParticipant.updateMany = async (args: any) => { where = args.where; return { count: 0 }; };
+  planParticipant.findUnique = async () => ({ status: 'accepted' });
+
+  assert.deepEqual(await caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { status: 'accepted' });
+  // The revival is scoped to removed seats only, which is why the answer stood.
+  assert.deepEqual(where, { planId: 'plan-1', userId: 'guest-id', status: 'removed' });
+});
+
+test('A Plan is a coordination object, not a mailing list', async () => {
+  const crowd = Array.from({ length: 50 }, (_, index) => ({ userId: `guest-${index}`, role: 'guest', status: 'invited' }));
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, ...crowd] });
+  user.findUnique = async () => ({ id: 'one-too-many' });
+  await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'one-too-many' }), { code: 'CONFLICT' });
 });
 
 // ─── Invite ───────────────────────────────────────────────────────────────────
@@ -203,24 +281,36 @@ test('Re-inviting is idempotent, and a removed person returns to a clean invite'
 test('Attaching a room requires a real published room', async () => {
   plan.findUnique = async () => planFixture();
   await assert.rejects(
-    () => caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', title: 'The Basement', capability: 'book', partyId: 'party-1' }),
+    () => caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1' }),
     { code: 'NOT_FOUND' },
   );
-  party.findFirst = async () => ({ id: 'party-1' });
-  assert.deepEqual(await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', title: 'The Basement', capability: 'book', partyId: 'party-1' }), { id: 'item-1', status: 'available' });
+  party.findFirst = async () => ({ id: 'party-1', title: 'The Basement', accessMode: 'free-rsvp' });
+  assert.deepEqual(
+    await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1' }),
+    { id: 'item-1', capability: 'book', status: 'available' },
+  );
+  // An item with no room behind it has nothing to derive from and stays a
+  // reference, so it needs its own title.
+  await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'dining' }), { code: 'BAD_REQUEST' });
 });
 
-test('An attached item starts available, never booked', async () => {
+test('The caller cannot state the capability, so a Plan cannot advertise a booking Bytspot does not control', async () => {
   plan.findUnique = async () => planFixture();
   let seeded: any = null;
-  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', status: 'available' }; };
-  // A details item is a reference the user resolves themselves; no capability
-  // may seed a booking, because attaching is not settling.
-  for (const capability of ['book', 'request', 'details'] as const) {
-    await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Broni Home Taste', capability });
-    assert.equal(seeded.capability, capability);
-    assert.equal(seeded.status, undefined, 'attach must not seed a status');
-  }
+  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+
+  // Capability is read off the room, not off the request. A room that only
+  // forwards a request cannot be attached as bookable.
+  party.findFirst = async () => ({ id: 'party-1', title: 'Rooftop', accessMode: 'private-approval' });
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', title: 'Claimed As Bookable', partyId: 'party-1' });
+  assert.equal(seeded.capability, 'request');
+  // The room names itself, so a caller-supplied title cannot misrepresent it.
+  assert.equal(seeded.title, 'Rooftop');
+
+  // Nothing Bytspot settles behind it means a reference, never a booking.
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Broni Home Taste' });
+  assert.equal(seeded.capability, 'details');
+  assert.equal(seeded.status, undefined, 'attach must not seed a status');
 });
 
 test('Detach cancels the item and refuses to strand a booking', async () => {
@@ -228,8 +318,11 @@ test('Detach cancels the item and refuses to strand a booking', async () => {
   assert.deepEqual(await caller().plans.detach({ planId: 'plan-1', itemId: 'item-1' }), { status: 'cancelled' });
   await assert.rejects(() => caller().plans.detach({ planId: 'plan-1', itemId: 'missing' }), { code: 'NOT_FOUND' });
 
-  plan.findUnique = async () => planFixture({ items: [{ id: 'item-1', needKind: 'dining', title: 'Dinner', status: 'booked' }] });
+  // A booking landing between the read and the write is not silently stranded.
+  let where: any = null;
+  planItem.updateMany = async (args: any) => { where = args.where; return { count: 0 }; };
   await assert.rejects(() => caller().plans.detach({ planId: 'plan-1', itemId: 'item-1' }), { code: 'CONFLICT' });
+  assert.deepEqual(where, { id: 'item-1', status: { not: 'booked' } });
 });
 
 // ─── Read model ───────────────────────────────────────────────────────────────

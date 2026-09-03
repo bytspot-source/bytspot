@@ -13,7 +13,7 @@ CREATE TABLE "plans" (
     "latitude" DOUBLE PRECISION,
     "longitude" DOUBLE PRECISION,
     "party_size" INTEGER,
-    "needs" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "needs" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     "lifecycle" TEXT NOT NULL DEFAULT 'proposed',
     "confirmed_at" TIMESTAMP(3),
     "cancelled_at" TIMESTAMP(3),
@@ -21,7 +21,10 @@ CREATE TABLE "plans" (
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "plans_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "plans_pkey" PRIMARY KEY ("id"),
+    -- Booked, active, and completed are derived. The database must not be able
+    -- to hold them, so a future write path cannot smuggle one in.
+    CONSTRAINT "plans_lifecycle_check" CHECK ("lifecycle" IN ('proposed', 'confirmed', 'cancelled'))
 );
 
 -- A participant owns exactly one thing: whether they are going.
@@ -35,7 +38,9 @@ CREATE TABLE "plan_participants" (
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "plan_participants_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "plan_participants_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "plan_participants_role_check" CHECK ("role" IN ('creator', 'guest')),
+    CONSTRAINT "plan_participants_status_check" CHECK ("status" IN ('invited', 'accepted', 'maybe', 'declined', 'removed'))
 );
 
 -- Supply attached to a Plan. `capability` is snapshotted from the Discover
@@ -51,7 +56,11 @@ CREATE TABLE "plan_items" (
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "plan_items_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "plan_items_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "plan_items_capability_check" CHECK ("capability" IN ('book', 'request', 'details')),
+    CONSTRAINT "plan_items_status_check" CHECK ("status" IN ('available', 'held', 'booked', 'cancelled')),
+    -- A reference the user resolves themselves was never booked by Bytspot.
+    CONSTRAINT "plan_items_details_never_booked_check" CHECK (NOT ("capability" = 'details' AND "status" = 'booked'))
 );
 
 CREATE UNIQUE INDEX "plans_creator_user_id_idempotency_key_key" ON "plans"("creator_user_id", "idempotency_key");

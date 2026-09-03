@@ -13,6 +13,17 @@ BEGIN
     RAISE EXCEPTION 'plans idempotency uniqueness missing';
   END IF;
 
+  -- The derived states must be unstorable, not merely unwritten.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plans_lifecycle_check') THEN
+    RAISE EXCEPTION 'plans.lifecycle domain is unenforced';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plan_participants_status_check') THEN
+    RAISE EXCEPTION 'plan_participants.status domain is unenforced';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plan_items_details_never_booked_check') THEN
+    RAISE EXCEPTION 'a details item could be stored as booked';
+  END IF;
+
   -- Detaching supply must never delete Plan history.
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.referential_constraints

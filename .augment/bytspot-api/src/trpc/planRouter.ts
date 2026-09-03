@@ -22,9 +22,22 @@ import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 const PROPOSED_PLAN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Attach capability, snapshotted from the Discover listing plug. */
-const CAPABILITIES = ['book', 'request', 'details'] as const;
 const PARTICIPANT_RESPONSES = ['accepted', 'maybe', 'declined'] as const;
+
+/** A Plan is a coordination object, not a mailing list. */
+const MAX_PLAN_PARTICIPANTS = 50;
+
+/**
+ * Capability is a fact about who controls fulfilment, so it is derived from the
+ * room, never accepted from the caller. A room Bytspot settles is bookable; one
+ * that only forwards a request is requestable; anything with no room behind it
+ * is a reference the user resolves themselves.
+ */
+export function capabilityForAccessMode(accessMode: string): 'book' | 'request' | 'details' {
+  if (accessMode === 'free-rsvp' || accessMode === 'paid-ticket') return 'book';
+  if (accessMode === 'private-approval') return 'request';
+  return 'details';
+}
 
 type PlanRecord = {
   lifecycle: string;
@@ -34,7 +47,7 @@ type PlanRecord = {
   needs: string[];
 };
 type ParticipantRecord = { status: string };
-type ItemRecord = { needKind: string; status: string };
+type ItemRecord = { needKind: string; status: string; capability?: string };
 
 /** A proposed Plan that ran out of time is expired on read; there is no sweep. */
 export function isProposedPlanExpired(plan: PlanRecord, now: Date): boolean {
@@ -48,13 +61,18 @@ export function isProposedPlanExpired(plan: PlanRecord, now: Date): boolean {
 export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Date): string {
   if (plan.lifecycle === 'cancelled') return 'cancelled';
   if (plan.lifecycle === 'proposed') return isProposedPlanExpired(plan, now) ? 'expired' : 'proposed';
-  if (plan.lifecycle !== 'confirmed') return plan.lifecycle;
+  // A lifecycle the database should not be able to hold is clamped to the
+  // least-claiming state rather than echoed, so a bad row cannot render as
+  // "booked" merely by being stored that way.
+  if (plan.lifecycle !== 'confirmed') return 'proposed';
 
   if (plan.endsAt && now >= plan.endsAt) return 'completed';
   if (plan.startsAt && now >= plan.startsAt) return 'active';
 
+  // A reference the user resolves themselves is not something Bytspot booked,
+  // so a details item can never carry the Plan into `booked`.
   const live = items.filter((item) => item.status !== 'cancelled');
-  if (live.length > 0 && live.every((item) => item.status === 'booked')) return 'booked';
+  if (live.length > 0 && live.every((item) => item.status === 'booked' && item.capability !== 'details')) return 'booked';
   return 'confirmed';
 }
 
@@ -218,24 +236,32 @@ export const planRouter = router({
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
       assertPlanMutable(plan, now);
       if (plan.lifecycle === 'confirmed') return { id: plan.id, lifecycle: plan.lifecycle };
-      const updated = await db.plan.update({
-        where: { id: plan.id },
+      // Conditioned on the row still being proposed, so a cancel that lands
+      // between the read and the write cannot be overwritten here.
+      const confirmed = await db.plan.updateMany({
+        where: { id: plan.id, lifecycle: 'proposed' },
         data: { lifecycle: 'confirmed', confirmedAt: now, expiresAt: null },
       });
-      return { id: updated.id, lifecycle: updated.lifecycle };
+      if (confirmed.count === 0) {
+        const current = await db.plan.findUnique({ where: { id: plan.id }, select: { lifecycle: true } });
+        if (current?.lifecycle === 'confirmed') return { id: plan.id, lifecycle: 'confirmed' };
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Plan was cancelled.' });
+      }
+      return { id: plan.id, lifecycle: 'confirmed' };
     }),
 
+  /** Cancelling is terminal, and always wins a race against confirming. */
   cancel: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'plan-cancel' }))
     .input(z.object({ planId: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
       if (plan.lifecycle === 'cancelled') return { id: plan.id, lifecycle: plan.lifecycle };
-      const updated = await db.plan.update({
-        where: { id: plan.id },
+      await db.plan.updateMany({
+        where: { id: plan.id, lifecycle: { not: 'cancelled' } },
         data: { lifecycle: 'cancelled', cancelledAt: new Date() },
       });
-      return { id: updated.id, lifecycle: updated.lifecycle };
+      return { id: plan.id, lifecycle: 'cancelled' };
     }),
 
   /**
@@ -258,13 +284,33 @@ export const planRouter = router({
 
       const seat = plan.participants.find((p) => p.userId === input.userId);
       if (seat && seat.status !== 'removed') return { status: seat.status };
-      // Re-inviting someone previously removed returns them to a clean invite.
-      const restored = await db.planParticipant.upsert({
-        where: { planId_userId: { planId: plan.id, userId: input.userId } },
-        create: { planId: plan.id, userId: input.userId, role: 'guest', status: 'invited' },
-        update: { status: 'invited', respondedAt: null },
+      if (plan.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Plan is full.' });
+      }
+
+      // Create first and let the unique index arbitrate. An upsert would take
+      // the update branch on a concurrent invite and reset a response that had
+      // already been given back to `invited`.
+      try {
+        const created = await db.planParticipant.create({
+          data: { planId: plan.id, userId: input.userId, role: 'guest', status: 'invited' },
+        });
+        return { status: created.status };
+      } catch (error) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+      }
+      // The seat already exists. Re-inviting only revives a removed person; it
+      // must never overwrite an answer someone has already given.
+      const revived = await db.planParticipant.updateMany({
+        where: { planId: plan.id, userId: input.userId, status: 'removed' },
+        data: { status: 'invited', respondedAt: null },
       });
-      return { status: restored.status };
+      if (revived.count > 0) return { status: 'invited' as const };
+      const current = await db.planParticipant.findUnique({
+        where: { planId_userId: { planId: plan.id, userId: input.userId } },
+        select: { status: true },
+      });
+      return { status: current?.status ?? 'invited' };
     }),
 
   /** A participant answers only for themselves. */
@@ -275,27 +321,31 @@ export const planRouter = router({
       const now = new Date();
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
       assertPlanMutable(plan, now);
-      const updated = await db.planParticipant.update({
-        where: { planId_userId: { planId: plan.id, userId: ctx.user.userId } },
+      // Conditioned on the seat still existing, so someone removed mid-call
+      // cannot answer their way back onto the Plan.
+      const answered = await db.planParticipant.updateMany({
+        where: { planId: plan.id, userId: ctx.user.userId, status: { not: 'removed' } },
         data: { status: input.response, respondedAt: now },
       });
-      return { status: updated.status };
+      if (answered.count === 0) throw planNotFound();
+      return { status: input.response };
     }),
 
   remove: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-remove' }))
     .input(z.object({ planId: z.string().min(1), userId: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
+      const now = new Date();
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
+      assertPlanMutable(plan, now);
       if (input.userId === ctx.user.userId) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Cancel the Plan instead of removing yourself.' });
       }
-      const seat = plan.participants.find((p) => p.userId === input.userId && p.status !== 'removed');
-      if (!seat) throw new TRPCError({ code: 'NOT_FOUND', message: 'That person is not on this Plan.' });
-      await db.planParticipant.update({
-        where: { planId_userId: { planId: plan.id, userId: input.userId } },
-        data: { status: 'removed', respondedAt: new Date() },
+      const removed = await db.planParticipant.updateMany({
+        where: { planId: plan.id, userId: input.userId, status: { not: 'removed' } },
+        data: { status: 'removed', respondedAt: now },
       });
+      if (removed.count === 0) throw new TRPCError({ code: 'NOT_FOUND', message: 'That person is not on this Plan.' });
       return { status: 'removed' as const };
     }),
 
@@ -312,9 +362,9 @@ export const planRouter = router({
     }),
 
   /**
-   * Attaching supply. `capability` is the plug's verdict, carried across as a
-   * fact: a `details` item is a reference the user resolves themselves, and it
-   * can never reach `booked`.
+   * Attaching supply. The caller never states the capability: it is read off
+   * the room, so a Plan cannot advertise a booking Bytspot does not control.
+   * An item with no room behind it is a reference, and stays `details`.
    */
   attach: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-attach' }))
@@ -322,8 +372,7 @@ export const planRouter = router({
       z.object({
         planId: z.string().min(1),
         needKind: z.string().trim().min(1).max(40),
-        title: z.string().trim().min(1).max(120),
-        capability: z.enum(CAPABILITIES),
+        title: z.string().trim().min(1).max(120).optional(),
         partyId: z.string().min(1).optional(),
       }),
     )
@@ -331,23 +380,25 @@ export const planRouter = router({
       const now = new Date();
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
       assertPlanMutable(plan, now);
+
+      let capability: 'book' | 'request' | 'details' = 'details';
+      let title = input.title;
       if (input.partyId) {
         const party = await db.party.findFirst({
           where: { id: input.partyId, status: 'published' },
-          select: { id: true },
+          select: { id: true, title: true, accessMode: true },
         });
         if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That room could not be found.' });
+        capability = capabilityForAccessMode(party.accessMode);
+        // The room names itself; a caller-supplied title cannot misrepresent it.
+        title = party.title;
       }
+      if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
+
       const item = await db.planItem.create({
-        data: {
-          planId: plan.id,
-          needKind: input.needKind,
-          title: input.title,
-          capability: input.capability,
-          partyId: input.partyId ?? null,
-        },
+        data: { planId: plan.id, needKind: input.needKind, title, capability, partyId: input.partyId ?? null },
       });
-      return { id: item.id, status: item.status };
+      return { id: item.id, capability: item.capability, status: item.status };
     }),
 
   /** Detach cancels the item; Plan history is never rewritten. */
@@ -355,13 +406,19 @@ export const planRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-detach' }))
     .input(z.object({ planId: z.string().min(1), itemId: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
+      const now = new Date();
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
+      assertPlanMutable(plan, now);
       const item = plan.items.find((candidate) => candidate.id === input.itemId);
       if (!item) throw new TRPCError({ code: 'NOT_FOUND', message: 'That item is not on this Plan.' });
-      if (item.status === 'booked') {
+      // Conditional so a booking landing concurrently is not silently stranded.
+      const cancelled = await db.planItem.updateMany({
+        where: { id: item.id, status: { not: 'booked' } },
+        data: { status: 'cancelled' },
+      });
+      if (cancelled.count === 0) {
         throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
       }
-      await db.planItem.update({ where: { id: item.id }, data: { status: 'cancelled' } });
       return { status: 'cancelled' as const };
     }),
 });

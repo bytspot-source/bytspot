@@ -60,7 +60,11 @@ CREATE TABLE "plan_items" (
     CONSTRAINT "plan_items_capability_check" CHECK ("capability" IN ('book', 'request', 'details')),
     CONSTRAINT "plan_items_status_check" CHECK ("status" IN ('available', 'held', 'booked', 'cancelled')),
     -- A reference the user resolves themselves was never booked by Bytspot.
-    CONSTRAINT "plan_items_details_never_booked_check" CHECK (NOT ("capability" = 'details' AND "status" = 'booked'))
+    CONSTRAINT "plan_items_details_never_booked_check" CHECK (NOT ("capability" = 'details' AND "status" = 'booked')),
+    -- The room is what makes an item bookable or requestable. If the room is
+    -- gone (party deleted -> SET NULL), the item cannot keep advertising an
+    -- affordance with nothing behind it.
+    CONSTRAINT "plan_items_no_room_no_promise_check" CHECK ("party_id" IS NOT NULL OR "capability" = 'details')
 );
 
 CREATE UNIQUE INDEX "plans_creator_user_id_idempotency_key_key" ON "plans"("creator_user_id", "idempotency_key");
@@ -74,3 +78,20 @@ ALTER TABLE "plan_participants" ADD CONSTRAINT "plan_participants_plan_id_fkey" 
 ALTER TABLE "plan_participants" ADD CONSTRAINT "plan_participants_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "plan_items" ADD CONSTRAINT "plan_items_plan_id_fkey" FOREIGN KEY ("plan_id") REFERENCES "plans"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "plan_items" ADD CONSTRAINT "plan_items_party_id_fkey" FOREIGN KEY ("party_id") REFERENCES "parties"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- When the room disappears, an orphaned item downgrades to a reference the
+-- user resolves themselves and is marked cancelled. Same trigger, same
+-- transaction as the SET NULL, so the CHECK above is never violated.
+CREATE OR REPLACE FUNCTION downgrade_orphaned_plan_items() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.party_id IS NULL AND OLD.party_id IS NOT NULL AND NEW.capability <> 'details' THEN
+    NEW.capability := 'details';
+    NEW.status := 'cancelled';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER plan_items_downgrade_orphans
+BEFORE UPDATE OF party_id ON plan_items
+FOR EACH ROW EXECUTE FUNCTION downgrade_orphaned_plan_items();

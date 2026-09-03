@@ -2,6 +2,7 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
+import { serializableTransaction } from '../lib/transactions';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -134,20 +135,22 @@ function serializePlan(plan: LoadedPlan, now: Date) {
 /** A Plan is indistinguishable from a deleted one to anyone not on it. */
 const planNotFound = () => new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
+type TxClient = Prisma.TransactionClient | typeof db;
+
 /**
  * Removal ends access; declining does not. Someone who said no should still be
  * able to see the Plan and change their mind.
  */
-async function loadPlanForParticipant(planId: string, userId: string): Promise<LoadedPlan> {
-  const plan = await db.plan.findUnique({ where: { id: planId }, include: planInclude });
+async function loadPlanForParticipant(planId: string, userId: string, tx: TxClient = db): Promise<LoadedPlan> {
+  const plan = await tx.plan.findUnique({ where: { id: planId }, include: planInclude });
   if (!plan) throw planNotFound();
   const seat = plan.participants.find((p) => p.userId === userId);
   if (!seat || seat.status === 'removed') throw planNotFound();
   return plan;
 }
 
-async function loadPlanForCreator(planId: string, userId: string): Promise<LoadedPlan> {
-  const plan = await db.plan.findUnique({ where: { id: planId }, include: planInclude });
+async function loadPlanForCreator(planId: string, userId: string, tx: TxClient = db): Promise<LoadedPlan> {
+  const plan = await tx.plan.findUnique({ where: { id: planId }, include: planInclude });
   if (!plan || plan.creatorUserId !== userId) throw planNotFound();
   return plan;
 }
@@ -282,35 +285,38 @@ export const planRouter = router({
       const invitee = await db.user.findUnique({ where: { id: input.userId }, select: { id: true } });
       if (!invitee) throw new TRPCError({ code: 'NOT_FOUND', message: 'That person could not be found.' });
 
-      const seat = plan.participants.find((p) => p.userId === input.userId);
-      if (seat && seat.status !== 'removed') return { status: seat.status };
-      if (plan.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'This Plan is full.' });
-      }
-
-      // Create first and let the unique index arbitrate. An upsert would take
-      // the update branch on a concurrent invite and reset a response that had
-      // already been given back to `invited`.
-      try {
-        const created = await db.planParticipant.create({
-          data: { planId: plan.id, userId: input.userId, role: 'guest', status: 'invited' },
+      // Reading a limit and then writing against it has to say Serializable
+      // out loud: two concurrent invites to different users would both pass a
+      // stale cap check and push the Plan past MAX_PLAN_PARTICIPANTS.
+      return serializableTransaction(async (tx) => {
+        const fresh = await loadPlanForCreator(plan.id, ctx.user.userId, tx);
+        assertPlanMutable(fresh, now);
+        const seat = fresh.participants.find((p) => p.userId === input.userId);
+        if (seat && seat.status !== 'removed') return { status: seat.status };
+        if (fresh.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Plan is full.' });
+        }
+        try {
+          const created = await tx.planParticipant.create({
+            data: { planId: fresh.id, userId: input.userId, role: 'guest', status: 'invited' },
+          });
+          return { status: created.status };
+        } catch (error) {
+          if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+        }
+        // A racing invite already took the seat. Reviving only removed rows
+        // keeps this from overwriting an answer someone has already given.
+        const revived = await tx.planParticipant.updateMany({
+          where: { planId: fresh.id, userId: input.userId, status: 'removed' },
+          data: { status: 'invited', respondedAt: null },
         });
-        return { status: created.status };
-      } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
-      }
-      // The seat already exists. Re-inviting only revives a removed person; it
-      // must never overwrite an answer someone has already given.
-      const revived = await db.planParticipant.updateMany({
-        where: { planId: plan.id, userId: input.userId, status: 'removed' },
-        data: { status: 'invited', respondedAt: null },
-      });
-      if (revived.count > 0) return { status: 'invited' as const };
-      const current = await db.planParticipant.findUnique({
-        where: { planId_userId: { planId: plan.id, userId: input.userId } },
-        select: { status: true },
-      });
-      return { status: current?.status ?? 'invited' };
+        if (revived.count > 0) return { status: 'invited' as const };
+        const current = await tx.planParticipant.findUnique({
+          where: { planId_userId: { planId: fresh.id, userId: input.userId } },
+          select: { status: true },
+        });
+        return { status: current?.status ?? 'invited' };
+      }, 'Another change to this Plan is in flight. Try again.');
     }),
 
   /** A participant answers only for themselves. */
@@ -321,14 +327,18 @@ export const planRouter = router({
       const now = new Date();
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
       assertPlanMutable(plan, now);
-      // Conditioned on the seat still existing, so someone removed mid-call
-      // cannot answer their way back onto the Plan.
-      const answered = await db.planParticipant.updateMany({
-        where: { planId: plan.id, userId: ctx.user.userId, status: { not: 'removed' } },
-        data: { status: input.response, respondedAt: now },
-      });
-      if (answered.count === 0) throw planNotFound();
-      return { status: input.response };
+      // Re-read the Plan inside the transaction so a cancel that lands after
+      // the initial load cannot be followed by a response on a dead Plan.
+      return serializableTransaction(async (tx) => {
+        const fresh = await loadPlanForParticipant(plan.id, ctx.user.userId, tx);
+        assertPlanMutable(fresh, now);
+        const answered = await tx.planParticipant.updateMany({
+          where: { planId: fresh.id, userId: ctx.user.userId, status: { not: 'removed' } },
+          data: { status: input.response, respondedAt: now },
+        });
+        if (answered.count === 0) throw planNotFound();
+        return { status: input.response };
+      }, 'Another change to this Plan is in flight. Try again.');
     }),
 
   remove: protectedProcedure
@@ -341,12 +351,16 @@ export const planRouter = router({
       if (input.userId === ctx.user.userId) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Cancel the Plan instead of removing yourself.' });
       }
-      const removed = await db.planParticipant.updateMany({
-        where: { planId: plan.id, userId: input.userId, status: { not: 'removed' } },
-        data: { status: 'removed', respondedAt: now },
-      });
-      if (removed.count === 0) throw new TRPCError({ code: 'NOT_FOUND', message: 'That person is not on this Plan.' });
-      return { status: 'removed' as const };
+      return serializableTransaction(async (tx) => {
+        const fresh = await loadPlanForCreator(plan.id, ctx.user.userId, tx);
+        assertPlanMutable(fresh, now);
+        const removed = await tx.planParticipant.updateMany({
+          where: { planId: fresh.id, userId: input.userId, status: { not: 'removed' } },
+          data: { status: 'removed', respondedAt: now },
+        });
+        if (removed.count === 0) throw new TRPCError({ code: 'NOT_FOUND', message: 'That person is not on this Plan.' });
+        return { status: 'removed' as const };
+      }, 'Another change to this Plan is in flight. Try again.');
     }),
 
   setNeeds: protectedProcedure
@@ -411,14 +425,19 @@ export const planRouter = router({
       assertPlanMutable(plan, now);
       const item = plan.items.find((candidate) => candidate.id === input.itemId);
       if (!item) throw new TRPCError({ code: 'NOT_FOUND', message: 'That item is not on this Plan.' });
-      // Conditional so a booking landing concurrently is not silently stranded.
-      const cancelled = await db.planItem.updateMany({
-        where: { id: item.id, status: { not: 'booked' } },
-        data: { status: 'cancelled' },
-      });
-      if (cancelled.count === 0) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
-      }
-      return { status: 'cancelled' as const };
+      return serializableTransaction(async (tx) => {
+        const fresh = await loadPlanForCreator(plan.id, ctx.user.userId, tx);
+        assertPlanMutable(fresh, now);
+        // Conditional on the item not having reached booked between the read
+        // and the write, so a booking is never silently stranded.
+        const cancelled = await tx.planItem.updateMany({
+          where: { id: item.id, status: { not: 'booked' } },
+          data: { status: 'cancelled' },
+        });
+        if (cancelled.count === 0) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
+        }
+        return { status: 'cancelled' as const };
+      }, 'Another change to this Plan is in flight. Try again.');
     }),
 });

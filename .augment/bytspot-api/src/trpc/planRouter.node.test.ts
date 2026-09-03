@@ -46,6 +46,9 @@ function planFixture(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  // Every serializable write re-reads on the transaction client, so the mock
+  // has to hand the caller back the same tables it would see outside.
+  (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>) => fn(db);
   plan.findUnique = async () => null;
   plan.findMany = async () => [];
   plan.create = async () => ({ id: 'plan-1' });
@@ -231,6 +234,19 @@ test('A concurrent cancel beats a confirm, and cancelling stays terminal', async
   call = 0;
   plan.findUnique = async (args: any) => (call++ === 0 ? original(args) : { lifecycle: 'confirmed' });
   assert.deepEqual(await caller().plans.confirm({ planId: 'plan-1' }), { id: 'plan-1', lifecycle: 'confirmed' });
+});
+
+test('Two concurrent invites cannot both slip past the cap', async () => {
+  // A stale-in-memory cap check would let two invites to different users both
+  // pass 49 and push the Plan to 51. Serializable is what stops that; the
+  // test proves it by aborting a racing transaction with P2034.
+  const crowd = Array.from({ length: 49 }, (_, index) => ({ userId: `guest-${index}`, role: 'guest', status: 'invited' }));
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, ...crowd] });
+  user.findUnique = async () => ({ id: 'racing-invitee' });
+  (db as any).$transaction = async () => {
+    throw new Prisma.PrismaClientKnownRequestError('serialization conflict', { code: 'P2034', clientVersion: 'test' });
+  };
+  await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'racing-invitee' }), { code: 'CONFLICT' });
 });
 
 test('A concurrent invite cannot reset an answer that was already given', async () => {

@@ -1,5 +1,7 @@
 -- The Plan control plane is additive: three new tables, nothing altered.
 DO $$
+DECLARE
+  needed TEXT;
 BEGIN
   IF to_regclass('public.plans') IS NULL THEN RAISE EXCEPTION 'plans table missing'; END IF;
   IF to_regclass('public.plan_participants') IS NULL THEN RAISE EXCEPTION 'plan_participants table missing'; END IF;
@@ -13,15 +15,32 @@ BEGIN
     RAISE EXCEPTION 'plans idempotency uniqueness missing';
   END IF;
 
-  -- The derived states must be unstorable, not merely unwritten.
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plans_lifecycle_check') THEN
-    RAISE EXCEPTION 'plans.lifecycle domain is unenforced';
+  -- Every finite domain the architecture rests on must be unstorable, not
+  -- merely unwritten. A missing CHECK here is a Phase-2 bypass waiting to
+  -- happen, so this fixture enumerates them one by one.
+  FOR needed IN
+    SELECT unnest(ARRAY[
+      'plans_lifecycle_check',
+      'plan_participants_role_check',
+      'plan_participants_status_check',
+      'plan_items_capability_check',
+      'plan_items_status_check',
+      'plan_items_details_never_booked_check',
+      'plan_items_no_room_no_promise_check'
+    ])
+  LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = needed) THEN
+      RAISE EXCEPTION 'missing structural constraint: %', needed;
+    END IF;
+  END LOOP;
+
+  IF (SELECT is_nullable FROM information_schema.columns WHERE table_name = 'plans' AND column_name = 'needs') <> 'NO' THEN
+    RAISE EXCEPTION 'plans.needs must be NOT NULL to match the Prisma default';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plan_participants_status_check') THEN
-    RAISE EXCEPTION 'plan_participants.status domain is unenforced';
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'plan_items_details_never_booked_check') THEN
-    RAISE EXCEPTION 'a details item could be stored as booked';
+
+  -- Orphan handling for plan_items must be a trigger, not application-only.
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'plan_items_downgrade_orphans') THEN
+    RAISE EXCEPTION 'plan_items must downgrade orphans structurally';
   END IF;
 
   -- Detaching supply must never delete Plan history.

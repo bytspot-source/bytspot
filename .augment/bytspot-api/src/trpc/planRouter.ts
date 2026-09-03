@@ -40,6 +40,17 @@ export function capabilityForAccessMode(accessMode: string): 'book' | 'request' 
   return 'details';
 }
 
+/**
+ * Phase 2: the same rule generalized across supply kinds. A coffee
+ * reservation is a hold ask, not a payment, so it derives to `request`.
+ * Neither supply present is a reference the user resolves themselves.
+ */
+export function capabilityForSupply(supply: { party?: { accessMode: string } | null; reservation?: unknown }): 'book' | 'request' | 'details' {
+  if (supply.party) return capabilityForAccessMode(supply.party.accessMode);
+  if (supply.reservation) return 'request';
+  return 'details';
+}
+
 type PlanRecord = {
   lifecycle: string;
   startsAt: Date | null;
@@ -126,6 +137,7 @@ function serializePlan(plan: LoadedPlan, now: Date) {
       needKind: item.needKind,
       title: item.title,
       partyId: item.partyId,
+      coffeeReservationId: item.coffeeReservationId,
       capability: item.capability,
       status: item.status,
     })),
@@ -388,9 +400,11 @@ export const planRouter = router({
     }),
 
   /**
-   * Attaching supply. The caller never states the capability: it is read off
-   * the room, so a Plan cannot advertise a booking Bytspot does not control.
-   * An item with no room behind it is a reference, and stays `details`.
+   * Attaching supply. The caller never states the capability: it is derived
+   * from the supply, so a Plan cannot advertise a booking Bytspot does not
+   * control. Phase 2 accepts a generic `supplyRef` alongside the legacy
+   * top-level `partyId`; a caller may set at most one supply. An item with
+   * no supply behind it is a reference, and stays `details`.
    */
   attach: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-attach' }))
@@ -399,7 +413,15 @@ export const planRouter = router({
         planId: z.string().min(1),
         needKind: z.string().trim().min(1).max(40),
         title: z.string().trim().min(1).max(120).optional(),
+        // Legacy top-level partyId is kept for one release so unshipped iOS
+        // builds do not break; a follow-up removes it. Prefer supplyRef.
         partyId: z.string().min(1).optional(),
+        supplyRef: z
+          .object({
+            partyId: z.string().min(1).optional(),
+            coffeeReservationId: z.string().min(1).optional(),
+          })
+          .optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -407,24 +429,58 @@ export const planRouter = router({
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
       assertPlanMutable(plan, now);
 
+      const partyId = input.supplyRef?.partyId ?? input.partyId ?? null;
+      const coffeeReservationId = input.supplyRef?.coffeeReservationId ?? null;
+      if (partyId && coffeeReservationId) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'An item can carry only one supply.' });
+      }
+
       let capability: 'book' | 'request' | 'details' = 'details';
       let title = input.title;
-      if (input.partyId) {
+
+      if (partyId) {
         const party = await db.party.findFirst({
-          where: { id: input.partyId, status: 'published' },
+          where: { id: partyId, status: 'published' },
           select: { id: true, title: true, accessMode: true },
         });
         if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That room could not be found.' });
-        capability = capabilityForAccessMode(party.accessMode);
+        capability = capabilityForSupply({ party });
         // The room names itself; a caller-supplied title cannot misrepresent it.
         title = party.title;
+      } else if (coffeeReservationId) {
+        const reservation = await db.coffeeReservation.findFirst({
+          where: { id: coffeeReservationId, requestedByUserId: ctx.user.userId, status: { in: ['pending', 'confirmed'] as const } },
+          select: { id: true, spot: { select: { name: true } } },
+        });
+        // Not-yours and not-found read the same, mirroring the party rule so
+        // one caller cannot enumerate another caller's reservations.
+        if (!reservation) throw new TRPCError({ code: 'NOT_FOUND', message: 'That coffee reservation could not be found.' });
+        capability = capabilityForSupply({ reservation });
+        title = reservation.spot.name;
       }
+
       if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
 
-      const item = await db.planItem.create({
-        data: { planId: plan.id, needKind: input.needKind, title, capability, partyId: input.partyId ?? null },
-      });
-      return { id: item.id, capability: item.capability, status: item.status };
+      try {
+        const item = await db.planItem.create({
+          data: {
+            planId: plan.id,
+            needKind: input.needKind,
+            title,
+            capability,
+            partyId,
+            coffeeReservationId,
+          },
+        });
+        return { id: item.id, capability: item.capability, status: item.status };
+      } catch (error) {
+        // A racing attach of the same reservation to another Plan trips the
+        // unique constraint on plan_items.coffee_reservation_id.
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'That reservation is already on another Plan.' });
+        }
+        throw error;
+      }
     }),
 
   /** Detach cancels the item; Plan history is never rewritten. */

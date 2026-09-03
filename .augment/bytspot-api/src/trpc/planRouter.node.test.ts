@@ -5,7 +5,7 @@ import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { capabilityForAccessMode, isProposedPlanExpired, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { capabilityForAccessMode, capabilityForSupply, isProposedPlanExpired, openNeeds, planDisplayState, planReadiness } from './planRouter';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
 const createCaller = createCallerFactory(appRouter);
@@ -14,6 +14,7 @@ const planParticipant = db.planParticipant as any;
 const planItem = db.planItem as any;
 const party = db.party as any;
 const user = db.user as any;
+const coffeeReservation = db.coffeeReservation as any;
 
 const creatorContext: Context = { user: { userId: 'creator-id', email: 'creator@bytspot.com' }, clientRateLimitKey: 'test-plan-creator' };
 const guestContext: Context = { user: { userId: 'guest-id', email: 'guest@bytspot.com' }, clientRateLimitKey: 'test-plan-guest' };
@@ -63,6 +64,7 @@ beforeEach(() => {
   planItem.updateMany = async () => ({ count: 1 });
   party.findFirst = async () => null;
   user.findUnique = async () => ({ id: 'guest-id' });
+  coffeeReservation.findFirst = async () => null;
 });
 
 // ─── Derived state ────────────────────────────────────────────────────────────
@@ -111,6 +113,15 @@ test('Capability is read off the room, so it states who actually controls fulfil
   assert.equal(capabilityForAccessMode('private-approval'), 'request');
   // Anything Bytspot does not settle is a reference the user resolves.
   assert.equal(capabilityForAccessMode('walk-up'), 'details');
+});
+
+test('capabilityForSupply derives from the supply kind and never trusts the caller', () => {
+  assert.equal(capabilityForSupply({ party: { accessMode: 'free-rsvp' } }), 'book');
+  assert.equal(capabilityForSupply({ party: { accessMode: 'private-approval' } }), 'request');
+  // A coffee reservation is a hold ask, not a payment. Always request.
+  assert.equal(capabilityForSupply({ reservation: { id: 'r-1' } }), 'request');
+  // Nothing behind it is a reference, and that is the fail-closed default.
+  assert.equal(capabilityForSupply({}), 'details');
 });
 
 test('Readiness travels beside the state, so Confirmed never stands alone', () => {
@@ -339,6 +350,58 @@ test('The caller cannot state the capability, so a Plan cannot advertise a booki
   await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Broni Home Taste' });
   assert.equal(seeded.capability, 'details');
   assert.equal(seeded.status, undefined, 'attach must not seed a status');
+});
+
+// ─── Attach: second real bookable ────────────────────────────────────────────
+
+test('Attach accepts a generic supplyRef and refuses to carry two supplies at once', async () => {
+  plan.findUnique = async () => planFixture();
+  await assert.rejects(
+    () => caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', supplyRef: { partyId: 'p-1', coffeeReservationId: 'r-1' } }),
+    { code: 'BAD_REQUEST' },
+  );
+
+  // supplyRef.partyId keeps the exact behaviour of the legacy top-level shape.
+  party.findFirst = async () => ({ id: 'p-1', title: 'The Basement', accessMode: 'free-rsvp' });
+  let seeded: any = null;
+  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', supplyRef: { partyId: 'p-1' } });
+  assert.equal(seeded.capability, 'book');
+  assert.equal(seeded.partyId, 'p-1');
+  assert.equal(seeded.coffeeReservationId, null);
+});
+
+test('Attaching a coffee reservation derives request, uses the spot name, and refuses another caller', async () => {
+  plan.findUnique = async () => planFixture();
+
+  // A reservation the caller does not own is indistinguishable from missing;
+  // findFirst is scoped by requestedByUserId in the router, so a match by
+  // reservation id alone is not enough.
+  coffeeReservation.findFirst = async () => null;
+  await assert.rejects(
+    () => caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } }),
+    { code: 'NOT_FOUND' },
+  );
+
+  // A reservation the caller owns lands on the item; the spot names itself so
+  // a caller-supplied title cannot misrepresent it, and capability is request.
+  coffeeReservation.findFirst = async () => ({ id: 'r-1', spot: { name: 'Highland Bakery' } });
+  let seeded: any = null;
+  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+  const result = await caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', title: 'Caller-Overrides-Refused', supplyRef: { coffeeReservationId: 'r-1' } });
+  assert.equal(result.capability, 'request');
+  assert.equal(seeded.capability, 'request');
+  assert.equal(seeded.title, 'Highland Bakery');
+  assert.equal(seeded.coffeeReservationId, 'r-1');
+  assert.equal(seeded.partyId, null);
+
+  // A racing attach of the same reservation to another Plan trips the
+  // unique constraint on plan_items.coffee_reservation_id.
+  planItem.create = async () => { throw new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' }); };
+  await assert.rejects(
+    () => caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } }),
+    { code: 'CONFLICT' },
+  );
 });
 
 test('Detach cancels the item and refuses to strand a booking', async () => {

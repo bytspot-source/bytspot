@@ -59,6 +59,8 @@ model User {
   partyGuests           PartyGuest[]
   createdPlans          Plan[]                @relation("planCreator")
   planSeats             PlanParticipant[]
+  coffeeSpots           CoffeeSpot[]          @relation("coffeeSpotOwner")
+  coffeeReservations    CoffeeReservation[]   @relation("coffeeReservationRequester")
   partyCheckouts        PartyCheckout[]
   mobilityQuotes        MobilityQuote[]
   mobilityTrips         MobilityTrip[]
@@ -792,18 +794,22 @@ model PlanParticipant {
 /// listing plug at attach time: a `details` item is a reference, not a booking,
 /// and can never reach `booked`.
 model PlanItem {
-  id         String   @id @default(cuid())
-  planId     String   @map("plan_id")
-  needKind   String   @map("need_kind")
-  title      String
-  partyId    String?  @map("party_id")
-  capability String   @default("details")
-  status     String   @default("available")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  id                  String   @id @default(cuid())
+  planId              String   @map("plan_id")
+  needKind            String   @map("need_kind")
+  title               String
+  partyId             String?  @map("party_id")
+  /// Second real bookable. A PlanItem links to at most one supply row; the
+  /// CHECK constraint `plan_items_single_supply_check` enforces that at the DB.
+  coffeeReservationId String?  @unique @map("coffee_reservation_id")
+  capability          String   @default("details")
+  status              String   @default("available")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
-  plan  Plan   @relation(fields: [planId], references: [id], onDelete: Cascade)
-  party Party? @relation(fields: [partyId], references: [id], onDelete: SetNull)
+  plan              Plan               @relation(fields: [planId], references: [id], onDelete: Cascade)
+  party             Party?             @relation(fields: [partyId], references: [id], onDelete: SetNull)
+  coffeeReservation CoffeeReservation? @relation(fields: [coffeeReservationId], references: [id], onDelete: SetNull)
 
   @@index([planId, createdAt])
   @@map("plan_items")
@@ -953,9 +959,9 @@ model VendorLocation {
   state    VendorLocationState @default(DRAFT)
 
   /// Absent only for a visiting provider, who publishes no address.
-  address String?
-  lat     Float
-  lng     Float
+  address     String?
+  lat         Float
+  lng         Float
   /// Only meaningful when the vendor is the one travelling.
   radiusMiles Float?  @map("radius_miles")
   timezone    String?
@@ -994,8 +1000,8 @@ model VendorWebhookEndpoint {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  seller     VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  seat       VendorSeat                @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  seller     VendorSeller            @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  seat       VendorSeat              @relation(fields: [seatId], references: [id], onDelete: Cascade)
   deliveries VendorWebhookDelivery[]
 
   @@index([sellerId])
@@ -1026,4 +1032,60 @@ model VendorWebhookDelivery {
   /// The sender's only query: what is due now, oldest first.
   @@index([nextAttemptAt])
   @@map("vendor_webhook_deliveries")
+}
+
+// ─── Coffee (Phase 2: second real bookable) ─────────────────────────
+// A hold ask, not a payment. `capability` on a PlanItem stays `request` for
+// coffee, and the reservation carries its own hold window so the DB, not the
+// client, decides when a hold is stale.
+model CoffeeSpot {
+  id          String   @id @default(cuid())
+  /// Null until vendor onboarding lands; seeded rows have no owner yet.
+  ownerUserId String?  @map("owner_user_id")
+  name        String
+  areaLabel   String?  @map("area_label")
+  latitude    Float?
+  longitude   Float?
+  /// The hold window. 15 minutes is the seeded default; a vendor may lengthen.
+  holdMinutes Int      @default(15) @map("hold_minutes")
+  /// Inactive spots are invisible: coffee.list only returns active=true.
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  owner        User?               @relation("coffeeSpotOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  reservations CoffeeReservation[]
+
+  @@index([active, createdAt(sort: Desc)])
+  @@map("coffee_spots")
+}
+
+/// A request against a CoffeeSpot. Attaching to a Plan is optional — a caller
+/// can hold a table without a Plan around it — but the reservation itself is
+/// what carries capability, not the Plan.
+model CoffeeReservation {
+  id                String    @id @default(cuid())
+  coffeeSpotId      String    @map("coffee_spot_id")
+  requestedByUserId String    @map("requested_by_user_id")
+  /// Client-supplied UUID that dedupes retries of the same create call.
+  idempotencyKey    String    @map("idempotency_key")
+  partySize         Int       @map("party_size")
+  /// When the guest wants the table. Bounded to <=30 days in the router.
+  requestedFor      DateTime  @map("requested_for")
+  status            String    @default("pending")
+  /// Server-computed at write time from spot.holdMinutes. The DB, not the
+  /// client, decides when a hold has run out.
+  holdExpiresAt     DateTime  @map("hold_expires_at")
+  decidedAt         DateTime? @map("decided_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  spot      CoffeeSpot @relation(fields: [coffeeSpotId], references: [id], onDelete: Cascade)
+  requester User       @relation("coffeeReservationRequester", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+  planItem  PlanItem?
+
+  @@unique([requestedByUserId, idempotencyKey])
+  @@index([coffeeSpotId, requestedFor])
+  @@index([requestedByUserId, createdAt(sort: Desc)])
+  @@map("coffee_reservations")
 }

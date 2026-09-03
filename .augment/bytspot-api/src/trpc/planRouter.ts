@@ -291,31 +291,43 @@ export const planRouter = router({
       return serializableTransaction(async (tx) => {
         const fresh = await loadPlanForCreator(plan.id, ctx.user.userId, tx);
         assertPlanMutable(fresh, now);
-        const seat = fresh.participants.find((p) => p.userId === input.userId);
-        if (seat && seat.status !== 'removed') return { status: seat.status };
+
+        // Re-read on the transaction client so a P2002 is a true race, not a
+        // predictable outcome. An expected unique violation inside a Postgres
+        // transaction aborts it and every following statement fails.
+        const existing = await tx.planParticipant.findUnique({
+          where: { planId_userId: { planId: fresh.id, userId: input.userId } },
+          select: { status: true },
+        });
+        if (existing && existing.status !== 'removed') return { status: existing.status };
+
         if (fresh.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
           throw new TRPCError({ code: 'CONFLICT', message: 'This Plan is full.' });
         }
+
+        if (existing) {
+          // Reviving only removed rows keeps this from overwriting an answer
+          // someone has already given.
+          await tx.planParticipant.update({
+            where: { planId_userId: { planId: fresh.id, userId: input.userId } },
+            data: { status: 'invited', respondedAt: null },
+          });
+          return { status: 'invited' as const };
+        }
+
         try {
           const created = await tx.planParticipant.create({
             data: { planId: fresh.id, userId: input.userId, role: 'guest', status: 'invited' },
           });
           return { status: created.status };
         } catch (error) {
-          if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+          // A concurrent invite of the same person raced us. Let Serializable
+          // do its job and surface the conflict at the transaction boundary.
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            throw new TRPCError({ code: 'CONFLICT', message: 'Another change to this Plan is in flight. Try again.' });
+          }
+          throw error;
         }
-        // A racing invite already took the seat. Reviving only removed rows
-        // keeps this from overwriting an answer someone has already given.
-        const revived = await tx.planParticipant.updateMany({
-          where: { planId: fresh.id, userId: input.userId, status: 'removed' },
-          data: { status: 'invited', respondedAt: null },
-        });
-        if (revived.count > 0) return { status: 'invited' as const };
-        const current = await tx.planParticipant.findUnique({
-          where: { planId_userId: { planId: fresh.id, userId: input.userId } },
-          select: { status: true },
-        });
-        return { status: current?.status ?? 'invited' };
       }, 'Another change to this Plan is in flight. Try again.');
     }),
 

@@ -249,17 +249,16 @@ test('Two concurrent invites cannot both slip past the cap', async () => {
   await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'racing-invitee' }), { code: 'CONFLICT' });
 });
 
-test('A concurrent invite cannot reset an answer that was already given', async () => {
+test('A concurrent invite of the same person surfaces as CONFLICT, not as a poisoned transaction', async () => {
+  // The initial in-transaction re-read sees no seat, so the cap check passes
+  // and create is attempted. Between our read and our create, a racing invite
+  // took the seat, so create raises P2002 - the only unexpected shape here.
   plan.findUnique = async () => planFixture({ participants: [creatorSeat] });
-  // The seat was created by a racing invite after this call read the Plan.
-  planParticipant.create = async () => { throw Object.assign(new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' }), {}); };
-  let where: any = null;
-  planParticipant.updateMany = async (args: any) => { where = args.where; return { count: 0 }; };
-  planParticipant.findUnique = async () => ({ status: 'accepted' });
-
-  assert.deepEqual(await caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { status: 'accepted' });
-  // The revival is scoped to removed seats only, which is why the answer stood.
-  assert.deepEqual(where, { planId: 'plan-1', userId: 'guest-id', status: 'removed' });
+  planParticipant.findUnique = async () => null;
+  planParticipant.create = async () => {
+    throw new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' });
+  };
+  await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { code: 'CONFLICT' });
 });
 
 test('A Plan is a coordination object, not a mailing list', async () => {
@@ -285,11 +284,24 @@ test('Invite asks for no prior relationship, which is what leaves room for Spot 
 
 test('Re-inviting is idempotent, and a removed person returns to a clean invite', async () => {
   plan.findUnique = async () => planFixture({ participants: [creatorSeat, { ...guestSeat, status: 'accepted' }] });
-  // Someone already going is left exactly as they are.
+  planParticipant.findUnique = async () => ({ status: 'accepted' });
+  // Someone already going is left exactly as they are, without a write.
+  let wrote = false;
+  planParticipant.create = async () => { wrote = true; throw new Error('should not create'); };
+  planParticipant.update = async () => { wrote = true; throw new Error('should not update'); };
   assert.deepEqual(await caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { status: 'accepted' });
+  assert.equal(wrote, false);
 
+  // A removed seat takes the update branch directly. Attempting create here
+  // would trigger P2002 inside the transaction, which poisons every
+  // subsequent statement in Postgres.
   plan.findUnique = async () => planFixture({ participants: [creatorSeat, { ...guestSeat, status: 'removed' }] });
+  planParticipant.findUnique = async () => ({ status: 'removed' });
+  planParticipant.create = async () => { throw new Error('must not create over an existing seat'); };
+  let updateWhere: any = null;
+  planParticipant.update = async (args: any) => { updateWhere = args.where; return { status: 'invited' }; };
   assert.deepEqual(await caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { status: 'invited' });
+  assert.deepEqual(updateWhere, { planId_userId: { planId: 'plan-1', userId: 'guest-id' } });
 });
 
 // ─── Attach ───────────────────────────────────────────────────────────────────

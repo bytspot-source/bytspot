@@ -20,6 +20,7 @@ import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/
 import partyMediaRouter from './routes/partyMedia';
 import partyLandingRouter from './routes/partyLanding'; // server-rendered share-link page (link previews need real HTML)
 import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
+import { placesPhotoRouter } from './routes/placesPhoto';
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 import vendorAuthRouter from './routes/vendorAuth';
 import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-in (separate origin, cookie-based refresh)
@@ -78,6 +79,7 @@ app.use(betaSignupRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(partyMediaRouter);
 app.use(partyLandingRouter);
+app.use(placesPhotoRouter);
 app.use(diagnosticsRouter);
 app.use(vendorAuthRouter);
 app.use(vendorSetupRouter);

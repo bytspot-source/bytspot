@@ -93,6 +93,24 @@ export function locationBucket(lat: number, lng: number): string {
 }
 
 /**
+ * De-duplicated and sorted, so the same set of types asked for in a different
+ * order is one cache entry and therefore one billed Google call.
+ */
+export function mergeIncludedTypes(type: string | undefined, types: string[] | undefined): string[] {
+  return [...new Set([...(types ?? []), ...(type ? [type] : [])])].sort();
+}
+
+export function nearbySearchCacheKey(
+  lat: number,
+  lng: number,
+  radius: number,
+  includedTypes: string[],
+  maxResults: number,
+): string {
+  return `gp:nearby:${locationBucket(lat, lng)}:${radius}:${includedTypes.join('+') || 'all'}:${maxResults}`;
+}
+
+/**
  * Google failing must not empty the app.
  *
  * A quota exhaustion or outage used to throw, and Home lost its places
@@ -142,19 +160,24 @@ export const placesRouter = router({
       lat: z.number(), lng: z.number(),
       radius: z.number().min(100).max(50000).optional().default(2000),
       type: z.string().optional(),
+      /// Several types in one call rather than one call per type: Google bills
+      /// per request, and a category like coffee spans `coffee_shop` and the
+      /// broader `cafe`. Merged with `type` so existing callers are untouched.
+      types: z.array(z.string().min(1).max(60)).min(1).max(5).optional(),
       maxResults: z.number().min(1).max(20).optional().default(10),
     }))
     .query(async ({ input }) => {
       const { lat, lng, radius, type, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:nearby:${locationBucket(lat, lng)}:${radius}:${type ?? 'all'}:${maxResults}`;
+      const includedTypes = mergeIncludedTypes(type, input.types);
+      const cacheKey = nearbySearchCacheKey(lat, lng, radius, includedTypes, maxResults);
       try {
         const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
           const body: Record<string, unknown> = {
             locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius } },
             maxResultCount: maxResults, rankPreference: 'DISTANCE',
           };
-          if (type) body.includedTypes = [type];
+          if (includedTypes.length > 0) body.includedTypes = includedTypes;
           const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
           return (data.places ?? []).map(mapPlace);
         });

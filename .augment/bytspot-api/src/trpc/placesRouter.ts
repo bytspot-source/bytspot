@@ -8,8 +8,17 @@ import { router, publicProcedure } from './trpc';
 import { cached, getRedis } from '../lib/redis';
 import { captureError } from '../lib/observability';
 import { config } from '../config';
+import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
+
+/**
+ * Bumped when the cached shape changes in a way that must not be served from
+ * before the bump. v2 abandons every entry written while photo URLs carried
+ * the API key: those objects are still readable for their TTL, and the stale
+ * copies for a week, so changing the mapper alone would keep leaking.
+ */
+const CACHE_VERSION = 'v2';
 
 export const SEARCH_FIELDS = [
   'places.id', 'places.displayName', 'places.formattedAddress', 'places.location',
@@ -33,9 +42,13 @@ export interface MappedPlace {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function mapPlace(p: any): MappedPlace {
-  const photos: string[] = (p.photos ?? []).slice(0, 4).map((ph: any) =>
-    `${GP_BASE}/${ph.name}/media?maxWidthPx=800&key=${config.googlePlacesApiKey}`,
-  );
+  // Proxied, never signed. Google's media endpoint takes the API key only as
+  // a query parameter, so a directly-fetchable URL would ship the key to every
+  // caller of this public procedure.
+  const photos: string[] = (p.photos ?? [])
+    .slice(0, 4)
+    .filter((ph: any) => isPhotoName(ph?.name))
+    .map((ph: any) => photoProxyUrl(ph.name));
   return {
     placeId: p.id ?? '', name: p.displayName?.text ?? '',
     address: p.formattedAddress ?? '',
@@ -66,8 +79,14 @@ export async function gpPost<T>(path: string, body: object, fieldMask: string): 
 }
 
 async function gpGet<T>(path: string, fieldMask: string): Promise<T> {
-  const res = await fetch(`${GP_BASE}${path}?key=${config.googlePlacesApiKey}`, {
-    headers: { 'Content-Type': 'application/json', 'X-Goog-FieldMask': fieldMask },
+  // Header, not query string, matching gpPost: a key in a URL rides along
+  // into logs and error traces.
+  const res = await fetch(`${GP_BASE}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': config.googlePlacesApiKey,
+      'X-Goog-FieldMask': fieldMask,
+    },
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) {
@@ -107,7 +126,7 @@ export function nearbySearchCacheKey(
   includedTypes: string[],
   maxResults: number,
 ): string {
-  return `gp:nearby:${locationBucket(lat, lng)}:${radius}:${includedTypes.join('+') || 'all'}:${maxResults}`;
+  return `gp:${CACHE_VERSION}:nearby:${locationBucket(lat, lng)}:${radius}:${includedTypes.join('+') || 'all'}:${maxResults}`;
 }
 
 /**
@@ -201,7 +220,7 @@ export const placesRouter = router({
     .query(async ({ input }) => {
       const { query, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:text:${query.toLowerCase().trim()}:${maxResults}`;
+      const cacheKey = `gp:${CACHE_VERSION}:text:${query.toLowerCase().trim()}:${maxResults}`;
       try {
         const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
           const body = {
@@ -222,7 +241,7 @@ export const placesRouter = router({
     .input(z.object({ placeId: z.string() }))
     .query(async ({ input }) => {
       if (!config.googlePlacesApiKey) return { place: null };
-      const cacheKey = `gp:detail:${input.placeId}`;
+      const cacheKey = `gp:${CACHE_VERSION}:detail:${input.placeId}`;
       const place = await cached(cacheKey, 3600, async () => {
         const data = await gpGet<Record<string, unknown>>(`/places/${input.placeId}`, DETAIL_FIELDS);
         const mapped = mapPlace(data);
@@ -247,6 +266,7 @@ export const placesRouter = router({
     .input(z.object({ photoName: z.string(), maxWidth: z.number().min(100).max(4800).optional().default(800) }))
     .query(({ input }) => {
       if (!config.googlePlacesApiKey) return { url: null };
-      return { url: `${GP_BASE}/${input.photoName}/media?maxWidthPx=${input.maxWidth}&key=${config.googlePlacesApiKey}` };
+      if (!isPhotoName(input.photoName)) return { url: null };
+      return { url: photoProxyUrl(input.photoName, input.maxWidth) };
     }),
 });

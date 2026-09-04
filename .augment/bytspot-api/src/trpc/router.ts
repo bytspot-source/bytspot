@@ -573,7 +573,7 @@ async function fetchLiveContext(): Promise<LiveContext> {
 
   // Fetch nearby places (Midtown ATL center: 33.7756, -84.3963)
   const placesPromise = config.googlePlacesApiKey
-    ? cached('concierge:places', 600, async () => {
+    ? cached('concierge:v2:places', 600, async () => {
         try {
           const body = {
             locationRestriction: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 3000 } },

@@ -111,7 +111,14 @@ export function planReadiness(participants: ParticipantRecord[]) {
 
 const planInclude = {
   participants: { orderBy: { createdAt: 'asc' } },
-  items: { orderBy: { createdAt: 'asc' } },
+  // Items include the reservation summary they point at so the client can
+  // render a hold countdown without a second round-trip. Only fields a
+  // Plans row actually paints are selected; owner and idempotency stay
+  // server-side, and the reservation summary is null for room-backed items.
+  items: {
+    orderBy: { createdAt: 'asc' },
+    include: { coffeeReservation: { select: { holdExpiresAt: true, status: true } } },
+  },
 } satisfies Prisma.PlanInclude;
 
 type LoadedPlan = Prisma.PlanGetPayload<{ include: typeof planInclude }>;
@@ -140,6 +147,11 @@ function serializePlan(plan: LoadedPlan, now: Date) {
       coffeeReservationId: item.coffeeReservationId,
       capability: item.capability,
       status: item.status,
+      // A room item has no reservation summary; the field is always null in
+      // that case so the client can key hold-countdown rendering off it.
+      reservation: item.coffeeReservation
+        ? { holdExpiresAt: item.coffeeReservation.holdExpiresAt, status: item.coffeeReservation.status }
+        : null,
     })),
   };
 }

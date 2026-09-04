@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampWidth, isPhotoName, photoProxyUrl } from './placesPhoto';
-import { placesRouter } from '../trpc/placesRouter';
+import { clampWidth, isAllowedRedirect, isPhotoName, photoProxyUrl } from './placesPhoto';
+import { nearbySearchCacheKey, placesRouter } from '../trpc/placesRouter';
 import { config } from '../config';
 
 /**
@@ -63,13 +63,32 @@ test('A malformed photo name is refused rather than proxied', () => {
   for (const name of rejected) assert.equal(isPhotoName(name), false, name);
 });
 
-test('Requested width is clamped to a sane range', () => {
+test('Requested width collapses into buckets so keys cannot be minted freely', () => {
+  // Every distinct width is a distinct cache key and therefore a billed
+  // Google request on miss. Off-by-one widths must share a bucket.
   assert.equal(clampWidth(400), 400);
-  assert.equal(clampWidth(10), 100);
+  assert.equal(clampWidth(401), 800);
+  assert.equal(clampWidth(399), 400);
+  assert.equal(clampWidth(10), 200);
   assert.equal(clampWidth(99999), 1600);
   assert.equal(clampWidth('abc'), 800);
   assert.equal(clampWidth(undefined), 800);
-  assert.equal(clampWidth(400.7), 400);
+  // A sweep of pixel widths must not produce a distinct key per pixel.
+  const distinct = new Set(Array.from({ length: 400 }, (_, i) => clampWidth(200 + i)));
+  assert.ok(distinct.size <= 4, `width sweep produced ${distinct.size} keys`);
+});
+
+test('Only a keyless Google image host is redirected to', () => {
+  assert.equal(isAllowedRedirect('https://lh3.googleusercontent.com/place-photo/AeJ'), true);
+  assert.equal(isAllowedRedirect('https://googleusercontent.com/x'), true);
+  // If the upstream ever returned something else, an unvalidated 302 would
+  // turn this endpoint into an open redirect.
+  assert.equal(isAllowedRedirect('https://evil.example/x'), false);
+  assert.equal(isAllowedRedirect('https://googleusercontent.com.evil.example/x'), false);
+  assert.equal(isAllowedRedirect('http://lh3.googleusercontent.com/x'), false);
+  assert.equal(isAllowedRedirect('javascript:alert(1)'), false);
+  assert.equal(isAllowedRedirect('//evil.example'), false);
+  assert.equal(isAllowedRedirect(''), false);
 });
 
 test('The proxy URL points at this server and encodes the name', () => {
@@ -78,4 +97,19 @@ test('The proxy URL points at this server and encodes the name', () => {
   // Unencoded slashes would break out of the query parameter.
   assert.ok(url.includes('name=places%2FChIJtest%2Fphotos%2FAeJbb3c'));
   assert.ok(url.endsWith('&w=400'));
+});
+
+/**
+ * The mapper fix alone was not enough: Redis held serialized places whose
+ * photoUrls still carried the key, readable for their TTL and for a week in
+ * the stale copies. The namespace bump is what makes those unreachable.
+ */
+test('Entries cached while photo URLs carried the key cannot be served', () => {
+  const key = nearbySearchCacheKey(33.7844, -84.3862, 2000, ['cafe', 'coffee_shop'], 10);
+  // The vulnerable build wrote gp:nearby:*; nothing may read that prefix now.
+  assert.equal(key.startsWith('gp:nearby:'), false, 'still reading the leaking namespace');
+  assert.ok(key.startsWith('gp:v2:nearby:'));
+  // The stale copy derives from the same key, so it moves with it. A 7-day
+  // stale entry from the old build was the longest-lived exposure.
+  assert.equal(`${key}:stale`.includes(':v2:'), true);
 });

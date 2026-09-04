@@ -12,6 +12,14 @@ import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
 
+/**
+ * Bumped when the cached shape changes in a way that must not be served from
+ * before the bump. v2 abandons every entry written while photo URLs carried
+ * the API key: those objects are still readable for their TTL, and the stale
+ * copies for a week, so changing the mapper alone would keep leaking.
+ */
+const CACHE_VERSION = 'v2';
+
 export const SEARCH_FIELDS = [
   'places.id', 'places.displayName', 'places.formattedAddress', 'places.location',
   'places.rating', 'places.userRatingCount', 'places.priceLevel', 'places.types',
@@ -118,7 +126,7 @@ export function nearbySearchCacheKey(
   includedTypes: string[],
   maxResults: number,
 ): string {
-  return `gp:nearby:${locationBucket(lat, lng)}:${radius}:${includedTypes.join('+') || 'all'}:${maxResults}`;
+  return `gp:${CACHE_VERSION}:nearby:${locationBucket(lat, lng)}:${radius}:${includedTypes.join('+') || 'all'}:${maxResults}`;
 }
 
 /**
@@ -212,7 +220,7 @@ export const placesRouter = router({
     .query(async ({ input }) => {
       const { query, maxResults } = input;
       if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:text:${query.toLowerCase().trim()}:${maxResults}`;
+      const cacheKey = `gp:${CACHE_VERSION}:text:${query.toLowerCase().trim()}:${maxResults}`;
       try {
         const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
           const body = {
@@ -233,7 +241,7 @@ export const placesRouter = router({
     .input(z.object({ placeId: z.string() }))
     .query(async ({ input }) => {
       if (!config.googlePlacesApiKey) return { place: null };
-      const cacheKey = `gp:detail:${input.placeId}`;
+      const cacheKey = `gp:${CACHE_VERSION}:detail:${input.placeId}`;
       const place = await cached(cacheKey, 3600, async () => {
         const data = await gpGet<Record<string, unknown>>(`/places/${input.placeId}`, DETAIL_FIELDS);
         const mapped = mapPlace(data);

@@ -433,6 +433,23 @@ test('Get returns the derived truth beside the stored lifecycle', async () => {
   assert.deepEqual(result.readiness, { going: 1, maybe: 0, pending: 1, declined: 1, total: 3 });
 });
 
+test('Get returns reservation summary on coffee-backed items, and null everywhere else', async () => {
+  // A hold countdown on the Plans row needs the reservation's expiry and
+  // status without a second round-trip. The reservation summary is present
+  // only when the item points at one; a room-backed item stays null.
+  const holdExpiresAt = new Date('2026-09-03T20:15:00Z');
+  plan.findUnique = async () => planFixture({
+    items: [
+      { id: 'item-1', needKind: 'dining', title: 'Dinner', partyId: 'party-1', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null },
+      { id: 'item-2', needKind: 'coffee', title: 'Highland Bakery', partyId: null, coffeeReservationId: 'r-1', capability: 'request', status: 'pending', coffeeReservation: { holdExpiresAt, status: 'pending' } },
+    ],
+  });
+  const result = await caller().plans.get({ planId: 'plan-1' });
+  const [room, coffee] = result.items;
+  assert.equal(room.reservation, null);
+  assert.deepEqual(coffee.reservation, { holdExpiresAt, status: 'pending' });
+});
+
 test('List returns only plans the caller still has a seat on', async () => {
   let where: any = null;
   plan.findMany = async (args: any) => { where = args.where; return [planFixture()]; };

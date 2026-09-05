@@ -1526,28 +1526,38 @@ export const partyArrivalRouter = router({
         if (!place || !place.name || (place.lat === 0 && place.lng === 0)) {
           throw new TRPCError({ code: 'NOT_FOUND', message: 'That place could not be resolved. Pick another from the search results.' });
         }
-        try {
-          venue = await db.venue.create({
-            data: {
-              name: place.name, slug: placeVenueSlug(place.name, place.placeId), googlePlaceId: place.placeId,
-              address: place.address || place.name, lat: place.lat, lng: place.lng, category: place.primaryType ?? 'venue',
-            },
-            select: venueSelect,
-          });
-          // Match seed.ts: populate the PostGIS point so the venue joins geo
-          // features. Arrival only needs lat/lng, so a PostGIS-less database
-          // must not fail the bind.
-          try {
-            await db.$executeRawUnsafe('UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint($1, $2), 4326) WHERE id = $3', place.lng, place.lat, venue.id);
-          } catch { /* PostGIS optional */ }
-        } catch (err) {
-          // A concurrent bind of the same new place raced us to the unique
-          // googlePlaceId; reuse the row the other request created.
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-            venue = await db.venue.findUnique({ where: { googlePlaceId: input.placeId }, select: venueSelect });
-          }
-          if (!venue) throw err;
+        // Google may canonicalize the id; dedupe on what it actually returned
+        // before creating anything.
+        if (place.placeId !== input.placeId) {
+          venue = await db.venue.findUnique({ where: { googlePlaceId: place.placeId }, select: venueSelect });
         }
+        // A host arrival destination is created non-discoverable: it must never
+        // surface a private party's address through the public venue catalog.
+        for (let attempt = 0; !venue && attempt < 2; attempt++) {
+          const slug = attempt === 0 ? placeVenueSlug(place.name, place.placeId) : `${placeVenueSlug(place.name, place.placeId)}-${randomBytes(3).toString('hex')}`;
+          try {
+            venue = await db.venue.create({
+              data: {
+                name: place.name, slug, googlePlaceId: place.placeId, discoverable: false,
+                address: place.address || place.name, lat: place.lat, lng: place.lng, category: place.primaryType ?? 'venue',
+              },
+              select: venueSelect,
+            });
+            // Match seed.ts: populate the PostGIS point so distance math works.
+            // Arrival only needs lat/lng, so a PostGIS-less database must not
+            // fail the bind.
+            try {
+              await db.$executeRawUnsafe('UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint($1, $2), 4326) WHERE id = $3', place.lng, place.lat, venue.id);
+            } catch { /* PostGIS optional */ }
+          } catch (err) {
+            if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+            // Either a concurrent bind of the same place won the unique
+            // googlePlaceId race (reuse it), or the generated slug collided
+            // (loop once more with a randomized slug).
+            venue = await db.venue.findUnique({ where: { googlePlaceId: place.placeId }, select: venueSelect });
+          }
+        }
+        if (!venue) throw new TRPCError({ code: 'CONFLICT', message: 'The arrival destination could not be saved. Please retry.' });
       }
 
       const updated = await db.party.updateMany({

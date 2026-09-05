@@ -125,6 +125,7 @@ model Venue {
   name          String
   slug          String   @unique
   googlePlaceId String?  @unique @map("google_place_id")
+  discoverable  Boolean  @default(true)
   address       String
   lat           Float
   lng           Float

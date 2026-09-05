@@ -1,6 +1,6 @@
--- One nullable, unique column on venues so a host's searched arrival place
--- maps to at most one Venue. Nothing backfills; hostile-shapes.sql already
--- covers survival across every migration in the run.
+-- A host's searched arrival place maps to at most one Venue, and such venues
+-- stay out of the public catalog. Nothing backfills; hostile-shapes.sql
+-- already covers survival across every migration in the run.
 DO $$
 BEGIN
   -- The column exists and is nullable: seeded and legacy venues carry no
@@ -28,5 +28,18 @@ BEGIN
   -- adds a column, it does not fabricate identities for existing rows.
   IF EXISTS (SELECT 1 FROM venues WHERE google_place_id IS NOT NULL) THEN
     RAISE EXCEPTION 'no existing venue should have a google_place_id after this migration';
+  END IF;
+
+  -- discoverable exists, is NOT NULL, and every existing (curated) venue stays
+  -- discoverable: the catalog is unchanged and only future host-created
+  -- arrival destinations are written non-discoverable.
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'venues' AND column_name = 'discoverable' AND is_nullable = 'NO'
+  ) THEN
+    RAISE EXCEPTION 'venues.discoverable must exist and be NOT NULL';
+  END IF;
+  IF EXISTS (SELECT 1 FROM venues WHERE discoverable IS NOT TRUE) THEN
+    RAISE EXCEPTION 'existing venues must remain discoverable after this migration';
   END IF;
 END $$;

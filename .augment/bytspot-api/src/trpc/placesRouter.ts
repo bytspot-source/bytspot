@@ -70,8 +70,13 @@ export async function resolvePlaceCore(
   placeId: string,
 ): Promise<Pick<MappedPlace, 'placeId' | 'name' | 'address' | 'lat' | 'lng' | 'primaryType'> | null> {
   if (!config.googlePlacesApiKey) return null;
+  // Accept either a bare Places id or a `places/<id>` resource name, then
+  // constrain to the Google id alphabet so a malformed input can never shape
+  // the outbound path.
+  const id = placeId.replace(/^places\//, '');
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return null;
   try {
-    const data = await gpGet<Record<string, unknown>>(`/places/${placeId}`, DETAIL_FIELDS);
+    const data = await gpGet<Record<string, unknown>>(`/places/${encodeURIComponent(id)}`, DETAIL_FIELDS);
     const m = mapPlace(data);
     if (!m.placeId || !m.name) return null;
     return { placeId: m.placeId, name: m.name, address: m.address, lat: m.lat, lng: m.lng, primaryType: m.primaryType };

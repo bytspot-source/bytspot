@@ -323,6 +323,23 @@ test('An unresolvable arrival place is a NOT_FOUND, never a 500', async () => {
   await assert.rejects(() => caller().events.arrival.bindPlace({ partyId: 'party-1', placeId: 'places/ChIJunknown' }), { code: 'NOT_FOUND' });
 });
 
+test('The public venue list only returns discoverable venues, never host arrival destinations', async () => {
+  let where: any;
+  venue.findMany = async (input: any) => { where = input.where; return []; };
+  const result = await createCaller(anonymousContext).venues.list({ entryType: 'paid' });
+  assert.deepEqual(result, { venues: [] });
+  assert.equal(where.discoverable, true);
+});
+
+test('A host arrival destination is not reachable by slug through the public venue API', async () => {
+  let where: any;
+  // findFirst (not findUnique) so the discoverable predicate is enforced: a
+  // non-discoverable arrival venue reads as absent.
+  venue.findFirst = async (input: any) => { where = input.where; return null; };
+  await assert.rejects(() => createCaller(anonymousContext).venues.getBySlug({ slug: 'rooftop-abcd1234' }), { code: 'NOT_FOUND' });
+  assert.deepEqual(where, { slug: 'rooftop-abcd1234', discoverable: true });
+});
+
 test('Party arrival guidance requires an access-granted guest and a bound venue', async () => {
   party.findFirst = async () => ({
     id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },

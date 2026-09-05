@@ -29,6 +29,7 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
   const alerts: { venue: string; type: string }[] = [];
 
   const venues = await db.venue.findMany({
+    where: { discoverable: true },
     select: {
       id: true,
       name: true,

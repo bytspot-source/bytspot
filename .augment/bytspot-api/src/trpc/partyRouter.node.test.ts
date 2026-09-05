@@ -340,6 +340,15 @@ test('A host arrival destination is not reachable by slug through the public ven
   assert.deepEqual(where, { slug: 'rooftop-abcd1234', discoverable: true });
 });
 
+test('Similar-venue discovery gates both the seed and its neighbours on discoverable', async () => {
+  let sql = '';
+  prisma.$queryRawUnsafe = async (query: string) => { sql = query; return []; };
+  const result = await createCaller(anonymousContext).venues.getSimilar({ slug: 'rooftop-abcd1234', limit: 5 });
+  assert.deepEqual(result, { similar: [] });
+  assert.match(sql, /v1\.discoverable = true/);
+  assert.match(sql, /v2\.discoverable = true/);
+});
+
 test('Party arrival guidance requires an access-granted guest and a bound venue', async () => {
   party.findFirst = async () => ({
     id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },

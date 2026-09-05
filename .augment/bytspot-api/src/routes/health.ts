@@ -73,7 +73,7 @@ router.get('/stats', async (_req, res) => {
   try {
     const [userCount, venueCount, betaLeadCount] = await Promise.all([
       db.user.count(),
-      db.venue.count(),
+      db.venue.count({ where: { discoverable: true } }),
       db.betaLead.count(),
     ]);
     res.json({ userCount, venueCount, betaLeadCount });

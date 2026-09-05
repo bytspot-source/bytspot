@@ -76,7 +76,7 @@ const healthRouter = router({
     try {
       const [userCount, venueCount, betaLeadCount] = await Promise.all([
         db.user.count(),
-        db.venue.count(),
+        db.venue.count({ where: { discoverable: true } }),
         db.betaLead.count(),
       ]);
       return { userCount, venueCount, betaLeadCount };
@@ -361,6 +361,7 @@ const venuesRouter = router({
                   1 - (v1.embedding <=> v2.embedding) as similarity
            FROM venues v1 CROSS JOIN venues v2
            WHERE v1.slug = $1 AND v2.slug != $1
+             AND v1.discoverable = true
              AND v2.discoverable = true
              AND v1.embedding IS NOT NULL AND v2.embedding IS NOT NULL
            ORDER BY v1.embedding <=> v2.embedding LIMIT $2`,

@@ -135,6 +135,7 @@ router.get('/venues/:slug/similar', async (req, res) => {
        FROM venues v1
        CROSS JOIN venues v2
        WHERE v1.slug = $1
+         AND v1.discoverable = true
          AND v2.slug != $1
          AND v2.discoverable = true
          AND v1.embedding IS NOT NULL

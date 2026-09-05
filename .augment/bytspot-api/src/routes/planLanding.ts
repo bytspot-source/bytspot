@@ -2,7 +2,6 @@ import { Router, type Response } from 'express';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { captureError } from '../lib/observability';
-import { isProposedPlanExpired } from '../trpc/planRouter';
 import { isInAppBrowserUA } from './partyLanding';
 
 const planLandingRouter = Router();
@@ -59,11 +58,12 @@ function firstName(name: string | null | undefined): string {
 // stranger with the link may only ever see the friend's first name, the
 // title, and the rough when/where the creator chose to share.
 function planLinkClosed(
-  plan: { lifecycle: string; startsAt: Date | null; endsAt: Date | null; expiresAt: Date | null; needs: string[] },
+  plan: { lifecycle: string; endsAt: Date | null; expiresAt: Date | null },
   now: Date,
 ): boolean {
   if (plan.lifecycle === 'cancelled') return true;
-  if (isProposedPlanExpired(plan, now)) return true;
+  // A proposed Plan that ran out of time is expired on read; there is no sweep.
+  if (plan.lifecycle === 'proposed' && plan.expiresAt && now >= plan.expiresAt) return true;
   if (plan.lifecycle === 'confirmed' && plan.endsAt && now >= plan.endsAt) return true;
   return false;
 }
@@ -171,7 +171,7 @@ planLandingRouter.get('/plan/:planId', async (req, res) => {
     plan = await db.plan.findUnique({
       where: { id: planId },
       select: {
-        id: true, title: true, startsAt: true, endsAt: true, areaLabel: true, needs: true,
+        id: true, title: true, startsAt: true, endsAt: true, areaLabel: true,
         lifecycle: true, expiresAt: true, creator: { select: { name: true } },
       },
     });

@@ -19,6 +19,7 @@ import betaSignupRouter from './routes/betaSignup'; // bytspot.com funnel (exter
 import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/stream) — no tRPC equivalent
 import partyMediaRouter from './routes/partyMedia';
 import partyLandingRouter from './routes/partyLanding'; // server-rendered share-link page (link previews need real HTML)
+import planLandingRouter from './routes/planLanding';   // server-rendered Plan invite page for non-members
 import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
 import { placesPhotoRouter } from './routes/placesPhoto';
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
@@ -79,6 +80,7 @@ app.use(betaSignupRouter);
 app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(partyMediaRouter);
 app.use(partyLandingRouter);
+app.use(planLandingRouter);
 app.use(placesPhotoRouter);
 app.use(diagnosticsRouter);
 app.use(vendorAuthRouter);

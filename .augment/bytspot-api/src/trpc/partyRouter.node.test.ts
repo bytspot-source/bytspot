@@ -295,6 +295,60 @@ test('Only the host can bind a matching registered arrival venue to a published 
   assert.deepEqual(update.data, { arrivalVenueId: 'venue-1' });
 });
 
+test('Binding an arrival place reuses a venue Bytspot already has for that Google place', async () => {
+  party.findFirst = async ({ where }: any) => where.hostUserId ? { id: 'party-1' } : null;
+  let placeLookup: any;
+  venue.findUnique = async (input: any) => { placeLookup = input; return { id: 'venue-9', name: 'Rooftop', address: '9 Sky Ave', lat: 33.77, lng: -84.39 }; };
+  venue.create = async () => { throw new Error('must not create when the place is already known'); };
+  let update: any;
+  party.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+
+  const result = await caller().events.arrival.bindPlace({ partyId: 'party-1', placeId: 'places/ChIJrooftop' });
+  assert.deepEqual(placeLookup.where, { googlePlaceId: 'places/ChIJrooftop' });
+  assert.deepEqual(result, { partyId: 'party-1', venue: { id: 'venue-9', name: 'Rooftop', address: '9 Sky Ave' } });
+  assert.deepEqual(update.data, { arrivalVenueId: 'venue-9' });
+});
+
+test('Only the host of a published Party can bind an arrival place', async () => {
+  party.findFirst = async ({ where }: any) => where.hostUserId ? null : { id: 'party-1' };
+  venue.findUnique = async () => ({ id: 'venue-9', name: 'Rooftop', address: '9 Sky Ave', lat: 33.77, lng: -84.39 });
+  await assert.rejects(() => caller().events.arrival.bindPlace({ partyId: 'party-1', placeId: 'places/ChIJrooftop' }), { code: 'NOT_FOUND' });
+});
+
+test('An unresolvable arrival place is a NOT_FOUND, never a 500', async () => {
+  // No Places key is configured in tests, so resolvePlaceCore returns null for
+  // any place Bytspot does not already have a venue for.
+  party.findFirst = async () => ({ id: 'party-1' });
+  venue.findUnique = async () => null;
+  await assert.rejects(() => caller().events.arrival.bindPlace({ partyId: 'party-1', placeId: 'places/ChIJunknown' }), { code: 'NOT_FOUND' });
+});
+
+test('The public venue list only returns discoverable venues, never host arrival destinations', async () => {
+  let where: any;
+  venue.findMany = async (input: any) => { where = input.where; return []; };
+  const result = await createCaller(anonymousContext).venues.list({ entryType: 'paid' });
+  assert.deepEqual(result, { venues: [] });
+  assert.equal(where.discoverable, true);
+});
+
+test('A host arrival destination is not reachable by slug through the public venue API', async () => {
+  let where: any;
+  // findFirst (not findUnique) so the discoverable predicate is enforced: a
+  // non-discoverable arrival venue reads as absent.
+  venue.findFirst = async (input: any) => { where = input.where; return null; };
+  await assert.rejects(() => createCaller(anonymousContext).venues.getBySlug({ slug: 'rooftop-abcd1234' }), { code: 'NOT_FOUND' });
+  assert.deepEqual(where, { slug: 'rooftop-abcd1234', discoverable: true });
+});
+
+test('Similar-venue discovery gates both the seed and its neighbours on discoverable', async () => {
+  let sql = '';
+  prisma.$queryRawUnsafe = async (query: string) => { sql = query; return []; };
+  const result = await createCaller(anonymousContext).venues.getSimilar({ slug: 'rooftop-abcd1234', limit: 5 });
+  assert.deepEqual(result, { similar: [] });
+  assert.match(sql, /v1\.discoverable = true/);
+  assert.match(sql, /v2\.discoverable = true/);
+});
+
 test('Party arrival guidance requires an access-granted guest and a bound venue', async () => {
   party.findFirst = async () => ({
     id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },

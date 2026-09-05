@@ -121,18 +121,20 @@ model ProviderIdentity {
 
 // ─── Venues ──────────────────────────────────────────
 model Venue {
-  id         String   @id @default(cuid())
-  name       String
-  slug       String   @unique
-  address    String
-  lat        Float
-  lng        Float
-  category   String // "bar", "restaurant", "club", "park", "market"
-  imageUrl   String?  @map("image_url")
-  entryType  String   @default("free") @map("entry_type") // "free" or "paid"
-  entryPrice String?  @map("entry_price") // e.g. "$15", "$25–$50"
-  ticketUrl  String?  @map("ticket_url") // external purchase link
-  createdAt  DateTime @default(now()) @map("created_at")
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique
+  googlePlaceId String?  @unique @map("google_place_id")
+  discoverable  Boolean  @default(true)
+  address       String
+  lat           Float
+  lng           Float
+  category      String // "bar", "restaurant", "club", "park", "market"
+  imageUrl      String?  @map("image_url")
+  entryType     String   @default("free") @map("entry_type") // "free" or "paid"
+  entryPrice    String?  @map("entry_price") // e.g. "$15", "$25–$50"
+  ticketUrl     String?  @map("ticket_url") // external purchase link
+  createdAt     DateTime @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng
   // Managed via raw SQL; Prisma can't model geometry natively

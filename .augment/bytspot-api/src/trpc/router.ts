@@ -76,7 +76,7 @@ const healthRouter = router({
     try {
       const [userCount, venueCount, betaLeadCount] = await Promise.all([
         db.user.count(),
-        db.venue.count(),
+        db.venue.count({ where: { discoverable: true } }),
         db.betaLead.count(),
       ]);
       return { userCount, venueCount, betaLeadCount };
@@ -265,7 +265,7 @@ const venuesRouter = router({
       const cacheKey = entryFilter ? `venues:all:${entryFilter}` : 'venues:all';
       const venues = await cached(cacheKey, 30, async () => {
         const rows = await db.venue.findMany({
-          where: entryFilter ? { entryType: entryFilter } : undefined,
+          where: entryFilter ? { discoverable: true, entryType: entryFilter } : { discoverable: true },
           include: {
             crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 },
             parking: true,
@@ -304,6 +304,7 @@ const venuesRouter = router({
                   ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
            FROM venues
            WHERE location IS NOT NULL
+             AND discoverable = true
              AND ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $3)
            ORDER BY distance ASC`,
           lng, lat, radius,
@@ -322,8 +323,8 @@ const venuesRouter = router({
     .input(z.object({ slug: z.string() }))
     .query(async ({ input }) => {
       const venue = await cached(`venue:${input.slug}`, 15, async () => {
-        return db.venue.findUnique({
-          where: { slug: input.slug },
+        return db.venue.findFirst({
+          where: { slug: input.slug, discoverable: true },
           include: {
             crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 24 },
             parking: true,
@@ -360,6 +361,8 @@ const venuesRouter = router({
                   1 - (v1.embedding <=> v2.embedding) as similarity
            FROM venues v1 CROSS JOIN venues v2
            WHERE v1.slug = $1 AND v2.slug != $1
+             AND v1.discoverable = true
+             AND v2.discoverable = true
              AND v1.embedding IS NOT NULL AND v2.embedding IS NOT NULL
            ORDER BY v1.embedding <=> v2.embedding LIMIT $2`,
           slug, limit,

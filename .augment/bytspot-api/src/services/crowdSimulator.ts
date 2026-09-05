@@ -33,7 +33,7 @@ export async function runCrowdSimulation(): Promise<SimulationResult> {
   const now = new Date();
   const { hour, day } = atlantaClock(now);
 
-  const venues = await db.venue.findMany({ select: { id: true, slug: true, category: true } });
+  const venues = await db.venue.findMany({ where: { discoverable: true }, select: { id: true, slug: true, category: true } });
 
   const inserts = venues.map((v) => {
     const level = typicalJitter(typicalLevel(hour, day, v.category), v.slug ?? v.id, hour, day);

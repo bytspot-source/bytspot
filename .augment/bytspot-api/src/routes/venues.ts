@@ -13,6 +13,7 @@ crowdEmitter.setMaxListeners(200); // allow many concurrent SSE clients
 router.get('/venues', async (_req, res) => {
   const venues = await cached('venues:all', 30, async () => {
     const rows = await db.venue.findMany({
+      where: { discoverable: true },
       include: {
         crowdLevels: {
           orderBy: { recordedAt: 'desc' },
@@ -90,6 +91,7 @@ router.get('/venues/nearby', async (req, res) => {
               ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
        FROM venues
        WHERE location IS NOT NULL
+         AND discoverable = true
          AND ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $3)
        ORDER BY distance ASC`,
       lng,
@@ -133,7 +135,9 @@ router.get('/venues/:slug/similar', async (req, res) => {
        FROM venues v1
        CROSS JOIN venues v2
        WHERE v1.slug = $1
+         AND v1.discoverable = true
          AND v2.slug != $1
+         AND v2.discoverable = true
          AND v1.embedding IS NOT NULL
          AND v2.embedding IS NOT NULL
        ORDER BY v1.embedding <=> v2.embedding
@@ -159,8 +163,8 @@ router.get('/venues/:slug', async (req, res) => {
   const { slug } = req.params;
 
   const venue = await cached(`venue:${slug}`, 15, async () => {
-    return db.venue.findUnique({
-      where: { slug },
+    return db.venue.findFirst({
+      where: { slug, discoverable: true },
       include: {
         crowdLevels: {
           orderBy: { recordedAt: 'desc' },
@@ -210,6 +214,7 @@ router.get('/venues/crowd/stream', async (req, res) => {
   // Send initial snapshot so client has data immediately
   try {
     const rows = await db.venue.findMany({
+      where: { discoverable: true },
       include: { crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 } },
       orderBy: { name: 'asc' },
     });

@@ -11,6 +11,7 @@ import { serializableTransaction } from '../lib/transactions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
+import { resolvePlaceCore } from './placesRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
 const maxMediaBytes = 600_000;
@@ -922,6 +923,15 @@ function normalizedVenueName(value: string): string {
   return value.trim().toLocaleLowerCase().split(/\s+/).join(' ');
 }
 
+// A Venue slug is unique, so a place-derived slug carries the place id's tail
+// to keep two same-named venues (e.g. two "Rooftop") apart. googlePlaceId is
+// the real dedupe key; this only has to avoid a slug collision on first insert.
+function placeVenueSlug(name: string, placeId: string): string {
+  const base = name.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'venue';
+  const suffix = placeId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(-8) || randomBytes(4).toString('hex');
+  return `${base}-${suffix}`;
+}
+
 async function authorizedPartyArrival(partyId: string, userId: string) {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
@@ -1486,6 +1496,70 @@ export const partyArrivalRouter = router({
       if (normalizedVenueName(venue.name) !== normalizedVenueName(party.venueName)) {
         throw new TRPCError({ code: 'CONFLICT', message: 'The registered venue must match the Party venue name.' });
       }
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published' },
+        data: { arrivalVenueId: venue.id },
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'The Party changed before its arrival destination could be saved.' });
+      return { partyId: party.id, venue: { id: venue.id, name: venue.name, address: venue.address } };
+    }),
+
+  /**
+   * Bind the arrival destination from a place the host searched (Google Places
+   * id), the path a real host takes when their venue is not in the seeded
+   * catalog that bindDestination requires. A Venue is created from the place
+   * once and reused on every later bind of the same place; unlike
+   * bindDestination this does not require the venue name to match venueName —
+   * the host has explicitly chosen this place as the door.
+   */
+  bindPlace: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-arrival-bind-place' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), placeId: z.string().min(1).max(256) }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' }, select: { id: true } });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+
+      const venueSelect = { id: true, name: true, address: true, lat: true, lng: true };
+      let venue = await db.venue.findUnique({ where: { googlePlaceId: input.placeId }, select: venueSelect });
+      if (!venue) {
+        const place = await resolvePlaceCore(input.placeId);
+        if (!place || !place.name || (place.lat === 0 && place.lng === 0)) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'That place could not be resolved. Pick another from the search results.' });
+        }
+        // Google may canonicalize the id; dedupe on what it actually returned
+        // before creating anything.
+        if (place.placeId !== input.placeId) {
+          venue = await db.venue.findUnique({ where: { googlePlaceId: place.placeId }, select: venueSelect });
+        }
+        // A host arrival destination is created non-discoverable: it must never
+        // surface a private party's address through the public venue catalog.
+        for (let attempt = 0; !venue && attempt < 2; attempt++) {
+          const slug = attempt === 0 ? placeVenueSlug(place.name, place.placeId) : `${placeVenueSlug(place.name, place.placeId)}-${randomBytes(3).toString('hex')}`;
+          try {
+            venue = await db.venue.create({
+              data: {
+                name: place.name, slug, googlePlaceId: place.placeId, discoverable: false,
+                address: place.address || place.name, lat: place.lat, lng: place.lng, category: place.primaryType ?? 'venue',
+              },
+              select: venueSelect,
+            });
+            // Match seed.ts: populate the PostGIS point so distance math works.
+            // Arrival only needs lat/lng, so a PostGIS-less database must not
+            // fail the bind.
+            try {
+              await db.$executeRawUnsafe('UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint($1, $2), 4326) WHERE id = $3', place.lng, place.lat, venue.id);
+            } catch { /* PostGIS optional */ }
+          } catch (err) {
+            if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+            // Either a concurrent bind of the same place won the unique
+            // googlePlaceId race (reuse it), or the generated slug collided
+            // (loop once more with a randomized slug).
+            venue = await db.venue.findUnique({ where: { googlePlaceId: place.placeId }, select: venueSelect });
+          }
+        }
+        if (!venue) throw new TRPCError({ code: 'CONFLICT', message: 'The arrival destination could not be saved. Please retry.' });
+      }
+
       const updated = await db.party.updateMany({
         where: { id: party.id, hostUserId: ctx.user.userId, status: 'published' },
         data: { arrivalVenueId: venue.id },

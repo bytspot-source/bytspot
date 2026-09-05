@@ -60,6 +60,27 @@ export function mapPlace(p: any): MappedPlace {
   };
 }
 
+/**
+ * Server-side place lookup for binding a Party's arrival destination. Returns
+ * only the fields a Venue needs, or null when the key is unset or Google is
+ * unreachable — the caller turns null into a NOT_FOUND so an outage degrades to
+ * "pick another", never a 500.
+ */
+export async function resolvePlaceCore(
+  placeId: string,
+): Promise<Pick<MappedPlace, 'placeId' | 'name' | 'address' | 'lat' | 'lng' | 'primaryType'> | null> {
+  if (!config.googlePlacesApiKey) return null;
+  try {
+    const data = await gpGet<Record<string, unknown>>(`/places/${placeId}`, DETAIL_FIELDS);
+    const m = mapPlace(data);
+    if (!m.placeId || !m.name) return null;
+    return { placeId: m.placeId, name: m.name, address: m.address, lat: m.lat, lng: m.lng, primaryType: m.primaryType };
+  } catch (err) {
+    captureError(err, { provider: 'google-places', operation: 'resolvePlaceCore' });
+    return null;
+  }
+}
+
 export async function gpPost<T>(path: string, body: object, fieldMask: string): Promise<T> {
   const res = await fetch(`${GP_BASE}${path}`, {
     method: 'POST',

@@ -187,6 +187,8 @@ test('Create is idempotent and seats the creator as already going', async () => 
   // Needs are de-duplicated, and an unscheduled Plan still gets a deadline.
   assert.deepEqual(seeded.needs, ['dining', 'parking']);
   assert.ok(seeded.expiresAt instanceof Date);
+  // A url-safe bearer join token is minted at creation, not left to chance.
+  assert.match(seeded.joinToken, /^[A-Za-z0-9_-]{32}$/);
 
   plan.findUnique = async () => ({ id: 'plan-existing' });
   assert.deepEqual(await caller().plans.create({ idempotencyKey, title: 'Friday Night', intent: 'Go out' }), { id: 'plan-existing' });
@@ -332,8 +334,12 @@ test('Join by link seats the holder as a guest who has yet to answer', async () 
 
 test('The join token is handed to the creator alone, never to a guest', async () => {
   plan.findUnique = async () => planFixture({ participants: [creatorSeat, guestSeat] });
+  plan.findMany = async () => [planFixture({ participants: [creatorSeat, guestSeat] })];
+  // get and list expose the token on the same terms: creator only.
   assert.equal((await caller().plans.get({ planId: 'plan-1' })).joinToken, 'tok-secret');
   assert.equal((await guest().plans.get({ planId: 'plan-1' })).joinToken, undefined);
+  assert.equal((await caller().plans.list()).plans[0].joinToken, 'tok-secret');
+  assert.equal((await guest().plans.list()).plans[0].joinToken, undefined);
 });
 
 test('An unknown or closed link is a Plan that never existed', async () => {

@@ -13,9 +13,11 @@ BEGIN
 
   -- It is uniquely indexed, so a token names at most one Plan.
   IF NOT EXISTS (
-    SELECT 1 FROM pg_indexes WHERE tablename = 'plans' AND indexname = 'plans_join_token_key'
+    SELECT 1 FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE c.relname = 'plans_join_token_key' AND i.indisunique
   ) THEN
-    RAISE EXCEPTION 'plans.join_token must have a unique index';
+    RAISE EXCEPTION 'plans.join_token must have a UNIQUE index';
   END IF;
 
   -- The backfill left no Plan tokenless.

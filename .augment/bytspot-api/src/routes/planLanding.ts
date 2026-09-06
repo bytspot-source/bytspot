@@ -20,9 +20,12 @@ const APP_STORE_URL = `https://apps.apple.com/app/id${APP_STORE_ID}`;
  * WhatsApp) read the response bytes and never run JavaScript, so the metadata
  * has to be in the HTML.
  *
- * There is deliberately no /plan/* Universal Link: the app has no in-app plan
- * router yet, so every tap should reach this page (installed users get the
- * Smart App Banner's "Open"), not a dead deep link.
+ * /plan/<id> is now a Universal Link: on a device with the app it opens the
+ * in-app join sheet directly. This page is the fallback when the app is not
+ * installed. The invite carries the Plan's bearer join token in `t`; when it
+ * is present it rides into the Smart App Banner's app-argument and the share
+ * URL, so an installed "Open" — or a re-tap after install — seats the holder.
+ * A token-bearing response is never cached: it carries a credential.
  */
 
 const ESCAPES: Record<string, string> = {
@@ -70,7 +73,7 @@ function planLinkClosed(
 
 interface PublicPlan {
   hostName: string; title: string; when: string; area: string | null;
-  shareUrl: string; isInAppBrowser: boolean;
+  shareUrl: string; isInAppBrowser: boolean; hasToken: boolean;
 }
 
 function renderPage(plan: PublicPlan): string {
@@ -122,7 +125,9 @@ h1{font-size:30px;font-weight:900;line-height:1.12;margin:6px 0 14px}
 <a class="cta" href="${escapeHtml(APP_STORE_URL)}">Get Bytspot</a>
 ${plan.isInAppBrowser
   ? `<p class="foot">This in-app browser can't open the App Store. Tap ⋯ and choose "Open in Safari".</p>`
-  : `<p class="foot">Open on iPhone to see the plan and say if you're in.</p>`}
+  : plan.hasToken
+    ? `<p class="foot">Get Bytspot, then reopen this invite to take your seat.</p>`
+    : `<p class="foot">Open on iPhone to see the plan and say if you're in.</p>`}
 </div></body></html>`;
 }
 
@@ -161,6 +166,12 @@ function sendNotFound(res: Response) {
 
 planLandingRouter.get('/plan/:planId', async (req, res) => {
   const planId = req.params.planId;
+  // The bearer join token, when the invite carries one. It is the app's
+  // credential, not this page's — the server never validates or stores it, only
+  // reflects it back into the app hand-off. Bound to the same ceiling the native
+  // router enforces; anything else is treated as a token-less preview.
+  const rawToken = typeof req.query.t === 'string' ? req.query.t.trim() : '';
+  const token = rawToken.length >= 1 && rawToken.length <= 200 ? rawToken : undefined;
   // Bound the key before it reaches the database. Generated IDs are well under
   // this, so anything longer is not a Plan that could exist and must not cost a
   // query — 404s are deliberately uncached, so misses always reach origin.
@@ -185,21 +196,24 @@ planLandingRouter.get('/plan/:planId', async (req, res) => {
   // A closed link reads the same as a Plan that never existed.
   if (!plan || planLinkClosed(plan, new Date())) return sendNotFound(res);
 
+  const base = `${config.partyShareBaseUrl}/plan/${encodeURIComponent(plan.id)}`;
   const html = renderPage({
     hostName: firstName(plan.creator.name),
     title: plan.title,
     when: plan.startsAt ? formatWhen(plan.startsAt) : WHEN_TBD,
     area: plan.areaLabel,
-    shareUrl: `${config.partyShareBaseUrl}/plan/${encodeURIComponent(plan.id)}`,
+    shareUrl: token ? `${base}?t=${encodeURIComponent(token)}` : base,
     isInAppBrowser: isInAppBrowserUA(req.get('user-agent')),
+    hasToken: Boolean(token),
   });
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  // Short TTL so a cancelled or edited Plan stops previewing quickly; the body
-  // varies on User-Agent (in-app-browser copy), so a shared cache must not hand
-  // one variant to the other.
-  res.setHeader('Cache-Control', 'public, max-age=60');
+  // A token-bearing page carries a credential and must never be cached on a
+  // shared CDN; a token-less preview keeps a short TTL so a cancelled or edited
+  // Plan stops previewing quickly. Either way the body varies on User-Agent
+  // (in-app-browser copy), so a shared cache must not hand one variant to the other.
+  res.setHeader('Cache-Control', token ? 'private, no-store' : 'public, max-age=60');
   res.setHeader('Vary', 'User-Agent');
   // Static markup only — no images, no scripts. The page must never execute
   // creator-controlled text.

@@ -18,7 +18,7 @@ const proposed = {
   creator: { name: 'Ava Reed' },
 };
 
-async function get(planId: string, userAgent?: string): Promise<{ status: number; html: string; csp: string | null; cache: string | null; vary: string | null }> {
+async function get(planId: string, userAgent?: string, token?: string): Promise<{ status: number; html: string; csp: string | null; cache: string | null; vary: string | null }> {
   const app = express();
   app.use(helmet());
   app.use(planLandingRouter);
@@ -26,7 +26,8 @@ async function get(planId: string, userAgent?: string): Promise<{ status: number
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/plan/${planId}`, {
+    const query = token === undefined ? '' : `?t=${encodeURIComponent(token)}`;
+    const res = await fetch(`http://127.0.0.1:${port}/plan/${planId}${query}`, {
       headers: userAgent ? { 'user-agent': userAgent } : {},
     });
     return {
@@ -79,6 +80,32 @@ test('A creator-controlled title is escaped, never executed', async () => {
   const { html } = await get('plan-1');
   assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
   assert.match(html, /&lt;script&gt;/);
+});
+
+test('A token-bearing invite carries the token into the app hand-off and is never cached', async () => {
+  const { status, html, cache } = await get('plan-1', undefined, 'sekret-join-token');
+  assert.equal(status, 200);
+  // The bearer token rides into the Smart App Banner's app-argument and the
+  // share URL so an installed "Open" or a re-tap after install seats the holder.
+  assert.match(html, /apple-itunes-app" content="app-id=6761876421, app-argument=[^"]*\?t=sekret-join-token/);
+  assert.match(html, /og:url" content="[^"]*\?t=sekret-join-token/);
+  // A page that carries a credential must not be cached on a shared CDN.
+  assert.equal(cache, 'private, no-store');
+  // Fresh installers are told to reopen the invite to take their seat.
+  assert.match(html, /reopen this invite to take your seat/);
+});
+
+test('A token-less preview stays cacheable and never claims a seat', async () => {
+  const { html, cache } = await get('plan-1');
+  assert.doesNotMatch(html, /\?t=/);
+  assert.doesNotMatch(html, /reopen this invite/);
+  assert.match(cache ?? '', /public, max-age=60/);
+});
+
+test('An over-length token is ignored and the page is treated as a token-less preview', async () => {
+  const { html, cache } = await get('plan-1', undefined, 'x'.repeat(201));
+  assert.doesNotMatch(html, /\?t=/);
+  assert.match(cache ?? '', /public, max-age=60/);
 });
 
 test('An in-app browser is told how to escape to Safari', async () => {

@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
+import { coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -521,16 +522,19 @@ export const planRouter = router({
 
       let capability: 'book' | 'request' | 'details' = 'details';
       let title = input.title;
+      // The projection handle snapshotted from whichever supply is attached.
+      let snapshot: BookableSnapshot | null = null;
 
       if (partyId) {
         const party = await db.party.findFirst({
           where: { id: partyId, status: 'published' },
-          select: { id: true, title: true, accessMode: true },
+          select: { id: true, title: true, accessMode: true, requiredMembershipTier: true },
         });
         if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That room could not be found.' });
         capability = capabilityForSupply({ party });
         // The room names itself; a caller-supplied title cannot misrepresent it.
         title = party.title;
+        snapshot = partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier });
       } else if (coffeeReservationId) {
         const reservation = await db.coffeeReservation.findFirst({
           where: { id: coffeeReservationId, requestedByUserId: ctx.user.userId, status: { in: ['pending', 'confirmed'] as const } },
@@ -541,20 +545,42 @@ export const planRouter = router({
         if (!reservation) throw new TRPCError({ code: 'NOT_FOUND', message: 'That coffee reservation could not be found.' });
         capability = capabilityForSupply({ reservation });
         title = reservation.spot.name;
+        snapshot = coffeeToBookableSnapshot({ coffeeReservationId: reservation.id, title: reservation.spot.name });
       }
 
       if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
 
       try {
-        const item = await db.planItem.create({
-          data: {
-            planId: plan.id,
-            needKind: input.needKind,
-            title,
-            capability,
-            partyId,
-            coffeeReservationId,
-          },
+        // The snapshot and the item are written together: the item never points
+        // at a handle that was not persisted, and a reference item (no supply)
+        // writes no handle at all.
+        const item = await db.$transaction(async (tx) => {
+          if (snapshot) {
+            await tx.bookable.create({
+              data: {
+                id: snapshot.id,
+                sourceKind: snapshot.sourceKind,
+                capability: snapshot.capability,
+                provider: snapshot.provider,
+                tierName: snapshot.tierName,
+                priceCents: snapshot.priceCents,
+                capacity: snapshot.capacity,
+                membershipFloor: snapshot.membershipFloor,
+                fulfillment: snapshot.fulfillment as Prisma.InputJsonValue,
+              },
+            });
+          }
+          return tx.planItem.create({
+            data: {
+              planId: plan.id,
+              needKind: input.needKind,
+              title,
+              capability,
+              partyId,
+              coffeeReservationId,
+              bookableId: snapshot?.id ?? null,
+            },
+          });
         });
         return { id: item.id, capability: item.capability, status: item.status };
       } catch (error) {

@@ -6,6 +6,7 @@ import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
 import { capabilityForAccessMode, capabilityForSupply, isProposedPlanExpired, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { controlFromCapability } from '../services/bookableProjection';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
 const createCaller = createCallerFactory(appRouter);
@@ -15,6 +16,7 @@ const planItem = db.planItem as any;
 const party = db.party as any;
 const user = db.user as any;
 const coffeeReservation = db.coffeeReservation as any;
+const bookable = db.bookable as any;
 
 const creatorContext: Context = { user: { userId: 'creator-id', email: 'creator@bytspot.com' }, clientRateLimitKey: 'test-plan-creator' };
 const guestContext: Context = { user: { userId: 'guest-id', email: 'guest@bytspot.com' }, clientRateLimitKey: 'test-plan-guest' };
@@ -61,6 +63,7 @@ beforeEach(() => {
   planParticipant.updateMany = async () => ({ count: 1 });
   planParticipant.findUnique = async () => null;
   planItem.create = async ({ data }: any) => ({ id: 'item-1', capability: data.capability, status: 'available' });
+  bookable.create = async ({ data }: any) => data;
   planItem.update = async () => ({ id: 'item-1', status: 'cancelled' });
   planItem.updateMany = async () => ({ count: 1 });
   party.findFirst = async () => null;
@@ -419,6 +422,40 @@ test('The caller cannot state the capability, so a Plan cannot advertise a booki
   await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Broni Home Taste' });
   assert.equal(seeded.capability, 'details');
   assert.equal(seeded.status, undefined, 'attach must not seed a status');
+});
+
+test('Attach snapshots a Bookable handle from the supply and links it; a reference writes none', async () => {
+  plan.findUnique = async () => planFixture();
+  let seededItem: any = null;
+  let seededBookable: any = null;
+  planItem.create = async ({ data }: any) => { seededItem = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+  bookable.create = async ({ data }: any) => { seededBookable = data; return data; };
+
+  // A paid room snapshots a book handle whose derived control is vendor, with
+  // the upstream id confined to fulfillment and never embedded in the BYT- id.
+  party.findFirst = async () => ({ id: 'party-1', title: 'The Basement', accessMode: 'paid-ticket', requiredMembershipTier: 'green' });
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', partyId: 'party-1' });
+  assert.equal(seededBookable.sourceKind, 'party_ticket');
+  assert.equal(seededBookable.capability, 'book');
+  assert.equal(controlFromCapability(seededBookable.capability), 'vendor');
+  assert.equal(seededBookable.membershipFloor, 'green');
+  assert.match(seededBookable.id, /^BYT-party_ticket-/);
+  assert.ok(!seededBookable.id.includes('party-1'));
+  assert.deepEqual(seededBookable.fulfillment, { partyId: 'party-1', accessMode: 'paid-ticket' });
+  assert.equal(seededItem.bookableId, seededBookable.id);
+
+  // A coffee reservation snapshots a request handle.
+  coffeeReservation.findFirst = async () => ({ id: 'r-1', spot: { name: 'Highland Bakery' } });
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } });
+  assert.equal(seededBookable.sourceKind, 'coffee');
+  assert.equal(seededBookable.capability, 'request');
+  assert.equal(seededItem.bookableId, seededBookable.id);
+
+  // A reference item (no supply) writes no handle at all.
+  seededBookable = null;
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Broni Home Taste' });
+  assert.equal(seededBookable, null, 'a reference must not mint a Bookable');
+  assert.equal(seededItem.bookableId, null);
 });
 
 // ─── Attach: second real bookable ────────────────────────────────────────────

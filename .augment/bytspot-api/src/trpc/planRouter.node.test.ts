@@ -37,6 +37,7 @@ function planFixture(overrides: Record<string, unknown> = {}) {
     endsAt: null,
     areaLabel: 'Midtown',
     partySize: 4,
+    joinToken: 'tok-secret',
     needs: [] as string[],
     lifecycle: 'proposed',
     expiresAt: new Date(Date.now() + 60 * 60 * 1000),
@@ -186,6 +187,8 @@ test('Create is idempotent and seats the creator as already going', async () => 
   // Needs are de-duplicated, and an unscheduled Plan still gets a deadline.
   assert.deepEqual(seeded.needs, ['dining', 'parking']);
   assert.ok(seeded.expiresAt instanceof Date);
+  // A url-safe bearer join token is minted at creation, not left to chance.
+  assert.match(seeded.joinToken, /^[A-Za-z0-9_-]{32}$/);
 
   plan.findUnique = async () => ({ id: 'plan-existing' });
   assert.deepEqual(await caller().plans.create({ idempotencyKey, title: 'Friday Night', intent: 'Go out' }), { id: 'plan-existing' });
@@ -313,6 +316,72 @@ test('Re-inviting is idempotent, and a removed person returns to a clean invite'
   planParticipant.update = async (args: any) => { updateWhere = args.where; return { status: 'invited' }; };
   assert.deepEqual(await caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }), { status: 'invited' });
   assert.deepEqual(updateWhere, { planId_userId: { planId: 'plan-1', userId: 'guest-id' } });
+});
+
+// ─── Join by link ───────────────────────────────────────────────────────────────
+
+test('Join by link seats the holder as a guest who has yet to answer', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, guestSeat] });
+  let created: any = null;
+  planParticipant.create = async (args: any) => { created = args.data; return { status: args.data.status }; };
+  const result = await stranger().plans.joinByToken({ token: 'tok-secret' });
+  // The holder is now on the Plan as a guest who still owes an answer.
+  assert.deepEqual(created, { planId: 'plan-1', userId: 'stranger-id', role: 'guest', status: 'invited' });
+  assert.ok(result.participants.some((p) => p.userId === 'stranger-id' && p.role === 'guest' && p.status === 'invited'));
+  // A joiner is not the creator, so the bearer token is never echoed back.
+  assert.equal(result.joinToken, undefined);
+});
+
+test('The join token is handed to the creator alone, never to a guest', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, guestSeat] });
+  plan.findMany = async () => [planFixture({ participants: [creatorSeat, guestSeat] })];
+  // get and list expose the token on the same terms: creator only.
+  assert.equal((await caller().plans.get({ planId: 'plan-1' })).joinToken, 'tok-secret');
+  assert.equal((await guest().plans.get({ planId: 'plan-1' })).joinToken, undefined);
+  assert.equal((await caller().plans.list()).plans[0].joinToken, 'tok-secret');
+  assert.equal((await guest().plans.list()).plans[0].joinToken, undefined);
+});
+
+test('An unknown or closed link is a Plan that never existed', async () => {
+  // Unknown token.
+  plan.findUnique = async () => null;
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'nope' }), { code: 'NOT_FOUND' });
+  // Cancelled.
+  plan.findUnique = async () => planFixture({ lifecycle: 'cancelled', cancelledAt: new Date() });
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'tok-secret' }), { code: 'NOT_FOUND' });
+  // Expired proposed.
+  plan.findUnique = async () => planFixture({ expiresAt: new Date(Date.now() - 1000) });
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'tok-secret' }), { code: 'NOT_FOUND' });
+  // Confirmed but already ended.
+  plan.findUnique = async () => planFixture({ lifecycle: 'confirmed', expiresAt: null, endsAt: new Date(Date.now() - 1000) });
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'tok-secret' }), { code: 'NOT_FOUND' });
+});
+
+test('A removed guest cannot rejoin by reusing the link', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, { ...guestSeat, status: 'removed' }] });
+  planParticipant.create = async () => { throw new Error('must not seat a removed guest'); };
+  await assert.rejects(() => guest().plans.joinByToken({ token: 'tok-secret' }), { code: 'NOT_FOUND' });
+});
+
+test('Joining is idempotent for someone already on the Plan', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, { ...guestSeat, status: 'accepted' }] });
+  planParticipant.create = async () => { throw new Error('should not create over an existing seat'); };
+  const result = await guest().plans.joinByToken({ token: 'tok-secret' });
+  assert.ok(result.participants.some((p) => p.userId === 'guest-id' && p.status === 'accepted'));
+});
+
+test('The link cannot push a Plan past its cap', async () => {
+  const crowd = Array.from({ length: 49 }, (_, index) => ({ userId: `guest-${index}`, role: 'guest', status: 'invited' }));
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, ...crowd] });
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'tok-secret' }), { code: 'CONFLICT' });
+});
+
+test('Concurrent joins for the last seat surface as CONFLICT, not a poisoned transaction', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat] });
+  planParticipant.create = async () => {
+    throw new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' });
+  };
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'tok-secret' }), { code: 'CONFLICT' });
 });
 
 // ─── Attach ───────────────────────────────────────────────────────────────────

@@ -752,6 +752,10 @@ model Plan {
   latitude       Float?
   longitude      Float?
   partySize      Int?      @map("party_size")
+  /// Bearer secret carried in the invite link. The id previews a Plan; this
+  /// token is what seats whoever holds it, so it is only ever handed to the
+  /// creator. Distinct from the id precisely so a guessable id grants nothing.
+  joinToken      String    @unique @map("join_token")
   /// Need kinds the Plan is trying to fill: dining, parking, nightlife, …
   needs          String[]  @default([])
   /// Deliberately excludes booked/active/completed. Those are derived from the

@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
@@ -123,12 +124,20 @@ const planInclude = {
 
 type LoadedPlan = Prisma.PlanGetPayload<{ include: typeof planInclude }>;
 
-function serializePlan(plan: LoadedPlan, now: Date) {
+/** The invite-link credential. 192 bits of randomness, url-safe for the path. */
+function newJoinToken(): string {
+  return randomBytes(24).toString('base64url');
+}
+
+function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string) {
   return {
     id: plan.id,
     title: plan.title,
     intent: plan.intent,
     creatorUserId: plan.creatorUserId,
+    // The join link is a bearer secret, so only the creator is handed it; a
+    // guest sees the Plan but cannot silently reshare a seat to it.
+    joinToken: plan.creatorUserId === viewerUserId ? plan.joinToken : undefined,
     startsAt: plan.startsAt,
     endsAt: plan.endsAt,
     areaLabel: plan.areaLabel,
@@ -224,6 +233,7 @@ export const planRouter = router({
             latitude: input.latitude ?? null,
             longitude: input.longitude ?? null,
             partySize: input.partySize ?? null,
+            joinToken: newJoinToken(),
             needs: [...new Set(input.needs)],
             expiresAt,
             // The creator is on their own Plan, and is already going.
@@ -241,7 +251,7 @@ export const planRouter = router({
 
   get: protectedProcedure
     .input(z.object({ planId: z.string().min(1) }))
-    .query(async ({ ctx, input }) => serializePlan(await loadPlanForParticipant(input.planId, ctx.user.userId), new Date())),
+    .query(async ({ ctx, input }) => serializePlan(await loadPlanForParticipant(input.planId, ctx.user.userId), new Date(), ctx.user.userId)),
 
   list: protectedProcedure.query(async ({ ctx }) => {
     const now = new Date();
@@ -251,8 +261,70 @@ export const planRouter = router({
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
-    return { plans: plans.map((plan) => serializePlan(plan, now)) };
+    return { plans: plans.map((plan) => serializePlan(plan, now, ctx.user.userId)) };
   }),
+
+  /**
+   * Join by link. The token is the credential the creator shared out-of-band
+   * — a text they sent from their own device — so holding it is what seats you.
+   * This is the one Plan write that does not start from an existing seat. You
+   * join as a guest with status `invited`: you are on the Plan, but your own
+   * attendance is still yours to confirm.
+   */
+  joinByToken: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'plan-join' }))
+    .input(z.object({ token: z.string().min(1).max(200) }))
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+      // Reading the cap and then writing against it has to say Serializable out
+      // loud, exactly as invite does: concurrent joins could each pass a stale
+      // cap check and push the Plan past MAX_PLAN_PARTICIPANTS.
+      return serializableTransaction(async (tx) => {
+        const plan = await tx.plan.findUnique({ where: { joinToken: input.token }, include: planInclude });
+        // A closed or unknown link is indistinguishable from a Plan that never
+        // existed — the same wall a non-participant hits everywhere else.
+        if (
+          !plan ||
+          plan.lifecycle === 'cancelled' ||
+          isProposedPlanExpired(plan, now) ||
+          (plan.lifecycle === 'confirmed' && plan.endsAt && now >= plan.endsAt)
+        ) {
+          throw planNotFound();
+        }
+
+        const seat = plan.participants.find((p) => p.userId === ctx.user.userId);
+        if (seat) {
+          // A removed guest does not get back in by reusing the link.
+          if (seat.status === 'removed') throw planNotFound();
+          return serializePlan(plan, now, ctx.user.userId);
+        }
+
+        if (plan.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Plan is full.' });
+        }
+
+        try {
+          await tx.planParticipant.create({
+            data: { planId: plan.id, userId: ctx.user.userId, role: 'guest', status: 'invited' },
+          });
+        } catch (error) {
+          // A concurrent join of the same user raced us; Serializable turns it
+          // into a retryable conflict rather than a duplicate seat.
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            throw new TRPCError({ code: 'CONFLICT', message: 'Another change to this Plan is in flight. Try again.' });
+          }
+          throw error;
+        }
+
+        // The loaded snapshot plus the seat just written is the current state;
+        // returning it avoids a second read of a row we already know.
+        plan.participants.push({
+          id: 'pending', planId: plan.id, userId: ctx.user.userId, role: 'guest',
+          status: 'invited', respondedAt: null, createdAt: now, updatedAt: now,
+        } as LoadedPlan['participants'][number]);
+        return serializePlan(plan, now, ctx.user.userId);
+      }, 'Another change to this Plan is in flight. Try again.');
+    }),
 
   /** Only the creator confirms, and only their own decision is recorded. */
   confirm: protectedProcedure

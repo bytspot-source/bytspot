@@ -808,6 +808,10 @@ model PlanItem {
   /// Second real bookable. A PlanItem links to at most one supply row; the
   /// CHECK constraint `plan_items_single_supply_check` enforces that at the DB.
   coffeeReservationId String?  @unique @map("coffee_reservation_id")
+  /// The projection handle snapshotted from this item's supply at attach time.
+  /// A pure denormalized pointer — it does not participate in the single-supply
+  /// XOR and never carries a promise the item's own `capability` does not.
+  bookableId          String?  @unique @map("bookable_id")
   capability          String   @default("details")
   status              String   @default("available")
   createdAt           DateTime @default(now()) @map("created_at")
@@ -816,9 +820,34 @@ model PlanItem {
   plan              Plan               @relation(fields: [planId], references: [id], onDelete: Cascade)
   party             Party?             @relation(fields: [partyId], references: [id], onDelete: SetNull)
   coffeeReservation CoffeeReservation? @relation(fields: [coffeeReservationId], references: [id], onDelete: SetNull)
+  bookable          Bookable?          @relation(fields: [bookableId], references: [id], onDelete: SetNull)
 
   @@index([planId, createdAt])
   @@map("plan_items")
+}
+
+/// A projection handle over attached supply — the honest snapshot a Plan item
+/// (and, later, the booking spine) reads from. `control` is never stored: it is
+/// derived from `capability` (bytspot-plan-prime-path-contract.md §8), so this
+/// table can never contradict the trust gate. Upstream ids live only in
+/// `fulfillment`, never in the canonical `BYT-…` id.
+model Bookable {
+  id              String   @id
+  sourceKind      String   @map("source_kind")
+  capability      String
+  provider        String?
+  tierName        String   @map("tier_name")
+  priceCents      Int      @default(0) @map("price_cents")
+  capacity        Int      @default(0)
+  membershipFloor String?  @map("membership_floor")
+  fulfillment     Json     @default("{}")
+  snapshotAt      DateTime @default(now()) @map("snapshot_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  planItem PlanItem?
+
+  @@map("bookables")
 }
 
 // ─── Tips (Valet Tipping) ─────────────────────────────

@@ -28,6 +28,10 @@ export interface PrimePathCandidate {
   // Capacity this path can seat and the floor it needs to run at all. A group
   // table with a minimum encodes the quorum trap: it "only works if N accept".
   seats: number;
+  // B4c: true for parties surfaced via the discovery pool rather than attached
+  // to the Plan. The ranker treats them identically; the client shows a
+  // "Suggestion" badge and an "Add to Plan" action.
+  discovered?: boolean;
   minParty: number;
   // Confirmable in the Plan window for the party — the first hard filter.
   confirmableNow: boolean;

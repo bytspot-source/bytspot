@@ -507,6 +507,7 @@ test('plans.primePath ranks the Plan\u2019s own supply on Live seats and states 
   // Ranking is per need: nightlife and coffee are never weighed against each other.
   const nightlife = result.needs.find((n: any) => n.needKind === 'nightlife');
   const coffee = result.needs.find((n: any) => n.needKind === 'coffee');
+  assert.ok(nightlife && coffee);
   assert.equal(nightlife.prime?.id, 'item-party');
   assert.equal(nightlife.prime?.seats, 10);
   assert.equal(nightlife.reason, '\u2605 Prime Path \u2014 fits 4, confirmable now');

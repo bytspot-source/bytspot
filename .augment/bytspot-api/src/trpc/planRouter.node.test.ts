@@ -5,7 +5,7 @@ import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { capabilityForAccessMode, capabilityForSupply, isProposedPlanExpired, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { capabilityForAccessMode, capabilityForSupply, isProposedPlanExpired, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
@@ -458,7 +458,42 @@ test('Attach snapshots a Bookable handle from the supply and links it; a referen
   assert.equal(seededItem.bookableId, null);
 });
 
-// ─── Booking spine: every booking is a Plan of one (B3a) ─────────────────────────
+// ─── Booking spine: booked is derived from the supply (B3b) ───────────────────────────
+
+test('itemIsBooked derives booked from the supply, never from a stored flag alone', async () => {
+  // A confirmed coffee hold is booked even while the item column still reads available.
+  assert.equal(itemIsBooked({ needKind: 'coffee', status: 'available', capability: 'request', coffeeReservation: { status: 'confirmed' } }), true);
+  // A pending hold is not booked yet.
+  assert.equal(itemIsBooked({ needKind: 'coffee', status: 'available', capability: 'request', coffeeReservation: { status: 'pending' } }), false);
+  // A details reference is never booked, whatever the stored column says.
+  assert.equal(itemIsBooked({ needKind: 'dining', status: 'booked', capability: 'details' }), false);
+  // A cancelled item is never booked. An explicit stored booking is honored.
+  assert.equal(itemIsBooked({ needKind: 'nightlife', status: 'cancelled', capability: 'book' }), false);
+  assert.equal(itemIsBooked({ needKind: 'nightlife', status: 'booked', capability: 'book' }), true);
+});
+
+test('A confirmed coffee hold rolls a confirmed Plan into booked without a stored flip', async () => {
+  const confirmedPlan = {
+    ...planFixture({ lifecycle: 'confirmed', needs: ['coffee'] }),
+    items: [{ id: 'item-1', needKind: 'coffee', title: 'Highland Bakery', partyId: null, coffeeReservationId: 'r-1', capability: 'request', status: 'available', coffeeReservation: { holdExpiresAt: null, status: 'confirmed' } }],
+  };
+  plan.findUnique = async () => confirmedPlan;
+  const view = await caller().plans.get({ planId: 'plan-1' });
+  assert.equal(view.state, 'booked');
+  assert.equal(view.items[0].booked, true);
+  // The stored column is untouched: booked was derived, not written.
+  assert.equal(view.items[0].status, 'available');
+});
+
+test('detach refuses a derived-booked item, not only a stored one', async () => {
+  plan.findUnique = async () => ({
+    ...planFixture(),
+    items: [{ id: 'item-1', needKind: 'coffee', title: 'Highland Bakery', partyId: null, coffeeReservationId: 'r-1', capability: 'request', status: 'available', coffeeReservation: { holdExpiresAt: null, status: 'confirmed' } }],
+  });
+  await assert.rejects(() => caller().plans.detach({ planId: 'plan-1', itemId: 'item-1' }), { code: 'CONFLICT' });
+});
+
+// ─── Booking spine: every booking is a Plan of one (B3a) ───────────────────────────
 
 test('createSolo wraps one supply in a single-need Plan of one, deriving capability and linking the handle', async () => {
   let planData: any = null, itemData: any = null, bookableData: any = null;

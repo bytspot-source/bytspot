@@ -61,7 +61,26 @@ type PlanRecord = {
   needs: string[];
 };
 type ParticipantRecord = { status: string };
-type ItemRecord = { needKind: string; status: string; capability?: string };
+type ItemRecord = { needKind: string; status: string; capability?: string; coffeeReservation?: { status: string } | null };
+
+/**
+ * Booked is derived from the supply, never taken from a stored flag alone: a
+ * Plan may only claim an item is booked when the execution layer actually
+ * settled the thing behind it. A details reference is never booked — the user
+ * resolves it themselves. A coffee hold is booked once its reservation is
+ * confirmed. An explicit stored `booked` is still honored so a future
+ * settlement write (or the detach guard) has a durable terminal to point at.
+ *
+ * Party-backed booking derives from the guest's granted access; that needs the
+ * settling identity resolved and lands in B3b-2, not here.
+ */
+export function itemIsBooked(item: ItemRecord): boolean {
+  if (item.status === 'cancelled') return false;
+  if (item.capability === 'details') return false;
+  if (item.status === 'booked') return true;
+  if (item.coffeeReservation?.status === 'confirmed') return true;
+  return false;
+}
 
 /** A proposed Plan that ran out of time is expired on read; there is no sweep. */
 export function isProposedPlanExpired(plan: PlanRecord, now: Date): boolean {
@@ -84,9 +103,10 @@ export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Dat
   if (plan.startsAt && now >= plan.startsAt) return 'active';
 
   // A reference the user resolves themselves is not something Bytspot booked,
-  // so a details item can never carry the Plan into `booked`.
+  // so a details item can never carry the Plan into `booked`; every other live
+  // item must be booked, derived from its supply rather than a stored flag.
   const live = items.filter((item) => item.status !== 'cancelled');
-  if (live.length > 0 && live.every((item) => item.status === 'booked' && item.capability !== 'details')) return 'booked';
+  if (live.length > 0 && live.every((item) => item.capability !== 'details' && itemIsBooked(item))) return 'booked';
   return 'confirmed';
 }
 
@@ -157,6 +177,9 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string) {
       coffeeReservationId: item.coffeeReservationId,
       capability: item.capability,
       status: item.status,
+      // Booked is derived, never echoed off the stored column, so the client
+      // and Prime Path read the same truth the state roll-up does.
+      booked: itemIsBooked(item),
       // A room item has no reservation summary; the field is always null in
       // that case so the client can key hold-countdown rendering off it.
       reservation: item.coffeeReservation
@@ -725,8 +748,15 @@ export const planRouter = router({
       return serializableTransaction(async (tx) => {
         const fresh = await loadPlanForCreator(plan.id, ctx.user.userId, tx);
         assertPlanMutable(fresh, now);
-        // Conditional on the item not having reached booked between the read
-        // and the write, so a booking is never silently stranded.
+        // Re-derived on the transaction client: a supply that settled between
+        // the read and the write makes the item booked, and a booking is never
+        // silently stranded by a detach.
+        const freshItem = fresh.items.find((candidate) => candidate.id === item.id);
+        if (freshItem && itemIsBooked(freshItem)) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
+        }
+        // Conditional on the stored status too, so an explicit booking written
+        // by a concurrent settlement is also never stranded.
         const cancelled = await tx.planItem.updateMany({
           where: { id: item.id, status: { not: 'booked' } },
           data: { status: 'cancelled' },

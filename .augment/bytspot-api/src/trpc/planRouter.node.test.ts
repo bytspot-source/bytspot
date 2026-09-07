@@ -72,6 +72,8 @@ beforeEach(() => {
   coffeeReservation.findFirst = async () => null;
   // No party guest holds granted access unless a test says so.
   partyGuest.findMany = async () => [];
+  partyGuest.groupBy = async () => [];
+  party.findMany = async () => [];
 });
 
 // ─── Derived state ────────────────────────────────────────────────────────────
@@ -486,6 +488,43 @@ test('A confirmed coffee hold rolls a confirmed Plan into booked without a store
   assert.equal(view.items[0].booked, true);
   // The stored column is untouched: booked was derived, not written.
   assert.equal(view.items[0].status, 'available');
+});
+
+test('plans.primePath ranks the Plan\u2019s own supply on Live seats and states the reason', async () => {
+  plan.findUnique = async () => ({
+    ...planFixture({ lifecycle: 'confirmed', partySize: 4, needs: ['nightlife'] }),
+    // The creator and one guest are going; a nearer coffee alternate is attached too.
+    participants: [{ userId: 'creator-id', role: 'creator', status: 'accepted' }, { userId: 'guest-id', role: 'guest', status: 'accepted' }],
+    items: [
+      { id: 'item-party', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null },
+      { id: 'item-coffee', needKind: 'coffee', title: 'Highland Bakery', partyId: null, coffeeReservationId: 'r-1', capability: 'request', status: 'available', coffeeReservation: { status: 'pending', holdExpiresAt: new Date(Date.now() + 60 * 60 * 1000) } },
+    ],
+  });
+  party.findMany = async () => [{ id: 'party-1', capacity: 40, status: 'published', admissionPaused: false, closedAt: null, endsAt: new Date(Date.now() + 6 * 60 * 60 * 1000) }];
+  partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 30 } }];
+
+  const result = await caller().plans.primePath({ planId: 'plan-1' });
+  // Ranking is per need: nightlife and coffee are never weighed against each other.
+  const nightlife = result.needs.find((n: any) => n.needKind === 'nightlife');
+  const coffee = result.needs.find((n: any) => n.needKind === 'coffee');
+  assert.equal(nightlife.prime?.id, 'item-party');
+  assert.equal(nightlife.prime?.seats, 10);
+  assert.equal(nightlife.reason, '\u2605 Prime Path \u2014 fits 4, confirmable now');
+  assert.deepEqual(nightlife.alternates, []);
+  assert.equal(coffee.prime?.id, 'item-coffee');
+  assert.equal(coffee.reason, '\u2605 Prime Path \u2014 fits 4, confirmable now');
+});
+
+test('plans.primePath features nothing when the only attached room is full', async () => {
+  plan.findUnique = async () => ({
+    ...planFixture({ lifecycle: 'confirmed', partySize: 4, needs: ['nightlife'] }),
+    items: [{ id: 'item-party', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null }],
+  });
+  party.findMany = async () => [{ id: 'party-1', capacity: 40, status: 'published', admissionPaused: false, closedAt: null, endsAt: new Date(Date.now() + 6 * 60 * 60 * 1000) }];
+  partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 40 } }];
+
+  const result = await caller().plans.primePath({ planId: 'plan-1' });
+  assert.deepEqual(result.needs, [{ needKind: 'nightlife', prime: null, alternates: [], reason: null }]);
 });
 
 test('A granted party guest rolls the creator\u2019s Plan into booked, scoped to that creator', async () => {

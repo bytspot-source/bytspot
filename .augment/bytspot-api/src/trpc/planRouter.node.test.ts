@@ -458,6 +458,59 @@ test('Attach snapshots a Bookable handle from the supply and links it; a referen
   assert.equal(seededItem.bookableId, null);
 });
 
+// ─── Booking spine: every booking is a Plan of one (B3a) ─────────────────────────
+
+test('createSolo wraps one supply in a single-need Plan of one, deriving capability and linking the handle', async () => {
+  let planData: any = null, itemData: any = null, bookableData: any = null;
+  plan.create = async ({ data }: any) => { planData = data; return { id: 'plan-solo' }; };
+  planItem.create = async ({ data }: any) => { itemData = data; return { id: 'item-solo', capability: data.capability, status: 'available' }; };
+  bookable.create = async ({ data }: any) => { bookableData = data; return data; };
+  party.findFirst = async () => ({ id: 'party-1', title: 'The Basement', accessMode: 'paid-ticket', requiredMembershipTier: 'green' });
+
+  const res = await caller().plans.createSolo({ idempotencyKey, needKind: 'nightlife', supplyRef: { partyId: 'party-1' } });
+  assert.equal(res.id, 'plan-solo');
+  // A single-need Plan, seated by the creator, named after the supply.
+  assert.deepEqual(planData.needs, ['nightlife']);
+  assert.equal(planData.title, 'The Basement');
+  assert.equal(planData.creatorUserId, 'creator-id');
+  // The one item carries the derived capability and links the snapshot handle.
+  assert.equal(itemData.capability, 'book');
+  assert.equal(itemData.partyId, 'party-1');
+  assert.equal(itemData.bookableId, bookableData.id);
+  assert.match(bookableData.id, /^BYT-party_ticket-/);
+  // The skeleton settles nothing: the item is never seeded booked.
+  assert.equal(itemData.status, undefined);
+});
+
+test('createSolo is idempotent: a replayed key returns the same Plan and writes nothing new', async () => {
+  plan.findUnique = async () => ({ id: 'plan-existing' });
+  let created = false;
+  plan.create = async () => { created = true; return { id: 'plan-new' }; };
+  const res = await caller().plans.createSolo({ idempotencyKey, needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } });
+  assert.equal(res.id, 'plan-existing');
+  assert.equal(created, false, 'a replay must not create a second Plan');
+});
+
+test('createSolo refuses an empty Plan and refuses two supplies at once', async () => {
+  await assert.rejects(
+    () => caller().plans.createSolo({ idempotencyKey, needKind: 'dining', title: 'Just Vibes', supplyRef: {} }),
+    { code: 'BAD_REQUEST' },
+  );
+  await assert.rejects(
+    () => caller().plans.createSolo({ idempotencyKey, needKind: 'coffee', supplyRef: { partyId: 'p-1', coffeeReservationId: 'r-1' } }),
+    { code: 'BAD_REQUEST' },
+  );
+});
+
+test('createSolo surfaces a supply already on another Plan as a conflict', async () => {
+  coffeeReservation.findFirst = async () => ({ id: 'r-1', spot: { name: 'Highland Bakery' } });
+  planItem.create = async () => { throw new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' }); };
+  await assert.rejects(
+    () => caller().plans.createSolo({ idempotencyKey, needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } }),
+    { code: 'CONFLICT' },
+  );
+});
+
 // ─── Attach: second real bookable ────────────────────────────────────────────
 
 test('Attach accepts a generic supplyRef and refuses to carry two supplies at once', async () => {

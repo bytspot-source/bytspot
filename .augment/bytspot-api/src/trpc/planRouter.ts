@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
+import { rankPrimePath } from '../services/primePath';
+import { candidatesFromPlan, type PartyFacts, type PlanItemFacts } from '../services/primePathCandidates';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -380,6 +382,49 @@ export const planRouter = router({
     .query(async ({ ctx, input }) => {
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
       return serializePlan(plan, new Date(), ctx.user.userId, await grantedPartyKeys([plan]));
+    }),
+
+  /**
+   * Prime Path (§5): per need, the one defaulted, explained, confirmable path
+   * for this Plan plus the alternates a decline auto-promotes into. Ranking is
+   * per need — a nightlife room is never weighed against a coffee hold — and
+   * candidates are the Plan's own attached supply, so no discovery or
+   * visibility surface is invented here. Party seats are read Live (capacity
+   * minus granted guests), never Typical. Rules-only; the ranker carries the
+   * contract.
+   */
+  primePath: protectedProcedure
+    .input(z.object({ planId: z.string().min(1) }))
+    .query(async ({ ctx, input }) => {
+      const now = new Date();
+      const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
+      const live = plan.items.filter((item) => item.status !== 'cancelled');
+      const partyIds = [...new Set(live.filter((item) => item.partyId).map((item) => item.partyId as string))];
+      const [parties, occupancy] = partyIds.length === 0
+        ? [[] as PartyFacts[], [] as { partyId: string; _count: { _all: number } }[]]
+        : await Promise.all([
+            db.party.findMany({ where: { id: { in: partyIds } }, select: { id: true, capacity: true, status: true, admissionPaused: true, closedAt: true, endsAt: true } }),
+            db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: partyIds }, accessGranted: true }, _count: { _all: true } }),
+          ]);
+      const partyMap = new Map(parties.map((party) => [party.id, party]));
+      const occupancyMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
+      const readiness = planReadiness(plan.participants);
+      // A Plan with no stated size still has to seat the people going, so the
+      // committed count is the honest floor when partySize is unset.
+      const partySize = plan.partySize ?? Math.max(1, readiness.going);
+
+      // Rank within each need, preserving item (createdAt) order across needs.
+      const byNeed = new Map<string, PlanItemFacts[]>();
+      for (const item of live) {
+        const group = byNeed.get(item.needKind) ?? [];
+        group.push(item as unknown as PlanItemFacts);
+        byNeed.set(item.needKind, group);
+      }
+      const needs = [...byNeed.entries()].map(([needKind, items]) => ({
+        needKind,
+        ...rankPrimePath(candidatesFromPlan(items, partyMap, occupancyMap, { partySize }, now), { partySize, goingCount: readiness.going }),
+      }));
+      return { needs };
     }),
 
   list: protectedProcedure.query(async ({ ctx }) => {

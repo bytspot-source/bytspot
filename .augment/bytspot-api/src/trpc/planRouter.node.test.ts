@@ -497,7 +497,7 @@ test('plans.primePath ranks the Plan\u2019s own supply on Live seats and states 
     participants: [{ userId: 'creator-id', role: 'creator', status: 'accepted' }, { userId: 'guest-id', role: 'guest', status: 'accepted' }],
     items: [
       { id: 'item-party', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null },
-      { id: 'item-coffee', needKind: 'coffee', title: 'Highland Bakery', partyId: null, coffeeReservationId: 'r-1', capability: 'request', status: 'available', coffeeReservation: { status: 'pending', holdExpiresAt: new Date(Date.now() + 60 * 60 * 1000) } },
+      { id: 'item-coffee', needKind: 'coffee', title: 'Highland Bakery', partyId: null, coffeeReservationId: 'r-1', capability: 'request', status: 'available', coffeeReservation: { status: 'pending' } },
     ],
   });
   party.findMany = async () => [{ id: 'party-1', capacity: 40, status: 'published', admissionPaused: false, closedAt: null, endsAt: new Date(Date.now() + 6 * 60 * 60 * 1000) }];
@@ -507,7 +507,8 @@ test('plans.primePath ranks the Plan\u2019s own supply on Live seats and states 
   // Ranking is per need: nightlife and coffee are never weighed against each other.
   const nightlife = result.needs.find((n: any) => n.needKind === 'nightlife');
   const coffee = result.needs.find((n: any) => n.needKind === 'coffee');
-  assert.ok(nightlife && coffee);
+  assert.ok(nightlife, 'nightlife need should exist');
+  assert.ok(coffee, 'coffee need should exist');
   assert.equal(nightlife.prime?.id, 'item-party');
   assert.equal(nightlife.prime?.seats, 10);
   assert.equal(nightlife.reason, '\u2605 Prime Path \u2014 fits 4, confirmable now');

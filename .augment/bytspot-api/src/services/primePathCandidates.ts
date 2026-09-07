@@ -21,7 +21,7 @@ export interface PlanItemFacts {
   capability: BookableCapability | null;
   partyId: string | null;
   coffeeReservationId: string | null;
-  coffeeReservation: { status: string; holdExpiresAt: Date | null } | null;
+  coffeeReservation: { status: string; holdExpiresAt?: Date | null } | null;
 }
 
 export interface PartyFacts {
@@ -71,7 +71,7 @@ function coffeeCandidate(item: PlanItemFacts, partySize: number, now: Date): Pri
   const live = !!reservation
     && reservation.status !== 'expired'
     && reservation.status !== 'cancelled'
-    && (reservation.holdExpiresAt === null || now < reservation.holdExpiresAt);
+    && (!reservation.holdExpiresAt || now < reservation.holdExpiresAt);
   return {
     id: item.id,
     label: item.title,

@@ -195,6 +195,72 @@ function assertPlanMutable(plan: LoadedPlan, now: Date) {
   if (isProposedPlanExpired(plan, now)) throw new TRPCError({ code: 'CONFLICT', message: 'This Plan expired.' });
 }
 
+// The single site where supply becomes a capability and a Bookable snapshot,
+// shared by attach and createSolo so control derives from capability in exactly
+// one place (contract §8). No supply behind it → a details reference that
+// promises nothing. The caller never states the capability: it is derived.
+async function resolveSupply(
+  userId: string,
+  input: { partyId: string | null; coffeeReservationId: string | null; title?: string },
+): Promise<{
+  capability: 'book' | 'request' | 'details';
+  title: string;
+  snapshot: BookableSnapshot | null;
+  partyId: string | null;
+  coffeeReservationId: string | null;
+}> {
+  const { partyId, coffeeReservationId } = input;
+  if (partyId && coffeeReservationId) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'An item can carry only one supply.' });
+  }
+
+  let capability: 'book' | 'request' | 'details' = 'details';
+  let title = input.title;
+  let snapshot: BookableSnapshot | null = null;
+
+  if (partyId) {
+    const party = await db.party.findFirst({
+      where: { id: partyId, status: 'published' },
+      select: { id: true, title: true, accessMode: true, requiredMembershipTier: true },
+    });
+    if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That room could not be found.' });
+    capability = capabilityForSupply({ party });
+    // The room names itself; a caller-supplied title cannot misrepresent it.
+    title = party.title;
+    snapshot = partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier });
+  } else if (coffeeReservationId) {
+    const reservation = await db.coffeeReservation.findFirst({
+      where: { id: coffeeReservationId, requestedByUserId: userId, status: { in: ['pending', 'confirmed'] as const } },
+      select: { id: true, spot: { select: { name: true } } },
+    });
+    // Not-yours and not-found read the same, mirroring the party rule so one
+    // caller cannot enumerate another caller's reservations.
+    if (!reservation) throw new TRPCError({ code: 'NOT_FOUND', message: 'That coffee reservation could not be found.' });
+    capability = capabilityForSupply({ reservation });
+    title = reservation.spot.name;
+    snapshot = coffeeToBookableSnapshot({ coffeeReservationId: reservation.id, title: reservation.spot.name });
+  }
+
+  if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
+  return { capability, title, snapshot, partyId, coffeeReservationId };
+}
+
+// The Bookable snapshot as Prisma create data — one mapping, so attach and
+// createSolo cannot drift.
+function bookableCreateData(snapshot: BookableSnapshot) {
+  return {
+    id: snapshot.id,
+    sourceKind: snapshot.sourceKind,
+    capability: snapshot.capability,
+    provider: snapshot.provider,
+    tierName: snapshot.tierName,
+    priceCents: snapshot.priceCents,
+    capacity: snapshot.capacity,
+    membershipFloor: snapshot.membershipFloor,
+    fulfillment: snapshot.fulfillment as Prisma.InputJsonValue,
+  };
+}
+
 export const planRouter = router({
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'plan-create' }))
@@ -516,69 +582,23 @@ export const planRouter = router({
 
       const partyId = input.supplyRef?.partyId ?? input.partyId ?? null;
       const coffeeReservationId = input.supplyRef?.coffeeReservationId ?? null;
-      if (partyId && coffeeReservationId) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'An item can carry only one supply.' });
-      }
-
-      let capability: 'book' | 'request' | 'details' = 'details';
-      let title = input.title;
-      // The projection handle snapshotted from whichever supply is attached.
-      let snapshot: BookableSnapshot | null = null;
-
-      if (partyId) {
-        const party = await db.party.findFirst({
-          where: { id: partyId, status: 'published' },
-          select: { id: true, title: true, accessMode: true, requiredMembershipTier: true },
-        });
-        if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That room could not be found.' });
-        capability = capabilityForSupply({ party });
-        // The room names itself; a caller-supplied title cannot misrepresent it.
-        title = party.title;
-        snapshot = partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier });
-      } else if (coffeeReservationId) {
-        const reservation = await db.coffeeReservation.findFirst({
-          where: { id: coffeeReservationId, requestedByUserId: ctx.user.userId, status: { in: ['pending', 'confirmed'] as const } },
-          select: { id: true, spot: { select: { name: true } } },
-        });
-        // Not-yours and not-found read the same, mirroring the party rule so
-        // one caller cannot enumerate another caller's reservations.
-        if (!reservation) throw new TRPCError({ code: 'NOT_FOUND', message: 'That coffee reservation could not be found.' });
-        capability = capabilityForSupply({ reservation });
-        title = reservation.spot.name;
-        snapshot = coffeeToBookableSnapshot({ coffeeReservationId: reservation.id, title: reservation.spot.name });
-      }
-
-      if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
+      const supply = await resolveSupply(ctx.user.userId, { partyId, coffeeReservationId, title: input.title });
 
       try {
         // The snapshot and the item are written together: the item never points
         // at a handle that was not persisted, and a reference item (no supply)
         // writes no handle at all.
         const item = await db.$transaction(async (tx) => {
-          if (snapshot) {
-            await tx.bookable.create({
-              data: {
-                id: snapshot.id,
-                sourceKind: snapshot.sourceKind,
-                capability: snapshot.capability,
-                provider: snapshot.provider,
-                tierName: snapshot.tierName,
-                priceCents: snapshot.priceCents,
-                capacity: snapshot.capacity,
-                membershipFloor: snapshot.membershipFloor,
-                fulfillment: snapshot.fulfillment as Prisma.InputJsonValue,
-              },
-            });
-          }
+          if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
           return tx.planItem.create({
             data: {
               planId: plan.id,
               needKind: input.needKind,
-              title,
-              capability,
-              partyId,
-              coffeeReservationId,
-              bookableId: snapshot?.id ?? null,
+              title: supply.title,
+              capability: supply.capability,
+              partyId: supply.partyId,
+              coffeeReservationId: supply.coffeeReservationId,
+              bookableId: supply.snapshot?.id ?? null,
             },
           });
         });
@@ -587,6 +607,105 @@ export const planRouter = router({
         // A racing attach of the same reservation to another Plan trips the
         // unique constraint on plan_items.coffee_reservation_id.
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'That reservation is already on another Plan.' });
+        }
+        throw error;
+      }
+    }),
+
+  /**
+   * The booking spine — "every booking is a Plan of one". A lone bookable is
+   * still a Plan: this creates a single-need Plan, seated by the caller, with
+   * the supply already attached, in one transaction — so the rest of the system
+   * (roll-up, recap, Prime Path) only ever reasons about Plans.
+   *
+   * It settles nothing and mints no Pass: the item stays `available` and the
+   * capability is derived, never asserted. Actual settlement remains the
+   * existing per-supply path (B3b flips the item to `booked` and freezes the
+   * snapshot). Supply is required — a solo Plan with nothing behind it would be
+   * an empty Plan, not a booking.
+   */
+  createSolo: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'plan-create-solo' }))
+    .input(
+      z.object({
+        idempotencyKey: z.string().uuid(),
+        needKind: z.string().trim().min(1).max(40),
+        supplyRef: z.object({
+          partyId: z.string().min(1).optional(),
+          coffeeReservationId: z.string().min(1).optional(),
+        }),
+        title: z.string().trim().min(1).max(80).optional(),
+        intent: z.string().trim().min(1).max(280).optional(),
+        areaLabel: z.string().trim().max(80).optional(),
+        partySize: z.number().int().min(1).max(200).optional(),
+        startsAt: z.coerce.date().optional(),
+        endsAt: z.coerce.date().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      if (input.startsAt && input.endsAt && input.endsAt <= input.startsAt) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
+      }
+      const key = { creatorUserId_idempotencyKey: { creatorUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } };
+      const existing = await db.plan.findUnique({ where: key });
+      if (existing) return { id: existing.id };
+
+      const partyId = input.supplyRef.partyId ?? null;
+      const coffeeReservationId = input.supplyRef.coffeeReservationId ?? null;
+      const supply = await resolveSupply(ctx.user.userId, { partyId, coffeeReservationId, title: input.title });
+      if (!supply.partyId && !supply.coffeeReservationId) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'A solo Plan needs one supply.' });
+      }
+
+      // The supply names the Plan when the caller does not, so a solo Plan
+      // cannot claim to be something other than the thing it wraps.
+      const title = input.title ?? supply.title;
+      const intent = input.intent ?? supply.title;
+      const expiresAt = input.startsAt ?? new Date(Date.now() + PROPOSED_PLAN_TTL_MS);
+
+      try {
+        const created = await db.$transaction(async (tx) => {
+          const plan = await tx.plan.create({
+            data: {
+              creatorUserId: ctx.user.userId,
+              idempotencyKey: input.idempotencyKey,
+              title,
+              intent,
+              startsAt: input.startsAt ?? null,
+              endsAt: input.endsAt ?? null,
+              areaLabel: input.areaLabel ?? null,
+              latitude: null,
+              longitude: null,
+              partySize: input.partySize ?? null,
+              joinToken: newJoinToken(),
+              needs: [input.needKind],
+              expiresAt,
+              // The creator is on their own Plan, and is already going.
+              participants: { create: { userId: ctx.user.userId, role: 'creator', status: 'accepted', respondedAt: new Date() } },
+            },
+          });
+          if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
+          await tx.planItem.create({
+            data: {
+              planId: plan.id,
+              needKind: input.needKind,
+              title: supply.title,
+              capability: supply.capability,
+              partyId: supply.partyId,
+              coffeeReservationId: supply.coffeeReservationId,
+              bookableId: supply.snapshot?.id ?? null,
+            },
+          });
+          return { id: plan.id };
+        });
+        return created;
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          // Either our own idempotency replay raced us — return that Plan — or the
+          // supply is already on another Plan, the same wall attach puts up.
+          const concurrent = await db.plan.findUnique({ where: key });
+          if (concurrent) return { id: concurrent.id };
           throw new TRPCError({ code: 'CONFLICT', message: 'That reservation is already on another Plan.' });
         }
         throw error;

@@ -8,7 +8,9 @@ import { router, publicProcedure } from './trpc';
 import { cached, getRedis } from '../lib/redis';
 import { captureError } from '../lib/observability';
 import { config } from '../config';
+import { db } from '../lib/db';
 import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
+import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
 
@@ -199,6 +201,33 @@ export async function cachedWithStale<T>(
 
 const STALE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+/**
+ * Shared Google text-search core. `textSearch` exposes it directly and `find`
+ * uses it to fill a short index page, so both stay on one cache key and one
+ * honest degradation path (none / google / google-stale / unavailable).
+ */
+export async function textSearchCore(
+  query: string,
+  maxResults: number,
+): Promise<{ places: MappedPlace[]; source: 'none' | 'google' | 'google-stale' | 'unavailable' }> {
+  if (!config.googlePlacesApiKey) return { places: [], source: 'none' };
+  const cacheKey = `gp:${CACHE_VERSION}:text:${query.toLowerCase().trim()}:${maxResults}`;
+  try {
+    const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
+      const body = {
+        textQuery: query, maxResultCount: maxResults,
+        locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
+      };
+      const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
+      return (data.places ?? []).map(mapPlace);
+    });
+    return { places, source: stale ? 'google-stale' : 'google' };
+  } catch (err) {
+    captureError(err, { provider: 'google-places', operation: 'textSearch' });
+    return { places: [], source: 'unavailable' };
+  }
+}
+
 export const placesRouter = router({
   nearbySearch: publicProcedure
     .input(z.object({
@@ -243,24 +272,45 @@ export const placesRouter = router({
       query: z.string().min(2).max(200),
       maxResults: z.number().min(1).max(20).optional().default(10),
     }))
+    .query(async ({ input }) => textSearchCore(input.query, input.maxResults)),
+
+  /**
+   * Find — the Home search bar. Index-first: our own discoverable venues lead,
+   * carrying their slug so a tap deep-links into the Bytspot place. An external
+   * provider is consulted only to fill a short page, and a resolved-only place
+   * is locked to DETAILS (no supply, so never Book/Request). `source` reports
+   * where the page came from; `provider` carries the external outcome so an
+   * outage degrades honestly instead of masquerading as an empty index.
+   */
+  find: publicProcedure
+    .input(z.object({
+      query: z.string().min(2).max(200),
+      maxResults: z.number().min(1).max(20).optional().default(10),
+    }))
     .query(async ({ input }) => {
       const { query, maxResults } = input;
-      if (!config.googlePlacesApiKey) return { places: [], source: 'none' as const };
-      const cacheKey = `gp:${CACHE_VERSION}:text:${query.toLowerCase().trim()}:${maxResults}`;
-      try {
-        const { data: places, stale } = await cachedWithStale(cacheKey, 900, async () => {
-          const body = {
-            textQuery: query, maxResultCount: maxResults,
-            locationBias: { circle: { center: { latitude: 33.7756, longitude: -84.3963 }, radius: 10000 } },
-          };
-          const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
-          return (data.places ?? []).map(mapPlace);
-        });
-        return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
-      } catch (err) {
-        captureError(err, { provider: 'google-places', operation: 'textSearch' });
-        return { places: [] as MappedPlace[], source: 'unavailable' as const };
+      const venues = await db.venue.findMany({
+        where: { discoverable: true, name: { contains: query, mode: 'insensitive' } },
+        select: { id: true, name: true, slug: true, googlePlaceId: true, address: true, lat: true, lng: true, category: true, imageUrl: true },
+        orderBy: { name: 'asc' },
+        take: maxResults,
+      });
+      const indexed = venues.map(indexedVenueToFindResult);
+
+      // Reach for external resolution only to fill what the index left empty.
+      let resolved: FindResult[] = [];
+      let provider: Awaited<ReturnType<typeof textSearchCore>>['source'] | null = null;
+      if (indexed.length < maxResults) {
+        const found = await textSearchCore(query, maxResults);
+        provider = found.source;
+        resolved = found.places.map(resolvedPlaceToFindResult);
       }
+
+      const results = mergeFindResults(indexed, resolved, maxResults);
+      const source = indexed.length === 0
+        ? (results.length === 0 ? ('empty' as const) : ('resolved' as const))
+        : (resolved.length === 0 ? ('index' as const) : ('index+resolved' as const));
+      return { results, source, provider };
     }),
 
   details: publicProcedure

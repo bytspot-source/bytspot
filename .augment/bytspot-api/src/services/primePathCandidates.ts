@@ -12,6 +12,7 @@
 //     rather than invented — the ranker treats them as ties.
 
 import type { BookableCapability } from './bookableProjection';
+import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import type { PrimePathCandidate } from './primePath';
 
 export interface PlanItemFacts {
@@ -107,4 +108,80 @@ export function candidatesFromPlan(
     // A details/reference item asserts no supply and is intentionally skipped.
   }
   return candidates;
+}
+
+// ─── B4c: Discovery candidate pool ─────────────────────────────────────────
+// Option B ruling: a published, non-closed, non-paused party is discoverable to
+// any user whose membership tier meets requiredMembershipTier. If the party has
+// non-empty audienceCircleIds, the user must also be a member of at least one.
+
+export interface DiscoverablePartyFacts extends PartyFacts {
+  title: string;
+  accessMode: string;
+  requiredMembershipTier: string;
+  audienceCircleIds: string[];
+  startsAt: Date;
+  latitude: number | null;
+  longitude: number | null;
+}
+
+/** Map a party's accessMode to the capability the user would acquire.
+ *  free/rsvp → request (a hold-ask that settles when the host grants);
+ *  paid-ticket → book (a purchase that settles at checkout). */
+export function capabilityForAccessMode(accessMode: string): BookableCapability {
+  return accessMode === 'paid-ticket' ? 'book' : 'request';
+}
+
+/** Project a discovered party into a PrimePathCandidate. */
+export function discoveredPartyCandidate(
+  party: DiscoverablePartyFacts,
+  granted: number,
+  now: Date,
+): PrimePathCandidate {
+  const seats = Math.max(0, party.capacity - granted);
+  const open = party.status === 'published'
+    && party.closedAt === null
+    && !party.admissionPaused
+    && (party.endsAt === null || now < party.endsAt);
+  return {
+    id: `discovered:${party.id}`,
+    label: party.title,
+    capability: capabilityForAccessMode(party.accessMode),
+    ownInventory: true,
+    seats,
+    minParty: 1,
+    confirmableNow: open && seats > 0,
+    discovered: true,
+    ...NEUTRAL,
+  };
+}
+
+/**
+ * Pure filter: keep only parties the user is eligible to discover.
+ * Excludes parties already attached to the Plan (by partyId).
+ */
+export function filterDiscoverableParties(
+  parties: DiscoverablePartyFacts[],
+  ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string> },
+): DiscoverablePartyFacts[] {
+  return parties.filter((p) => {
+    if (ctx.attachedPartyIds.has(p.id)) return false;
+    if (!meetsRequiredMembershipTier(ctx.userTier, p.requiredMembershipTier)) return false;
+    if (p.audienceCircleIds.length > 0 && !p.audienceCircleIds.some((c) => ctx.userCircleIds.has(c))) return false;
+    return true;
+  });
+}
+
+/**
+ * Full discovery pipeline: filter eligible parties, project each as a
+ * PrimePathCandidate with `discovered: true`.
+ */
+export function candidatesFromDiscovery(
+  parties: DiscoverablePartyFacts[],
+  occupancy: ReadonlyMap<string, number>,
+  ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string> },
+  now: Date,
+): PrimePathCandidate[] {
+  return filterDiscoverableParties(parties, ctx)
+    .map((p) => discoveredPartyCandidate(p, occupancy.get(p.id) ?? 0, now));
 }

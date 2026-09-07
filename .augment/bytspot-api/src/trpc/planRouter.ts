@@ -6,7 +6,7 @@ import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
 import { coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
-import { candidatesFromPlan, type PartyFacts, type PlanItemFacts } from '../services/primePathCandidates';
+import { candidatesFromPlan, candidatesFromDiscovery, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -413,6 +413,67 @@ export const planRouter = router({
       // committed count is the honest floor when partySize is unset.
       const partySize = plan.partySize ?? Math.max(1, readiness.going);
 
+      // ─── B4c: Discovery candidate pool (Option B — membership-gated) ───
+      // Surface published parties the user is eligible for but hasn't attached.
+      // Only when the Plan declares 'nightlife' as a need and has a location.
+      const wantsNightlife = (plan.needs as string[]).includes('nightlife');
+      let discoveredCandidates: import('../services/primePath').PrimePathCandidate[] = [];
+      if (wantsNightlife && plan.latitude != null && plan.longitude != null) {
+        const attachedPartyIds = new Set(partyIds);
+        const BBOX_DELTA = 0.05; // ~3.5 mi
+        const [user, userCircles, discoverableParties] = await Promise.all([
+          db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
+          db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
+          db.party.findMany({
+            where: {
+              status: 'published',
+              closedAt: null,
+              admissionPaused: false,
+              id: { notIn: [...attachedPartyIds] },
+              // Bounding box from Plan location
+              ...(plan.latitude != null && plan.longitude != null ? {
+                arrivalVenue: {
+                  lat: { gte: plan.latitude - BBOX_DELTA, lte: plan.latitude + BBOX_DELTA },
+                  lng: { gte: plan.longitude - BBOX_DELTA, lte: plan.longitude + BBOX_DELTA },
+                },
+              } : {}),
+              // Time overlap: party hasn't ended and starts within 24h of Plan
+              ...(plan.startsAt ? {
+                startsAt: { lte: new Date(plan.startsAt.getTime() + 24 * 60 * 60 * 1000) },
+                OR: [{ endsAt: null }, { endsAt: { gte: now } }],
+              } : {
+                OR: [{ endsAt: null }, { endsAt: { gte: now } }],
+              }),
+            },
+            select: {
+              id: true, title: true, capacity: true, status: true, admissionPaused: true,
+              closedAt: true, endsAt: true, startsAt: true, accessMode: true,
+              requiredMembershipTier: true, audienceCircleIds: true,
+              arrivalVenue: { select: { lat: true, lng: true } },
+            },
+            take: 20,
+          }),
+        ]);
+        // Occupancy for discovered parties only — not the whole system.
+        const discoveredIds = discoverableParties.map((p) => p.id);
+        const discoveryOccupancy = discoveredIds.length > 0
+          ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: discoveredIds }, accessGranted: true }, _count: { _all: true } })
+          : [];
+        const userTier = user?.membershipTier ?? 'green';
+        const userCircleIds = new Set(userCircles.map((m) => m.circleId));
+        const discoveryOccMap = new Map(discoveryOccupancy.map((row) => [row.partyId, row._count._all]));
+        const discoverable: DiscoverablePartyFacts[] = discoverableParties.map((p) => ({
+          id: p.id, title: p.title, capacity: p.capacity, status: p.status,
+          admissionPaused: p.admissionPaused, closedAt: p.closedAt, endsAt: p.endsAt,
+          startsAt: p.startsAt, accessMode: p.accessMode,
+          requiredMembershipTier: p.requiredMembershipTier,
+          audienceCircleIds: p.audienceCircleIds,
+          latitude: p.arrivalVenue?.lat ?? null,
+          longitude: p.arrivalVenue?.lng ?? null,
+        }));
+        discoveredCandidates = candidatesFromDiscovery(discoverable, discoveryOccMap, { userTier, userCircleIds, attachedPartyIds }, now);
+      }
+
       // Rank within each need, preserving item (createdAt) order across needs.
       const byNeed = new Map<string, PlanItemFacts[]>();
       for (const item of live) {
@@ -420,10 +481,17 @@ export const planRouter = router({
         group.push(item as unknown as PlanItemFacts);
         byNeed.set(item.needKind, group);
       }
-      const needs = [...byNeed.entries()].map(([needKind, items]) => ({
-        needKind,
-        ...rankPrimePath(candidatesFromPlan(items, partyMap, occupancyMap, { partySize }, now), { partySize, goingCount: readiness.going }),
-      }));
+      const needs = [...byNeed.entries()].map(([needKind, items]) => {
+        const attached = candidatesFromPlan(items, partyMap, occupancyMap, { partySize }, now);
+        // B4c: merge discovered candidates into the nightlife need.
+        const pool = needKind === 'nightlife' ? [...attached, ...discoveredCandidates] : attached;
+        return { needKind, ...rankPrimePath(pool, { partySize, goingCount: readiness.going }) };
+      });
+      // If the Plan has a nightlife need but no attached nightlife items,
+      // byNeed won't have an entry — surface discovered-only candidates.
+      if (wantsNightlife && !byNeed.has('nightlife') && discoveredCandidates.length > 0) {
+        needs.push({ needKind: 'nightlife', ...rankPrimePath(discoveredCandidates, { partySize, goingCount: readiness.going }) });
+      }
       return { needs };
     }),
 

@@ -61,7 +61,7 @@ type PlanRecord = {
   needs: string[];
 };
 type ParticipantRecord = { status: string };
-type ItemRecord = { needKind: string; status: string; capability?: string; coffeeReservation?: { status: string } | null };
+type ItemRecord = { needKind: string; status: string; capability?: string; partyId?: string | null; coffeeReservation?: { status: string } | null };
 
 /**
  * Booked is derived from the supply, never taken from a stored flag alone: a
@@ -71,13 +71,16 @@ type ItemRecord = { needKind: string; status: string; capability?: string; coffe
  * confirmed. An explicit stored `booked` is still honored so a future
  * settlement write (or the detach guard) has a durable terminal to point at.
  *
- * Party-backed booking derives from the guest's granted access; that needs the
- * settling identity resolved and lands in B3b-2, not here.
+ * Party-backed booking derives from the guest's granted access. The settling
+ * identity is the Plan creator (exactly right for a Plan of one; the reasonable
+ * reading for a shared Plan, whose supply the creator attached), passed in as
+ * the set of that creator's granted partyIds so this stays a pure function.
  */
-export function itemIsBooked(item: ItemRecord): boolean {
+export function itemIsBooked(item: ItemRecord, bookedPartyIds?: ReadonlySet<string>): boolean {
   if (item.status === 'cancelled') return false;
   if (item.capability === 'details') return false;
   if (item.status === 'booked') return true;
+  if (item.partyId && bookedPartyIds?.has(item.partyId)) return true;
   if (item.coffeeReservation?.status === 'confirmed') return true;
   return false;
 }
@@ -91,7 +94,7 @@ export function isProposedPlanExpired(plan: PlanRecord, now: Date): boolean {
  * Booked, active, and completed are never stored. Deriving them is what stops
  * the control plane from claiming something the execution layer never did.
  */
-export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Date): string {
+export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Date, bookedPartyIds?: ReadonlySet<string>): string {
   if (plan.lifecycle === 'cancelled') return 'cancelled';
   if (plan.lifecycle === 'proposed') return isProposedPlanExpired(plan, now) ? 'expired' : 'proposed';
   // A lifecycle the database should not be able to hold is clamped to the
@@ -106,7 +109,7 @@ export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Dat
   // so a details item can never carry the Plan into `booked`; every other live
   // item must be booked, derived from its supply rather than a stored flag.
   const live = items.filter((item) => item.status !== 'cancelled');
-  if (live.length > 0 && live.every((item) => item.capability !== 'details' && itemIsBooked(item))) return 'booked';
+  if (live.length > 0 && live.every((item) => item.capability !== 'details' && itemIsBooked(item, bookedPartyIds))) return 'booked';
   return 'confirmed';
 }
 
@@ -150,7 +153,40 @@ function newJoinToken(): string {
   return randomBytes(24).toString('base64url');
 }
 
-function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string) {
+/**
+ * One query for every party-backed item across the plans being serialized:
+ * which of each plan creator's party guests hold granted access. Keyed
+ * `partyId:userId` so a creator's booking is scoped to that creator and never
+ * leaks another guest's access. No party items → no query.
+ */
+async function grantedPartyKeys(plans: LoadedPlan[], client: TxClient = db): Promise<Set<string>> {
+  const seen = new Set<string>();
+  const pairs: { partyId: string; userId: string }[] = [];
+  for (const plan of plans) {
+    for (const item of plan.items) {
+      if (!item.partyId || item.status === 'cancelled') continue;
+      const key = `${item.partyId}:${plan.creatorUserId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ partyId: item.partyId, userId: plan.creatorUserId });
+    }
+  }
+  if (pairs.length === 0) return new Set();
+  const rows = await client.partyGuest.findMany({ where: { accessGranted: true, OR: pairs }, select: { partyId: true, userId: true } });
+  return new Set(rows.map((row) => `${row.partyId}:${row.userId}`));
+}
+
+/** The creator's granted partyIds on this Plan — the set itemIsBooked reads. */
+function bookedPartyIdsForPlan(plan: LoadedPlan, grantedKeys: ReadonlySet<string>): Set<string> {
+  const ids = new Set<string>();
+  for (const item of plan.items) {
+    if (item.partyId && grantedKeys.has(`${item.partyId}:${plan.creatorUserId}`)) ids.add(item.partyId);
+  }
+  return ids;
+}
+
+function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string, grantedKeys: ReadonlySet<string> = new Set()) {
+  const bookedPartyIds = bookedPartyIdsForPlan(plan, grantedKeys);
   return {
     id: plan.id,
     title: plan.title,
@@ -165,7 +201,7 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string) {
     partySize: plan.partySize,
     needs: plan.needs,
     lifecycle: plan.lifecycle,
-    state: planDisplayState(plan, plan.items, now),
+    state: planDisplayState(plan, plan.items, now, bookedPartyIds),
     readiness: planReadiness(plan.participants),
     openNeeds: openNeeds(plan, plan.items),
     participants: plan.participants.map((p) => ({ userId: p.userId, role: p.role, status: p.status })),
@@ -179,7 +215,7 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string) {
       status: item.status,
       // Booked is derived, never echoed off the stored column, so the client
       // and Prime Path read the same truth the state roll-up does.
-      booked: itemIsBooked(item),
+      booked: itemIsBooked(item, bookedPartyIds),
       // A room item has no reservation summary; the field is always null in
       // that case so the client can key hold-countdown rendering off it.
       reservation: item.coffeeReservation
@@ -341,7 +377,10 @@ export const planRouter = router({
 
   get: protectedProcedure
     .input(z.object({ planId: z.string().min(1) }))
-    .query(async ({ ctx, input }) => serializePlan(await loadPlanForParticipant(input.planId, ctx.user.userId), new Date(), ctx.user.userId)),
+    .query(async ({ ctx, input }) => {
+      const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
+      return serializePlan(plan, new Date(), ctx.user.userId, await grantedPartyKeys([plan]));
+    }),
 
   list: protectedProcedure.query(async ({ ctx }) => {
     const now = new Date();
@@ -351,7 +390,8 @@ export const planRouter = router({
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
-    return { plans: plans.map((plan) => serializePlan(plan, now, ctx.user.userId)) };
+    const granted = await grantedPartyKeys(plans);
+    return { plans: plans.map((plan) => serializePlan(plan, now, ctx.user.userId, granted)) };
   }),
 
   /**
@@ -382,11 +422,15 @@ export const planRouter = router({
           throw planNotFound();
         }
 
+        // Scoped to this one Plan's creator, read on the transaction client so
+        // the returned state matches the row just written.
+        const granted = await grantedPartyKeys([plan], tx);
+
         const seat = plan.participants.find((p) => p.userId === ctx.user.userId);
         if (seat) {
           // A removed guest does not get back in by reusing the link.
           if (seat.status === 'removed') throw planNotFound();
-          return serializePlan(plan, now, ctx.user.userId);
+          return serializePlan(plan, now, ctx.user.userId, granted);
         }
 
         if (plan.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
@@ -412,7 +456,7 @@ export const planRouter = router({
           id: 'pending', planId: plan.id, userId: ctx.user.userId, role: 'guest',
           status: 'invited', respondedAt: null, createdAt: now, updatedAt: now,
         } as LoadedPlan['participants'][number]);
-        return serializePlan(plan, now, ctx.user.userId);
+        return serializePlan(plan, now, ctx.user.userId, granted);
       }, 'Another change to this Plan is in flight. Try again.');
     }),
 
@@ -752,8 +796,11 @@ export const planRouter = router({
         // the read and the write makes the item booked, and a booking is never
         // silently stranded by a detach.
         const freshItem = fresh.items.find((candidate) => candidate.id === item.id);
-        if (freshItem && itemIsBooked(freshItem)) {
-          throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
+        if (freshItem) {
+          const granted = await grantedPartyKeys([fresh], tx);
+          if (itemIsBooked(freshItem, bookedPartyIdsForPlan(fresh, granted))) {
+            throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
+          }
         }
         // Conditional on the stored status too, so an explicit booking written
         // by a concurrent settlement is also never stranded.

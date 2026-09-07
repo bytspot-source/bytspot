@@ -17,6 +17,7 @@ const party = db.party as any;
 const user = db.user as any;
 const coffeeReservation = db.coffeeReservation as any;
 const bookable = db.bookable as any;
+const partyGuest = db.partyGuest as any;
 
 const creatorContext: Context = { user: { userId: 'creator-id', email: 'creator@bytspot.com' }, clientRateLimitKey: 'test-plan-creator' };
 const guestContext: Context = { user: { userId: 'guest-id', email: 'guest@bytspot.com' }, clientRateLimitKey: 'test-plan-guest' };
@@ -69,6 +70,8 @@ beforeEach(() => {
   party.findFirst = async () => null;
   user.findUnique = async () => ({ id: 'guest-id' });
   coffeeReservation.findFirst = async () => null;
+  // No party guest holds granted access unless a test says so.
+  partyGuest.findMany = async () => [];
 });
 
 // ─── Derived state ────────────────────────────────────────────────────────────
@@ -483,6 +486,31 @@ test('A confirmed coffee hold rolls a confirmed Plan into booked without a store
   assert.equal(view.items[0].booked, true);
   // The stored column is untouched: booked was derived, not written.
   assert.equal(view.items[0].status, 'available');
+});
+
+test('A granted party guest rolls the creator\u2019s Plan into booked, scoped to that creator', async () => {
+  const partyPlan = {
+    ...planFixture({ lifecycle: 'confirmed', needs: ['nightlife'] }),
+    items: [{ id: 'item-1', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null }],
+  };
+  plan.findUnique = async () => partyPlan;
+
+  // The creator (creator-id) holds granted access to party-1.
+  let queried: any = null;
+  partyGuest.findMany = async (args: any) => { queried = args; return [{ partyId: 'party-1', userId: 'creator-id' }]; };
+  const view = await caller().plans.get({ planId: 'plan-1' });
+  assert.equal(view.state, 'booked');
+  assert.equal(view.items[0].booked, true);
+  assert.equal(view.items[0].status, 'available');
+  // The lookup is scoped to the creator and to granted access only.
+  assert.equal(queried.where.accessGranted, true);
+  assert.deepEqual(queried.where.OR, [{ partyId: 'party-1', userId: 'creator-id' }]);
+
+  // Another user's granted access to the same party does not book this Plan.
+  partyGuest.findMany = async () => [{ partyId: 'party-1', userId: 'someone-else' }];
+  const stillOpen = await caller().plans.get({ planId: 'plan-1' });
+  assert.equal(stillOpen.state, 'confirmed');
+  assert.equal(stillOpen.items[0].booked, false);
 });
 
 test('detach refuses a derived-booked item, not only a stored one', async () => {

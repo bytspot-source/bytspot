@@ -131,6 +131,11 @@ model Venue {
   lng           Float
   category      String // "bar", "restaurant", "club", "park", "market"
   imageUrl      String?  @map("image_url")
+  // A photograph is an endorsement: only "bytspot_owned" or "party_media"
+  // earns a map pin. "borrowed" is the fail-closed default and stays a dot.
+  // Pin eligibility is derived in venuePhotoProvenance.ts, never stored.
+  photoProvenance  String  @default("borrowed") @map("photo_provenance")
+  photoAttribution String? @map("photo_attribution")
   entryType     String   @default("free") @map("entry_type") // "free" or "paid"
   entryPrice    String?  @map("entry_price") // e.g. "$15", "$25–$50"
   ticketUrl     String?  @map("ticket_url") // external purchase link

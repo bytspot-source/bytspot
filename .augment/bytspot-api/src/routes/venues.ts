@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached } from '../lib/redis';
+import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 
 const router = Router();
 
@@ -33,6 +34,7 @@ router.get('/venues', async (_req, res) => {
       lng: v.lng,
       category: v.category,
       imageUrl: v.imageUrl,
+      ...projectVenuePhoto(v),
       crowd: v.crowdLevels[0]
         ? {
             level: v.crowdLevels[0].level,
@@ -84,10 +86,13 @@ router.get('/venues/nearby', async (req, res) => {
         lng: number;
         category: string;
         image_url: string | null;
+        photo_provenance: string;
+        photo_attribution: string | null;
         distance: number;
       }>
     >(
       `SELECT id, name, slug, address, lat, lng, category, image_url,
+              photo_provenance, photo_attribution,
               ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
        FROM venues
        WHERE location IS NOT NULL
@@ -108,6 +113,11 @@ router.get('/venues/nearby', async (req, res) => {
       lng: r.lng,
       category: r.category,
       imageUrl: r.image_url,
+      ...projectVenuePhoto({
+        photoProvenance: r.photo_provenance,
+        photoAttribution: r.photo_attribution,
+        imageUrl: r.image_url,
+      }),
       distanceMeters: Math.round(r.distance),
     }));
   });
@@ -189,6 +199,7 @@ router.get('/venues/:slug', async (req, res) => {
     lng: venue.lng,
     category: venue.category,
     imageUrl: venue.imageUrl,
+    ...projectVenuePhoto(venue),
     crowd: {
       current: venue.crowdLevels[0] || null,
       history: venue.crowdLevels,

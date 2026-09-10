@@ -45,3 +45,16 @@ test('coffee is a hold-ask: always request, capacity one, reservation confined t
   assert.deepEqual(snap.fulfillment, { coffeeReservationId: 'r-7' });
   assert.ok(!snap.id.includes('r-7'));
 });
+
+test('unreserved coffee uses the same canonical request snapshot without promising capacity', () => {
+  const snap = coffeeToBookableSnapshot({ coffeeSpotId: 'spot-7', title: 'Highland Bakery' });
+  assert.match(snap.id, /^BYT-coffee-/);
+  assert.ok(!snap.id.includes('spot-7'));
+  assert.equal(snap.sourceKind, 'coffee');
+  assert.equal(snap.capability, 'request');
+  assert.equal(snap.capacity, 0);
+  assert.equal(snap.priceCents, 0);
+  assert.equal(snap.membershipFloor, null);
+  assert.deepEqual(snap.fulfillment, { coffeeSpotId: 'spot-7' });
+  assert.notEqual(coffeeToBookableSnapshot({ coffeeSpotId: 'spot-7', title: 'Highland Bakery' }).id, snap.id);
+});

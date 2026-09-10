@@ -1,12 +1,13 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
-import { serializableTransaction } from '../lib/transactions';
-import { coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
+import { serializableTransaction, serializableTransactionWithRetry } from '../lib/transactions';
+import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
+import { capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
-import { candidatesFromPlan, candidatesFromDiscovery, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { candidatesFromPlan, candidatesFromDiscovery, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -38,11 +39,7 @@ const MAX_PLAN_PARTICIPANTS = 50;
  * that only forwards a request is requestable; anything with no room behind it
  * is a reference the user resolves themselves.
  */
-export function capabilityForAccessMode(accessMode: string): 'book' | 'request' | 'details' {
-  if (accessMode === 'free-rsvp' || accessMode === 'paid-ticket') return 'book';
-  if (accessMode === 'private-approval') return 'request';
-  return 'details';
-}
+export { capabilityForAccessMode } from '../services/bookableProjection';
 
 /**
  * Phase 2: the same rule generalized across supply kinds. A coffee
@@ -63,7 +60,7 @@ type PlanRecord = {
   needs: string[];
 };
 type ParticipantRecord = { status: string };
-type ItemRecord = { needKind: string; status: string; capability?: string; partyId?: string | null; coffeeReservation?: { status: string } | null };
+type ItemRecord = { needKind: string; status: string; capability?: string; partyId?: string | null; coffeeSpotId?: string | null; coffeeReservation?: { status: string } | null };
 
 /**
  * Booked is derived from the supply, never taken from a stored flag alone: a
@@ -80,6 +77,7 @@ type ItemRecord = { needKind: string; status: string; capability?: string; party
  */
 export function itemIsBooked(item: ItemRecord, bookedPartyIds?: ReadonlySet<string>): boolean {
   if (item.status === 'cancelled') return false;
+  if (item.coffeeSpotId) return false; // An unreserved selection guarantees nothing.
   if (item.capability === 'details') return false;
   if (item.status === 'booked') return true;
   if (item.partyId && bookedPartyIds?.has(item.partyId)) return true;
@@ -115,9 +113,9 @@ export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Dat
   return 'confirmed';
 }
 
-/** What the Plan is still missing. A need with no live item attached is open. */
+/** Draft coffee references cannot fill a need; legacy attach semantics stay intact. */
 export function openNeeds(plan: PlanRecord, items: ItemRecord[]): string[] {
-  const filled = new Set(items.filter((item) => item.status !== 'cancelled').map((item) => item.needKind));
+  const filled = new Set(items.filter((item) => item.status !== 'cancelled' && (!item.coffeeSpotId || itemIsBooked(item))).map((item) => item.needKind));
   return plan.needs.filter((need) => !filled.has(need));
 }
 
@@ -144,7 +142,7 @@ const planInclude = {
   // server-side, and the reservation summary is null for room-backed items.
   items: {
     orderBy: { createdAt: 'asc' },
-    include: { coffeeReservation: { select: { holdExpiresAt: true, status: true } } },
+    include: { coffeeReservation: { select: { holdExpiresAt: true, status: true, coffeeSpotId: true } } },
   },
 } satisfies Prisma.PlanInclude;
 
@@ -155,27 +153,38 @@ function newJoinToken(): string {
   return randomBytes(24).toString('base64url');
 }
 
-/**
- * One query for every party-backed item across the plans being serialized:
- * which of each plan creator's party guests hold granted access. Keyed
- * `partyId:userId` so a creator's booking is scoped to that creator and never
- * leaks another guest's access. No party items → no query.
+type PartyBookingFacts = { granted: ReadonlySet<string>; deletionBlocked: ReadonlySet<string> };
+
+/** Creator-scoped supply facts only, never guest credentials or checkout URLs.
+ * Include cancelled items: stale item status cannot hide live fulfillment.
  */
-async function grantedPartyKeys(plans: LoadedPlan[], client: TxClient = db): Promise<Set<string>> {
+async function partyBookingFacts(plans: LoadedPlan[], client: TxClient = db): Promise<PartyBookingFacts> {
   const seen = new Set<string>();
   const pairs: { partyId: string; userId: string }[] = [];
   for (const plan of plans) {
     for (const item of plan.items) {
-      if (!item.partyId || item.status === 'cancelled') continue;
+      if (!item.partyId) continue;
       const key = `${item.partyId}:${plan.creatorUserId}`;
       if (seen.has(key)) continue;
       seen.add(key);
       pairs.push({ partyId: item.partyId, userId: plan.creatorUserId });
     }
   }
-  if (pairs.length === 0) return new Set();
-  const rows = await client.partyGuest.findMany({ where: { accessGranted: true, OR: pairs }, select: { partyId: true, userId: true } });
-  return new Set(rows.map((row) => `${row.partyId}:${row.userId}`));
+  const granted = new Set<string>();
+  const deletionBlocked = new Set<string>();
+  if (pairs.length === 0) return { granted, deletionBlocked };
+  const rows = await client.partyGuest.findMany({
+    where: { OR: pairs },
+    select: { partyId: true, userId: true, accessGranted: true, status: true },
+  });
+  for (const row of rows) {
+    const key = `${row.partyId}:${row.userId}`;
+    if (row.accessGranted) granted.add(key);
+    // Checkout-pending is the existing durable payment-in-flight marker.
+    // Do not expire it here or invoke payment/release paths to resolve it.
+    if (row.accessGranted || row.status === 'confirmed' || row.status === 'checkout-pending') deletionBlocked.add(key);
+  }
+  return { granted, deletionBlocked };
 }
 
 /** The creator's granted partyIds on this Plan — the set itemIsBooked reads. */
@@ -187,13 +196,27 @@ function bookedPartyIdsForPlan(plan: LoadedPlan, grantedKeys: ReadonlySet<string
   return ids;
 }
 
-function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string, grantedKeys: ReadonlySet<string> = new Set()) {
-  const bookedPartyIds = bookedPartyIdsForPlan(plan, grantedKeys);
+/** More conservative than display booked: pending holds and stale/cancelled
+ * items still protect real supply. Bare references and selections do not.
+ */
+function planHasProtectedSupply(plan: LoadedPlan, facts: PartyBookingFacts): boolean {
+  return plan.items.some((item) =>
+    item.coffeeReservation?.status === 'pending'
+    || item.coffeeReservation?.status === 'confirmed'
+    || Boolean(item.partyId && facts.deletionBlocked.has(`${item.partyId}:${plan.creatorUserId}`))
+    || itemIsBooked(item)
+    || (item.status === 'held' && Boolean(item.partyId || item.coffeeReservationId)));
+}
+
+function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
+  facts: PartyBookingFacts = { granted: new Set(), deletionBlocked: new Set() }) {
+  const bookedPartyIds = bookedPartyIdsForPlan(plan, facts.granted);
   return {
     id: plan.id,
     title: plan.title,
     intent: plan.intent,
     creatorUserId: plan.creatorUserId,
+    canDelete: !plan.deletedAt && plan.creatorUserId === viewerUserId && !planHasProtectedSupply(plan, facts),
     // The join link is a bearer secret, so only the creator is handed it; a
     // guest sees the Plan but cannot silently reshare a seat to it.
     joinToken: plan.creatorUserId === viewerUserId ? plan.joinToken : undefined,
@@ -213,6 +236,8 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string, grante
       title: item.title,
       partyId: item.partyId,
       coffeeReservationId: item.coffeeReservationId,
+      coffeeSpotId: item.coffeeSpotId ?? undefined,
+      selectionKey: item.selectionKey ?? undefined,
       capability: item.capability,
       status: item.status,
       // Booked is derived, never echoed off the stored column, so the client
@@ -230,6 +255,14 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string, grante
 /** A Plan is indistinguishable from a deleted one to anyone not on it. */
 const planNotFound = () => new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
+/** Keep the original unique key occupied; an ambiguous create retry must not
+ * return a usable deleted Plan or recreate it under a new identity.
+ */
+function existingPlanResult(plan: { id: string; deletedAt: Date | null }) {
+  if (plan.deletedAt) throw new TRPCError({ code: 'CONFLICT', message: 'This Plan was deleted. Use a new idempotency key for a new Plan.' });
+  return { id: plan.id };
+}
+
 type TxClient = Prisma.TransactionClient | typeof db;
 
 /**
@@ -238,7 +271,7 @@ type TxClient = Prisma.TransactionClient | typeof db;
  */
 async function loadPlanForParticipant(planId: string, userId: string, tx: TxClient = db): Promise<LoadedPlan> {
   const plan = await tx.plan.findUnique({ where: { id: planId }, include: planInclude });
-  if (!plan) throw planNotFound();
+  if (!plan || plan.deletedAt) throw planNotFound();
   const seat = plan.participants.find((p) => p.userId === userId);
   if (!seat || seat.status === 'removed') throw planNotFound();
   return plan;
@@ -246,12 +279,13 @@ async function loadPlanForParticipant(planId: string, userId: string, tx: TxClie
 
 async function loadPlanForCreator(planId: string, userId: string, tx: TxClient = db): Promise<LoadedPlan> {
   const plan = await tx.plan.findUnique({ where: { id: planId }, include: planInclude });
-  if (!plan || plan.creatorUserId !== userId) throw planNotFound();
+  if (!plan || plan.deletedAt || plan.creatorUserId !== userId) throw planNotFound();
   return plan;
 }
 
 /** The creator may only reshape a Plan that is still going somewhere. */
 function assertPlanMutable(plan: LoadedPlan, now: Date) {
+  if (plan.deletedAt) throw planNotFound();
   if (plan.lifecycle === 'cancelled') throw new TRPCError({ code: 'CONFLICT', message: 'This Plan was cancelled.' });
   if (isProposedPlanExpired(plan, now)) throw new TRPCError({ code: 'CONFLICT', message: 'This Plan expired.' });
 }
@@ -263,12 +297,15 @@ function assertPlanMutable(plan: LoadedPlan, now: Date) {
 async function resolveSupply(
   userId: string,
   input: { partyId: string | null; coffeeReservationId: string | null; title?: string },
+  client: TxClient = db,
 ): Promise<{
   capability: 'book' | 'request' | 'details';
   title: string;
   snapshot: BookableSnapshot | null;
   partyId: string | null;
   coffeeReservationId: string | null;
+  reservationCoffeeSpotId: string | null;
+  attachedItem: { id: string; planId: string } | null;
 }> {
   const { partyId, coffeeReservationId } = input;
   if (partyId && coffeeReservationId) {
@@ -278,9 +315,11 @@ async function resolveSupply(
   let capability: 'book' | 'request' | 'details' = 'details';
   let title = input.title;
   let snapshot: BookableSnapshot | null = null;
+  let reservationCoffeeSpotId: string | null = null;
+  let attachedItem: { id: string; planId: string } | null = null;
 
   if (partyId) {
-    const party = await db.party.findFirst({
+    const party = await client.party.findFirst({
       where: { id: partyId, status: 'published' },
       select: { id: true, title: true, accessMode: true, requiredMembershipTier: true },
     });
@@ -290,20 +329,24 @@ async function resolveSupply(
     title = party.title;
     snapshot = partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier });
   } else if (coffeeReservationId) {
-    const reservation = await db.coffeeReservation.findFirst({
-      where: { id: coffeeReservationId, requestedByUserId: userId, status: { in: ['pending', 'confirmed'] as const } },
-      select: { id: true, spot: { select: { name: true } } },
+    const reservation = await client.coffeeReservation.findFirst({
+      where: { id: coffeeReservationId, requestedByUserId: userId, spot: { active: true },
+        OR: [{ status: 'confirmed' }, { status: 'pending', holdExpiresAt: { gt: new Date() } }] },
+      select: { id: true, coffeeSpotId: true, spot: { select: { name: true } },
+        planItem: { select: { id: true, planId: true } } },
     });
     // Not-yours and not-found read the same, mirroring the party rule so one
     // caller cannot enumerate another caller's reservations.
     if (!reservation) throw new TRPCError({ code: 'NOT_FOUND', message: 'That coffee reservation could not be found.' });
+    reservationCoffeeSpotId = reservation.coffeeSpotId;
+    attachedItem = reservation.planItem ?? null;
     capability = capabilityForSupply({ reservation });
     title = reservation.spot.name;
     snapshot = coffeeToBookableSnapshot({ coffeeReservationId: reservation.id, title: reservation.spot.name });
   }
 
   if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
-  return { capability, title, snapshot, partyId, coffeeReservationId };
+  return { capability, title, snapshot, partyId, coffeeReservationId, reservationCoffeeSpotId, attachedItem };
 }
 
 // The Bookable snapshot as Prisma create data — one mapping, so attach and
@@ -322,30 +365,244 @@ function bookableCreateData(snapshot: BookableSnapshot) {
   };
 }
 
+const createPlanInput = z.object({
+  idempotencyKey: z.string().uuid(),
+  title: z.string().trim().min(1).max(80),
+  intent: z.string().trim().min(1).max(280),
+  startsAt: z.coerce.date().optional(),
+  endsAt: z.coerce.date().optional(),
+  areaLabel: z.string().trim().max(80).optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  partySize: z.number().int().min(1).max(200).optional(),
+  needs: z.array(z.string().trim().min(1).max(40)).max(12).default([]),
+});
+const bookableSelectionsInput = z.array(z.object({
+  sourceKind: z.enum(['coffeeSpot', 'party']),
+  sourceId: z.string().trim().min(1).max(128),
+}).strict()).max(12).refine(
+  (selections) => new Set(selections.map((s) => `${s.sourceKind}:${s.sourceId}`)).size === selections.length,
+  'An offering may be selected only once.',
+);
+type BookableSelection = z.infer<typeof bookableSelectionsInput>[number];
+const selectionKeyFor = (selection: BookableSelection) => `${selection.sourceKind}:${selection.sourceId}`;
+
+const BOOKABLE_CATEGORIES = ['coffee', 'events', 'nightlife', 'dining', 'wellness', 'fitness', 'automotive', 'stay', 'stall', 'green', 'shopping'] as const;
+type BookableCategory = typeof BOOKABLE_CATEGORIES[number];
+
+/** Host Studio's printer is not its category. Type refines broad costumes
+ * (outdoor yoga vs fitness vs hike); untagged/unknown public rooms are events. */
+export function categoryForParty(config: Prisma.JsonValue): BookableCategory {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return 'events';
+  const type = typeof config.hostType === 'string' ? config.hostType : '';
+  const category = typeof config.hostCategory === 'string' ? config.hostCategory : '';
+  const types: Record<string, BookableCategory> = {
+    afrobeats: 'nightlife', club: 'nightlife', lounge: 'nightlife', 'after-hours': 'nightlife',
+    dinner: 'dining', brunch: 'dining', 'pop-up-table': 'dining',
+    cruise: 'automotive', 'garage-meet': 'automotive', yoga: 'wellness',
+    fitness: 'fitness', hike: 'green', market: 'shopping',
+  };
+  if (Object.prototype.hasOwnProperty.call(types, type)) return types[type];
+  if ((BOOKABLE_CATEGORIES as readonly string[]).includes(category)) return category as BookableCategory;
+  if (category === 'food-drink') return 'dining';
+  if (category === 'cars') return 'automotive';
+  if (category === 'outdoor') return 'green';
+  return 'events';
+}
+
+/** Hash exactly the persisted intent, not property insertion order, generated
+ * dates/ids, or an optional field's presence. Selections and needs are sets. */
+function normalizedPlanPayload(input: z.infer<typeof createPlanInput>) {
+  return {
+    title: input.title, intent: input.intent,
+    startsAt: input.startsAt ?? null, endsAt: input.endsAt ?? null,
+    areaLabel: input.areaLabel ?? null, latitude: input.latitude ?? null,
+    longitude: input.longitude ?? null, partySize: input.partySize ?? null,
+    needs: [...new Set(input.needs)].sort(),
+  };
+}
+
+/** Public inventory only. This is deliberately stricter than circle discovery:
+ * no private-approval, invite-only, protected location, or circle-only rooms.
+ * Reuse Prime Path's membership/audience check, and its published/open/time
+ * gates. With no Plan location/date in this contract there is no bbox/overlap.
+ * A missing end uses the existing party share-link six-hour expiry policy.
+ */
+async function publicBookableParties(client: TxClient, userId: string, now: Date, ids?: string[]) {
+  const user = await client.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
+  const userTier = user?.membershipTier ?? '';
+  const allowedTiers = Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(userTier, tier));
+  const parties = await client.party.findMany({
+    where: {
+      ...(ids ? { id: { in: ids } } : {}),
+      status: 'published', closedAt: null, admissionPaused: false,
+      accessMode: { in: ['free-rsvp', 'paid-ticket'] },
+      templateId: { not: 'private-party' }, locationDisclosure: 'public',
+      audienceCircleIds: { isEmpty: true },
+      requiredMembershipTier: { in: allowedTiers },
+      AND: [
+        { OR: [{ endsAt: { gt: now } }, { endsAt: null, startsAt: { gt: new Date(now.getTime() - 6 * 60 * 60 * 1000) } }] },
+        { OR: [{ shareLinkExpiresAt: null }, { shareLinkExpiresAt: { gt: now } }] },
+      ],
+    },
+    select: {
+      id: true, title: true, capacity: true, status: true, admissionPaused: true,
+      closedAt: true, endsAt: true, startsAt: true, accessMode: true,
+      requiredMembershipTier: true, audienceCircleIds: true,
+      templateId: true, templateConfig: true, locationDisclosure: true, shareLinkExpiresAt: true,
+    },
+    orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], take: ids ? 12 : 50,
+  });
+  // Defense in depth: all eligibility facts must survive the shared pure gate.
+  const publicParties = parties.filter((party) =>
+    party.status === 'published' && party.closedAt === null && !party.admissionPaused
+    && ['free-rsvp', 'paid-ticket'].includes(party.accessMode)
+    && party.templateId !== 'private-party' && party.locationDisclosure === 'public'
+    && party.audienceCircleIds.length === 0
+    && now < (party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000))
+    && (party.shareLinkExpiresAt === null || now < party.shareLinkExpiresAt));
+  const eligibleIds = new Set(filterDiscoverableParties(publicParties.map((party) => ({ ...party, latitude: null, longitude: null })), {
+    userTier, userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(),
+  }).map((party) => party.id));
+  return publicParties.filter((party) => eligibleIds.has(party.id));
+}
+
+/** Resolve every identity before writing anything, on the transaction client.
+ * Never invoke reservation, RSVP, checkout, or payment paths here.
+ */
+async function resolveBookableSelections(client: TxClient, userId: string, selections: BookableSelection[], now: Date) {
+  const coffeeIds = selections.filter((s) => s.sourceKind === 'coffeeSpot').map((s) => s.sourceId);
+  const partyIds = selections.filter((s) => s.sourceKind === 'party').map((s) => s.sourceId);
+  const [spots, parties] = await Promise.all([
+    coffeeIds.length ? client.coffeeSpot.findMany({ where: { id: { in: coffeeIds }, active: true }, select: { id: true, name: true, active: true }, take: 12 }) : [],
+    partyIds.length ? publicBookableParties(client, userId, now, partyIds) : [],
+  ]);
+  return selections.map((selection) => {
+    const selectionKey = selectionKeyFor(selection);
+    if (selection.sourceKind === 'coffeeSpot') {
+      const spot = spots.find((s) => s.id === selection.sourceId && s.active);
+      if (!spot) throw new TRPCError({ code: 'NOT_FOUND', message: 'That offering is not available.' });
+      return { selectionKey, needKind: 'coffee', title: spot.name, capability: 'request' as const,
+        coffeeSpotId: spot.id, partyId: null,
+        snapshot: coffeeToBookableSnapshot({ coffeeSpotId: spot.id, title: spot.name }) };
+    }
+    const party = parties.find((p) => p.id === selection.sourceId);
+    if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That offering is not available.' });
+    const capability = capabilityForSupply({ party });
+    return { selectionKey, needKind: categoryForParty(party.templateConfig), title: party.title, capability,
+      coffeeSpotId: null, partyId: party.id,
+      snapshot: partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier }) };
+  });
+}
+
+async function insertBookableSelections(client: TxClient, planId: string,
+  supplies: Awaited<ReturnType<typeof resolveBookableSelections>>,
+  existing: LoadedPlan['items'] = []) {
+  const ids: string[] = [];
+  for (const { snapshot, ...supply } of supplies) {
+    // Include pre-picker attaches: a NULL/old selection key must not cause a
+    // second item for the same party or already-linked coffee spot.
+    const matches = existing.filter((item) => item.selectionKey === supply.selectionKey
+      || (supply.partyId !== null && item.partyId === supply.partyId)
+      || (supply.coffeeSpotId !== null && (item.coffeeSpotId === supply.coffeeSpotId
+        || item.coffeeReservation?.coffeeSpotId === supply.coffeeSpotId)));
+    if (matches.length > 1) throw new TRPCError({ code: 'CONFLICT', message: 'This offering has multiple existing items. Resolve them before adding it.' });
+    const previous = matches[0];
+    // Keep cancelled history too: a delayed retry must never revive a detach.
+    if (previous) { ids.push(previous.id); continue; }
+    await client.bookable.create({ data: bookableCreateData(snapshot) });
+    const item = await client.planItem.create({ data: {
+      planId, ...supply, bookableId: snapshot.id, status: 'available',
+    } });
+    ids.push(item.id);
+  }
+  return { ids };
+}
+
 export const planRouter = router({
+  bookables: protectedProcedure
+    // Accept catalog/native category strings without treating templates as stock.
+    // Categories without a real supply adapter (including unknown ones) are empty.
+    .input(z.object({ category: z.string() }))
+    .query(async ({ ctx, input }) => {
+      if (input.category === 'coffee') {
+        const spots = await db.coffeeSpot.findMany({ where: { active: true },
+          select: { id: true, name: true, areaLabel: true, active: true },
+          orderBy: [{ name: 'asc' }, { id: 'asc' }], take: 50 });
+        return { offerings: spots.filter((spot) => spot.active).map((spot) => ({ id: `coffeeSpot:${spot.id}`, sourceKind: 'coffeeSpot' as const,
+          sourceId: spot.id, category: 'coffee', title: spot.name, subtitle: spot.areaLabel ?? undefined,
+          capability: 'request' as const })) };
+      }
+      if ((BOOKABLE_CATEGORIES as readonly string[]).includes(input.category)) {
+        const parties = await publicBookableParties(db, ctx.user.userId, new Date());
+        // Events is the all-public-ROOM umbrella, at any hour, not a synonym
+        // for nightlife. Each row still carries its actual canonical category.
+        return { offerings: parties.filter((party) => input.category === 'events' || categoryForParty(party.templateConfig) === input.category)
+          .map((party) => ({ id: `party:${party.id}`, sourceKind: 'party' as const,
+            sourceId: party.id, category: categoryForParty(party.templateConfig), title: party.title,
+            capability: capabilityForSupply({ party }) })) };
+      }
+      return { offerings: [] };
+    }),
+
+  createWithBookables: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'plan-create' }))
+    .input(createPlanInput.extend({ bookableSelections: bookableSelectionsInput }).strict())
+    .mutation(async ({ ctx, input }) => {
+      if (input.startsAt && input.endsAt && input.endsAt <= input.startsAt) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
+      }
+      const { bookableSelections } = input;
+      const planInput = normalizedPlanPayload(input);
+      const bookableCreationHash = createHash('sha256').update(JSON.stringify({
+        version: 1, ...planInput,
+        bookableSelections: bookableSelections.map(selectionKeyFor).sort(),
+      })).digest('hex');
+      return serializableTransactionWithRetry(async (tx) => {
+        const existing = await tx.plan.findUnique({ where: { creatorUserId_idempotencyKey: {
+          creatorUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey,
+        } } });
+        if (existing) {
+          const result = existingPlanResult(existing);
+          if (existing.bookableCreationHash !== bookableCreationHash) {
+            throw new TRPCError({ code: 'CONFLICT', message: 'This idempotency key was used for a different Plan request.' });
+          }
+          // Legacy keys have no comparable payload: conflict rather than
+          // silently discarding selections. Matching retries write nothing.
+          return result;
+        }
+        const supplies = await resolveBookableSelections(tx, ctx.user.userId, bookableSelections, new Date());
+        const plan = await tx.plan.create({ data: {
+          ...planInput, idempotencyKey: input.idempotencyKey, creatorUserId: ctx.user.userId,
+          bookableCreationHash, joinToken: newJoinToken(),
+          expiresAt: input.startsAt ?? new Date(Date.now() + PROPOSED_PLAN_TTL_MS),
+          participants: { create: { userId: ctx.user.userId, role: 'creator', status: 'accepted', respondedAt: new Date() } },
+        } });
+        await insertBookableSelections(tx, plan.id, supplies);
+        return { id: plan.id };
+      }, 'Another change to this Plan is in flight. Retry with the same idempotency key.');
+    }),
+
+  addBookables: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-add-bookables' }))
+    .input(z.object({ planId: z.string().min(1), bookableSelections: bookableSelectionsInput }).strict())
+    .mutation(async ({ ctx, input }) => serializableTransactionWithRetry(async (tx) => {
+      const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
+      assertPlanMutable(plan, new Date());
+      const supplies = await resolveBookableSelections(tx, ctx.user.userId, input.bookableSelections, new Date());
+      return insertBookableSelections(tx, plan.id, supplies, plan.items);
+    }, 'Another change to this Plan is in flight. Retry the same selections.')),
+
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'plan-create' }))
-    .input(
-      z.object({
-        idempotencyKey: z.string().uuid(),
-        title: z.string().trim().min(1).max(80),
-        intent: z.string().trim().min(1).max(280),
-        startsAt: z.coerce.date().optional(),
-        endsAt: z.coerce.date().optional(),
-        areaLabel: z.string().trim().max(80).optional(),
-        latitude: z.number().min(-90).max(90).optional(),
-        longitude: z.number().min(-180).max(180).optional(),
-        partySize: z.number().int().min(1).max(200).optional(),
-        needs: z.array(z.string().trim().min(1).max(40)).max(12).default([]),
-      }),
-    )
+    .input(createPlanInput)
     .mutation(async ({ ctx, input }) => {
       if (input.startsAt && input.endsAt && input.endsAt <= input.startsAt) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
       }
       const key = { creatorUserId_idempotencyKey: { creatorUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } };
       const existing = await db.plan.findUnique({ where: key });
-      if (existing) return { id: existing.id };
+      if (existing) return existingPlanResult(existing);
 
       const expiresAt = input.startsAt ?? new Date(Date.now() + PROPOSED_PLAN_TTL_MS);
       try {
@@ -372,7 +629,7 @@ export const planRouter = router({
       } catch (error) {
         if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
         const concurrent = await db.plan.findUnique({ where: key });
-        if (concurrent) return { id: concurrent.id };
+        if (concurrent) return existingPlanResult(concurrent);
         throw error;
       }
     }),
@@ -381,7 +638,7 @@ export const planRouter = router({
     .input(z.object({ planId: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
-      return serializePlan(plan, new Date(), ctx.user.userId, await grantedPartyKeys([plan]));
+      return serializePlan(plan, new Date(), ctx.user.userId, await partyBookingFacts([plan]));
     }),
 
   /**
@@ -498,13 +755,14 @@ export const planRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const now = new Date();
     const plans = await db.plan.findMany({
-      where: { participants: { some: { userId: ctx.user.userId, status: { not: 'removed' } } } },
+      where: { deletedAt: null, participants: { some: { userId: ctx.user.userId, status: { not: 'removed' } } } },
       include: planInclude,
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
-    const granted = await grantedPartyKeys(plans);
-    return { plans: plans.map((plan) => serializePlan(plan, now, ctx.user.userId, granted)) };
+    const visible = plans.filter((plan) => !plan.deletedAt);
+    const facts = await partyBookingFacts(visible);
+    return { plans: visible.map((plan) => serializePlan(plan, now, ctx.user.userId, facts)) };
   }),
 
   /**
@@ -528,6 +786,7 @@ export const planRouter = router({
         // existed — the same wall a non-participant hits everywhere else.
         if (
           !plan ||
+          plan.deletedAt ||
           plan.lifecycle === 'cancelled' ||
           isProposedPlanExpired(plan, now) ||
           (plan.lifecycle === 'confirmed' && plan.endsAt && now >= plan.endsAt)
@@ -537,7 +796,7 @@ export const planRouter = router({
 
         // Scoped to this one Plan's creator, read on the transaction client so
         // the returned state matches the row just written.
-        const granted = await grantedPartyKeys([plan], tx);
+        const granted = await partyBookingFacts([plan], tx);
 
         const seat = plan.participants.find((p) => p.userId === ctx.user.userId);
         if (seat) {
@@ -573,6 +832,26 @@ export const planRouter = router({
       }, 'Another change to this Plan is in flight. Try again.');
     }),
 
+  /** Soft removal only: retain all supply/history and the create key. Never
+   * release a hold, cancel fulfillment, or call a payment/refund path here.
+   */
+  delete: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'plan-delete' }))
+    .input(z.object({ planId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => serializableTransactionWithRetry(async (tx) => {
+      // Do not use the normal loader: only this endpoint may see a tombstone,
+      // and only its creator may receive an idempotent success for it.
+      const plan = await tx.plan.findUnique({ where: { id: input.planId }, include: planInclude });
+      if (!plan || plan.creatorUserId !== ctx.user.userId) throw planNotFound();
+      if (plan.deletedAt) return { deleted: true as const };
+      const facts = await partyBookingFacts([plan], tx);
+      if (planHasProtectedSupply(plan, facts)) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Plan has a booking or pending hold and cannot be deleted.' });
+      }
+      await tx.plan.update({ where: { id: plan.id }, data: { deletedAt: new Date() } });
+      return { deleted: true as const };
+    }, 'Another change to this Plan is in flight. Try again.')),
+
   /** Only the creator confirms, and only their own decision is recorded. */
   confirm: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'plan-confirm' }))
@@ -585,12 +864,13 @@ export const planRouter = router({
       // Conditioned on the row still being proposed, so a cancel that lands
       // between the read and the write cannot be overwritten here.
       const confirmed = await db.plan.updateMany({
-        where: { id: plan.id, lifecycle: 'proposed' },
+        where: { id: plan.id, deletedAt: null, lifecycle: 'proposed' },
         data: { lifecycle: 'confirmed', confirmedAt: now, expiresAt: null },
       });
       if (confirmed.count === 0) {
-        const current = await db.plan.findUnique({ where: { id: plan.id }, select: { lifecycle: true } });
-        if (current?.lifecycle === 'confirmed') return { id: plan.id, lifecycle: 'confirmed' };
+        const current = await db.plan.findUnique({ where: { id: plan.id }, select: { lifecycle: true, deletedAt: true } });
+        if (!current || current.deletedAt) throw planNotFound();
+        if (current.lifecycle === 'confirmed') return { id: plan.id, lifecycle: 'confirmed' };
         throw new TRPCError({ code: 'CONFLICT', message: 'This Plan was cancelled.' });
       }
       return { id: plan.id, lifecycle: 'confirmed' };
@@ -603,10 +883,11 @@ export const planRouter = router({
     .mutation(async ({ ctx, input }) => {
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
       if (plan.lifecycle === 'cancelled') return { id: plan.id, lifecycle: plan.lifecycle };
-      await db.plan.updateMany({
-        where: { id: plan.id, lifecycle: { not: 'cancelled' } },
+      const cancelled = await db.plan.updateMany({
+        where: { id: plan.id, deletedAt: null, lifecycle: { not: 'cancelled' } },
         data: { lifecycle: 'cancelled', cancelledAt: new Date() },
       });
+      if (cancelled.count === 0) await loadPlanForCreator(plan.id, ctx.user.userId);
       return { id: plan.id, lifecycle: 'cancelled' };
     }),
 
@@ -726,7 +1007,8 @@ export const planRouter = router({
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
       assertPlanMutable(plan, now);
       const needs = [...new Set(input.needs)];
-      await db.plan.update({ where: { id: plan.id }, data: { needs } });
+      const updated = await db.plan.updateMany({ where: { id: plan.id, deletedAt: null }, data: { needs } });
+      if (updated.count === 0) throw planNotFound();
       return { needs, openNeeds: openNeeds({ ...plan, needs }, plan.items) };
     }),
 
@@ -755,43 +1037,63 @@ export const planRouter = router({
           .optional(),
       }),
     )
-    .mutation(async ({ ctx, input }) => {
-      const now = new Date();
-      const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
-      assertPlanMutable(plan, now);
-
+    .mutation(async ({ ctx, input }) => serializableTransactionWithRetry(async (tx) => {
+      const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
+      assertPlanMutable(plan, new Date());
+      if (input.partyId && input.supplyRef?.partyId && input.partyId !== input.supplyRef.partyId) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Conflicting room references.' });
+      }
       const partyId = input.supplyRef?.partyId ?? input.partyId ?? null;
       const coffeeReservationId = input.supplyRef?.coffeeReservationId ?? null;
-      const supply = await resolveSupply(ctx.user.userId, { partyId, coffeeReservationId, title: input.title });
-
-      try {
-        // The snapshot and the item are written together: the item never points
-        // at a handle that was not persisted, and a reference item (no supply)
-        // writes no handle at all.
-        const item = await db.$transaction(async (tx) => {
-          if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
-          return tx.planItem.create({
-            data: {
-              planId: plan.id,
-              needKind: input.needKind,
-              title: supply.title,
-              capability: supply.capability,
-              partyId: supply.partyId,
-              coffeeReservationId: supply.coffeeReservationId,
-              bookableId: supply.snapshot?.id ?? null,
-            },
-          });
-        });
-        return { id: item.id, capability: item.capability, status: item.status };
-      } catch (error) {
-        // A racing attach of the same reservation to another Plan trips the
-        // unique constraint on plan_items.coffee_reservation_id.
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-          throw new TRPCError({ code: 'CONFLICT', message: 'That reservation is already on another Plan.' });
-        }
-        throw error;
+      // Revalidate ownership, live reservation and supply on every attempt.
+      const supply = await resolveSupply(ctx.user.userId, { partyId, coffeeReservationId, title: input.title }, tx);
+      if (supply.attachedItem && supply.attachedItem.planId !== plan.id) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'That reservation is already on another Plan.' });
       }
-    }),
+      const selectionKey = supply.reservationCoffeeSpotId
+        ? `coffeeSpot:${supply.reservationCoffeeSpotId}` : partyId ? `party:${partyId}` : null;
+      const matches = plan.items.filter((item) =>
+        (coffeeReservationId !== null && item.coffeeReservationId === coffeeReservationId)
+        || (partyId !== null && item.partyId === partyId)
+        || (selectionKey !== null && item.selectionKey === selectionKey)
+        || (supply.reservationCoffeeSpotId != null && (item.coffeeSpotId === supply.reservationCoffeeSpotId
+          || item.coffeeReservation?.coffeeSpotId === supply.reservationCoffeeSpotId)));
+      if (matches.length > 1) throw new TRPCError({ code: 'CONFLICT', message: 'This offering has multiple existing items.' });
+      const previous = matches[0];
+      if (previous) {
+        // Exact retries return history unchanged, including cancelled rows.
+        if ((coffeeReservationId && previous.coffeeReservationId === coffeeReservationId)
+          || (partyId && previous.partyId === partyId)) {
+          return { id: previous.id, capability: previous.capability, status: previous.status };
+        }
+        if (previous.status === 'cancelled' || previous.status === 'booked' || previous.coffeeReservationId
+          || !previous.coffeeSpotId || previous.coffeeSpotId !== supply.reservationCoffeeSpotId || !supply.snapshot) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This selection can no longer be upgraded.' });
+        }
+        // Keep the canonical BYT handle and item identity. This is the existing
+        // coffee projection acquiring fulfillment, not a second booking engine.
+        let bookableId = previous.bookableId;
+        if (bookableId) {
+          const { id: _id, ...snapshotData } = bookableCreateData(supply.snapshot);
+          await tx.bookable.update({ where: { id: bookableId }, data: { ...snapshotData, snapshotAt: new Date() } });
+        } else {
+          bookableId = supply.snapshot.id;
+          await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
+        }
+        const item = await tx.planItem.update({ where: { id: previous.id }, data: {
+          coffeeSpotId: null, coffeeReservationId, bookableId, selectionKey,
+          title: supply.title, capability: supply.capability,
+        } });
+        return { id: item.id, capability: item.capability, status: item.status };
+      }
+      if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
+      const item = await tx.planItem.create({ data: {
+        planId: plan.id, needKind: input.needKind, title: supply.title,
+        capability: supply.capability, partyId, coffeeReservationId,
+        selectionKey, bookableId: supply.snapshot?.id ?? null,
+      } });
+      return { id: item.id, capability: item.capability, status: item.status };
+    }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.')),
 
   /**
    * The booking spine — "every booking is a Plan of one". A lone bookable is
@@ -829,7 +1131,7 @@ export const planRouter = router({
       }
       const key = { creatorUserId_idempotencyKey: { creatorUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } };
       const existing = await db.plan.findUnique({ where: key });
-      if (existing) return { id: existing.id };
+      if (existing) return existingPlanResult(existing);
 
       const partyId = input.supplyRef.partyId ?? null;
       const coffeeReservationId = input.supplyRef.coffeeReservationId ?? null;
@@ -885,7 +1187,7 @@ export const planRouter = router({
           // Either our own idempotency replay raced us — return that Plan — or the
           // supply is already on another Plan, the same wall attach puts up.
           const concurrent = await db.plan.findUnique({ where: key });
-          if (concurrent) return { id: concurrent.id };
+          if (concurrent) return existingPlanResult(concurrent);
           throw new TRPCError({ code: 'CONFLICT', message: 'That reservation is already on another Plan.' });
         }
         throw error;
@@ -910,8 +1212,8 @@ export const planRouter = router({
         // silently stranded by a detach.
         const freshItem = fresh.items.find((candidate) => candidate.id === item.id);
         if (freshItem) {
-          const granted = await grantedPartyKeys([fresh], tx);
-          if (itemIsBooked(freshItem, bookedPartyIdsForPlan(fresh, granted))) {
+          const facts = await partyBookingFacts([fresh], tx);
+          if (itemIsBooked(freshItem, bookedPartyIdsForPlan(fresh, facts.granted))) {
             throw new TRPCError({ code: 'CONFLICT', message: 'Cancel the booking before removing it from the Plan.' });
           }
         }

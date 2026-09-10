@@ -73,16 +73,26 @@ function discoverableParty(overrides: Partial<DiscoverablePartyFacts> = {}): Dis
   return {
     id: 'party-d1', title: 'Midtown Rooftop', capacity: 60, status: 'published',
     admissionPaused: false, closedAt: null, endsAt: new Date('2026-09-08T02:00:00Z'),
-    startsAt: new Date('2026-09-07T21:00:00Z'), accessMode: 'rsvp',
+    startsAt: new Date('2026-09-07T21:00:00Z'), accessMode: 'free-rsvp',
     requiredMembershipTier: 'green', audienceCircleIds: [],
     latitude: 33.79, longitude: -84.38, ...overrides,
   };
 }
 
-test('capabilityForAccessMode maps free/rsvp to request and paid-ticket to book', () => {
-  assert.equal(capabilityForAccessMode('free'), 'request');
-  assert.equal(capabilityForAccessMode('rsvp'), 'request');
-  assert.equal(capabilityForAccessMode('paid-ticket'), 'book');
+test('party capability stays consistent from discovery to attachment, with unknown modes closed', () => {
+  for (const [accessMode, capability] of [
+    ['free-rsvp', 'book'], ['paid-ticket', 'book'], ['private-approval', 'request'],
+    ['free', 'details'], ['rsvp', 'details'], ['unknown', 'details'],
+  ] as const) {
+    assert.equal(capabilityForAccessMode(accessMode), capability);
+    const source = discoverableParty({ accessMode });
+    const discovered = discoveredPartyCandidate(source, 0, now);
+    const [attached] = candidatesFromPlan([
+      partyItem({ partyId: source.id, capability: capabilityForAccessMode(accessMode) }),
+    ], new Map([[source.id, source]]), new Map(), { partySize: 2 }, now);
+    assert.equal(discovered.capability, capability);
+    assert.equal(attached.capability, discovered.capability);
+  }
 });
 
 test('A discovered party candidate is marked discovered with ownInventory true', () => {
@@ -91,7 +101,7 @@ test('A discovered party candidate is marked discovered with ownInventory true',
   assert.equal(candidate.ownInventory, true);
   assert.equal(candidate.seats, 20);
   assert.equal(candidate.confirmableNow, true);
-  assert.equal(candidate.capability, 'request');
+  assert.equal(candidate.capability, 'book');
   assert.ok(candidate.id.startsWith('discovered:'));
 });
 

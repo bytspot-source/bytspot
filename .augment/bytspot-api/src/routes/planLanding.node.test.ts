@@ -14,6 +14,7 @@ const proposed = {
   endsAt: new Date(Date.now() + 5 * 60 * 60 * 1000),
   areaLabel: 'Midtown',
   lifecycle: 'proposed',
+  deletedAt: null,
   expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   creator: { name: 'Ava Reed' },
 };
@@ -59,7 +60,7 @@ test('The invite previews as the friend and the plan, and points at the App Stor
   assert.match(html, /you decide if you're in/);
   assert.match(csp ?? '', /default-src 'none'/);
   assert.doesNotMatch(csp ?? '', /script-src/);
-  assert.match(cache ?? '', /max-age=60/);
+  assert.equal(cache, 'private, no-store');
   assert.equal(vary, 'User-Agent');
 });
 
@@ -95,17 +96,17 @@ test('A token-bearing invite carries the token into the app hand-off and is neve
   assert.match(html, /reopen this invite to take your seat/);
 });
 
-test('A token-less preview stays cacheable and never claims a seat', async () => {
+test('A token-less preview cannot be cached past deletion and never claims a seat', async () => {
   const { html, cache } = await get('plan-1');
   assert.doesNotMatch(html, /\?t=/);
   assert.doesNotMatch(html, /reopen this invite/);
-  assert.match(cache ?? '', /public, max-age=60/);
+  assert.equal(cache, 'private, no-store');
 });
 
 test('An over-length token is ignored and the page is treated as a token-less preview', async () => {
   const { html, cache } = await get('plan-1', undefined, 'x'.repeat(201));
   assert.doesNotMatch(html, /\?t=/);
-  assert.match(cache ?? '', /public, max-age=60/);
+  assert.equal(cache, 'private, no-store');
 });
 
 test('An in-app browser is told how to escape to Safari', async () => {
@@ -120,6 +121,18 @@ test('A cancelled plan is indistinguishable from one that never existed', async 
   assert.match(html, /isn't available/);
   assert.doesNotMatch(html, /Rooftop then dinner/);
   assert.equal(cache, 'no-store');
+});
+
+test('A tombstone invalidates both the preview and invite, without leaking Plan detail', async () => {
+  let selected: any;
+  plan.findUnique = async ({ select }: any) => { selected = select; return { ...proposed, deletedAt: new Date() }; };
+  for (const linkValue of [undefined, 'fixture-link']) {
+    const { status, html, cache } = await get('plan-1', undefined, linkValue);
+    assert.equal(status, 404);
+    assert.equal(cache, 'no-store');
+    assert.doesNotMatch(html, /Rooftop then dinner|Ava|fixture-link/);
+  }
+  assert.equal(selected.deletedAt, true);
 });
 
 test('An expired proposed plan 404s', async () => {

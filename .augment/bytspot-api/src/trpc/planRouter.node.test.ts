@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { createCallerFactory } from './trpc';
+import { createCallerFactory, resetLocalRateLimitForTests } from './trpc';
 import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { capabilityForAccessMode, capabilityForSupply, isProposedPlanExpired, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
@@ -16,6 +16,7 @@ const planItem = db.planItem as any;
 const party = db.party as any;
 const user = db.user as any;
 const coffeeReservation = db.coffeeReservation as any;
+const coffeeSpot = db.coffeeSpot as any;
 const bookable = db.bookable as any;
 const partyGuest = db.partyGuest as any;
 
@@ -43,6 +44,7 @@ function planFixture(overrides: Record<string, unknown> = {}) {
     joinToken: 'tok-secret',
     needs: [] as string[],
     lifecycle: 'proposed',
+    deletedAt: null as Date | null,
     expiresAt: new Date(Date.now() + 60 * 60 * 1000),
     participants: [creatorSeat, guestSeat],
     items: [] as any[],
@@ -51,6 +53,7 @@ function planFixture(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  resetLocalRateLimitForTests();
   // Every serializable write re-reads on the transaction client, so the mock
   // has to hand the caller back the same tables it would see outside.
   (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>) => fn(db);
@@ -65,6 +68,9 @@ beforeEach(() => {
   planParticipant.findUnique = async () => null;
   planItem.create = async ({ data }: any) => ({ id: 'item-1', capability: data.capability, status: 'available' });
   bookable.create = async ({ data }: any) => data;
+  bookable.update = async ({ data }: any) => data;
+  coffeeSpot.findMany = async () => [];
+  coffeeReservation.create = async () => { throw new Error('Plans must never reserve coffee'); };
   planItem.update = async () => ({ id: 'item-1', status: 'cancelled' });
   planItem.updateMany = async () => ({ count: 1 });
   party.findFirst = async () => null;
@@ -177,7 +183,7 @@ test('A participant answers only for themselves, and the creator owns the Plan a
   let confirmWhere: any = null;
   plan.updateMany = async (args: any) => { confirmWhere = args.where; return { count: 1 }; };
   await caller().plans.confirm({ planId: 'plan-1' });
-  assert.deepEqual(confirmWhere, { id: 'plan-1', lifecycle: 'proposed' });
+  assert.deepEqual(confirmWhere, { id: 'plan-1', deletedAt: null, lifecycle: 'proposed' });
   // There is no procedure to answer on someone else's behalf: respond takes no
   // userId, and remove is the creator's, not a way to decline for a guest.
   await assert.rejects(() => caller().plans.remove({ planId: 'plan-1', userId: 'creator-id' }), { code: 'BAD_REQUEST' });
@@ -537,17 +543,17 @@ test('A granted party guest rolls the creator\u2019s Plan into booked, scoped to
 
   // The creator (creator-id) holds granted access to party-1.
   let queried: any = null;
-  partyGuest.findMany = async (args: any) => { queried = args; return [{ partyId: 'party-1', userId: 'creator-id' }]; };
+  partyGuest.findMany = async (args: any) => { queried = args; return [{ partyId: 'party-1', userId: 'creator-id', accessGranted: true, status: 'confirmed' }]; };
   const view = await caller().plans.get({ planId: 'plan-1' });
   assert.equal(view.state, 'booked');
   assert.equal(view.items[0].booked, true);
   assert.equal(view.items[0].status, 'available');
-  // The lookup is scoped to the creator and to granted access only.
-  assert.equal(queried.where.accessGranted, true);
+  // The lookup is creator-scoped and selects only non-secret supply facts.
   assert.deepEqual(queried.where.OR, [{ partyId: 'party-1', userId: 'creator-id' }]);
+  assert.deepEqual(queried.select, { partyId: true, userId: true, accessGranted: true, status: true });
 
   // Another user's granted access to the same party does not book this Plan.
-  partyGuest.findMany = async () => [{ partyId: 'party-1', userId: 'someone-else' }];
+  partyGuest.findMany = async () => [{ partyId: 'party-1', userId: 'someone-else', accessGranted: true, status: 'confirmed' }];
   const stillOpen = await caller().plans.get({ planId: 'plan-1' });
   assert.equal(stillOpen.state, 'confirmed');
   assert.equal(stillOpen.items[0].booked, false);
@@ -717,5 +723,517 @@ test('List returns only plans the caller still has a seat on', async () => {
   plan.findMany = async (args: any) => { where = args.where; return [planFixture()]; };
   const result = await caller().plans.list();
   assert.equal(result.plans.length, 1);
-  assert.deepEqual(where, { participants: { some: { userId: 'creator-id', status: { not: 'removed' } } } });
+  assert.deepEqual(where, { deletedAt: null, participants: { some: { userId: 'creator-id', status: { not: 'removed' } } } });
+});
+
+// ─── Creator-only soft deletion ────────────────────────────────────────────
+
+test('delete hides missing and non-owned Plans, including tombstones', async () => {
+  for (const row of [null, planFixture(), planFixture({ deletedAt: new Date() })]) {
+    plan.findUnique = async () => row;
+    await assert.rejects(() => guest().plans.delete({ planId: 'plan-1' }), { code: 'NOT_FOUND' });
+    await assert.rejects(() => stranger().plans.delete({ planId: 'plan-1' }), { code: 'NOT_FOUND' });
+  }
+  plan.findUnique = async () => null;
+  await assert.rejects(() => caller().plans.delete({ planId: 'missing' }), { code: 'NOT_FOUND' });
+});
+
+test('empty, reference-only and unreserved selection Plans can be deleted without touching history', async () => {
+  const reference = { id: 'reference', needKind: 'dining', title: 'Reference', status: 'booked', capability: 'details' };
+  const coffee = { id: 'coffee', needKind: 'coffee', title: 'Coffee', status: 'available', capability: 'request', coffeeSpotId: 'spot-1' };
+  const room = { id: 'room', needKind: 'nightlife', title: 'Room', status: 'available', capability: 'book', partyId: 'party-1' };
+  for (const items of [[], [reference], [coffee, room]]) {
+    const row = planFixture({ items });
+    const history = structuredClone(row);
+    let writes = 0;
+    plan.findUnique = async () => row;
+    plan.update = async ({ where, data }: any) => {
+      assert.deepEqual(where, { id: row.id });
+      assert.deepEqual(Object.keys(data), ['deletedAt']);
+      assert.ok(data.deletedAt instanceof Date);
+      writes++;
+      Object.assign(row, data);
+      return row;
+    };
+    assert.equal((await caller().plans.get({ planId: row.id })).canDelete, true);
+    assert.equal((await guest().plans.get({ planId: row.id })).canDelete, false);
+    assert.deepEqual(await caller().plans.delete({ planId: row.id }), { deleted: true });
+    const tombstone = row.deletedAt;
+    assert.deepEqual(await caller().plans.delete({ planId: row.id }), { deleted: true });
+    assert.equal(writes, 1, 'retry must not rewrite the tombstone');
+    assert.equal(row.deletedAt, tombstone);
+    assert.deepEqual({ ...row, deletedAt: null }, history, 'items, seats, lifecycle and create identity survive');
+  }
+});
+
+test('unbooked Plans remain deletable across lifecycle and derived expiry/completion states', async () => {
+  for (const lifecycle of ['proposed', 'confirmed', 'cancelled']) {
+    const row = planFixture({ lifecycle, expiresAt: new Date(0), endsAt: new Date(0) });
+    plan.findUnique = async () => row;
+    plan.findMany = async () => [row];
+    plan.update = async ({ data }: any) => { Object.assign(row, data); return row; };
+    assert.equal((await caller().plans.list()).plans[0].canDelete, true, lifecycle);
+    assert.equal((await caller().plans.get({ planId: row.id })).canDelete, true, lifecycle);
+    assert.deepEqual(await caller().plans.delete({ planId: row.id }), { deleted: true }, lifecycle);
+  }
+});
+
+test('delete and canDelete protect coffee holds and booked items despite stale item status', async () => {
+  let writes = 0;
+  plan.update = async () => { writes++; throw new Error('must not delete'); };
+  const blocked = [
+    { capability: 'book', status: 'booked' },
+    { capability: 'request', status: 'available', coffeeReservation: { status: 'pending', holdExpiresAt: new Date(Date.now() + 60_000) } },
+    { capability: 'request', status: 'cancelled', coffeeReservation: { status: 'pending', holdExpiresAt: new Date(0) } },
+    { capability: 'request', status: 'available', coffeeReservation: { status: 'confirmed' } },
+    { capability: 'details', status: 'cancelled', coffeeReservation: { status: 'confirmed' } },
+    { capability: 'request', status: 'held', coffeeReservationId: 'r-1' },
+  ];
+  for (const item of blocked) {
+    plan.findUnique = async () => planFixture({ items: [{ id: 'item-1', needKind: 'coffee', title: 'Supply', ...item }] });
+    assert.equal((await caller().plans.get({ planId: 'plan-1' })).canDelete, false);
+    await assert.rejects(() => caller().plans.delete({ planId: 'plan-1' }), { code: 'CONFLICT' });
+  }
+  assert.equal(writes, 0);
+  // A terminal reservation is not a live hold, and references never book.
+  for (const status of ['cancelled', 'expired', 'declined']) {
+    plan.findUnique = async () => planFixture({ items: [{ status: 'available', capability: 'request', coffeeReservation: { status } }] });
+    assert.equal((await caller().plans.get({ planId: 'plan-1' })).canDelete, true);
+  }
+});
+
+test('granted party access, confirmed guests and payment-in-flight protect even cancelled items', async () => {
+  const row = planFixture({ items: [{ id: 'item-1', needKind: 'nightlife', title: 'Room', partyId: 'party-1', status: 'cancelled', capability: 'book' }] });
+  plan.findUnique = async () => row;
+  plan.update = async () => { throw new Error('must not delete'); };
+  for (const facts of [{ accessGranted: true, status: 'pending' }, { accessGranted: false, status: 'confirmed' }, { accessGranted: false, status: 'checkout-pending' }]) {
+    partyGuest.findMany = async ({ where, select }: any) => {
+      assert.deepEqual(where, { OR: [{ partyId: 'party-1', userId: 'creator-id' }] });
+      assert.deepEqual(select, { partyId: true, userId: true, accessGranted: true, status: true });
+      return [{ partyId: 'party-1', userId: 'creator-id', ...facts }];
+    };
+    const view = await caller().plans.get({ planId: 'plan-1' });
+    assert.equal(view.canDelete, false);
+    assert.equal(view.items[0].booked, false, 'display semantics do not change');
+    await assert.rejects(() => caller().plans.delete({ planId: 'plan-1' }), { code: 'CONFLICT' });
+  }
+  partyGuest.findMany = async () => [{ partyId: 'party-1', userId: 'someone-else', accessGranted: true, status: 'confirmed' }];
+  assert.equal((await caller().plans.get({ planId: 'plan-1' })).canDelete, true);
+  partyGuest.findMany = async () => [{ partyId: 'party-1', userId: 'creator-id', accessGranted: false, status: 'pending' }];
+  assert.equal((await caller().plans.get({ planId: 'plan-1' })).canDelete, true, 'an unapproved request is not a booked party or payment hold');
+});
+
+test('delete reads fresh Plan, coffee and guest facts and writes only its tombstone in Serializable', async () => {
+  plan.findUnique = async () => { throw new Error('must not read outside transaction'); };
+  partyGuest.findMany = async () => { throw new Error('must not read guests outside transaction'); };
+  let blocked = true;
+  let writes = 0;
+  (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>, options: any) => {
+    assert.equal(options.isolationLevel, Prisma.TransactionIsolationLevel.Serializable);
+    return fn({
+      plan: {
+        findUnique: async ({ include }: any) => {
+          assert.equal(include.items.include.coffeeReservation.select.status, true);
+          return planFixture({ items: [{ partyId: 'party-1', status: 'available', capability: 'book' }] });
+        },
+        update: async ({ data }: any) => { assert.deepEqual(Object.keys(data), ['deletedAt']); writes++; },
+      },
+      partyGuest: { findMany: async () => blocked ? [{ partyId: 'party-1', userId: 'creator-id', accessGranted: false, status: 'checkout-pending' }] : [] },
+      // No fulfillment/payment/participant/item write methods exist on this tx.
+    });
+  };
+  await assert.rejects(() => caller().plans.delete({ planId: 'plan-1' }), { code: 'CONFLICT' });
+  assert.equal(writes, 0);
+  blocked = false;
+  assert.deepEqual(await caller().plans.delete({ planId: 'plan-1' }), { deleted: true });
+  assert.equal(writes, 1);
+});
+
+test('list exposes creator-only canDelete using live supply rather than the item display status', async () => {
+  const room = { id: 'item-1', needKind: 'nightlife', title: 'Room', partyId: 'party-1', status: 'available', capability: 'book' };
+  plan.findMany = async () => [planFixture({ id: 'empty' }), planFixture({ id: 'checkout', items: [room] }), planFixture({ id: 'guest-plan', creatorUserId: 'guest-id' })];
+  partyGuest.findMany = async () => [{ partyId: 'party-1', userId: 'creator-id', accessGranted: false, status: 'checkout-pending' }];
+  const result = await caller().plans.list();
+  assert.deepEqual(result.plans.map((p) => [p.id, p.canDelete]), [['empty', true], ['checkout', false], ['guest-plan', false]]);
+  assert.equal(result.plans[1].items[0].booked, false, 'checkout-pending must not pretend to be booked');
+});
+
+test('a serialization retry rechecks newly held coffee and never commits the earlier tombstone', async () => {
+  let attempts = 0;
+  let attemptedWrites = 0;
+  (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>, options: any) => {
+    assert.equal(options.isolationLevel, Prisma.TransactionIsolationLevel.Serializable);
+    const attempt = ++attempts;
+    await fn({
+      plan: {
+        findUnique: async () => planFixture({ items: attempt === 1 ? [] : [{ status: 'cancelled', capability: 'request', coffeeReservation: { status: 'pending' } }] }),
+        update: async () => { attemptedWrites++; },
+      },
+    });
+    // The first attempt loses to fulfillment; its staged write is rolled back.
+    throw new Prisma.PrismaClientKnownRequestError('concurrent fulfillment', { code: 'P2034', clientVersion: 'test' });
+  };
+  await assert.rejects(() => caller().plans.delete({ planId: 'plan-1' }), { code: 'CONFLICT', message: 'This Plan has a booking or pending hold and cannot be deleted.' });
+  assert.equal(attempts, 2);
+  assert.equal(attemptedWrites, 1, 'retry must block before attempting another write');
+});
+
+test('tombstones disappear from list/get/prime/join and reject all Plan mutations', async () => {
+  const dead = planFixture({ deletedAt: new Date() });
+  plan.findUnique = async () => dead;
+  plan.findMany = async ({ where }: any) => { assert.equal(where.deletedAt, null); return [dead, planFixture({ id: 'live' })]; };
+  assert.deepEqual((await caller().plans.list()).plans.map((p) => p.id), ['live']);
+  const calls = [
+    () => caller().plans.get({ planId: 'plan-1' }),
+    () => guest().plans.get({ planId: 'plan-1' }),
+    () => caller().plans.primePath({ planId: 'plan-1' }),
+    () => caller().plans.joinByToken({ token: 'fixture-link' }),
+    () => stranger().plans.joinByToken({ token: 'fixture-link' }),
+    () => caller().plans.confirm({ planId: 'plan-1' }),
+    () => caller().plans.cancel({ planId: 'plan-1' }),
+    () => caller().plans.invite({ planId: 'plan-1', userId: 'guest-id' }),
+    () => guest().plans.respond({ planId: 'plan-1', response: 'accepted' }),
+    () => caller().plans.remove({ planId: 'plan-1', userId: 'guest-id' }),
+    () => caller().plans.setNeeds({ planId: 'plan-1', needs: [] }),
+    () => caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Reference' }),
+    () => caller().plans.detach({ planId: 'plan-1', itemId: 'item-1' }),
+    () => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [] }),
+  ];
+  for (const call of calls) await assert.rejects(call, { code: 'NOT_FOUND' });
+});
+
+test('legacy creates and solo creates reject tombstone retries, including a raced unique key', async () => {
+  const dead = planFixture({ deletedAt: new Date() });
+  for (const create of [
+    () => caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner' }),
+    () => caller().plans.createSolo({ idempotencyKey, needKind: 'nightlife', supplyRef: { partyId: 'party-1' } }),
+  ]) {
+    plan.findUnique = async () => dead;
+    plan.create = async () => { throw new Error('must not resurrect'); };
+    await assert.rejects(create, { code: 'CONFLICT' });
+    let reads = 0;
+    plan.findUnique = async () => ++reads === 1 ? null : dead;
+    party.findFirst = async () => ({ id: 'party-1', title: 'Room', accessMode: 'free-rsvp' });
+    plan.create = async () => { throw new Prisma.PrismaClientKnownRequestError('unique', { code: 'P2002', clientVersion: 'test' }); };
+    await assert.rejects(create, { code: 'CONFLICT' });
+    assert.equal(reads, 2);
+  }
+});
+
+test('confirm, cancel and needs cannot write through a concurrent tombstone', async () => {
+  for (const mutate of [
+    () => caller().plans.confirm({ planId: 'plan-1' }),
+    () => caller().plans.cancel({ planId: 'plan-1' }),
+    () => caller().plans.setNeeds({ planId: 'plan-1', needs: [] }),
+  ]) {
+    let reads = 0;
+    plan.findUnique = async () => planFixture({ deletedAt: ++reads === 1 ? null : new Date() });
+    plan.updateMany = async ({ where }: any) => { assert.equal(where.deletedAt, null); return { count: 0 }; };
+    await assert.rejects(mutate, { code: 'NOT_FOUND' });
+  }
+});
+
+// ─── Picker selections: transaction-only, never fulfillment ──────────────────
+const coffeeSelection = { sourceKind: 'coffeeSpot' as const, sourceId: 'spot-1' };
+const partySelection = { sourceKind: 'party' as const, sourceId: 'party-1' };
+const selectedCreate = { idempotencyKey, title: 'A day out', intent: 'Meet friends', bookableSelections: [coffeeSelection, partySelection] };
+function publicParty(overrides: Record<string, unknown> = {}) {
+  return { id: 'party-1', title: 'Brunch', capacity: 20, status: 'published', admissionPaused: false,
+    closedAt: null, startsAt: new Date(Date.now() + 60_000), endsAt: new Date(Date.now() + 3_600_000),
+    accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: [],
+    templateId: 'pop-up', templateConfig: { hostCategory: 'food-drink', hostType: 'brunch' },
+    locationDisclosure: 'public', shareLinkExpiresAt: null, ...overrides };
+}
+
+/** An isolated, versioned transaction double: partial writes are discarded on
+ * failure, and overlapping commits lose with P2034. No live DB calls. */
+function selectionStore(initialPlan: ReturnType<typeof planFixture> | null = null) {
+  const store = { state: { plan: initialPlan, snapshots: [] as any[] }, version: 0, attempts: 0, failItemAt: 0, failUpgrade: false, conflictCode: 'P2034' };
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  coffeeSpot.findMany = async () => [{ id: 'spot-1', name: 'Coffee', active: true, areaLabel: 'Midtown' }];
+  party.findMany = async () => [publicParty()];
+  plan.findUnique = async () => store.state.plan;
+  plan.findMany = async () => store.state.plan ? [store.state.plan] : [];
+  (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>, options: any) => {
+    assert.equal(options.isolationLevel, Prisma.TransactionIsolationLevel.Serializable);
+    store.attempts++;
+    const version = store.version;
+    const staged = structuredClone(store.state);
+    let writes = 0;
+    const tx = {
+      coffeeSpot, party, user, coffeeReservation, partyGuest,
+      plan: {
+        findUnique: async () => staged.plan,
+        update: async ({ data }: any) => { assert.ok(staged.plan); Object.assign(staged.plan, data); return staged.plan; },
+        create: async ({ data }: any) => {
+          staged.plan = planFixture({ ...data, participants: [creatorSeat], items: [] });
+          return staged.plan;
+        },
+      },
+      bookable: {
+        create: async ({ data }: any) => { staged.snapshots.push(data); return data; },
+        update: async ({ where, data }: any) => {
+          const snapshot = staged.snapshots.find((s) => s.id === where.id);
+          assert.ok(snapshot, 'upgrade must update the existing handle');
+          Object.assign(snapshot, data);
+          return snapshot;
+        },
+      },
+      planItem: {
+        create: async ({ data }: any) => {
+          if (++writes === store.failItemAt) throw new Error('injected item failure');
+          const item = { id: `item-${staged.plan!.items.length + 1}`, coffeeReservationId: null, coffeeReservation: null, status: 'available', ...data };
+          staged.plan!.items.push(item);
+          return item;
+        },
+        update: async ({ where, data }: any) => {
+          if (store.failUpgrade) throw new Error('injected upgrade failure');
+          const item = staged.plan!.items.find((i) => i.id === where.id);
+          assert.ok(item);
+          Object.assign(item, data);
+          return item;
+        },
+      },
+    };
+    const result = await fn(tx);
+    if (version !== store.version) throw new Prisma.PrismaClientKnownRequestError('concurrent commit', { code: store.conflictCode, clientVersion: 'test' });
+    store.state = staged;
+    store.version++;
+    return result;
+  };
+  return store;
+}
+
+test('bookables returns stable raw identities and capabilities, not projected or reserved inventory', async () => {
+  const store = selectionStore();
+  assert.deepEqual(await caller().plans.bookables({ category: 'coffee' }), { offerings: [{
+    id: 'coffeeSpot:spot-1', sourceKind: 'coffeeSpot', sourceId: 'spot-1', category: 'coffee',
+    title: 'Coffee', subtitle: 'Midtown', capability: 'request',
+  }] });
+  assert.equal((await caller().plans.bookables({ category: 'dining' })).offerings[0].capability, 'book');
+  assert.deepEqual(await caller().plans.bookables({ category: 'nightlife' }), { offerings: [] });
+  for (const category of ['unknown', 'stay', 'stall', 'wellness', 'fitness', 'automotive', 'green', 'shopping']) {
+    assert.deepEqual(await caller().plans.bookables({ category }), { offerings: [] });
+  }
+  assert.equal(store.attempts, 0);
+  assert.deepEqual(store.state.snapshots, []);
+});
+
+test('host taxonomy maps actual room types; sports/music/social are events, not nightlife', async () => {
+  for (const [hostType, category] of Object.entries({ club: 'nightlife', brunch: 'dining', yoga: 'wellness', fitness: 'fitness', cruise: 'automotive', hike: 'green', market: 'shopping', 'watch-party': 'events', listening: 'events', meetup: 'events' })) {
+    assert.equal(categoryForParty({ hostType }), category);
+  }
+  assert.equal(categoryForParty({ hostCategory: 'food-drink' }), 'dining');
+  assert.equal(categoryForParty({ hostCategory: 'nightlife' }), 'nightlife');
+  assert.equal(categoryForParty({ hostCategory: 'cars' }), 'automotive');
+  assert.equal(categoryForParty({ hostType: 'yoga', hostCategory: 'outdoor' }), 'wellness');
+  assert.equal(categoryForParty({ hostCategory: 'music' }), 'events');
+  assert.equal(categoryForParty(null), 'events');
+  assert.equal(categoryForParty({ hostType: 'toString' }), 'events');
+  selectionStore();
+  party.findMany = async () => [publicParty({ startsAt: new Date('2099-01-01T10:00:00Z'), endsAt: new Date('2099-01-01T12:00:00Z') })];
+  const events = (await caller().plans.bookables({ category: 'events' })).offerings;
+  assert.equal(events.length, 1, 'daytime public rooms belong in Events');
+  assert.equal(events[0].category, 'dining');
+});
+
+test('createWithBookables persists both canonical snapshots and no reservation, RSVP or booking', async () => {
+  const store = selectionStore();
+  assert.deepEqual(await caller().plans.createWithBookables(selectedCreate), { id: 'plan-1' });
+  assert.equal(store.state.snapshots.length, 2);
+  const items = store.state.plan!.items;
+  assert.deepEqual(items.map((i) => [i.selectionKey, i.needKind, i.capability, i.status]), [
+    ['coffeeSpot:spot-1', 'coffee', 'request', 'available'], ['party:party-1', 'dining', 'book', 'available'],
+  ]);
+  for (const item of items) {
+    assert.equal(item.coffeeReservationId, null);
+    assert.match(item.bookableId, /^BYT-/);
+    assert.ok(store.state.snapshots.some((s) => s.id === item.bookableId));
+  }
+  assert.deepEqual(store.state.snapshots[0].fulfillment, { coffeeSpotId: 'spot-1' });
+  assert.equal(store.state.snapshots[0].capacity, 0);
+  assert.deepEqual(store.state.snapshots[1].fulfillment, { partyId: 'party-1', accessMode: 'free-rsvp' });
+  assert.deepEqual(await caller().plans.primePath({ planId: 'plan-1' }).then((r) => r.needs.find((n) => n.needKind === 'coffee')?.prime), null);
+});
+
+test('empty selections create a valid plan and add nothing; normalized duplicate input is rejected', async () => {
+  const store = selectionStore();
+  await caller().plans.createWithBookables({ ...selectedCreate, bookableSelections: [] });
+  assert.deepEqual(store.state.plan!.items, []);
+  assert.deepEqual(store.state.snapshots, []);
+  assert.deepEqual(await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [] }), { ids: [] });
+  await assert.rejects(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection, { ...coffeeSelection, sourceId: ' spot-1 ' }] }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => caller().plans.createWithBookables({ ...selectedCreate, bookableSelections: [partySelection, partySelection] }), { code: 'BAD_REQUEST' });
+});
+
+test('create retries compare canonical persisted intent and never discard changed selections or legacy keys', async () => {
+  const store = selectionStore();
+  await caller().plans.createWithBookables({ ...selectedCreate, title: ' A day out ', needs: ['coffee', 'dining', 'coffee'] });
+  const snapshot = structuredClone(store.state);
+  assert.deepEqual(await caller().plans.createWithBookables({ ...selectedCreate, needs: ['dining', 'coffee'], bookableSelections: [partySelection, coffeeSelection] }), { id: 'plan-1' });
+  assert.deepEqual(store.state, snapshot);
+  for (const change of [{ title: 'Different' }, { partySize: 2 }, { areaLabel: '' }, { bookableSelections: [] }]) {
+    await assert.rejects(() => caller().plans.createWithBookables({ ...selectedCreate, needs: ['coffee', 'dining'], ...change }), { code: 'CONFLICT' });
+  }
+  (store.state.plan as any).bookableCreationHash = null;
+  await assert.rejects(() => caller().plans.createWithBookables(selectedCreate), { code: 'CONFLICT' });
+});
+
+test('delete retries serialize and matching createWithBookables retries cannot resurrect a tombstone', async () => {
+  const store = selectionStore();
+  await caller().plans.createWithBookables(selectedCreate);
+  const history = structuredClone(store.state);
+  const deleted = await Promise.all([caller().plans.delete({ planId: 'plan-1' }), caller().plans.delete({ planId: 'plan-1' })]);
+  assert.deepEqual(deleted, [{ deleted: true }, { deleted: true }]);
+  assert.ok(store.state.plan!.deletedAt instanceof Date);
+  assert.deepEqual(store.state.plan!.items, history.plan!.items);
+  assert.deepEqual(store.state.snapshots, history.snapshots);
+  const tombstone = structuredClone(store.state);
+  await assert.rejects(() => caller().plans.createWithBookables(selectedCreate), { code: 'CONFLICT' });
+  assert.deepEqual(store.state, tombstone);
+  assert.deepEqual(await caller().plans.list(), { plans: [] });
+});
+
+test('writes revalidate every private, closed, stale and membership-restricted room and inactive spot', async () => {
+  const store = selectionStore();
+  const blocked = [{ status: 'draft' }, { admissionPaused: true }, { closedAt: new Date() },
+    { accessMode: 'private-approval' }, { accessMode: 'invite-only' }, { templateId: 'private-party' },
+    { locationDisclosure: 'after-approval' }, { audienceCircleIds: ['private-circle'] },
+    { requiredMembershipTier: 'black' }, { endsAt: new Date(0) },
+    { endsAt: null, startsAt: new Date(Date.now() - 7 * 3_600_000) }, { shareLinkExpiresAt: new Date(0) }];
+  for (const facts of blocked) {
+    resetLocalRateLimitForTests();
+    party.findMany = async () => [publicParty(facts)];
+    assert.deepEqual(await caller().plans.bookables({ category: 'events' }), { offerings: [] });
+    await assert.rejects(() => caller().plans.createWithBookables(selectedCreate), { code: 'NOT_FOUND' });
+    assert.equal(store.state.plan, null);
+    assert.deepEqual(store.state.snapshots, []);
+  }
+  party.findMany = async () => [publicParty()];
+  coffeeSpot.findMany = async () => [{ id: 'spot-1', name: 'Inactive', active: false }];
+  assert.deepEqual(await caller().plans.bookables({ category: 'coffee' }), { offerings: [] });
+  await assert.rejects(() => caller().plans.createWithBookables(selectedCreate), { code: 'NOT_FOUND' });
+  assert.equal(store.state.plan, null);
+});
+
+test('create and add roll back the entire batch, including common snapshots, on invalid supply or failed item insert', async () => {
+  const createStore = selectionStore();
+  createStore.failItemAt = 2;
+  await assert.rejects(() => caller().plans.createWithBookables(selectedCreate), /injected item failure/);
+  assert.deepEqual(createStore.state, { plan: null, snapshots: [] });
+
+  // Separate transaction doubles keep each rollback scenario independent and
+  // avoid mutating a property narrowed to null by the assertion above.
+  const store = selectionStore(planFixture());
+  store.failItemAt = 2;
+  const original = structuredClone(store.state);
+  await assert.rejects(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: selectedCreate.bookableSelections }), /injected item failure/);
+  assert.deepEqual(store.state, original);
+  store.failItemAt = 0;
+  await assert.rejects(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection, { ...partySelection, sourceId: 'missing' }] }), { code: 'NOT_FOUND' });
+  assert.deepEqual(store.state, original);
+});
+
+test('parallel create/add conflicts retry on a fresh transaction and produce exactly one item per identity', async () => {
+  for (const code of ['P2034', 'P2002']) {
+  const store = selectionStore();
+  store.conflictCode = code;
+  const creations = await Promise.all([caller().plans.createWithBookables(selectedCreate), caller().plans.createWithBookables(selectedCreate)]);
+  assert.deepEqual(creations, [{ id: 'plan-1' }, { id: 'plan-1' }]);
+  assert.equal(store.state.plan!.items.length, 2);
+  assert.equal(store.state.snapshots.length, 2);
+  assert.equal(store.attempts, 3);
+  store.state.plan = planFixture();
+  store.state.snapshots = [];
+  store.attempts = 0;
+  const results = await Promise.all([1, 2].map(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: selectedCreate.bookableSelections })));
+  assert.deepEqual(results, [{ ids: ['item-1', 'item-2'] }, { ids: ['item-1', 'item-2'] }]);
+  assert.equal(store.state.plan!.items.length, 2);
+  assert.equal(store.state.snapshots.length, 2);
+  assert.equal(store.attempts, 3);
+  }
+});
+
+test('add is creator-only, preserves cancelled selections, and never changes get/list DTOs on retry', async () => {
+  const store = selectionStore(planFixture({ needs: ['coffee'] }));
+  await assert.rejects(() => guest().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] }), { code: 'NOT_FOUND' });
+  await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] });
+  const before = await caller().plans.get({ planId: 'plan-1' });
+  assert.equal(before.items[0].coffeeSpotId, 'spot-1');
+  assert.equal(before.items[0].booked, false);
+  assert.equal(itemIsBooked({ needKind: 'coffee', coffeeSpotId: 'spot-1', status: 'booked', capability: 'request' }), false);
+  assert.deepEqual(before.openNeeds, ['coffee']);
+  await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] });
+  assert.deepEqual(await caller().plans.get({ planId: 'plan-1' }), before);
+  assert.deepEqual((await caller().plans.list()).plans[0], before);
+  store.state.plan!.items[0].status = 'cancelled';
+  assert.deepEqual(await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] }), { ids: ['item-1'] });
+  assert.equal(store.state.plan!.items[0].status, 'cancelled');
+  assert.equal(store.state.snapshots.length, 1);
+  store.state.plan!.lifecycle = 'cancelled';
+  await assert.rejects(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] }), { code: 'CONFLICT' });
+});
+
+test('add reconciles old party keys and reservation-backed coffee; ambiguous legacy duplicates fail explicitly', async () => {
+  const legacyParty = { id: 'old-party', partyId: 'party-1', selectionKey: null, status: 'available' };
+  const store = selectionStore(planFixture({ items: [legacyParty, {
+    id: 'old-coffee', coffeeReservationId: 'r-1', coffeeReservation: { coffeeSpotId: 'spot-1' }, selectionKey: null, status: 'cancelled',
+  }] }));
+  assert.deepEqual(await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: selectedCreate.bookableSelections }), { ids: ['old-coffee', 'old-party'] });
+  assert.deepEqual(store.state.snapshots, []);
+  store.state.plan!.items.push({ ...legacyParty, id: 'duplicate' });
+  await assert.rejects(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [partySelection] }), { code: 'CONFLICT' });
+});
+
+test('explicit attach upgrades coffee in place, retains BYT identity, and handles retries without duplicates', async () => {
+  const store = selectionStore(planFixture());
+  await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] });
+  const handle = store.state.snapshots[0].id;
+  coffeeReservation.findFirst = async ({ where }: any) => {
+    assert.equal(where.requestedByUserId, 'creator-id');
+    assert.deepEqual(where.spot, { active: true });
+    assert.deepEqual(where.OR.map((v: any) => v.status), ['confirmed', 'pending']);
+    assert.ok(where.OR[1].holdExpiresAt.gt instanceof Date);
+    return { id: 'r-1', coffeeSpotId: 'spot-1', spot: { name: 'Coffee' }, planItem: null };
+  };
+  const input = { planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } };
+  store.failUpgrade = true;
+  const before = structuredClone(store.state);
+  await assert.rejects(() => caller().plans.attach(input), /injected upgrade failure/);
+  assert.deepEqual(store.state, before, 'failed upgrade rolls back the snapshot update too');
+  store.failUpgrade = false;
+  assert.deepEqual(await Promise.all([caller().plans.attach(input), caller().plans.attach(input)]), [
+    { id: 'item-1', capability: 'request', status: 'available' },
+    { id: 'item-1', capability: 'request', status: 'available' },
+  ]);
+  const item = store.state.plan!.items[0];
+  assert.equal(store.state.plan!.items.length, 1);
+  assert.equal(item.coffeeSpotId, null);
+  assert.equal(item.coffeeReservationId, 'r-1');
+  assert.equal(item.selectionKey, 'coffeeSpot:spot-1');
+  assert.equal(item.bookableId, handle);
+  assert.equal(store.state.snapshots.length, 1);
+  assert.deepEqual(store.state.snapshots[0].fulfillment, { coffeeReservationId: 'r-1' });
+  assert.deepEqual(await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] }), { ids: ['item-1'] });
+});
+
+test('attach never resurrects cancelled selections, steals reservations, or replaces different fulfillment', async () => {
+  const store = selectionStore(planFixture());
+  await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] });
+  const input = { planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' } };
+  coffeeReservation.findFirst = async () => null;
+  await assert.rejects(() => caller().plans.attach(input), { code: 'NOT_FOUND' });
+  const reservation = { id: 'r-1', coffeeSpotId: 'spot-1', spot: { name: 'Coffee' }, planItem: null };
+  coffeeReservation.findFirst = async () => ({ ...reservation, planItem: { id: 'other-item', planId: 'other-plan' } });
+  await assert.rejects(() => caller().plans.attach(input), { code: 'CONFLICT' });
+  coffeeReservation.findFirst = async () => reservation;
+  store.state.plan!.items[0].status = 'cancelled';
+  const original = structuredClone(store.state);
+  await assert.rejects(() => caller().plans.attach(input), { code: 'CONFLICT' });
+  assert.deepEqual(store.state, original);
+  store.state.plan!.items[0].status = 'available';
+  store.state.plan!.items[0].coffeeSpotId = null;
+  store.state.plan!.items[0].coffeeReservationId = 'different-reservation';
+  await assert.rejects(() => caller().plans.attach(input), { code: 'CONFLICT' });
+  assert.equal(store.state.plan!.items[0].coffeeReservationId, 'different-reservation');
 });

@@ -15,6 +15,15 @@ export type BookableCapability = 'book' | 'request' | 'details';
 export type BookableControl = 'local' | 'vendor';
 export type BookableSourceKind = 'party_ticket' | 'coffee';
 
+/** One rule for catalog, attachments, and Prime Path. Free RSVP can grant
+ * access directly; private approval needs the host. Unknown modes fail closed.
+ * Capability describes the available action, never an existing booking. */
+export function capabilityForAccessMode(accessMode: string): BookableCapability {
+  if (accessMode === 'free-rsvp' || accessMode === 'paid-ticket') return 'book';
+  if (accessMode === 'private-approval') return 'request';
+  return 'details';
+}
+
 const CONTROL_BY_CAPABILITY: Record<BookableCapability, BookableControl> = {
   book: 'vendor',
   request: 'vendor',
@@ -67,11 +76,12 @@ export function partyToBookableSnapshot(input: {
   };
 }
 
-// Coffee is a hold-ask, never a payment, so it is always request.
-export function coffeeToBookableSnapshot(input: {
-  coffeeReservationId: string;
-  title: string;
-}): BookableSnapshot {
+// Coffee supports a hold-ask, never a payment. A spot selection has no
+// reservation and guarantees no capacity; both use the same projection.
+export function coffeeToBookableSnapshot(input: { title: string } & (
+  | { coffeeReservationId: string; coffeeSpotId?: never }
+  | { coffeeSpotId: string; coffeeReservationId?: never }
+)): BookableSnapshot {
   return {
     id: bookableId('coffee'),
     sourceKind: 'coffee',
@@ -79,8 +89,10 @@ export function coffeeToBookableSnapshot(input: {
     provider: null,
     tierName: input.title,
     priceCents: 0,
-    capacity: 1,
+    capacity: input.coffeeReservationId ? 1 : 0,
     membershipFloor: null,
-    fulfillment: { coffeeReservationId: input.coffeeReservationId },
+    fulfillment: input.coffeeReservationId
+      ? { coffeeReservationId: input.coffeeReservationId }
+      : { coffeeSpotId: input.coffeeSpotId },
   };
 }

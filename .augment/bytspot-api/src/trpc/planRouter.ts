@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { serializableTransaction, serializableTransactionWithRetry } from '../lib/transactions';
 import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
-import { coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
+import { capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
 import { candidatesFromPlan, candidatesFromDiscovery, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
@@ -39,11 +39,7 @@ const MAX_PLAN_PARTICIPANTS = 50;
  * that only forwards a request is requestable; anything with no room behind it
  * is a reference the user resolves themselves.
  */
-export function capabilityForAccessMode(accessMode: string): 'book' | 'request' | 'details' {
-  if (accessMode === 'free-rsvp' || accessMode === 'paid-ticket') return 'book';
-  if (accessMode === 'private-approval') return 'request';
-  return 'details';
-}
+export { capabilityForAccessMode } from '../services/bookableProjection';
 
 /**
  * Phase 2: the same rule generalized across supply kinds. A coffee

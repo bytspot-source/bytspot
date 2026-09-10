@@ -15,6 +15,15 @@ export type BookableCapability = 'book' | 'request' | 'details';
 export type BookableControl = 'local' | 'vendor';
 export type BookableSourceKind = 'party_ticket' | 'coffee';
 
+/** One rule for catalog, attachments, and Prime Path. Free RSVP can grant
+ * access directly; private approval needs the host. Unknown modes fail closed.
+ * Capability describes the available action, never an existing booking. */
+export function capabilityForAccessMode(accessMode: string): BookableCapability {
+  if (accessMode === 'free-rsvp' || accessMode === 'paid-ticket') return 'book';
+  if (accessMode === 'private-approval') return 'request';
+  return 'details';
+}
+
 const CONTROL_BY_CAPABILITY: Record<BookableCapability, BookableControl> = {
   book: 'vendor',
   request: 'vendor',

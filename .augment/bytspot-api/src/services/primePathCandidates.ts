@@ -11,7 +11,7 @@
 //     vendor reliability have no server data yet, so they are left neutral
 //     rather than invented — the ranker treats them as ties.
 
-import type { BookableCapability } from './bookableProjection';
+import { capabilityForAccessMode, type BookableCapability } from './bookableProjection';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import type { PrimePathCandidate } from './primePath';
 
@@ -125,12 +125,8 @@ export interface DiscoverablePartyFacts extends PartyFacts {
   longitude: number | null;
 }
 
-/** Map a party's accessMode to the capability the user would acquire.
- *  free/rsvp → request (a hold-ask that settles when the host grants);
- *  paid-ticket → book (a purchase that settles at checkout). */
-export function capabilityForAccessMode(accessMode: string): BookableCapability {
-  return accessMode === 'paid-ticket' ? 'book' : 'request';
-}
+// Preserve the exported helper for existing callers, with no second mapping.
+export { capabilityForAccessMode } from './bookableProjection';
 
 /** Project a discovered party into a PrimePathCandidate. */
 export function discoveredPartyCandidate(

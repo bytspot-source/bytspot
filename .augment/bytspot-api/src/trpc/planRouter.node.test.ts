@@ -766,6 +766,18 @@ test('empty, reference-only and unreserved selection Plans can be deleted withou
   }
 });
 
+test('unbooked Plans remain deletable across lifecycle and derived expiry/completion states', async () => {
+  for (const lifecycle of ['proposed', 'confirmed', 'cancelled']) {
+    const row = planFixture({ lifecycle, expiresAt: new Date(0), endsAt: new Date(0) });
+    plan.findUnique = async () => row;
+    plan.findMany = async () => [row];
+    plan.update = async ({ data }: any) => { Object.assign(row, data); return row; };
+    assert.equal((await caller().plans.list()).plans[0].canDelete, true, lifecycle);
+    assert.equal((await caller().plans.get({ planId: row.id })).canDelete, true, lifecycle);
+    assert.deepEqual(await caller().plans.delete({ planId: row.id }), { deleted: true }, lifecycle);
+  }
+});
+
 test('delete and canDelete protect coffee holds and booked items despite stale item status', async () => {
   let writes = 0;
   plan.update = async () => { writes++; throw new Error('must not delete'); };

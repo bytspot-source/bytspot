@@ -1105,11 +1105,15 @@ test('writes revalidate every private, closed, stale and membership-restricted r
 });
 
 test('create and add roll back the entire batch, including common snapshots, on invalid supply or failed item insert', async () => {
-  const store = selectionStore();
-  store.failItemAt = 2;
+  const createStore = selectionStore();
+  createStore.failItemAt = 2;
   await assert.rejects(() => caller().plans.createWithBookables(selectedCreate), /injected item failure/);
-  assert.deepEqual(store.state, { plan: null, snapshots: [] });
-  store.state.plan = planFixture();
+  assert.deepEqual(createStore.state, { plan: null, snapshots: [] });
+
+  // Separate transaction doubles keep each rollback scenario independent and
+  // avoid mutating a property narrowed to null by the assertion above.
+  const store = selectionStore(planFixture());
+  store.failItemAt = 2;
   const original = structuredClone(store.state);
   await assert.rejects(() => caller().plans.addBookables({ planId: 'plan-1', bookableSelections: selectedCreate.bookableSelections }), /injected item failure/);
   assert.deepEqual(store.state, original);

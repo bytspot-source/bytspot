@@ -749,6 +749,8 @@ model Plan {
   id             String    @id @default(cuid())
   creatorUserId  String    @map("creator_user_id")
   idempotencyKey String    @map("idempotency_key")
+  /// Immutable normalized createWithBookables payload hash; legacy creates leave null.
+  bookableCreationHash String? @map("bookable_creation_hash")
   title          String
   intent         String
   startsAt       DateTime? @map("starts_at")
@@ -768,6 +770,8 @@ model Plan {
   lifecycle      String    @default("proposed")
   confirmedAt    DateTime? @map("confirmed_at")
   cancelledAt    DateTime? @map("cancelled_at")
+  /// Soft tombstone retains the create key and all supply/history; never revived.
+  deletedAt      DateTime? @map("deleted_at")
   /// Proposed plans must not linger. Read as expired once passed; no sweep job.
   expiresAt      DateTime? @map("expires_at")
   createdAt      DateTime  @default(now()) @map("created_at")
@@ -813,6 +817,12 @@ model PlanItem {
   /// Second real bookable. A PlanItem links to at most one supply row; the
   /// CHECK constraint `plan_items_single_supply_check` enforces that at the DB.
   coffeeReservationId String?  @unique @map("coffee_reservation_id")
+  /// Unreserved coffee selection with a request-capable Bookable snapshot.
+  /// Cleared when explicit attach upgrades this item to a reservation.
+  coffeeSpotId        String?  @map("coffee_spot_id")
+  /// Stable sourceKind:sourceId within a Plan, retained through fulfillment.
+  /// Legacy attach may leave null; retries also reconcile actual supply ids.
+  selectionKey        String?  @map("selection_key")
   /// The projection handle snapshotted from this item's supply at attach time.
   /// A pure denormalized pointer — it does not participate in the single-supply
   /// XOR and never carries a promise the item's own `capability` does not.
@@ -825,8 +835,11 @@ model PlanItem {
   plan              Plan               @relation(fields: [planId], references: [id], onDelete: Cascade)
   party             Party?             @relation(fields: [partyId], references: [id], onDelete: SetNull)
   coffeeReservation CoffeeReservation? @relation(fields: [coffeeReservationId], references: [id], onDelete: SetNull)
+  coffeeSpot        CoffeeSpot?        @relation(fields: [coffeeSpotId], references: [id], onDelete: Restrict)
   bookable          Bookable?          @relation(fields: [bookableId], references: [id], onDelete: SetNull)
 
+  @@unique([planId, selectionKey])
+  @@index([coffeeSpotId])
   @@index([planId, createdAt])
   @@map("plan_items")
 }
@@ -1095,6 +1108,7 @@ model CoffeeSpot {
 
   owner        User?               @relation("coffeeSpotOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   reservations CoffeeReservation[]
+  planItems    PlanItem[]
 
   @@index([active, createdAt(sort: Desc)])
   @@map("coffee_spots")

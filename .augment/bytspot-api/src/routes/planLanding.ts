@@ -55,16 +55,16 @@ function firstName(name: string | null | undefined): string {
   return trimmed.split(/\s+/)[0];
 }
 
-// A cancelled, expired, or finished Plan must read the same as one that never
+// A deleted, cancelled, expired, or finished Plan reads the same as one that never
 // existed — the link is closed. Membership-only detail (who is going, the
 // intent, the area coordinates) is never on this page: an unauthenticated
 // stranger with the link may only ever see the friend's first name, the
 // title, and the rough when/where the creator chose to share.
 function planLinkClosed(
-  plan: { lifecycle: string; endsAt: Date | null; expiresAt: Date | null },
+  plan: { lifecycle: string; endsAt: Date | null; expiresAt: Date | null; deletedAt: Date | null },
   now: Date,
 ): boolean {
-  if (plan.lifecycle === 'cancelled') return true;
+  if (plan.deletedAt || plan.lifecycle === 'cancelled') return true;
   // A proposed Plan that ran out of time is expired on read; there is no sweep.
   if (plan.lifecycle === 'proposed' && plan.expiresAt && now >= plan.expiresAt) return true;
   if (plan.lifecycle === 'confirmed' && plan.endsAt && now >= plan.endsAt) return true;
@@ -183,7 +183,7 @@ planLandingRouter.get('/plan/:planId', async (req, res) => {
       where: { id: planId },
       select: {
         id: true, title: true, startsAt: true, endsAt: true, areaLabel: true,
-        lifecycle: true, expiresAt: true, creator: { select: { name: true } },
+        lifecycle: true, expiresAt: true, deletedAt: true, creator: { select: { name: true } },
       },
     });
   } catch (err) {
@@ -209,11 +209,9 @@ planLandingRouter.get('/plan/:planId', async (req, res) => {
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  // A token-bearing page carries a credential and must never be cached on a
-  // shared CDN; a token-less preview keeps a short TTL so a cancelled or edited
-  // Plan stops previewing quickly. Either way the body varies on User-Agent
-  // (in-app-browser copy), so a shared cache must not hand one variant to the other.
-  res.setHeader('Cache-Control', token ? 'private, no-store' : 'public, max-age=60');
+  // Neither previews nor credential-bearing pages may outlive deletion in a
+  // shared cache. Every new request must revalidate the Plan's tombstone.
+  res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('Vary', 'User-Agent');
   // Static markup only — no images, no scripts. The page must never execute
   // creator-controlled text.

@@ -67,11 +67,12 @@ export function partyToBookableSnapshot(input: {
   };
 }
 
-// Coffee is a hold-ask, never a payment, so it is always request.
-export function coffeeToBookableSnapshot(input: {
-  coffeeReservationId: string;
-  title: string;
-}): BookableSnapshot {
+// Coffee supports a hold-ask, never a payment. A spot selection has no
+// reservation and guarantees no capacity; both use the same projection.
+export function coffeeToBookableSnapshot(input: { title: string } & (
+  | { coffeeReservationId: string; coffeeSpotId?: never }
+  | { coffeeSpotId: string; coffeeReservationId?: never }
+)): BookableSnapshot {
   return {
     id: bookableId('coffee'),
     sourceKind: 'coffee',
@@ -79,8 +80,10 @@ export function coffeeToBookableSnapshot(input: {
     provider: null,
     tierName: input.title,
     priceCents: 0,
-    capacity: 1,
+    capacity: input.coffeeReservationId ? 1 : 0,
     membershipFloor: null,
-    fulfillment: { coffeeReservationId: input.coffeeReservationId },
+    fulfillment: input.coffeeReservationId
+      ? { coffeeReservationId: input.coffeeReservationId }
+      : { coffeeSpotId: input.coffeeSpotId },
   };
 }

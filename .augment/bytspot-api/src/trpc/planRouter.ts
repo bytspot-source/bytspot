@@ -7,6 +7,7 @@ import { serializableTransaction, serializableTransactionWithRetry } from '../li
 import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
+import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
@@ -540,6 +541,7 @@ export const planRouter = router({
         return { offerings: parties.filter((party) => input.category === 'events' || categoryForParty(party.templateConfig) === input.category)
           .map((party) => ({ id: `party:${party.id}`, sourceKind: 'party' as const,
             sourceId: party.id, category: categoryForParty(party.templateConfig), title: party.title,
+            ...hostDiscoveryTags(party.templateConfig),
             capability: capabilityForSupply({ party }) })) };
       }
       return { offerings: [] };

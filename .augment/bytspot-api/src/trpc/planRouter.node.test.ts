@@ -1037,6 +1037,49 @@ test('host taxonomy maps actual room types; sports/music/social are events, not 
   assert.equal(events[0].category, 'dining');
 });
 
+test('bookables exposes only recognized HOST category/type pairs without changing identity or capability', async () => {
+  const store = selectionStore();
+  const samples = [
+    ['meetup', 'social', 'events'], ['workshop', 'culture', 'events'],
+    ['dinner', 'food-drink', 'dining'], ['after-hours', 'nightlife', 'nightlife'],
+    ['pop-up-table', 'food-drink', 'dining'], ['hike', 'outdoor', 'green'],
+  ];
+  for (const [hostType, hostCategory, category] of samples) {
+    party.findMany = async () => [publicParty({ templateConfig: {
+      hostType, hostCategory, hostFormat: 'room', internalNote: 'Not discovery metadata',
+    } })];
+    const result = await caller().plans.bookables({ category: 'events' });
+    assert.deepEqual(result, { offerings: [{
+      id: 'party:party-1', sourceKind: 'party', sourceId: 'party-1', category,
+      title: 'Brunch', hostCategory, hostType, capability: 'book',
+    }] });
+  }
+  assert.equal(store.attempts, 0, 'classification never writes a Plan or admission');
+  assert.deepEqual(store.state.snapshots, []);
+});
+
+test('bookables omits legacy, malformed, and mismatched HOST metadata rather than guessing it', async () => {
+  selectionStore();
+  for (const templateConfig of [null, [], 'meetup', 1, {},
+    { hostCategory: 'social' }, { hostType: 'meetup' },
+    { hostType: 'workshop', hostCategory: 'social' },
+    { hostType: 'unknown', hostCategory: 'culture' },
+    { hostType: 'toString', hostCategory: 'culture' },
+    { hostType: '__proto__', hostCategory: 'culture' },
+    { hostType: ['meetup'], hostCategory: 'social' },
+    { hostType: 'meetup', hostCategory: ['social'] },
+    { hostType: ' Meetup ', hostCategory: 'social' },
+  ]) {
+    party.findMany = async () => [publicParty({ templateConfig })];
+    const result = await caller().plans.bookables({ category: 'events' });
+    assert.equal(result.offerings.length, 1, 'tags do not change existing eligibility');
+    assert.equal(Object.hasOwn(result.offerings[0], 'hostCategory'), false);
+    assert.equal(Object.hasOwn(result.offerings[0], 'hostType'), false);
+    assert.equal(result.offerings[0].sourceId, 'party-1');
+    assert.equal(result.offerings[0].capability, 'book');
+  }
+});
+
 test('createWithBookables persists both canonical snapshots and no reservation, RSVP or booking', async () => {
   const store = selectionStore();
   assert.deepEqual(await caller().plans.createWithBookables(selectedCreate), { id: 'plan-1' });

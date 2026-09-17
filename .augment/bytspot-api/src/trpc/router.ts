@@ -14,6 +14,7 @@ import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
 import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
+import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { currentPlatformFeeBps, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE } from '../services/platformFee';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { claimPackedAlert, entersPacked } from '../services/crowdTransition';
@@ -275,6 +276,7 @@ const venuesRouter = router({
         return rows.map((v) => ({
           id: v.id, name: v.name, slug: v.slug, address: v.address,
           lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
+          ...projectVenuePhoto(v),
           entryType: (v.entryType ?? 'free') as 'free' | 'paid',
           entryPrice: v.entryPrice ?? null,
           ticketUrl: v.ticketUrl ?? null,
@@ -298,9 +300,9 @@ const venuesRouter = router({
       const cacheKey = `venues:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}`;
       const venues = await cached(cacheKey, 30, async () => {
         const rows = await db.$queryRawUnsafe<
-          Array<{ id: string; name: string; slug: string; address: string; lat: number; lng: number; category: string; image_url: string | null; distance: number }>
+          Array<{ id: string; name: string; slug: string; address: string; lat: number; lng: number; category: string; image_url: string | null; photo_provenance: string; photo_attribution: string | null; distance: number }>
         >(
-          `SELECT id, name, slug, address, lat, lng, category, image_url,
+          `SELECT id, name, slug, address, lat, lng, category, image_url, photo_provenance, photo_attribution,
                   ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
            FROM venues
            WHERE location IS NOT NULL
@@ -312,6 +314,11 @@ const venuesRouter = router({
         return rows.map((r) => ({
           id: r.id, name: r.name, slug: r.slug, address: r.address,
           lat: r.lat, lng: r.lng, category: r.category, imageUrl: r.image_url,
+          ...projectVenuePhoto({
+            photoProvenance: r.photo_provenance,
+            photoAttribution: r.photo_attribution,
+            imageUrl: r.image_url,
+          }),
           distanceMeters: Math.round(r.distance),
         }));
       });
@@ -335,6 +342,7 @@ const venuesRouter = router({
       return {
         id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
+        ...projectVenuePhoto(venue),
         entryType: (venue.entryType ?? 'free') as 'free' | 'paid',
         entryPrice: venue.entryPrice ?? null,
         ticketUrl: venue.ticketUrl ?? null,

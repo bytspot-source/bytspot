@@ -15,6 +15,7 @@ const createCaller = createCallerFactory(appRouter);
 const demand = db.demand as any;
 const demandEvent = db.demandEvent as any;
 const plan = db.plan as any;
+const planItem = db.planItem as any;
 
 const authenticated: Context = {
   user: { userId: 'guest-1', email: 'guest@bytspot.com' },
@@ -52,6 +53,8 @@ beforeEach(() => {
   };
   demandEvent.create = async () => ({});
   plan.findFirst = async () => null;
+  planItem.findFirst = async () => null;
+  demand.findFirst = async () => null;
 });
 
 test('a publishable need is stored open, with the contract defaults filled in', async () => {
@@ -271,4 +274,95 @@ test('a finished request cannot be withdrawn, and a race cannot undo a booking',
       demandEvent: { create: async () => ({}) },
     });
   await assert.rejects(() => caller().demand.withdraw({ demandId: 'demand-1' }), { code: 'CONFLICT' });
+});
+
+/** A plan that says enough: tonight, in Midtown, for four. */
+function planRow(over: Record<string, unknown> = {}) {
+  const now = Date.now();
+  return {
+    id: 'plan-1',
+    startsAt: new Date(now + 3 * 60 * 60 * 1000),
+    endsAt: new Date(now + 7 * 60 * 60 * 1000),
+    latitude: 33.7866,
+    longitude: -84.3833,
+    partySize: 4,
+    ...over,
+  };
+}
+
+function itemRow(over: Record<string, unknown> = {}) {
+  return { id: 'item-1', needKind: 'dining', status: 'available', bookableId: null, ...over };
+}
+
+test('a plan asks for what it already says, without the guest restating it', async () => {
+  plan.findFirst = async () => planRow();
+  planItem.findFirst = async () => itemRow();
+
+  const result = await caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' });
+
+  assert.equal(result.state, 'OPEN');
+  assert.equal(result.category, 'dining');
+  assert.equal(created[0].partySize, 4);
+  assert.equal(created[0].latitude, 33.7866);
+  // The demand stays attached to the plan that raised it.
+  assert.equal(created[0].planId, 'plan-1');
+  // And obeys the same contract defaults as a typed request.
+  assert.equal(created[0].radiusMiles, DEMAND_DEFAULTS.radiusMiles);
+});
+
+test('a plan that does not say enough is refused with what to fix', async () => {
+  plan.findFirst = async () => planRow({ partySize: null });
+  planItem.findFirst = async () => itemRow();
+
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+    code: 'BAD_REQUEST',
+    message: 'Say how many people are coming first.',
+  });
+  assert.equal(created.length, 0);
+});
+
+test('a need the vendor vocabulary cannot express is not published to the wrong sellers', async () => {
+  plan.findFirst = async () => planRow();
+  planItem.findFirst = async () => itemRow({ needKind: 'automotive' });
+
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+    code: 'BAD_REQUEST',
+    message: 'We cannot ask vendors for that yet.',
+  });
+});
+
+test('someone elses plan, and an item from another plan, are both indistinguishable from missing', async () => {
+  plan.findFirst = async () => null;
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-9', planItemId: 'item-1' }), {
+    code: 'NOT_FOUND',
+    message: 'Plan not found.',
+  });
+
+  plan.findFirst = async () => planRow();
+  planItem.findFirst = async () => null;
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-9' }), {
+    code: 'NOT_FOUND',
+    message: 'Plan item not found.',
+  });
+});
+
+test('the same gap is not asked about twice while the first ask is still live', async () => {
+  plan.findFirst = async () => planRow();
+  planItem.findFirst = async () => itemRow();
+  demand.findFirst = async () => ({ id: 'demand-1' });
+
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+    code: 'CONFLICT',
+  });
+  assert.equal(created.length, 0);
+});
+
+test('a plan cannot outrun the cap that applies to every other request', async () => {
+  plan.findFirst = async () => planRow();
+  planItem.findFirst = async () => itemRow();
+  demand.count = async () => 5;
+
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+    code: 'CONFLICT',
+  });
 });

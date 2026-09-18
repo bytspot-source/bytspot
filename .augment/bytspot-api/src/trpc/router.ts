@@ -34,6 +34,7 @@ import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH
 import { mobilityRouter } from './mobilityRouter';
 import { planRouter } from './planRouter';
 import { coffeeRouter } from './coffeeRouter';
+import { demandRouter } from './demandRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -1302,6 +1303,7 @@ export const appRouter = router({
   mobility: mobilityRouter,
   plans: planRouter,
   coffee: coffeeRouter,
+  demand: demandRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

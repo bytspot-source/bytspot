@@ -25,6 +25,7 @@ import { placesPhotoRouter } from './routes/placesPhoto';
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 import vendorAuthRouter from './routes/vendorAuth';
 import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-in (separate origin, cookie-based refresh)
+import vendorDemandRouter from './routes/vendorDemand';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -85,6 +86,7 @@ app.use(placesPhotoRouter);
 app.use(diagnosticsRouter);
 app.use(vendorAuthRouter);
 app.use(vendorSetupRouter);
+app.use(vendorDemandRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

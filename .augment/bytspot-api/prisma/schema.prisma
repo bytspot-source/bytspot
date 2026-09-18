@@ -121,25 +121,25 @@ model ProviderIdentity {
 
 // ─── Venues ──────────────────────────────────────────
 model Venue {
-  id            String   @id @default(cuid())
-  name          String
-  slug          String   @unique
-  googlePlaceId String?  @unique @map("google_place_id")
-  discoverable  Boolean  @default(true)
-  address       String
-  lat           Float
-  lng           Float
-  category      String // "bar", "restaurant", "club", "park", "market"
-  imageUrl      String?  @map("image_url")
+  id               String   @id @default(cuid())
+  name             String
+  slug             String   @unique
+  googlePlaceId    String?  @unique @map("google_place_id")
+  discoverable     Boolean  @default(true)
+  address          String
+  lat              Float
+  lng              Float
+  category         String // "bar", "restaurant", "club", "park", "market"
+  imageUrl         String?  @map("image_url")
   // A photograph is an endorsement: only "bytspot_owned" or "party_media"
   // earns a map pin. "borrowed" is the fail-closed default and stays a dot.
   // Pin eligibility is derived in venuePhotoProvenance.ts, never stored.
-  photoProvenance  String  @default("borrowed") @map("photo_provenance")
-  photoAttribution String? @map("photo_attribution")
-  entryType     String   @default("free") @map("entry_type") // "free" or "paid"
-  entryPrice    String?  @map("entry_price") // e.g. "$15", "$25–$50"
-  ticketUrl     String?  @map("ticket_url") // external purchase link
-  createdAt     DateTime @default(now()) @map("created_at")
+  photoProvenance  String   @default("borrowed") @map("photo_provenance")
+  photoAttribution String?  @map("photo_attribution")
+  entryType        String   @default("free") @map("entry_type") // "free" or "paid"
+  entryPrice       String?  @map("entry_price") // e.g. "$15", "$25–$50"
+  ticketUrl        String?  @map("ticket_url") // external purchase link
+  createdAt        DateTime @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng
   // Managed via raw SQL; Prisma can't model geometry natively
@@ -746,40 +746,47 @@ model Review {
 /// participants confirm their own attendance, and bookings confirm inventory —
 /// three different owners, never collapsed into one word.
 model Plan {
-  id             String    @id @default(cuid())
-  creatorUserId  String    @map("creator_user_id")
-  idempotencyKey String    @map("idempotency_key")
+  id                   String    @id @default(cuid())
+  creatorUserId        String    @map("creator_user_id")
+  idempotencyKey       String    @map("idempotency_key")
   /// Immutable normalized createWithBookables payload hash; legacy creates leave null.
-  bookableCreationHash String? @map("bookable_creation_hash")
-  title          String
-  intent         String
-  startsAt       DateTime? @map("starts_at")
-  endsAt         DateTime? @map("ends_at")
-  areaLabel      String?   @map("area_label")
-  latitude       Float?
-  longitude      Float?
-  partySize      Int?      @map("party_size")
+  bookableCreationHash String?   @map("bookable_creation_hash")
+  title                String
+  intent               String
+  startsAt             DateTime? @map("starts_at")
+  endsAt               DateTime? @map("ends_at")
+  areaLabel            String?   @map("area_label")
+  latitude             Float?
+  longitude            Float?
+  partySize            Int?      @map("party_size")
+  /// The ceiling the group named. Null is not zero: a Plan without a budget
+  /// publishes demand the budget match rule simply does not apply to.
+  budgetCents          Int?      @map("budget_cents")
+  /// How far the group will travel from the anchor. Null falls back to the
+  /// contract default at publish time rather than being stored as a guess.
+  radiusMiles          Float?    @map("radius_miles")
   /// Bearer secret carried in the invite link. The id previews a Plan; this
   /// token is what seats whoever holds it, so it is only ever handed to the
   /// creator. Distinct from the id precisely so a guessable id grants nothing.
-  joinToken      String    @unique @map("join_token")
+  joinToken            String    @unique @map("join_token")
   /// Need kinds the Plan is trying to fill: dining, parking, nightlife, …
-  needs          String[]  @default([])
+  needs                String[]  @default([])
   /// Deliberately excludes booked/active/completed. Those are derived from the
   /// items and the clock so the control plane cannot contradict execution.
-  lifecycle      String    @default("proposed")
-  confirmedAt    DateTime? @map("confirmed_at")
-  cancelledAt    DateTime? @map("cancelled_at")
+  lifecycle            String    @default("proposed")
+  confirmedAt          DateTime? @map("confirmed_at")
+  cancelledAt          DateTime? @map("cancelled_at")
   /// Soft tombstone retains the create key and all supply/history; never revived.
-  deletedAt      DateTime? @map("deleted_at")
+  deletedAt            DateTime? @map("deleted_at")
   /// Proposed plans must not linger. Read as expired once passed; no sweep job.
-  expiresAt      DateTime? @map("expires_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  expiresAt            DateTime? @map("expires_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   creator      User              @relation("planCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
   participants PlanParticipant[]
   items        PlanItem[]
+  demands      Demand[]
 
   @@unique([creatorUserId, idempotencyKey])
   @@index([creatorUserId, createdAt(sort: Desc)])
@@ -864,6 +871,7 @@ model Bookable {
   updatedAt       DateTime @updatedAt @map("updated_at")
 
   planItem PlanItem?
+  offer    Offer?
 
   @@map("bookables")
 }
@@ -965,6 +973,8 @@ model VendorSeller {
   seats     VendorSeat[]
   locations VendorLocation[]
   endpoints VendorWebhookEndpoint[]
+  windows   VendorAvailabilityWindow[]
+  offers    Offer[]
 
   @@index([state])
   @@map("vendor_sellers")
@@ -1022,7 +1032,9 @@ model VendorLocation {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  seller VendorSeller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  seller  VendorSeller               @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  windows VendorAvailabilityWindow[]
+  offers  Offer[]
 
   /// Every profile read filters a seller's places by state.
   @@index([sellerId, state])
@@ -1142,4 +1154,191 @@ model CoffeeReservation {
   @@index([coffeeSpotId, requestedFor])
   @@index([requestedByUserId, createdAt(sort: Desc)])
   @@map("coffee_reservations")
+}
+
+// ─── Demand, availability and offers ─────────────────
+//
+// The consumer names a need; a seller answers it with a real instance. Nothing
+// here grants a capability: a rail with no window and no accepted offer still
+// renders as Listed. Capability is how far supply actually reached, never a
+// column someone remembered to set.
+
+/// A guest's unresolved need, before any seller has answered it. Mirrors the
+/// `Demand` shape the vendor console already matches against, so the two sides
+/// never have to translate.
+model Demand {
+  id             String  @id @default(cuid())
+  /// Null when the need was raised from Concierge or a bare search. The common
+  /// case at launch: intent exists before a Plan does.
+  planId         String? @map("plan_id")
+  raisedByUserId String  @map("raised_by_user_id")
+
+  /// A discover category from the contract, not a Discover rail. Only these
+  /// carry `domains`, and the category match rule compares them against the
+  /// seller's domain; a rail token would make that rule unevaluable.
+  category String
+  state    String @default("OPEN")
+
+  partySize Int      @map("party_size")
+  /// Stored already widened by the guest's flexibility, so a seller reads the
+  /// window they must actually satisfy and never re-applies a default.
+  earliest  DateTime
+  latest    DateTime
+
+  latitude    Float
+  longitude   Float
+  radiusMiles Float @map("radius_miles")
+
+  budgetCents Int?    @map("budget_cents")
+  note        String?
+
+  raisedAt  DateTime @default(now()) @map("raised_at")
+  /// A stored instant, not a computed one: seller and guest can never disagree
+  /// about whether the need is still live.
+  expiresAt DateTime @map("expires_at")
+
+  plan   Plan?   @relation(fields: [planId], references: [id], onDelete: SetNull)
+  offers Offer[]
+
+  @@index([state, expiresAt])
+  @@index([category, state, latitude, longitude])
+  @@index([planId])
+  @@index([raisedByUserId, raisedAt(sort: Desc)])
+  @@map("demands")
+}
+
+/// A seller's answer to "when?", before it is multiplied into slots. Slots are
+/// never stored: they are derived from this window and the commitments below,
+/// so capacity and state cannot disagree.
+model VendorAvailabilityWindow {
+  id         String @id @default(cuid())
+  sellerId   String @map("seller_id")
+  locationId String @map("location_id")
+
+  /// The SKU this window sells. A contract template id, or a seller's own.
+  skuTemplateId String @map("sku_template_id")
+  /// The seller's side of the category rule. Denormalised so the demand feed
+  /// filters without joining the catalogue.
+  domain        String
+
+  slotKind     String @default("rolling") @map("slot_kind")
+  slotMinutes  Int    @default(30) @map("slot_minutes")
+  leadTimeMins Int    @default(60) @map("lead_time_mins")
+  horizonDays  Int    @default(30) @map("horizon_days")
+
+  /// ISO weekday numbers this window recurs on.
+  weekdays  Int[] @default([])
+  openMins  Int   @map("open_mins")
+  closeMins Int   @map("close_mins")
+  /// Sellable units per derived slot.
+  quantity  Int
+
+  priceCents Int @map("price_cents")
+  maxGuests  Int @map("max_guests")
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  seller      VendorSeller           @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location    VendorLocation         @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  commitments VendorSlotCommitment[]
+  offers      Offer[]
+
+  @@index([sellerId, active])
+  @@index([domain, active])
+  @@index([locationId, skuTemplateId])
+  @@map("vendor_availability_windows")
+}
+
+/// The facts taken against one derived slot. A row exists only once someone
+/// acted: an untouched slot is fully open by absence.
+model VendorSlotCommitment {
+  id       String @id @default(cuid())
+  windowId String @map("window_id")
+
+  /// The window plus this instant is the slot's identity. Both sides recompute
+  /// it; the database never invents one.
+  startsAt DateTime @map("starts_at")
+
+  committed   Int     @default(0)
+  blocked     Boolean @default(false)
+  closed      Boolean @default(false)
+  blockReason String? @map("block_reason")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  window VendorAvailabilityWindow @relation(fields: [windowId], references: [id], onDelete: Cascade)
+
+  @@unique([windowId, startsAt])
+  @@index([startsAt])
+  @@map("vendor_slot_commitments")
+}
+
+/// A seller asserting a concrete instance against a concrete need. This is what
+/// makes a Bookable exist without an availability integration.
+///
+/// "Bookable" means two different things either side of this table, and the
+/// difference is load-bearing. The vendor console's `DemandSupply.bookableId`
+/// is the seller's own offering — what they sell, at a price, from a location,
+/// with slots — and that is `windowId` here. `bookableId` below is the API's
+/// Bookable: an immutable snapshot a guest holds, which does not exist until
+/// the offer is accepted. So the console's respond(demandId, bookableId) names
+/// a window, and the column named bookableId stays null until acceptance.
+model Offer {
+  id         String @id @default(cuid())
+  demandId   String @map("demand_id")
+  sellerId   String @map("seller_id")
+  locationId String @map("location_id")
+
+  /// The seller's offering this answers from — what the console calls a
+  /// bookable. Null when hand-asserted against no standing window.
+  windowId      String? @map("window_id")
+  skuTemplateId String  @map("sku_template_id")
+
+  startsAt     DateTime @map("starts_at")
+  durationMins Int      @map("duration_mins")
+  priceCents   Int      @map("price_cents")
+  capacity     Int
+  terms        String?
+
+  state         String   @default("OFFERED")
+  /// A hold is a promise with a deadline or it is not a hold.
+  holdExpiresAt DateTime @map("hold_expires_at")
+
+  createdBySeatId String  @map("created_by_seat_id")
+  bookableId      String? @unique @map("bookable_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  demand   Demand                    @relation(fields: [demandId], references: [id], onDelete: Cascade)
+  seller   VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location VendorLocation            @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  window   VendorAvailabilityWindow? @relation(fields: [windowId], references: [id], onDelete: SetNull)
+  bookable Bookable?                 @relation(fields: [bookableId], references: [id], onDelete: SetNull)
+
+  @@index([demandId, state])
+  @@index([sellerId, state, createdAt])
+  @@index([state, holdExpiresAt])
+  @@map("offers")
+}
+
+/// Append-only. Every broadcast, every decline and its miss rule, every accept
+/// and every settled amount. Free to write today and impossible to reconstruct
+/// later, which is the whole reason it exists before anything reads it.
+model DemandEvent {
+  id       String  @id @default(cuid())
+  demandId String  @map("demand_id")
+  offerId  String? @map("offer_id")
+  sellerId String? @map("seller_id")
+
+  kind   String
+  detail Json?
+
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  @@index([demandId, occurredAt])
+  @@index([sellerId, kind, occurredAt])
+  @@map("demand_events")
 }

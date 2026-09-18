@@ -23,6 +23,8 @@ import { DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
 /** The most live requests one person may have outstanding at once. */
 const MAX_LIVE_PER_USER = 5;
 
+const LIVE_STATES = ['OPEN', 'MATCHED', 'OFFERED'];
+
 const publishInput = z.object({
   // Validated against the contract, not a local list. Only these carry the
   // domains the category match rule reads; a Discover rail would be unmatchable.
@@ -79,7 +81,7 @@ export const demandRouter = router({
       }
 
       const live = await db.demand.count({
-        where: { raisedByUserId: ctx.user.userId, state: { in: ['OPEN', 'MATCHED', 'OFFERED'] }, expiresAt: { gt: now } },
+        where: { raisedByUserId: ctx.user.userId, state: { in: LIVE_STATES }, expiresAt: { gt: now } },
       });
       if (live >= MAX_LIVE_PER_USER) {
         throw new TRPCError({
@@ -120,5 +122,102 @@ export const demandRouter = router({
         expiresAt: demand.expiresAt.toISOString(),
         raisedAt: demand.raisedAt.toISOString(),
       };
+    }),
+
+  /**
+   * What you asked for, and what came back.
+   *
+   * Without this a guest publishes into silence. The offers are included
+   * because an answer nobody can see is the same as no answer, and only live
+   * ones are: an expired hold is a seller's promise that has run out, and
+   * showing it would be offering a table that is no longer held.
+   */
+  mine: protectedProcedure.query(async ({ ctx }) => {
+    const now = new Date();
+    const rows = await db.demand.findMany({
+      where: { raisedByUserId: ctx.user.userId, state: { in: LIVE_STATES }, expiresAt: { gt: now } },
+      orderBy: { raisedAt: 'desc' },
+      take: 20,
+      include: {
+        offers: {
+          where: { state: 'OFFERED', holdExpiresAt: { gt: now } },
+          orderBy: { startsAt: 'asc' },
+          include: { location: { select: { label: true } } },
+        },
+      },
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      state: row.state,
+      category: row.category,
+      partySize: row.partySize,
+      earliest: row.earliest.toISOString(),
+      latest: row.latest.toISOString(),
+      budgetCents: row.budgetCents ?? undefined,
+      note: row.note ?? undefined,
+      planId: row.planId ?? undefined,
+      raisedAt: row.raisedAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
+      offers: row.offers.map((offer) => ({
+        id: offer.id,
+        // The place, not the business: a guest recognises where they are going.
+        where: offer.location.label,
+        startsAt: offer.startsAt.toISOString(),
+        durationMins: offer.durationMins,
+        priceCents: offer.priceCents,
+        terms: offer.terms ?? undefined,
+        holdExpiresAt: offer.holdExpiresAt.toISOString(),
+      })),
+    }));
+  }),
+
+  /**
+   * Take it back.
+   *
+   * A request that cannot be retracted is a promise a guest cannot get out of,
+   * and it keeps occupying one of their five live slots until it expires.
+   * Withdrawing releases the sellers who were holding capacity for it, so this
+   * cancels outstanding offers in the same transaction rather than leaving
+   * tables held for somebody who has gone elsewhere.
+   */
+  withdraw: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 40, label: 'demand-withdraw' }))
+    .input(z.object({ demandId: z.string().trim().min(1).max(64) }))
+    .mutation(async ({ ctx, input }) => {
+      // Scoped to the caller, so another person's request is indistinguishable
+      // from one that does not exist.
+      const demand = await db.demand.findFirst({
+        where: { id: input.demandId, raisedByUserId: ctx.user.userId },
+        select: { id: true, state: true },
+      });
+      if (!demand) throw new TRPCError({ code: 'NOT_FOUND', message: 'Request not found.' });
+
+      // Already booked, expired or withdrawn. Terminal is terminal, and a
+      // booked request is a commitment that is no longer the guest's alone.
+      if (!LIVE_STATES.includes(demand.state)) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'That request has already finished.' });
+      }
+
+      const moved = await db.$transaction(async (tx) => {
+        // Guarded on the state that was read, so a withdrawal racing a booking
+        // cannot undo the booking.
+        const changed = await tx.demand.updateMany({
+          where: { id: demand.id, state: demand.state },
+          data: { state: 'WITHDRAWN' },
+        });
+        if (changed.count === 0) return false;
+
+        await tx.offer.updateMany({
+          where: { demandId: demand.id, state: 'OFFERED' },
+          data: { state: 'WITHDRAWN' },
+        });
+        await tx.demandEvent.create({ data: { demandId: demand.id, kind: 'WITHDRAWN' } });
+        return true;
+      });
+
+      if (!moved) throw new TRPCError({ code: 'CONFLICT', message: 'That request has already finished.' });
+
+      return { id: demand.id, state: 'WITHDRAWN' };
     }),
 });

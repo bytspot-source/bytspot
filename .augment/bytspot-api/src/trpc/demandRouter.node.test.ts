@@ -180,3 +180,95 @@ test('an empty note is stored as nothing rather than as an empty string', async 
   await caller().demand.publish(input({ note: '   ' }));
   assert.equal(created[0].note, null);
 });
+
+test('a guest can see what they asked for and what came back', async () => {
+  const now = Date.now();
+  demand.findMany = async () => [
+    {
+      id: 'demand-1',
+      state: 'OFFERED',
+      category: 'dining',
+      partySize: 2,
+      earliest: new Date(now + 3600_000),
+      latest: new Date(now + 7200_000),
+      budgetCents: null,
+      note: null,
+      planId: null,
+      raisedAt: new Date(now),
+      expiresAt: new Date(now + 7200_000),
+      offers: [
+        {
+          id: 'offer-1',
+          location: { label: 'Broni Home Taste' },
+          startsAt: new Date(now + 4000_000),
+          durationMins: 90,
+          priceCents: 5000,
+          terms: null,
+          holdExpiresAt: new Date(now + 3600_000),
+        },
+      ],
+    },
+  ];
+
+  const mine = await caller().demand.mine();
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].state, 'OFFERED');
+  // The place, not the business: a guest recognises where they are going.
+  assert.equal(mine[0].offers[0].where, 'Broni Home Taste');
+  assert.equal(mine[0].offers[0].priceCents, 5000);
+});
+
+test('an expired hold is not shown as an offer that is still standing', async () => {
+  // The query itself is what excludes them, so assert the filter rather than
+  // the mapping: a lapsed hold must never reach the guest as a live table.
+  let where: any = null;
+  demand.findMany = async (args: any) => {
+    where = args.where;
+    return [];
+  };
+  await caller().demand.mine();
+  assert.deepEqual(where.state.in, ['OPEN', 'MATCHED', 'OFFERED']);
+  assert.ok(where.expiresAt.gt instanceof Date);
+});
+
+test('withdrawing releases the sellers who were holding capacity', async () => {
+  demand.findFirst = async () => ({ id: 'demand-1', state: 'MATCHED' });
+  let offersWithdrawn = false;
+  let logged: any = null;
+  (db as any).$transaction = async (fn: any) =>
+    fn({
+      demand: { updateMany: async () => ({ count: 1 }) },
+      offer: {
+        updateMany: async ({ where, data }: any) => {
+          offersWithdrawn = where.state === 'OFFERED' && data.state === 'WITHDRAWN';
+          return { count: 1 };
+        },
+      },
+      demandEvent: { create: async ({ data }: any) => ((logged = data), {}) },
+    });
+
+  const result = await caller().demand.withdraw({ demandId: 'demand-1' });
+  assert.equal(result.state, 'WITHDRAWN');
+  assert.equal(offersWithdrawn, true);
+  assert.equal(logged.kind, 'WITHDRAWN');
+});
+
+test('someone elses request is indistinguishable from one that does not exist', async () => {
+  demand.findFirst = async () => null;
+  await assert.rejects(() => caller().demand.withdraw({ demandId: 'demand-9' }), { code: 'NOT_FOUND' });
+});
+
+test('a finished request cannot be withdrawn, and a race cannot undo a booking', async () => {
+  demand.findFirst = async () => ({ id: 'demand-1', state: 'BOOKED' });
+  await assert.rejects(() => caller().demand.withdraw({ demandId: 'demand-1' }), { code: 'CONFLICT' });
+
+  // Live when read, booked by the time the guarded write ran.
+  demand.findFirst = async () => ({ id: 'demand-1', state: 'OFFERED' });
+  (db as any).$transaction = async (fn: any) =>
+    fn({
+      demand: { updateMany: async () => ({ count: 0 }) },
+      offer: { updateMany: async () => ({ count: 0 }) },
+      demandEvent: { create: async () => ({}) },
+    });
+  await assert.rejects(() => caller().demand.withdraw({ demandId: 'demand-1' }), { code: 'CONFLICT' });
+});

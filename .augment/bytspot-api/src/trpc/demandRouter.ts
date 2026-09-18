@@ -113,7 +113,7 @@ export const demandRouter = router({
         },
       });
 
-      await db.demandEvent.create({ data: { demandId: demand.id, kind: 'RAISED' } });
+      await db.demandEvent.create({ data: { demandId: demand.id, kind: 'PUBLISHED' } });
 
       return {
         id: demand.id,

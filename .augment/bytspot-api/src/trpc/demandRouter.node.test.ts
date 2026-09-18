@@ -74,7 +74,7 @@ test('raising a need is logged, so who asked and when survives the demand', asyn
     return {};
   };
   await caller().demand.publish(input());
-  assert.equal(logged.kind, 'RAISED');
+  assert.equal(logged.kind, 'PUBLISHED');
   assert.ok(logged.demandId);
 });
 

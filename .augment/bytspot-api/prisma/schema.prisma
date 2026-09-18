@@ -1274,13 +1274,22 @@ model VendorSlotCommitment {
 
 /// A seller asserting a concrete instance against a concrete need. This is what
 /// makes a Bookable exist without an availability integration.
+///
+/// "Bookable" means two different things either side of this table, and the
+/// difference is load-bearing. The vendor console's `DemandSupply.bookableId`
+/// is the seller's own offering — what they sell, at a price, from a location,
+/// with slots — and that is `windowId` here. `bookableId` below is the API's
+/// Bookable: an immutable snapshot a guest holds, which does not exist until
+/// the offer is accepted. So the console's respond(demandId, bookableId) names
+/// a window, and the column named bookableId stays null until acceptance.
 model Offer {
   id         String @id @default(cuid())
   demandId   String @map("demand_id")
   sellerId   String @map("seller_id")
   locationId String @map("location_id")
 
-  /// Null when hand-asserted against no standing window.
+  /// The seller's offering this answers from — what the console calls a
+  /// bookable. Null when hand-asserted against no standing window.
   windowId      String? @map("window_id")
   skuTemplateId String  @map("sku_template_id")
 

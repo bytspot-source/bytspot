@@ -93,19 +93,30 @@ BEGIN
 
   -- A state outside the contract's six must be unstorable.
   BEGIN
-    INSERT INTO demands (id, raised_by_user_id, rail_token, state, party_size,
+    INSERT INTO demands (id, raised_by_user_id, category, state, party_size,
                          earliest, latest, latitude, longitude, radius_miles, expires_at)
-    VALUES ('assert-bad-state', v_user_id, 'eat_drink', 'PENDING', 4,
+    VALUES ('assert-bad-state', v_user_id, 'dining', 'PENDING', 4,
             NOW() + INTERVAL '1 hour', NOW() + INTERVAL '3 hours', 33.78, -84.38, 5,
             NOW() + INTERVAL '2 hours');
     RAISE EXCEPTION 'demands accepted a state outside the contract';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
+  -- A Discover rail is not a discover category. Only categories carry domains,
+  -- so a rail token would leave the category match rule with nothing to compare.
+  BEGIN
+    INSERT INTO demands (id, raised_by_user_id, category, party_size,
+                         earliest, latest, latitude, longitude, radius_miles, expires_at)
+    VALUES ('assert-rail-not-category', v_user_id, 'eat_drink', 4,
+            NOW() + INTERVAL '1 hour', NOW() + INTERVAL '3 hours', 33.78, -84.38, 5,
+            NOW() + INTERVAL '2 hours');
+    RAISE EXCEPTION 'demands accepted a Discover rail where a category belongs';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+
   -- A window that runs backwards is not a window.
   BEGIN
-    INSERT INTO demands (id, raised_by_user_id, rail_token, party_size,
+    INSERT INTO demands (id, raised_by_user_id, category, party_size,
                          earliest, latest, latitude, longitude, radius_miles, expires_at)
-    VALUES ('assert-bad-window', v_user_id, 'eat_drink', 4,
+    VALUES ('assert-bad-window', v_user_id, 'dining', 4,
             NOW() + INTERVAL '3 hours', NOW() + INTERVAL '1 hour', 33.78, -84.38, 5,
             NOW() + INTERVAL '2 hours');
     RAISE EXCEPTION 'demands accepted a window running backwards';
@@ -113,10 +124,10 @@ BEGIN
 
   -- A need cannot expire before it was raised.
   BEGIN
-    INSERT INTO demands (id, raised_by_user_id, rail_token, party_size,
+    INSERT INTO demands (id, raised_by_user_id, category, party_size,
                          earliest, latest, latitude, longitude, radius_miles,
                          raised_at, expires_at)
-    VALUES ('assert-bad-expiry', v_user_id, 'eat_drink', 4,
+    VALUES ('assert-bad-expiry', v_user_id, 'dining', 4,
             NOW() + INTERVAL '1 hour', NOW() + INTERVAL '3 hours', 33.78, -84.38, 5,
             NOW(), NOW() - INTERVAL '1 hour');
     RAISE EXCEPTION 'demands accepted an expiry before the raise';
@@ -124,9 +135,9 @@ BEGIN
 
   -- demand.defaults.maxPartySize = 20.
   BEGIN
-    INSERT INTO demands (id, raised_by_user_id, rail_token, party_size,
+    INSERT INTO demands (id, raised_by_user_id, category, party_size,
                          earliest, latest, latitude, longitude, radius_miles, expires_at)
-    VALUES ('assert-big-party', v_user_id, 'eat_drink', 21,
+    VALUES ('assert-big-party', v_user_id, 'dining', 21,
             NOW() + INTERVAL '1 hour', NOW() + INTERVAL '3 hours', 33.78, -84.38, 5,
             NOW() + INTERVAL '2 hours');
     RAISE EXCEPTION 'demands accepted a party beyond the contract ceiling';
@@ -134,18 +145,18 @@ BEGIN
 
   -- demand.defaults.maxRadiusMiles = 50.
   BEGIN
-    INSERT INTO demands (id, raised_by_user_id, rail_token, party_size,
+    INSERT INTO demands (id, raised_by_user_id, category, party_size,
                          earliest, latest, latitude, longitude, radius_miles, expires_at)
-    VALUES ('assert-wide-radius', v_user_id, 'eat_drink', 4,
+    VALUES ('assert-wide-radius', v_user_id, 'dining', 4,
             NOW() + INTERVAL '1 hour', NOW() + INTERVAL '3 hours', 33.78, -84.38, 51,
             NOW() + INTERVAL '2 hours');
     RAISE EXCEPTION 'demands accepted a radius beyond the contract maximum';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
   -- A demand with no Plan is the common case and must be storable.
-  INSERT INTO demands (id, raised_by_user_id, rail_token, party_size,
+  INSERT INTO demands (id, raised_by_user_id, category, party_size,
                        earliest, latest, latitude, longitude, radius_miles, expires_at)
-  VALUES (v_dem_id, v_user_id, 'eat_drink', 6,
+  VALUES (v_dem_id, v_user_id, 'dining', 6,
           NOW() + INTERVAL '1 hour', NOW() + INTERVAL '4 hours', 33.7866, -84.3833, 15,
           NOW() + INTERVAL '2 hours');
 
@@ -158,27 +169,37 @@ BEGIN
   -- A window that closes before it opens sells nothing.
   BEGIN
     INSERT INTO vendor_availability_windows
-      (id, seller_id, location_id, sku_template_id, rail_token, weekdays,
+      (id, seller_id, location_id, sku_template_id, domain, weekdays,
        open_mins, close_mins, quantity, price_cents, max_guests, updated_at)
-    VALUES ('assert-bad-window-hours', v_sell_id, v_loc_id, 'dining.table-for-4', 'eat_drink',
+    VALUES ('assert-bad-window-hours', v_sell_id, v_loc_id, 'dining.table-for-4', 'dining',
             ARRAY[5], 1320, 600, 4, 5000, 4, NOW());
     RAISE EXCEPTION 'windows accepted a close before its open';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+
+  -- The seller's side of the category rule takes a domain, not a category.
+  BEGIN
+    INSERT INTO vendor_availability_windows
+      (id, seller_id, location_id, sku_template_id, domain, weekdays,
+       open_mins, close_mins, quantity, price_cents, max_guests, updated_at)
+    VALUES ('assert-bad-domain', v_sell_id, v_loc_id, 'dining.table-for-4', 'entertainment',
+            ARRAY[5], 600, 1320, 4, 5000, 4, NOW());
+    RAISE EXCEPTION 'windows accepted a category where a domain belongs';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
   -- availability.slotKinds.
   BEGIN
     INSERT INTO vendor_availability_windows
-      (id, seller_id, location_id, sku_template_id, rail_token, slot_kind, weekdays,
+      (id, seller_id, location_id, sku_template_id, domain, slot_kind, weekdays,
        open_mins, close_mins, quantity, price_cents, max_guests, updated_at)
-    VALUES ('assert-bad-slot-kind', v_sell_id, v_loc_id, 'dining.table-for-4', 'eat_drink',
+    VALUES ('assert-bad-slot-kind', v_sell_id, v_loc_id, 'dining.table-for-4', 'dining',
             'hourly', ARRAY[5], 600, 1320, 4, 5000, 4, NOW());
     RAISE EXCEPTION 'windows accepted a slot kind outside the contract';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
   INSERT INTO vendor_availability_windows
-    (id, seller_id, location_id, sku_template_id, rail_token, weekdays,
+    (id, seller_id, location_id, sku_template_id, domain, weekdays,
      open_mins, close_mins, quantity, price_cents, max_guests, updated_at)
-  VALUES (v_win_id, v_sell_id, v_loc_id, 'dining.table-for-4', 'eat_drink',
+  VALUES (v_win_id, v_sell_id, v_loc_id, 'dining.table-for-4', 'dining',
           ARRAY[5], 600, 1320, 4, 5000, 6, NOW());
 
   -- A block nobody can explain is an outage, not a decision.
@@ -186,6 +207,14 @@ BEGIN
     INSERT INTO vendor_slot_commitments (id, window_id, starts_at, blocked, updated_at)
     VALUES ('assert-unexplained-block', v_win_id, NOW() + INTERVAL '1 day', true, NOW());
     RAISE EXCEPTION 'commitments accepted a block with no reason';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+
+  -- availability.blockReasons. A reason outside the vocabulary cannot be shown
+  -- to a guest, so it cannot be stored.
+  BEGIN
+    INSERT INTO vendor_slot_commitments (id, window_id, starts_at, blocked, block_reason, updated_at)
+    VALUES ('assert-bad-reason', v_win_id, NOW() + INTERVAL '2 days', true, 'because', NOW());
+    RAISE EXCEPTION 'commitments accepted a block reason outside the vocabulary';
   EXCEPTION WHEN check_violation THEN NULL; END;
 
   -- One window plus one instant is one slot. A second row for it is a second

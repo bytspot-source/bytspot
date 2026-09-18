@@ -1173,9 +1173,11 @@ model Demand {
   planId         String? @map("plan_id")
   raisedByUserId String  @map("raised_by_user_id")
 
-  /// A consumer rail token, so demand and Discover speak one vocabulary.
-  railToken String @map("rail_token")
-  state     String @default("OPEN")
+  /// A discover category from the contract, not a Discover rail. Only these
+  /// carry `domains`, and the category match rule compares them against the
+  /// seller's domain; a rail token would make that rule unevaluable.
+  category String
+  state    String @default("OPEN")
 
   partySize Int      @map("party_size")
   /// Stored already widened by the guest's flexibility, so a seller reads the
@@ -1199,7 +1201,7 @@ model Demand {
   offers Offer[]
 
   @@index([state, expiresAt])
-  @@index([railToken, state, latitude, longitude])
+  @@index([category, state, latitude, longitude])
   @@index([planId])
   @@index([raisedByUserId, raisedAt(sort: Desc)])
   @@map("demands")
@@ -1215,8 +1217,9 @@ model VendorAvailabilityWindow {
 
   /// The SKU this window sells. A contract template id, or a seller's own.
   skuTemplateId String @map("sku_template_id")
-  /// Denormalised so the demand feed filters without joining the catalogue.
-  railToken     String @map("rail_token")
+  /// The seller's side of the category rule. Denormalised so the demand feed
+  /// filters without joining the catalogue.
+  domain        String
 
   slotKind     String @default("rolling") @map("slot_kind")
   slotMinutes  Int    @default(30) @map("slot_minutes")
@@ -1243,7 +1246,7 @@ model VendorAvailabilityWindow {
   offers      Offer[]
 
   @@index([sellerId, active])
-  @@index([railToken, active])
+  @@index([domain, active])
   @@index([locationId, skuTemplateId])
   @@map("vendor_availability_windows")
 }

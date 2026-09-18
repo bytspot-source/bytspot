@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS "demands" (
   "id"                TEXT NOT NULL,
   "plan_id"           TEXT,
   "raised_by_user_id" TEXT NOT NULL,
-  "rail_token"        TEXT NOT NULL,
+  "category"          TEXT NOT NULL,
   "state"             TEXT NOT NULL DEFAULT 'OPEN',
   "party_size"        INTEGER NOT NULL,
   "earliest"          TIMESTAMP(3) NOT NULL,
@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS "demands" (
 DO $$ BEGIN
   ALTER TABLE "demands" ADD CONSTRAINT "demands_state_known"
     CHECK ("state" IN ('OPEN', 'MATCHED', 'OFFERED', 'BOOKED', 'EXPIRED', 'WITHDRAWN'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- A discover category from the contract, never a Discover rail. Only these
+-- carry domains, and the category match rule compares them against a seller's
+-- domain; a rail token would make that rule unevaluable.
+DO $$ BEGIN
+  ALTER TABLE "demands" ADD CONSTRAINT "demands_category_known"
+    CHECK ("category" IN ('boutique_apartment', 'mobility', 'nightlife', 'dining', 'coffee',
+                          'shopping', 'entertainment', 'service', 'fitness', 'parking', 'valet'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- A window that runs backwards is not a window.
@@ -105,8 +114,8 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE INDEX IF NOT EXISTS "demands_state_expires_at_idx" ON "demands" ("state", "expires_at");
-CREATE INDEX IF NOT EXISTS "demands_rail_token_state_latitude_longitude_idx"
-  ON "demands" ("rail_token", "state", "latitude", "longitude");
+CREATE INDEX IF NOT EXISTS "demands_category_state_latitude_longitude_idx"
+  ON "demands" ("category", "state", "latitude", "longitude");
 CREATE INDEX IF NOT EXISTS "demands_plan_id_idx" ON "demands" ("plan_id");
 CREATE INDEX IF NOT EXISTS "demands_raised_by_user_id_raised_at_idx"
   ON "demands" ("raised_by_user_id", "raised_at" DESC);
@@ -118,7 +127,7 @@ CREATE TABLE IF NOT EXISTS "vendor_availability_windows" (
   "seller_id"       TEXT NOT NULL,
   "location_id"     TEXT NOT NULL,
   "sku_template_id" TEXT NOT NULL,
-  "rail_token"      TEXT NOT NULL,
+  "domain"          TEXT NOT NULL,
   "slot_kind"       TEXT NOT NULL DEFAULT 'rolling',
   "slot_minutes"    INTEGER NOT NULL DEFAULT 30,
   "lead_time_mins"  INTEGER NOT NULL DEFAULT 60,
@@ -134,6 +143,13 @@ CREATE TABLE IF NOT EXISTS "vendor_availability_windows" (
   "updated_at"      TIMESTAMP(3) NOT NULL,
   CONSTRAINT "vendor_availability_windows_pkey" PRIMARY KEY ("id")
 );
+
+-- The seller's side of the category rule.
+DO $$ BEGIN
+  ALTER TABLE "vendor_availability_windows" ADD CONSTRAINT "vendor_windows_domain_known"
+    CHECK ("domain" IN ('dining', 'nightlife', 'wellness', 'automotive', 'stay', 'stall',
+                        'green', 'coffee', 'shopping', 'events', 'fitness'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- availability.slotKinds.
 DO $$ BEGIN
@@ -171,8 +187,8 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE INDEX IF NOT EXISTS "vendor_availability_windows_seller_id_active_idx"
   ON "vendor_availability_windows" ("seller_id", "active");
-CREATE INDEX IF NOT EXISTS "vendor_availability_windows_rail_token_active_idx"
-  ON "vendor_availability_windows" ("rail_token", "active");
+CREATE INDEX IF NOT EXISTS "vendor_availability_windows_domain_active_idx"
+  ON "vendor_availability_windows" ("domain", "active");
 CREATE INDEX IF NOT EXISTS "vendor_availability_windows_location_id_sku_template_id_idx"
   ON "vendor_availability_windows" ("location_id", "sku_template_id");
 
@@ -202,6 +218,14 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE "vendor_slot_commitments" ADD CONSTRAINT "vendor_slot_commitments_block_explained"
     CHECK ("blocked" = false OR "block_reason" IS NOT NULL);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- availability.blockReasons. A reason outside the vocabulary cannot be shown
+-- to a guest, so it cannot be stored.
+DO $$ BEGIN
+  ALTER TABLE "vendor_slot_commitments" ADD CONSTRAINT "vendor_slot_commitments_block_reason_known"
+    CHECK ("block_reason" IS NULL
+           OR "block_reason" IN ('holiday', 'maintenance', 'private-event', 'staffing', 'weather'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN

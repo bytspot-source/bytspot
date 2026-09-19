@@ -245,12 +245,22 @@ export const demandRouter = router({
   mine: protectedProcedure.query(async ({ ctx }) => {
     const now = new Date();
     const rows = await db.demand.findMany({
-      where: { raisedByUserId: ctx.user.userId, state: { in: LIVE_STATES }, expiresAt: { gt: now } },
+      where: {
+        raisedByUserId: ctx.user.userId,
+        OR: [
+          { state: { in: LIVE_STATES }, expiresAt: { gt: now } },
+          // A booking the guest accepted, until the table they hold is in the
+          // past. Dropping it the moment it is booked would make a confirmed
+          // reservation vanish from the only screen that ever showed it.
+          { state: 'BOOKED', offers: { some: { state: 'ACCEPTED', startsAt: { gt: now } } } },
+        ],
+      },
       orderBy: { raisedAt: 'desc' },
       take: 20,
       include: {
         offers: {
-          where: { state: 'OFFERED', holdExpiresAt: { gt: now } },
+          // An accepted offer is the answer; the rest are history once one wins.
+          where: { OR: [{ state: 'OFFERED', holdExpiresAt: { gt: now } }, { state: 'ACCEPTED' }] },
           orderBy: { startsAt: 'asc' },
           include: { location: { select: { label: true } } },
         },
@@ -278,6 +288,9 @@ export const demandRouter = router({
         priceCents: offer.priceCents,
         terms: offer.terms ?? undefined,
         holdExpiresAt: offer.holdExpiresAt.toISOString(),
+        // The client must be able to tell a table it holds from one it is being
+        // shown, without inferring it from the demand's state.
+        accepted: offer.state === 'ACCEPTED',
       })),
     }));
   }),

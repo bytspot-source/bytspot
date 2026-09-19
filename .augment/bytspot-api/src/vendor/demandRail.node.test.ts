@@ -773,3 +773,28 @@ test('two sellers answer, the guest accepts both at once, and only one sticks', 
   assert.equal(finalOffers.filter((offer) => offer.state === 'DECLINED').length, 1);
   assert.equal((await db.demand.findUniqueOrThrow({ where: { id: published.id } })).state, 'BOOKED');
 });
+
+test('a booking the guest accepted stays visible until the table is in the past', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const { offer, demandId } = await offeredTo();
+
+  // Before accepting: an open question with an offer to weigh.
+  const waiting = (await guest().demand.mine()).find((row) => row.id === demandId);
+  assert.equal(waiting?.state, 'OFFERED');
+  assert.equal(waiting?.offers.every((each) => each.accepted === false), true);
+
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // After accepting: still listed, now as a table they hold. A confirmed
+  // booking disappearing from the only screen that showed it would be worse
+  // than never having shown it.
+  const held = (await guest().demand.mine()).find((row) => row.id === demandId);
+  assert.ok(held, 'an accepted booking must not vanish');
+  assert.equal(held?.state, 'BOOKED');
+  const accepted = held?.offers.filter((each) => each.accepted) ?? [];
+  assert.equal(accepted.length, 1, 'exactly the offer they took');
+  assert.equal(accepted[0].id, offer.id);
+  // The losing offers are not shown back to the guest as if still choosable.
+  assert.equal(held?.offers.length, 1);
+});

@@ -524,3 +524,81 @@ test('an offer made to somebody else is not found, not forbidden', async (t) => 
     },
   );
 });
+
+/**
+ * Vendor intent.
+ *
+ * Capability used to be inferred from which kind of row existed. This is the
+ * seller saying what they offer, and the platform holding them to it.
+ */
+
+test('a window that has not offered to answer asks never reaches the feed', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const when = atlantaEveningTomorrow();
+  const published = await guest().demand.publish({
+    category: 'dining',
+    partySize: 2,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+
+  // The seller withdraws the intent. Nothing else about the window changes:
+  // same hours, same capacity, same price, still active. `none` exists so that
+  // declining is expressible without deleting or deactivating the window.
+  await db.$executeRawUnsafe(
+    `UPDATE "vendor_availability_windows" SET "intent" = 'none' WHERE "id" = $1`,
+    ids.window,
+  );
+
+  try {
+    const feed = await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+    // The request still exists and is still near them. It simply has nothing
+    // here to answer it, so it stays unmatched rather than being promoted.
+    const seen = feed.demand.find((item) => item.id === published.id);
+    assert.ok(seen, 'the ask is still reported');
+    assert.equal(seen.state, 'OPEN');
+    assert.equal(feed.supply.length, 0, 'a window without the intent is not sellable supply');
+
+    // And the direct path is closed too: naming the window id explicitly must
+    // not do what the feed refused to offer.
+    const seatNow = await seat();
+    await assert.rejects(
+      () => respondToDemand(seatNow, published.id, { operation: 'OFFER', bookableId: ids.window }),
+      (error: Error) => {
+        assert.match(error.message, /offering/i);
+        return true;
+      },
+    );
+
+    const offers = await db.offer.findMany({ where: { demandId: published.id } });
+    assert.equal(offers.length, 0, 'no offer may exist from a window that does not answer asks');
+  } finally {
+    await db.$executeRawUnsafe(
+      `UPDATE "vendor_availability_windows" SET "intent" = 'request' WHERE "id" = $1`,
+      ids.window,
+    );
+  }
+});
+
+test('the database refuses an intent the platform cannot honour', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  // book, order and redirect are not words a seller can say yet. Nothing behind
+  // them is built, and a vocabulary that can name a promise the platform cannot
+  // keep is how the trust gate stops meaning anything.
+  for (const intent of ['book', 'order', 'redirect']) {
+    await assert.rejects(
+      () =>
+        db.$executeRawUnsafe(
+          `UPDATE "vendor_availability_windows" SET "intent" = $1 WHERE "id" = $2`,
+          intent,
+          ids.window,
+        ),
+      /violates check constraint|constraint/i,
+      `${intent} must not be storable until the rail behind it exists`,
+    );
+  }
+});

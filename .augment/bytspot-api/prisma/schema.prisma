@@ -1236,6 +1236,11 @@ model VendorAvailabilityWindow {
   priceCents Int @map("price_cents")
   maxGuests  Int @map("max_guests")
 
+  /// What the seller says this window is for, not what we infer from the shape
+  /// of their data. Only `request` exists today, because only the ask → offer
+  /// → accept rail is built; a word is added when the rail behind it is.
+  intent String @default("request")
+
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

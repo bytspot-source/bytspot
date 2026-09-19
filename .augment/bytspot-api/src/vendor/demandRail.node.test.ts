@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
 import { acceptOffer } from './acceptOffer';
+import { setWindowIntent } from './windowIntent';
 import { createCallerFactory } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
 import type { Context } from '../trpc/context';
@@ -601,4 +602,53 @@ test('the database refuses an intent the platform cannot honour', async (t) => {
       `${intent} must not be storable until the rail behind it exists`,
     );
   }
+});
+
+test('the console mutation is what turns asks on and off', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const when = atlantaEveningTomorrow();
+  const published = await guest().demand.publish({
+    category: 'dining',
+    partySize: 2,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+
+  const declined = await setWindowIntent({ sellerId: ids.seller, windowId: ids.window, intent: 'none' });
+  assert.equal(declined.intent, 'none');
+  // The console is told what it agreed to in words, not just a token echoed
+  // back: a seller changing what their business accepts should read a sentence.
+  assert.match(declined.meaning, /no asks/i);
+
+  const quiet = await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  assert.equal(quiet.supply.length, 0, 'declining must actually stop the asks');
+  assert.equal(quiet.demand.find((item) => item.id === published.id)?.state, 'OPEN');
+
+  const accepting = await setWindowIntent({ sellerId: ids.seller, windowId: ids.window, intent: 'request' });
+  assert.equal(accepting.intent, 'request');
+  assert.match(accepting.meaning, /offer/i);
+
+  const live = await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  assert.equal(live.supply.length, 1, 'saying yes must put the window back in the feed');
+  assert.equal(live.demand.find((item) => item.id === published.id)?.state, 'MATCHED');
+});
+
+test('a seat cannot speak for a window that is not its business', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  // Not-found rather than forbidden: the id is not theirs to learn about.
+  await assert.rejects(
+    () => setWindowIntent({ sellerId: `${ids.seller}-other`, windowId: ids.window, intent: 'none' }),
+    (error: Error) => {
+      assert.match(error.message, /offering/i);
+      return true;
+    },
+  );
+
+  // And the window is untouched by the attempt.
+  const untouched = await db.vendorAvailabilityWindow.findUniqueOrThrow({ where: { id: ids.window } });
+  assert.equal(untouched.intent, 'request');
 });

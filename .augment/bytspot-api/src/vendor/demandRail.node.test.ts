@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { acceptOffer } from './acceptOffer';
+import { acceptOffer, OfferGone, SlotTaken } from './acceptOffer';
 import { setWindowIntent } from './windowIntent';
 import { createCallerFactory } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
@@ -651,4 +651,124 @@ test('a seat cannot speak for a window that is not its business', async (t) => {
   // And the window is untouched by the attempt.
   const untouched = await db.vendorAvailabilityWindow.findUniqueOrThrow({ where: { id: ids.window } });
   assert.equal(untouched.intent, 'request');
+});
+
+/**
+ * Races.
+ *
+ * Both of these passed the sequential suite and failed in reality. A rail that
+ * sells capacity is only correct under simultaneous buyers.
+ */
+
+test('two accepts into one empty slot both succeed when there is room for both', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  // Two separate guests, two separate demands, the same empty slot on a window
+  // with room for six. Nothing here should be scarce.
+  const first = await offeredTo();
+  const second = await offeredTo();
+  assert.equal(first.offer.startsAt.getTime(), second.offer.startsAt.getTime(), 'same slot, or this proves nothing');
+
+  const results = await Promise.allSettled([
+    acceptOffer({ offerId: first.offer.id, userId: ids.user }),
+    acceptOffer({ offerId: second.offer.id, userId: ids.user }),
+  ]);
+
+  // Whoever loses the race to create the commitment row must continue to the
+  // increment, not be told the slot is full. Being refused here would be a
+  // vendor losing a booking they had capacity for.
+  const refused = results.filter((result) => result.status === 'rejected');
+  assert.deepEqual(refused.map((r) => (r as PromiseRejectedResult).reason?.message), [],
+    'neither accept may fail while the slot has room');
+
+  const commitment = await db.vendorSlotCommitment.findUniqueOrThrow({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: first.offer.startsAt } },
+  });
+  assert.equal(commitment.committed, 2, 'both bookings must be counted, exactly once each');
+});
+
+test('two accepts racing for the last unit: one wins, the other is told plainly', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const first = await offeredTo();
+  const second = await offeredTo();
+
+  // One unit left.
+  await db.vendorSlotCommitment.upsert({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: first.offer.startsAt } },
+    create: { windowId: ids.window, startsAt: first.offer.startsAt, committed: 5 },
+    update: { committed: 5 },
+  });
+
+  const results = await Promise.allSettled([
+    acceptOffer({ offerId: first.offer.id, userId: ids.user }),
+    acceptOffer({ offerId: second.offer.id, userId: ids.user }),
+  ]);
+
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1, 'exactly one may win');
+  const loser = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+  // A domain refusal, not a database error surfacing as a 500.
+  assert.ok(loser.reason instanceof SlotTaken, `expected SlotTaken, got ${loser.reason?.constructor?.name}`);
+
+  const commitment = await db.vendorSlotCommitment.findUniqueOrThrow({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: first.offer.startsAt } },
+  });
+  assert.equal(commitment.committed, 6, 'the seller must never be sold past what they declared');
+});
+
+// Honest limit: this asserts the invariant, it does not reproduce the deadlock
+// it guards against. The collision needs both transactions interleaved mid-way,
+// which did not occur in repeated runs with the demand lock removed; it was
+// found with a trigger widening the window. Kept because the invariant is the
+// thing that must hold, not because it proves the lock.
+test('two sellers answer, the guest accepts both at once, and only one sticks', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  // One demand, two offers. Without a deliberate order these can deadlock on
+  // each other's offer rows and the loser gets a raw database error.
+  const when = atlantaEveningTomorrow();
+  const published = await guest().demand.publish({
+    category: 'dining',
+    partySize: 2,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window });
+  const offers = await db.offer.findMany({ where: { demandId: published.id, state: 'OFFERED' } });
+  // A second offer on the same demand, as a second seat would have written it.
+  const sibling = await db.offer.create({
+    data: {
+      demandId: published.id,
+      sellerId: offers[0].sellerId,
+      locationId: offers[0].locationId,
+      windowId: offers[0].windowId,
+      skuTemplateId: offers[0].skuTemplateId,
+      startsAt: offers[0].startsAt,
+      durationMins: offers[0].durationMins,
+      priceCents: offers[0].priceCents,
+      capacity: offers[0].capacity,
+      state: 'OFFERED',
+      holdExpiresAt: offers[0].holdExpiresAt,
+      createdBySeatId: offers[0].createdBySeatId,
+    },
+  });
+
+  const results = await Promise.allSettled([
+    acceptOffer({ offerId: offers[0].id, userId: ids.user }),
+    acceptOffer({ offerId: sibling.id, userId: ids.user }),
+  ]);
+
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1, 'a demand may be booked once');
+  const loser = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+  // The point of the lock: a named refusal rather than a deadlock.
+  assert.ok(loser.reason instanceof OfferGone, `expected OfferGone, got ${loser.reason?.constructor?.name}`);
+
+  const finalOffers = await db.offer.findMany({ where: { demandId: published.id } });
+  assert.equal(finalOffers.filter((offer) => offer.state === 'ACCEPTED').length, 1);
+  // The seller who lost is released rather than left holding a maybe.
+  assert.equal(finalOffers.filter((offer) => offer.state === 'DECLINED').length, 1);
+  assert.equal((await db.demand.findUniqueOrThrow({ where: { id: published.id } })).state, 'BOOKED');
 });

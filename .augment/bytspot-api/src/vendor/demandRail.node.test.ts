@@ -29,6 +29,8 @@ const ids = {
   location: `rail-loc-${Date.now()}`,
   seat: `rail-seat-${Date.now()}`,
   window: `rail-win-${Date.now()}`,
+  plan: `rail-plan-${Date.now()}`,
+  planItem: `rail-item-${Date.now()}`,
 };
 
 /** Midtown Atlanta, where the seller and the guest both are. */
@@ -96,6 +98,8 @@ before(async () => {
 after(async () => {
   if (!reachable) return;
   await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+  await db.planItem.deleteMany({ where: { planId: ids.plan } });
+  await db.plan.deleteMany({ where: { id: ids.plan } });
   await db.vendorAvailabilityWindow.deleteMany({ where: { sellerId: ids.seller } });
   await db.vendorSeat.deleteMany({ where: { sellerId: ids.seller } });
   await db.vendorLocation.deleteMany({ where: { sellerId: ids.seller } });
@@ -160,6 +164,47 @@ test('a published need reaches the seller who can answer it, and is offered agai
   const visible = mine.find((item) => item.id === published.id);
   assert.equal(visible?.offers.length, 1);
   assert.equal(visible?.offers[0].where, 'Rail Kitchen Midtown');
+});
+
+test('a plan raises the ask, and it reaches the seller like any other', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const when = atlantaEveningTomorrow();
+  await db.plan.create({
+    data: {
+      id: ids.plan,
+      creatorUserId: ids.user,
+      idempotencyKey: `${ids.plan}-key`,
+      joinToken: `${ids.plan}-token`,
+      title: 'Dinner in Midtown',
+      intent: 'dinner',
+      startsAt: when.earliest,
+      endsAt: when.latest,
+      latitude: MIDTOWN.lat,
+      longitude: MIDTOWN.lng,
+      partySize: 4,
+    },
+  });
+  await db.planItem.create({
+    data: { id: ids.planItem, planId: ids.plan, needKind: 'dining', title: 'Somewhere to eat' },
+  });
+
+  const raised = await guest().demand.fromPlan({ planId: ids.plan, planItemId: ids.planItem });
+  assert.equal(raised.category, 'dining');
+
+  // Read back from the database rather than the return value: the plan link is
+  // what lets a guest see which gap this was asked for.
+  const stored = await db.demand.findUnique({ where: { id: raised.id } });
+  assert.equal(stored!.planId, ids.plan);
+  assert.equal(stored!.partySize, 4);
+
+  const feed = await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  assert.equal(feed.demand.find((entry) => entry.id === raised.id)?.state, 'MATCHED');
+
+  // The same gap must not be asked about twice while the first ask is live.
+  await assert.rejects(() => guest().demand.fromPlan({ planId: ids.plan, planItemId: ids.planItem }));
+
+  await guest().demand.withdraw({ demandId: raised.id });
 });
 
 test('demand nobody can answer still reaches the feed, unmatched', async (t) => {

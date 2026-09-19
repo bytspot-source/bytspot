@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
+import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 
 /**
  * Demand — intent published before supply is known.
@@ -39,6 +40,63 @@ const publishInput = z.object({
   note: z.string().trim().max(280).optional(),
   planId: z.string().trim().min(1).max(64).optional(),
 });
+
+/**
+ * Everything true of a request however it was raised.
+ *
+ * Shared so that demand emitted by a Plan cannot drift away from demand a guest
+ * typed: the cap, the expiry rule and the event are one implementation, not two
+ * that happen to agree today.
+ */
+async function raiseDemand(
+  userId: string,
+  envelope: DemandEnvelope,
+  extras: { planId?: string | null; radiusMiles?: number; budgetCents?: number; note?: string | null },
+  now: Date,
+) {
+  const live = await db.demand.count({
+    where: { raisedByUserId: userId, state: { in: LIVE_STATES }, expiresAt: { gt: now } },
+  });
+  if (live >= MAX_LIVE_PER_USER) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: 'You have too many open requests. Let one land or expire first.',
+    });
+  }
+
+  // A demand must not outlive the window it asks about. The contract's expiry
+  // is the longest anyone waits; a request for dinner tonight stops being a
+  // request the moment tonight is over.
+  const contractExpiry = new Date(now.getTime() + DEMAND_DEFAULTS.expiryMins * 60_000);
+  const expiresAt = contractExpiry < envelope.latest ? contractExpiry : envelope.latest;
+
+  const demand = await db.demand.create({
+    data: {
+      planId: extras.planId ?? null,
+      raisedByUserId: userId,
+      category: envelope.category,
+      partySize: envelope.partySize,
+      earliest: envelope.earliest,
+      latest: envelope.latest,
+      latitude: envelope.latitude,
+      longitude: envelope.longitude,
+      radiusMiles: extras.radiusMiles ?? DEMAND_DEFAULTS.radiusMiles,
+      budgetCents: extras.budgetCents ?? null,
+      note: extras.note || null,
+      expiresAt,
+    },
+  });
+
+  await db.demandEvent.create({ data: { demandId: demand.id, kind: 'PUBLISHED' } });
+
+  return {
+    id: demand.id,
+    state: demand.state,
+    category: demand.category,
+    expiresAt: demand.expiresAt.toISOString(),
+    raisedAt: demand.raisedAt.toISOString(),
+  };
+}
 
 export const demandRouter = router({
   /**
@@ -80,48 +138,85 @@ export const demandRouter = router({
         if (!plan) throw new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
       }
 
-      const live = await db.demand.count({
-        where: { raisedByUserId: ctx.user.userId, state: { in: LIVE_STATES }, expiresAt: { gt: now } },
-      });
-      if (live >= MAX_LIVE_PER_USER) {
-        throw new TRPCError({
-          code: 'CONFLICT',
-          message: 'You have too many open requests. Let one land or expire first.',
-        });
-      }
-
-      // A demand must not outlive the window it asks about. The contract's
-      // expiry is the longest anyone waits; a request for dinner tonight stops
-      // being a request the moment tonight is over.
-      const contractExpiry = new Date(now.getTime() + DEMAND_DEFAULTS.expiryMins * 60_000);
-      const expiresAt = contractExpiry < input.latest ? contractExpiry : input.latest;
-
-      const demand = await db.demand.create({
-        data: {
-          planId: input.planId ?? null,
-          raisedByUserId: ctx.user.userId,
+      return raiseDemand(
+        ctx.user.userId,
+        {
           category: input.category,
           partySize: input.partySize,
           earliest: input.earliest,
           latest: input.latest,
           latitude: input.latitude,
           longitude: input.longitude,
-          radiusMiles: input.radiusMiles ?? DEMAND_DEFAULTS.radiusMiles,
-          budgetCents: input.budgetCents ?? null,
-          note: input.note || null,
-          expiresAt,
         },
+        { planId: input.planId, radiusMiles: input.radiusMiles, budgetCents: input.budgetCents, note: input.note },
+        now,
+      );
+    }),
+
+  /**
+   * Ask on behalf of a Plan.
+   *
+   * The Plan already states when, where and how many, so a guest filling a gap
+   * in one should not have to restate it — and could not restate it more
+   * accurately than the Plan itself.
+   *
+   * Nothing here is inferred: a Plan that does not say enough is refused with
+   * the reason, so the guest learns what to add rather than watching a request
+   * expire unanswered.
+   */
+  fromPlan: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 20, label: 'demand-from-plan' }))
+    .input(
+      z.object({
+        planId: z.string().trim().min(1).max(64),
+        planItemId: z.string().trim().min(1).max(64),
+        budgetCents: z.number().int().positive().max(100_000_00).optional(),
+        note: z.string().trim().max(280).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+
+      // Someone else's Plan is indistinguishable from one that does not exist.
+      const plan = await db.plan.findFirst({
+        where: { id: input.planId, creatorUserId: ctx.user.userId },
+        select: { id: true, startsAt: true, endsAt: true, latitude: true, longitude: true, partySize: true },
       });
+      if (!plan) throw new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
-      await db.demandEvent.create({ data: { demandId: demand.id, kind: 'PUBLISHED' } });
+      const item = await db.planItem.findFirst({
+        where: { id: input.planItemId, planId: plan.id },
+        select: { id: true, needKind: true, status: true, bookableId: true },
+      });
+      if (!item) throw new TRPCError({ code: 'NOT_FOUND', message: 'Plan item not found.' });
 
-      return {
-        id: demand.id,
-        state: demand.state,
-        category: demand.category,
-        expiresAt: demand.expiresAt.toISOString(),
-        raisedAt: demand.raisedAt.toISOString(),
-      };
+      const emission = constraintsFromPlan(plan, item, now);
+      if (!emission.ok) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: refusalMessage(emission.reason) });
+      }
+
+      // One ask per need. A second live request for the same gap doubles what
+      // every matching seller sees and makes two of them hold capacity for one
+      // table.
+      const already = await db.demand.findFirst({
+        where: {
+          planId: plan.id,
+          category: emission.envelope.category,
+          state: { in: LIVE_STATES },
+          expiresAt: { gt: now },
+        },
+        select: { id: true },
+      });
+      if (already) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'You have already asked for that.' });
+      }
+
+      return raiseDemand(
+        ctx.user.userId,
+        emission.envelope,
+        { planId: plan.id, budgetCents: input.budgetCents, note: input.note },
+        now,
+      );
     }),
 
   /**

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
 import { acceptOffer, OfferGone, SlotTaken } from './acceptOffer';
@@ -8,6 +9,7 @@ import { appRouter } from '../trpc/router';
 import type { Context } from '../trpc/context';
 import { buildDemandSnapshot, respondToDemand, NoCapacity, NotFound } from './demandFeed';
 import { DEMAND_DEFAULTS } from './demand';
+import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 
 /**
  * The rail, end to end, against a real database.
@@ -133,7 +135,10 @@ before(async () => {
 // refuses to be deleted on its own, by design.
 beforeEach(async () => {
   if (!reachable) return;
-  await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+  // Items first. A filed booking holds its offer down by design, so the
+  // cascade from the demand cannot run while one still points at it.
+  await db.planItem.deleteMany({ where: { plan: { creatorUserId: ids.user } } });
+  await db.demand.deleteMany({ where: { raisedByUserId: { startsWith: ids.user } } });
   // Capacity too: the slots derive from one window, so a test that fills the
   // seller's evening leaves the next one with nothing to sell.
   await db.vendorSlotCommitment.deleteMany({ where: { windowId: ids.window } });
@@ -141,9 +146,9 @@ beforeEach(async () => {
 
 after(async () => {
   if (!reachable) return;
-  await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
-  await db.planItem.deleteMany({ where: { planId: ids.plan } });
-  await db.plan.deleteMany({ where: { id: ids.plan } });
+  await db.planItem.deleteMany({ where: { plan: { creatorUserId: ids.user } } });
+  await db.demand.deleteMany({ where: { raisedByUserId: { startsWith: ids.user } } });
+  await db.plan.deleteMany({ where: { creatorUserId: ids.user } });
   await db.vendorAvailabilityWindow.deleteMany({ where: { sellerId: ids.seller } });
   await db.vendorSeat.deleteMany({ where: { sellerId: ids.seller } });
   await db.vendorLocation.deleteMany({ where: { sellerId: ids.seller } });
@@ -839,4 +844,200 @@ test('an offer may not run longer than a day', async (t) => {
     /offers_shape_sane/,
   );
   await db.offer.update({ where: { id: offer.id }, data: { durationMins: 1440 } });
+});
+
+/**
+ * Filing the table in the Plan.
+ *
+ * A booking the guest cannot find in the Plan they built is a booking they
+ * will assume did not happen.
+ */
+
+/** A Plan with one open dining need, distinct per test so asks never collide. */
+async function planWithDiningNeed(): Promise<string> {
+  const when = atlantaEveningTomorrow();
+  const plan = await db.plan.create({
+    data: {
+      creatorUserId: ids.user,
+      idempotencyKey: `${ids.plan}-attach-${randomUUID()}`,
+      joinToken: `${ids.plan}-attach-token-${randomUUID()}`,
+      title: 'Dinner in Midtown',
+      intent: 'dinner',
+      startsAt: when.earliest,
+      endsAt: when.latest,
+      latitude: MIDTOWN.lat,
+      longitude: MIDTOWN.lng,
+      partySize: 2,
+      needs: ['dining'],
+      // The creator's own seat. A Plan without one is unreadable even to the
+      // person who made it, so a fixture without it is not a Plan.
+      participants: { create: { userId: ids.user, role: 'creator', status: 'accepted' } },
+    },
+  });
+  return plan.id;
+}
+
+/** Raise from a Plan, get it matched, and take one offer back. */
+async function offeredToPlan(planId: string) {
+  const raised = await guest().demand.fromPlan({ planId, needKind: 'dining' });
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  await respondToDemand(await seat(), raised.id, { operation: 'OFFER', bookableId: ids.window });
+  const offer = await db.offer.findFirstOrThrow({ where: { demandId: raised.id, state: 'OFFERED' } });
+  return { demandId: raised.id, offer };
+}
+
+test('a table won on the rail lands in the Plan it was asked for', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  const item = await db.planItem.findUnique({ where: { offerId: offer.id } });
+  assert.ok(item, 'the accepted table must appear in the Plan');
+  assert.equal(item!.planId, planId);
+  // Filed under the need the guest actually stated, not a guessed one.
+  assert.equal(item!.needKind, 'dining');
+  assert.equal(item!.title, 'Rail Kitchen Midtown');
+  // Capacity is committed, so the item says booked and nothing weaker.
+  assert.equal(item!.capability, 'book');
+  assert.equal(item!.status, 'booked');
+  // Carries the frozen snapshot of what was agreed, not a live lookup.
+  assert.equal(item!.bookableId, (await db.offer.findUniqueOrThrow({ where: { id: offer.id } })).bookableId);
+});
+
+test('the guest sees the won table when they open the Plan', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // Through the router the client actually calls, not the row underneath it.
+  const plan = await guest().plans.get({ planId });
+  const item = plan.items.find((entry) => entry.selectionKey === `vendorOffer:${offer.id}`);
+  assert.ok(item, 'the Plan must show the table it won');
+  assert.equal(item!.booked, true);
+  assert.equal(item!.needKind, 'dining');
+  assert.equal(item!.title, 'Rail Kitchen Midtown');
+});
+
+test('a booking asked for outside any Plan is still a booking', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  // Its own guest: publishing is rate-limited per user, and the asks above
+  // have already spent this window. A limit is not what this test is about.
+  const soloUser = `${ids.user}-solo`;
+  const solo = createCaller({
+    user: { userId: soloUser, email: `${soloUser}@bytspot.test` },
+    clientRateLimitKey: 'rail-solo',
+  } as Context);
+
+  // Raised from Concierge: no Plan to file it in. The accept must still
+  // complete — the demand inbox is where this one lives.
+  const when = atlantaEveningTomorrow();
+  const published = await solo.demand.publish({
+    category: 'dining',
+    partySize: 2,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window });
+  const offer = await db.offer.findFirstOrThrow({ where: { demandId: published.id, state: 'OFFERED' } });
+  const demandId = published.id;
+  await acceptOffer({ offerId: offer.id, userId: soloUser });
+
+  assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
+  assert.equal(await db.planItem.findUnique({ where: { offerId: offer.id } }), null);
+});
+
+test('a Plan deleted while the ask was live does not take the booking down with it', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer, demandId } = await offeredToPlan(planId);
+  await db.plan.update({ where: { id: planId }, data: { deletedAt: new Date() } });
+
+  // The table is real and the seller committed capacity. Refusing the accept
+  // because the Plan is gone would punish the guest for tidying up.
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+  assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
+  assert.equal(await db.planItem.findUnique({ where: { offerId: offer.id } }), null);
+});
+
+test('the same accepted offer cannot be filed twice, in any Plan', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // A second Plan and a second snapshot, so neither the shared bookable nor
+  // the per-plan selection key is what refuses. One table, filed once.
+  const otherPlan = await planWithDiningNeed();
+  const snapshot = offerToBookableSnapshot({
+    offerId: offer.id,
+    where: 'Rail Kitchen Midtown',
+    priceCents: offer.priceCents,
+    capacity: offer.capacity,
+    startsAt: offer.startsAt,
+    durationMins: offer.durationMins,
+  });
+  await db.bookable.create({ data: { ...bookableCreateData(snapshot), snapshotAt: new Date() } });
+
+  await assert.rejects(
+    () =>
+      db.planItem.create({
+        data: {
+          planId: otherPlan,
+          needKind: 'dining',
+          title: 'Rail Kitchen Midtown',
+          offerId: offer.id,
+          bookableId: snapshot.id,
+          capability: 'book',
+          status: 'booked',
+          selectionKey: `vendorOffer:${offer.id}`,
+        },
+      }),
+    /offer_id/,
+  );
+});
+
+test('an offer-backed item may not claim to be anything other than booked', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // Available would invite a second attempt to reserve a table already held.
+  await assert.rejects(
+    () => db.planItem.update({ where: { offerId: offer.id }, data: { status: 'available' } }),
+    /plan_items_vendor_offer_booked_check/,
+  );
+  // Request understates a committed table.
+  await assert.rejects(
+    () => db.planItem.update({ where: { offerId: offer.id }, data: { capability: 'request' } }),
+    /plan_items_vendor_offer_booked_check/,
+  );
+  // Cancelling is the one move it is allowed to make.
+  await db.planItem.update({ where: { offerId: offer.id }, data: { status: 'cancelled' } });
+});
+
+test('an item carries one supply, and an offer is not an exception', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  const spot = await db.coffeeSpot.findFirst();
+  if (!spot) return t.skip('no coffee spot fixture');
+  await assert.rejects(
+    () => db.planItem.update({ where: { offerId: offer.id }, data: { coffeeSpotId: spot.id } }),
+    /plan_items_selection_supply_check/,
+  );
 });

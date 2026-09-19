@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { db } from '../lib/db';
 import { stateAfterOperation } from './demand';
+import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 
 /**
@@ -179,6 +180,38 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
       where: { id: offer.demandId },
       data: { state: 'BOOKED' },
     });
+
+    // File the table in the Plan it was asked for.
+    //
+    // A demand raised from Concierge has no Plan, and a Plan deleted while the
+    // request was live is gone for good — in both cases the booking still
+    // stands, it simply has nowhere to be filed. The demand inbox remains its
+    // home, so nothing is lost by not writing an item here.
+    if (offer.demand.planId) {
+      const needKind = needKindForDemandCategory(offer.demand.category);
+      const plan = await tx.plan.findFirst({
+        where: { id: offer.demand.planId, deletedAt: null },
+        select: { id: true },
+      });
+      // No need kind means the category never came from a Plan need. Filing it
+      // under a guessed one would put a booking in a list the guest never
+      // wrote, so it stays unfiled and honest.
+      if (plan && needKind) {
+        await tx.planItem.create({
+          data: {
+            planId: plan.id,
+            needKind,
+            title: offer.location.label,
+            offerId: offer.id,
+            bookableId: snapshot.id,
+            // Capacity is committed; this is a booking, not an intention.
+            capability: 'book',
+            status: 'booked',
+            selectionKey: `vendorOffer:${offer.id}`,
+          },
+        });
+      }
+    }
 
     await tx.demandEvent.create({
       data: {

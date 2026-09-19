@@ -5,6 +5,7 @@ import { db } from '../lib/db';
 import { DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
+import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
 
 /**
  * Demand — intent published before supply is known.
@@ -290,6 +291,35 @@ export const demandRouter = router({
    * cancels outstanding offers in the same transaction rather than leaving
    * tables held for somebody who has gone elsewhere.
    */
+  /**
+   * Take the offer.
+   *
+   * The first point where the rail commits to anything. Everything before it
+   * is conversation; this is a guest with a table and a seller with one fewer
+   * to sell.
+   */
+  acceptOffer: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 40, label: 'demand-accept' }))
+    .input(z.object({ offerId: z.string().trim().min(1).max(64) }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await acceptOffer({ offerId: input.offerId, userId: ctx.user.userId });
+      } catch (error) {
+        // Gone and not-yours are both NOT_FOUND: a stranger probing offer ids
+        // must not learn which ones exist.
+        if (error instanceof OfferGone || error instanceof NotYours) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'That offer is no longer available.' });
+        }
+        if (error instanceof OfferExpired) {
+          throw new TRPCError({ code: 'CONFLICT', message: new OfferExpired().message });
+        }
+        if (error instanceof SlotTaken) {
+          throw new TRPCError({ code: 'CONFLICT', message: new SlotTaken().message });
+        }
+        throw error;
+      }
+    }),
+
   withdraw: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 40, label: 'demand-withdraw' }))
     .input(z.object({ demandId: z.string().trim().min(1).max(64) }))

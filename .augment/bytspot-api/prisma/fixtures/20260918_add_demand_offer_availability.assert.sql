@@ -303,3 +303,50 @@ BEGIN
   DELETE FROM plans WHERE id = v_plan_id;
   DELETE FROM users WHERE id = v_user_id;
 END $$;
+
+-- ── Vendor intent ────────────────────────────────────────────────────────────
+-- A seller says what a window is for; the platform holds them to it. The closed
+-- side is the assertion: words whose rail does not exist must be unstorable.
+DO $$
+DECLARE
+  v_seller_id TEXT := 'assert-intent-seller';
+  v_loc_id    TEXT := 'assert-intent-loc';
+  v_win_id    TEXT := 'assert-intent-win';
+BEGIN
+  INSERT INTO "vendor_sellers" ("id", "state", "business_mode", "created_at", "updated_at")
+    VALUES (v_seller_id, 'ACTIVE', 'standard', NOW(), NOW());
+  INSERT INTO "vendor_locations" ("id", "seller_id", "label", "kind", "lat", "lng", "timezone", "state", "created_at", "updated_at")
+    VALUES (v_loc_id, v_seller_id, 'Assert Room', 'venue', 33.78, -84.38, 'America/New_York', 'ACTIVE', NOW(), NOW());
+  INSERT INTO "vendor_availability_windows"
+      ("id", "seller_id", "location_id", "sku_template_id", "domain", "slot_minutes",
+       "weekdays", "open_mins", "close_mins", "quantity", "price_cents", "max_guests", "created_at", "updated_at")
+    VALUES (v_win_id, v_seller_id, v_loc_id, 'dining.table', 'dining', 60,
+            '{0,1,2,3,4,5,6}', 1020, 1320, 4, 5000, 4, NOW(), NOW());
+
+  -- A window answers asks unless the seller says otherwise. The default states
+  -- what these rows already did before the column existed.
+  ASSERT (SELECT "intent" FROM "vendor_availability_windows" WHERE "id" = v_win_id) = 'request',
+    'a window must default to answering asks';
+
+  -- Declining must be expressible without deleting the window.
+  UPDATE "vendor_availability_windows" SET "intent" = 'none' WHERE "id" = v_win_id;
+
+  -- Rejection: a promise with nothing behind it must be unstorable, not merely
+  -- discouraged. These become legal only when their rail is built.
+  BEGIN
+    UPDATE "vendor_availability_windows" SET "intent" = 'book' WHERE "id" = v_win_id;
+    RAISE EXCEPTION 'book was stored before anything could honour it';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+
+  BEGIN
+    UPDATE "vendor_availability_windows" SET "intent" = 'order' WHERE "id" = v_win_id;
+    RAISE EXCEPTION 'order was stored before anything could honour it';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+
+  BEGIN
+    UPDATE "vendor_availability_windows" SET "intent" = 'redirect' WHERE "id" = v_win_id;
+    RAISE EXCEPTION 'redirect was stored before anything could honour it';
+  EXCEPTION WHEN check_violation THEN NULL; END;
+
+  DELETE FROM "vendor_sellers" WHERE "id" = v_seller_id;
+END $$;

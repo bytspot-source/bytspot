@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { captureError } from '../lib/observability';
 import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
+import { setIntentInput, setWindowIntent } from '../vendor/windowIntent';
 import {
   DemandMoved,
   NoCapacity,
@@ -61,6 +62,49 @@ router.post('/vendor/demand/:id/respond', requireVendorSeat, requireCapability('
       return;
     }
     captureError(err, { route: 'vendor/demand:respond' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * Declaring what a window is for.
+ *
+ * SCHEDULE, not SELL: this shapes supply rather than transacting against it.
+ * That is also why a DRAFT or PENDING business may do it — setting up what you
+ * offer before going live is the normal order — while a SUSPENDED one may not.
+ * A suspended business honours what it already sold; it does not change what
+ * it is offering.
+ */
+router.post('/vendor/windows/:id/intent', requireVendorSeat, requireCapability('SCHEDULE'), async (req, res) => {
+  const parsed = setIntentInput.safeParse(req.body);
+  if (!parsed.success) {
+    // Named plainly rather than echoing the rejected word: the console should
+    // say what can be offered, not repeat something the platform cannot honour.
+    res.status(400).json({
+      error: 'Unknown intent',
+      blockers: ['A window can take asks, or take nothing. Nothing else is supported yet'],
+    });
+    return;
+  }
+
+  const windowId = String(req.params.id ?? '');
+  if (!windowId) {
+    res.status(404).json({ error: 'No such offering' });
+    return;
+  }
+
+  try {
+    res.status(200).json(await setWindowIntent({
+      sellerId: req.vendor!.seller.id,
+      windowId,
+      intent: parsed.data.intent,
+    }));
+  } catch (err) {
+    if (err instanceof NotFound) {
+      res.status(404).json({ error: 'No such offering' });
+      return;
+    }
+    captureError(err, { route: 'vendor/windows:intent' });
     res.status(500).json({ error: 'Internal error' });
   }
 });

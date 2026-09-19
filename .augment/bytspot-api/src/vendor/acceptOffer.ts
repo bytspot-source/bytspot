@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { db } from '../lib/db';
+import { stateAfterOperation } from './demand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 
 /**
@@ -15,6 +17,17 @@ import { bookableCreateData, offerToBookableSnapshot } from '../services/bookabl
  * the commitment is written under the database's own uniqueness guarantee
  * rather than under anything this process believes.
  */
+
+/**
+ * The one demand state that can hold an acceptable offer, taken from the
+ * contract rather than restated here: OFFER moves a demand to it, so an offer
+ * worth accepting implies it.
+ *
+ * An allowlist, after review pointed out that my denylist of terminal states
+ * was not the fail-closed thing I had claimed in the comment above it — a state
+ * added later would have fallen through it and been accepted.
+ */
+const ACCEPTABLE_DEMAND_STATE = stateAfterOperation('OFFER');
 
 export class OfferGone extends Error {
   constructor() {
@@ -75,6 +88,25 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
   if (offer.demand.state === 'WITHDRAWN' || offer.demand.state === 'EXPIRED') throw new OfferGone();
 
   return db.$transaction(async (tx) => {
+    // Take the demand row first, before any capacity or offer row is touched.
+    //
+    // Two guests cannot accept the same demand, but two *offers* on one demand
+    // can be accepted at the same instant, and without this both transactions
+    // reach the sibling-decline step holding each other's offer rows. That
+    // deadlocks, and Postgres picks a loser: correct in the end, but the loser
+    // gets a raw database error instead of being told what happened.
+    //
+    // Locking here makes the ordering deliberate rather than accidental. Every
+    // accept for a demand queues on one row, in one place, and the loser reads
+    // a BOOKED demand and refuses cleanly.
+    const [locked] = await tx.$queryRaw<{ state: string }[]>`
+      SELECT "state" FROM "demands" WHERE "id" = ${offer.demandId} FOR UPDATE
+    `;
+    if (!locked) throw new OfferGone();
+    // Re-read under the lock: the state checked before the transaction may have
+    // moved while this accept was waiting its turn.
+    if (locked.state !== ACCEPTABLE_DEMAND_STATE) throw new OfferGone();
+
     // A hand-asserted offer answers from no standing window, so there is no
     // slot to commit. The seller took the booking on themselves.
     if (offer.windowId) {
@@ -83,12 +115,21 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
 
       if (window.quantity < 1) throw new SlotTaken();
 
-      // Increment first, create only if there is nothing to increment. The
-      // reverse order reads better but cannot tell "no row yet" apart from
-      // "row already at capacity", and an upsert cannot either: a row sitting
-      // at exactly the count a fresh create would write is indistinguishable
-      // from the create having happened, so one booking silently overwrites
-      // another.
+      // Make the row exist without taking anything. Two accepts racing into an
+      // empty slot both need a row before either can increment, and whoever
+      // loses that insert must not be told the slot is full when it is empty:
+      // ON CONFLICT DO NOTHING lets the loser continue to the increment below
+      // rather than rolling the whole accept back on a unique violation.
+      await tx.$executeRaw`
+        INSERT INTO "vendor_slot_commitments" ("id", "window_id", "starts_at", "committed", "updated_at")
+        VALUES (${randomUUID()}, ${offer.windowId}, ${offer.startsAt}, 0, NOW())
+        ON CONFLICT ("window_id", "starts_at") DO NOTHING
+      `;
+
+      // The only operation that takes capacity, and the only one that decides
+      // whether there was any to take. Row-level locking on the guarded update
+      // is what serialises concurrent accepts; the count is never read first
+      // and acted on afterwards.
       const taken = await tx.vendorSlotCommitment.updateMany({
         where: {
           windowId: offer.windowId,
@@ -99,21 +140,9 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
         },
         data: { committed: { increment: 1 } },
       });
-
-      if (taken.count === 0) {
-        const existing = await tx.vendorSlotCommitment.findUnique({
-          where: { windowId_startsAt: { windowId: offer.windowId, startsAt: offer.startsAt } },
-          select: { id: true },
-        });
-        // A row that exists but did not increment is full, blocked or closed.
-        if (existing) throw new SlotTaken();
-        // No row yet: this is the slot's first booking. If a concurrent accept
-        // creates it first, the unique index on (window_id, starts_at) rejects
-        // this one and the whole accept rolls back rather than double-selling.
-        await tx.vendorSlotCommitment.create({
-          data: { windowId: offer.windowId, startsAt: offer.startsAt, committed: 1 },
-        });
-      }
+      // Full, blocked or closed. The row certainly exists by now, so nothing
+      // else can explain a miss.
+      if (taken.count === 0) throw new SlotTaken();
     }
 
     // What the guest agreed to, frozen. The database refuses an accepted offer

@@ -1,5 +1,16 @@
 import { z } from 'zod';
 import { db } from '../lib/db';
+
+/**
+ * The one intent that exists today.
+ *
+ * A seller declaring it is saying: send me asks, I will answer with an offer,
+ * and I will honour it if the guest takes it. Every part of that sentence is
+ * built — demand, offers, holds, acceptance, capacity. `book`, `order` and
+ * `redirect` are not words a seller can say yet, because the platform could
+ * not hold them to any of them.
+ */
+export const ASK_INTENT = 'request';
 import { notifyOfferArrived } from '../services/offerNotifications';
 import { deriveSlots, type Commitment, type DerivedSlot } from './availability';
 import {
@@ -101,7 +112,10 @@ function slotDto(slot: DerivedSlot) {
  */
 export async function supplyFor(sellerId: string, now: Date): Promise<SupplySnapshot> {
   const windows = await db.vendorAvailabilityWindow.findMany({
-    where: { sellerId, active: true, location: { state: 'ACTIVE' } },
+    // Intent is filtered here, not checked at the point of offering, so a
+    // window the seller has not offered for this never reaches the feed and
+    // cannot be answered from by any later path.
+    where: { sellerId, active: true, intent: ASK_INTENT, location: { state: 'ACTIVE' } },
     include: { location: true },
   });
 
@@ -327,9 +341,12 @@ export async function respondToDemand(
   // The window must be this seller's. Answering from someone else's capacity
   // is the one mistake this endpoint must never make.
   const window = await db.vendorAvailabilityWindow.findFirst({
-    where: { id: input.bookableId, sellerId: seat.sellerId, active: true },
+    where: { id: input.bookableId, sellerId: seat.sellerId, active: true, intent: ASK_INTENT },
     include: { location: true },
   });
+  // Not-found rather than a refusal: a window that does not answer asks is not
+  // an offering as far as this rail is concerned. The seat named an id the feed
+  // would never have shown it.
   if (!window) throw new NotFound('offering');
 
   if (!canRunDemandOperation(input.operation, demand.state, seat.capabilities)) throw new DemandMoved();

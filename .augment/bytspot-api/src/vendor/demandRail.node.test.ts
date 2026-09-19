@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
+import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import { acceptOffer, OfferGone, SlotTaken } from './acceptOffer';
 import { setWindowIntent } from './windowIntent';
@@ -966,6 +967,116 @@ test('a Plan deleted while the ask was live does not take the booking down with 
   await acceptOffer({ offerId: offer.id, userId: ids.user });
   assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
   assert.equal(await db.planItem.findUnique({ where: { offerId: offer.id } }), null);
+});
+
+test('an accept that arrives mid-delete files nothing in the tombstone', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+
+  // Drive the dangerous interleaving rather than hope for it. A delete holds
+  // the Plan row and has not committed; the accept arrives in that window.
+  // Without the row lock the accept reads a Plan that still looks alive,
+  // commits after the delete, and leaves a booking inside a tombstone.
+  let accept: Promise<unknown> | null = null;
+  await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "plans" WHERE "id" = ${planId} FOR UPDATE`;
+    await tx.plan.update({ where: { id: planId }, data: { deletedAt: new Date() } });
+    accept = acceptOffer({ offerId: offer.id, userId: ids.user });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }, { timeout: 10_000 });
+  await accept;
+
+  assert.equal(
+    await db.planItem.findUnique({ where: { offerId: offer.id } }),
+    null,
+    'a booking may not be filed in a Plan that was deleted out from under it',
+  );
+});
+
+test('a Plan holding a won table refuses to be deleted', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // The seller committed capacity for this. Deleting the Plan would strand it.
+  await assert.rejects(() => guest().plans.delete({ planId }), { code: 'CONFLICT' });
+  assert.equal((await db.plan.findUniqueOrThrow({ where: { id: planId } })).deletedAt, null);
+});
+
+test('a delete that arrives mid-accept sees the booking and refuses', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // Stage the other order: an accept holds the Plan row and its item is
+  // written but not yet committed when the delete arrives. Without the row
+  // lock on the delete side, the supply count runs early, sees nothing to
+  // protect, and tombstones a Plan that is about to hold a real table.
+  const filed = await db.planItem.findUniqueOrThrow({ where: { offerId: offer.id } });
+  await db.planItem.delete({ where: { id: filed.id } });
+
+  let removal: Promise<unknown> | null = null;
+  await db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "plans" WHERE "id" = ${planId} FOR UPDATE`;
+    await tx.planItem.create({
+      data: {
+        planId, needKind: filed.needKind, title: filed.title, offerId: filed.offerId,
+        bookableId: filed.bookableId, capability: 'book', status: 'booked',
+        selectionKey: filed.selectionKey,
+      },
+    });
+    removal = assert.rejects(() => guest().plans.delete({ planId }), { code: 'CONFLICT' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }, { timeout: 10_000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  await removal;
+
+  assert.equal((await db.plan.findUniqueOrThrow({ where: { id: planId } })).deletedAt, null);
+});
+
+test('an offer-backed item must carry the snapshot of the offer it names', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+  const item = await db.planItem.findUniqueOrThrow({ where: { offerId: offer.id } });
+
+  // Pointing at the right offer while carrying someone else's snapshot would
+  // show the guest a price and a time nobody agreed to.
+  const stray = offerToBookableSnapshot({
+    offerId: `${offer.id}-stray`, where: 'Rail Kitchen Midtown', priceCents: 9900,
+    capacity: offer.capacity, startsAt: offer.startsAt, durationMins: offer.durationMins,
+  });
+  await db.bookable.create({ data: { ...bookableCreateData(stray), snapshotAt: new Date() } });
+
+  await assert.rejects(
+    () => db.planItem.update({ where: { id: item.id }, data: { bookableId: stray.id } }),
+    /snapshot of offer_id/,
+  );
+});
+
+test('the shared snapshot is cleared by whichever owner leaves last', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  const { offer, demandId } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+  const item = await db.planItem.findUniqueOrThrow({ where: { offerId: offer.id } });
+  const bookableId = item.bookableId!;
+
+  // Item first: the offer still holds the snapshot, so it stays.
+  await db.planItem.delete({ where: { id: item.id } });
+  assert.ok(await db.bookable.findUnique({ where: { id: bookableId } }), 'the offer still needs it');
+
+  // Offer last: nobody is left holding it.
+  await db.demand.delete({ where: { id: demandId } });
+  assert.equal(await db.bookable.findUnique({ where: { id: bookableId } }), null, 'no snapshot may outlive both owners');
 });
 
 test('the same accepted offer cannot be filed twice, in any Plan', async (t) => {

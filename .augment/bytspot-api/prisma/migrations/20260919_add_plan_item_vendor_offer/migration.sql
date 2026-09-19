@@ -62,12 +62,44 @@ ALTER TABLE "plan_items" ADD CONSTRAINT "plan_items_vendor_offer_booked_check"
 --
 -- Orphaned now means orphaned: still delete the snapshot when nothing else
 -- holds it, and leave it alone when something does.
+-- Either owner may go first, so both ask the same question: is anyone else
+-- still holding this snapshot? Whoever leaves last turns the light off.
 CREATE OR REPLACE FUNCTION delete_orphaned_bookable() RETURNS TRIGGER AS $$
 BEGIN
   IF OLD.bookable_id IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM "offers" WHERE "bookable_id" = OLD.bookable_id) THEN
+     AND NOT EXISTS (SELECT 1 FROM "offers" WHERE "bookable_id" = OLD.bookable_id)
+     AND NOT EXISTS (SELECT 1 FROM "plan_items" WHERE "bookable_id" = OLD.bookable_id) THEN
     DELETE FROM "bookables" WHERE "id" = OLD.bookable_id;
   END IF;
   RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS offers_delete_bookable ON offers;
+CREATE TRIGGER offers_delete_bookable
+AFTER DELETE ON offers
+FOR EACH ROW EXECUTE FUNCTION delete_orphaned_bookable();
+
+-- An offer-backed item must carry the snapshot of the offer it names, not
+-- merely some snapshot. A CHECK cannot see another table and a composite
+-- foreign key cannot be expressed here (bookable_id already backs its own
+-- reference), so this is a trigger, matching how the rest of this schema
+-- states cross-table invariants.
+CREATE OR REPLACE FUNCTION plan_item_offer_snapshot_matches() RETURNS TRIGGER AS $$
+DECLARE
+  offer_bookable TEXT;
+BEGIN
+  IF NEW.offer_id IS NULL THEN RETURN NEW; END IF;
+  SELECT "bookable_id" INTO offer_bookable FROM "offers" WHERE "id" = NEW.offer_id;
+  IF offer_bookable IS DISTINCT FROM NEW.bookable_id THEN
+    RAISE EXCEPTION 'plan_items.bookable_id must be the snapshot of offer_id %', NEW.offer_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS plan_items_offer_snapshot ON plan_items;
+CREATE TRIGGER plan_items_offer_snapshot
+BEFORE INSERT OR UPDATE OF offer_id, bookable_id ON plan_items
+FOR EACH ROW EXECUTE FUNCTION plan_item_offer_snapshot_matches();

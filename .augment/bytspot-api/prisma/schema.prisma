@@ -1251,6 +1251,8 @@ model VendorAvailabilityWindow {
   offers      Offer[]
 
   @@index([sellerId, active])
+  /// The demand feed reads only windows a vendor actually wants offers from.
+  @@index([intent, active])
   @@index([domain, active])
   @@index([locationId, skuTemplateId])
   @@map("vendor_availability_windows")

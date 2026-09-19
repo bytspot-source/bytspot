@@ -15,7 +15,6 @@ const createCaller = createCallerFactory(appRouter);
 const demand = db.demand as any;
 const demandEvent = db.demandEvent as any;
 const plan = db.plan as any;
-const planItem = db.planItem as any;
 
 const authenticated: Context = {
   user: { userId: 'guest-1', email: 'guest@bytspot.com' },
@@ -53,7 +52,6 @@ beforeEach(() => {
   };
   demandEvent.create = async () => ({});
   plan.findFirst = async () => null;
-  planItem.findFirst = async () => null;
   demand.findFirst = async () => null;
 });
 
@@ -281,6 +279,8 @@ function planRow(over: Record<string, unknown> = {}) {
   const now = Date.now();
   return {
     id: 'plan-1',
+    needs: ['dining'],
+    items: [],
     startsAt: new Date(now + 3 * 60 * 60 * 1000),
     endsAt: new Date(now + 7 * 60 * 60 * 1000),
     latitude: 33.7866,
@@ -290,15 +290,10 @@ function planRow(over: Record<string, unknown> = {}) {
   };
 }
 
-function itemRow(over: Record<string, unknown> = {}) {
-  return { id: 'item-1', needKind: 'dining', status: 'available', bookableId: null, ...over };
-}
-
 test('a plan asks for what it already says, without the guest restating it', async () => {
   plan.findFirst = async () => planRow();
-  planItem.findFirst = async () => itemRow();
 
-  const result = await caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' });
+  const result = await caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' });
 
   assert.equal(result.state, 'OPEN');
   assert.equal(result.category, 'dining');
@@ -312,9 +307,8 @@ test('a plan asks for what it already says, without the guest restating it', asy
 
 test('a plan that does not say enough is refused with what to fix', async () => {
   plan.findFirst = async () => planRow({ partySize: null });
-  planItem.findFirst = async () => itemRow();
 
-  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' }), {
     code: 'BAD_REQUEST',
     message: 'Say how many people are coming first.',
   });
@@ -322,36 +316,49 @@ test('a plan that does not say enough is refused with what to fix', async () => 
 });
 
 test('a need the vendor vocabulary cannot express is not published to the wrong sellers', async () => {
-  plan.findFirst = async () => planRow();
-  planItem.findFirst = async () => itemRow({ needKind: 'automotive' });
+  plan.findFirst = async () => planRow({ needs: ['automotive'] });
 
-  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'automotive' }), {
     code: 'BAD_REQUEST',
     message: 'We cannot ask vendors for that yet.',
   });
 });
 
-test('someone elses plan, and an item from another plan, are both indistinguishable from missing', async () => {
+test('someone elses plan is indistinguishable from one that does not exist', async () => {
   plan.findFirst = async () => null;
-  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-9', planItemId: 'item-1' }), {
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-9', needKind: 'dining' }), {
     code: 'NOT_FOUND',
     message: 'Plan not found.',
   });
+});
 
-  plan.findFirst = async () => planRow();
-  planItem.findFirst = async () => null;
-  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-9' }), {
+test('a need this plan never declared is not called already sorted', async () => {
+  plan.findFirst = async () => planRow({ needs: ['coffee'] });
+
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' }), {
     code: 'NOT_FOUND',
-    message: 'Plan item not found.',
+    message: 'This plan does not have that need.',
   });
+});
+
+test('a need the plan has already sorted is not asked for again', async () => {
+  // An item that fills the need closes it, so the plan no longer reports it open.
+  plan.findFirst = async () => planRow({
+    items: [{ needKind: 'dining', status: 'available', coffeeSpotId: null, bookableId: 'bkbl-1', partyId: null }],
+  });
+
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' }), {
+    code: 'BAD_REQUEST',
+    message: 'That part of the plan is already sorted.',
+  });
+  assert.equal(created.length, 0);
 });
 
 test('the same gap is not asked about twice while the first ask is still live', async () => {
   plan.findFirst = async () => planRow();
-  planItem.findFirst = async () => itemRow();
   demand.findFirst = async () => ({ id: 'demand-1' });
 
-  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' }), {
     code: 'CONFLICT',
   });
   assert.equal(created.length, 0);
@@ -359,10 +366,9 @@ test('the same gap is not asked about twice while the first ask is still live', 
 
 test('a plan cannot outrun the cap that applies to every other request', async () => {
   plan.findFirst = async () => planRow();
-  planItem.findFirst = async () => itemRow();
   demand.count = async () => 5;
 
-  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', planItemId: 'item-1' }), {
+  await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' }), {
     code: 'CONFLICT',
   });
 });

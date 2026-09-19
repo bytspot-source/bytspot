@@ -14,8 +14,7 @@ import { DEMAND_DEFAULTS, demandCategoryIds } from './demand';
  */
 
 export type EmissionRefusal =
-  | 'item-cancelled'
-  | 'item-filled'
+  | 'need-not-open'
   | 'category-unmappable'
   | 'no-window'
   | 'window-passed'
@@ -70,22 +69,28 @@ export interface EmittingPlan {
   partySize: number | null;
 }
 
-export interface EmittingItem {
-  needKind: string;
-  status: string;
-  bookableId: string | null;
+/**
+ * A need as the Plan states it.
+ *
+ * Keyed by kind rather than by item because a Plan can declare a need nothing
+ * has been attached to yet — "dinner" with no restaurant chosen is the most
+ * common thing to want help with, and it has no item at all.
+ */
+export interface EmittingNeed {
+  kind: string;
+  /** Still unmet, as the Plan itself reports it. */
+  open: boolean;
 }
 
 /**
  * What a Plan would ask for on behalf of one of its unfilled needs.
  */
-export function constraintsFromPlan(plan: EmittingPlan, item: EmittingItem, now: Date): Emission {
-  if (item.status === 'cancelled') return { ok: false, reason: 'item-cancelled' };
-  // Supply already found. Asking again would hold capacity the guest does not
-  // need and answer a question they have stopped asking.
-  if (item.bookableId) return { ok: false, reason: 'item-filled' };
+export function constraintsFromPlan(plan: EmittingPlan, need: EmittingNeed, now: Date): Emission {
+  // Already met, cancelled, or not a need this Plan has. Asking would hold
+  // capacity nobody needs and answer a question the guest stopped asking.
+  if (!need.open) return { ok: false, reason: 'need-not-open' };
 
-  const category = demandCategoryForNeed(item.needKind);
+  const category = demandCategoryForNeed(need.kind);
   if (!category) return { ok: false, reason: 'category-unmappable' };
 
   if (!plan.startsAt) return { ok: false, reason: 'no-window' };
@@ -127,9 +132,7 @@ export function constraintsFromPlan(plan: EmittingPlan, item: EmittingItem, now:
 /** What to tell the guest when a Plan cannot ask on their behalf. */
 export function refusalMessage(reason: EmissionRefusal): string {
   switch (reason) {
-    case 'item-cancelled':
-      return 'That part of the plan was cancelled.';
-    case 'item-filled':
+    case 'need-not-open':
       return 'That part of the plan is already sorted.';
     case 'category-unmappable':
       return 'We cannot ask vendors for that yet.';

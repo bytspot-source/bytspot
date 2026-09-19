@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { db } from '../lib/db';
+import { notifyOfferArrived } from '../services/offerNotifications';
 import { deriveSlots, type Commitment, type DerivedSlot } from './availability';
 import {
   anyMatch,
@@ -336,7 +337,8 @@ export async function respondToDemand(
   const nextState = stateAfterOperation(input.operation);
   if (!nextState) throw new DemandMoved();
 
-  await db.$transaction(async (tx) => {
+  const offeredId = await db.$transaction(async (tx) => {
+    let offered: string | null = null;
     // Guarded on the state we read: two seats answering at once must not both
     // win, and the loser is told the request moved rather than silently
     // overwriting the winner.
@@ -402,7 +404,7 @@ export async function respondToDemand(
       );
       if (!usable.length) throw new NoCapacity();
 
-      await tx.offer.create({
+      const created = await tx.offer.create({
         data: {
           demandId: demand.id,
           sellerId: seat.sellerId,
@@ -418,6 +420,7 @@ export async function respondToDemand(
           holdExpiresAt: new Date(now.getTime() + 120 * 60_000),
         },
       });
+      offered = created.id;
     }
 
     if (input.operation === 'WITHDRAW_OFFER') {
@@ -426,7 +429,14 @@ export async function respondToDemand(
         data: { state: 'WITHDRAWN' },
       });
     }
+
+    return offered;
   });
+
+  // After the commit, never inside it: a push is not worth holding a database
+  // transaction open for, and an offer that exists must not be undone because
+  // a notification failed.
+  if (offeredId) await notifyOfferArrived(offeredId);
 
   return buildDemandSnapshot(seat.sellerId, seat.locations, new Date());
 }

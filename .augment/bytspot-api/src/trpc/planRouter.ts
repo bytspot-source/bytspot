@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { serializableTransaction, serializableTransactionWithRetry } from '../lib/transactions';
 import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
-import { capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
+import { bookableCreateData, capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
@@ -352,19 +352,6 @@ async function resolveSupply(
 
 // The Bookable snapshot as Prisma create data — one mapping, so attach and
 // createSolo cannot drift.
-function bookableCreateData(snapshot: BookableSnapshot) {
-  return {
-    id: snapshot.id,
-    sourceKind: snapshot.sourceKind,
-    capability: snapshot.capability,
-    provider: snapshot.provider,
-    tierName: snapshot.tierName,
-    priceCents: snapshot.priceCents,
-    capacity: snapshot.capacity,
-    membershipFloor: snapshot.membershipFloor,
-    fulfillment: snapshot.fulfillment as Prisma.InputJsonValue,
-  };
-}
 
 const createPlanInput = z.object({
   idempotencyKey: z.string().uuid(),

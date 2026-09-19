@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
+import { acceptOffer } from './acceptOffer';
 import { createCallerFactory } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
 import type { Context } from '../trpc/context';
@@ -132,6 +133,9 @@ before(async () => {
 beforeEach(async () => {
   if (!reachable) return;
   await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+  // Capacity too: the slots derive from one window, so a test that fills the
+  // seller's evening leaves the next one with nothing to sell.
+  await db.vendorSlotCommitment.deleteMany({ where: { windowId: ids.window } });
 });
 
 after(async () => {
@@ -324,6 +328,10 @@ test('a withdrawn need leaves the feed and releases the offer', async (t) => {
   });
 
   await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  // The feed is what promotes a request to MATCHED, and only a MATCHED
+  // request may be answered. Offering without reading the feed is not a path
+  // the console can take.
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
   await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window });
 
   await guest().demand.withdraw({ demandId: published.id });
@@ -382,4 +390,137 @@ test('an offer is refused when the window cannot actually cover the party', asyn
     (err: unknown) => err instanceof NoCapacity,
   );
   assert.equal(await db.offer.count({ where: { demandId: published.id } }), 0);
+});
+
+/**
+ * Accepting.
+ *
+ * The first point where the rail commits to anything, and the first place a
+ * mistake costs a real business a real evening.
+ */
+
+async function offeredTo(category = 'dining', partySize = 2) {
+  const when = atlantaEveningTomorrow();
+  const published = await guest().demand.publish({
+    category,
+    partySize,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+  // The feed is what promotes a request to MATCHED, and only a MATCHED
+  // request may be answered. Offering without reading the feed is not a path
+  // the console can take.
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window });
+  const offer = await db.offer.findFirstOrThrow({ where: { demandId: published.id, state: 'OFFERED' } });
+  return { demandId: published.id, offer };
+}
+
+test('accepting commits the slot the seller actually has', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const { demandId, offer } = await offeredTo();
+
+  // Offering holds nothing: a seller may answer ten requests from one window
+  // hoping one lands. That is selling, not overbooking.
+  const beforeAccept = await db.vendorSlotCommitment.findUnique({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: offer.startsAt } },
+  });
+  assert.equal(beforeAccept?.committed ?? 0, 0, 'an offer must not consume capacity');
+
+  const taken = await guest().demand.acceptOffer({ offerId: offer.id });
+  assert.equal(taken.offerId, offer.id);
+  assert.ok(taken.where.length > 0, 'the guest is told where they are going');
+
+  const committed = await db.vendorSlotCommitment.findUniqueOrThrow({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: offer.startsAt } },
+  });
+  assert.equal(committed.committed, 1, 'accepting is what commits capacity');
+
+  const demand = await db.demand.findUniqueOrThrow({ where: { id: demandId } });
+  assert.equal(demand.state, 'BOOKED');
+  const accepted = await db.offer.findUniqueOrThrow({ where: { id: offer.id } });
+  assert.equal(accepted.state, 'ACCEPTED');
+
+  // The ledger has to be able to answer "who took what, and for how much".
+  const events = await db.demandEvent.findMany({ where: { demandId, kind: 'ACCEPTED' } });
+  assert.equal(events.length, 1);
+});
+
+test('two guests cannot take the last one', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  // Fill the window to its declared quantity, then offer one more and take it.
+  const { offer } = await offeredTo();
+  await db.vendorSlotCommitment.upsert({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: offer.startsAt } },
+    create: { windowId: ids.window, startsAt: offer.startsAt, committed: 6 },
+    update: { committed: 6 },
+  });
+
+  await assert.rejects(
+    () => guest().demand.acceptOffer({ offerId: offer.id }),
+    (error: { code?: string; message?: string }) => {
+      assert.equal(error.code, 'CONFLICT');
+      // Named plainly: the guest did nothing wrong and should ask again.
+      assert.match(String(error.message), /took the last one/i);
+      return true;
+    },
+  );
+
+  // The refusal must leave nothing behind: no phantom booking, no lost request.
+  const stillOffered = await db.offer.findUniqueOrThrow({ where: { id: offer.id } });
+  assert.equal(stillOffered.state, 'OFFERED', 'a failed accept must not consume the offer');
+  const committed = await db.vendorSlotCommitment.findUniqueOrThrow({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: offer.startsAt } },
+  });
+  assert.equal(committed.committed, 6, 'a failed accept must not commit capacity');
+});
+
+test('an expired hold cannot be accepted', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const { offer } = await offeredTo();
+
+  // The clock is moved rather than the hold: the database refuses a
+  // hold_expires_at at or before created_at, which is the right rule and means
+  // an expired hold cannot be faked by writing one.
+  const afterTheHold = new Date(offer.holdExpiresAt.getTime() + 60_000);
+  await assert.rejects(
+    () => acceptOffer({ offerId: offer.id, userId: ids.user, now: afterTheHold }),
+    (error: Error) => {
+      assert.match(error.message, /expired/i);
+      return true;
+    },
+  );
+
+  // Nothing was taken on the way to refusing.
+  const untouched = await db.offer.findUniqueOrThrow({ where: { id: offer.id } });
+  assert.equal(untouched.state, 'OFFERED');
+  const commitment = await db.vendorSlotCommitment.findUnique({
+    where: { windowId_startsAt: { windowId: ids.window, startsAt: offer.startsAt } },
+  });
+  assert.equal(commitment?.committed ?? 0, 0);
+});
+
+test('an offer made to somebody else is not found, not forbidden', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const { offer } = await offeredTo();
+  const stranger = createCaller({
+    user: { userId: `${ids.user}-stranger`, email: 'stranger@bytspot.test' },
+    clientRateLimitKey: 'rail-stranger',
+  } as Context);
+
+  // NOT_FOUND rather than FORBIDDEN: a stranger probing offer ids must not
+  // learn which ones exist.
+  await assert.rejects(
+    () => stranger.demand.acceptOffer({ offerId: offer.id }),
+    (error: { code?: string }) => {
+      assert.equal(error.code, 'NOT_FOUND');
+      return true;
+    },
+  );
 });

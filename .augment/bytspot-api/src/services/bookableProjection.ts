@@ -7,13 +7,14 @@
 // `fulfillment`, never in the canonical `BYT-…` id.
 
 import { randomUUID } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 
 // The server derives a three-state capability from supply (see
 // planRouter.capabilityForSupply). `redirect` is a client-only state until
 // table / deep-link supply exists server-side, matching the native fold.
 export type BookableCapability = 'book' | 'request' | 'details';
 export type BookableControl = 'local' | 'vendor';
-export type BookableSourceKind = 'party_ticket' | 'coffee';
+export type BookableSourceKind = 'party_ticket' | 'coffee' | 'vendor_offer';
 
 /** One rule for catalog, attachments, and Prime Path. Free RSVP can grant
  * access directly; private approval needs the host. Unknown modes fail closed.
@@ -94,5 +95,52 @@ export function coffeeToBookableSnapshot(input: { title: string } & (
     fulfillment: input.coffeeReservationId
       ? { coffeeReservationId: input.coffeeReservationId }
       : { coffeeSpotId: input.coffeeSpotId },
+  };
+}
+
+// A vendor's answer, frozen at the moment the guest took it. Unlike a party
+// room, the price and time here are the offer's own and must not be re-read
+// later: the seller may change the window tomorrow, but what was agreed does
+// not change with it.
+export function offerToBookableSnapshot(input: {
+  offerId: string;
+  where: string;
+  priceCents: number;
+  capacity: number;
+  startsAt: Date;
+  durationMins: number;
+}): BookableSnapshot {
+  return {
+    id: bookableId('vendor_offer'),
+    sourceKind: 'vendor_offer',
+    // The seller committed real capacity against it, so this is a booking.
+    capability: 'book',
+    provider: null,
+    tierName: input.where,
+    priceCents: input.priceCents,
+    capacity: input.capacity,
+    membershipFloor: null,
+    fulfillment: {
+      offerId: input.offerId,
+      startsAt: input.startsAt.toISOString(),
+      durationMins: input.durationMins,
+    },
+  };
+}
+
+// The row a snapshot becomes. Shared so that every writer of a Bookable
+// freezes the same fields; a caller that shapes its own row is how the
+// projection drifts from what the guest was shown.
+export function bookableCreateData(snapshot: BookableSnapshot) {
+  return {
+    id: snapshot.id,
+    sourceKind: snapshot.sourceKind,
+    capability: snapshot.capability,
+    provider: snapshot.provider,
+    tierName: snapshot.tierName,
+    priceCents: snapshot.priceCents,
+    capacity: snapshot.capacity,
+    membershipFloor: snapshot.membershipFloor,
+    fulfillment: snapshot.fulfillment as Prisma.InputJsonValue,
   };
 }

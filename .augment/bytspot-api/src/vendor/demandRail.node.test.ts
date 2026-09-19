@@ -798,3 +798,45 @@ test('a booking the guest accepted stays visible until the table is in the past'
   // The losing offers are not shown back to the guest as if still choosable.
   assert.equal(held?.offers.length, 1);
 });
+
+test('a booking stays visible through the meal and goes once the table is done', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const { offer, demandId } = await offeredTo();
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  // Mid-meal: started, not finished. Dropping it at startsAt would take the
+  // confirmation away from a guest who is sitting at the table.
+  await db.offer.update({
+    where: { id: offer.id },
+    data: { startsAt: new Date(Date.now() - 30 * 60_000), durationMins: 90 },
+  });
+  assert.ok(
+    (await guest().demand.mine()).some((row) => row.id === demandId),
+    'a booking in progress must still be visible',
+  );
+
+  // Finished: history, and no longer returned.
+  await db.offer.update({
+    where: { id: offer.id },
+    data: { startsAt: new Date(Date.now() - 200 * 60_000), durationMins: 90 },
+  });
+  assert.equal(
+    (await guest().demand.mine()).some((row) => row.id === demandId),
+    false,
+    'a finished booking stops being an answer',
+  );
+});
+
+test('an offer may not run longer than a day', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const { offer } = await offeredTo();
+  // The bound the read path depends on: if this can be violated, a long
+  // booking silently drops out of `mine` instead of staying visible.
+  await assert.rejects(
+    () => db.offer.update({ where: { id: offer.id }, data: { durationMins: 1441 } }),
+    /offers_shape_sane/,
+  );
+  await db.offer.update({ where: { id: offer.id }, data: { durationMins: 1440 } });
+});

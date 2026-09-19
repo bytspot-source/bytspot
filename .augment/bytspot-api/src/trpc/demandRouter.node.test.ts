@@ -228,8 +228,15 @@ test('an expired hold is not shown as an offer that is still standing', async ()
     return [];
   };
   await caller().demand.mine();
-  assert.deepEqual(where.state.in, ['OPEN', 'MATCHED', 'OFFERED']);
-  assert.ok(where.expiresAt.gt instanceof Date);
+  const [live, booked] = where.OR;
+  assert.deepEqual(live.state.in, ['OPEN', 'MATCHED', 'OFFERED']);
+  assert.ok(live.expiresAt.gt instanceof Date);
+
+  // The second branch keeps a table the guest already holds. It must be
+  // reachable only through an offer they actually accepted.
+  assert.equal(booked.state, 'BOOKED');
+  assert.equal(booked.offers.some.state, 'ACCEPTED');
+  assert.ok(booked.offers.some.startsAt.gt instanceof Date);
 });
 
 test('withdrawing releases the sellers who were holding capacity', async () => {

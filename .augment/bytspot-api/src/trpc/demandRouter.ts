@@ -28,6 +28,17 @@ const MAX_LIVE_PER_USER = 5;
 
 const LIVE_STATES = ['OPEN', 'MATCHED', 'OFFERED'];
 
+/**
+ * The longest an offer may run, enforced by `offers_shape_sane`.
+ *
+ * A booking stays visible until the table has finished, which is
+ * `startsAt + durationMins`. Prisma cannot express that arithmetic in a
+ * `where`, so the query prefilters on `startsAt` by this much and applies the
+ * exact end time in code. The prefilter is only sound because the database
+ * refuses a longer offer.
+ */
+const MAX_OFFER_DURATION_MINS = 1440;
+
 const publishInput = z.object({
   // Validated against the contract, not a local list. Only these carry the
   // domains the category match rule reads; a Discover rail would be unmatchable.
@@ -249,10 +260,16 @@ export const demandRouter = router({
         raisedByUserId: ctx.user.userId,
         OR: [
           { state: { in: LIVE_STATES }, expiresAt: { gt: now } },
-          // A booking the guest accepted, until the table they hold is in the
-          // past. Dropping it the moment it is booked would make a confirmed
-          // reservation vanish from the only screen that ever showed it.
-          { state: 'BOOKED', offers: { some: { state: 'ACCEPTED', startsAt: { gt: now } } } },
+          // A booking the guest accepted, until the table they hold has
+          // finished. Dropping it the moment it is booked would make a
+          // confirmed reservation vanish from the only screen that ever showed
+          // it; dropping it at `startsAt` would do the same thing halfway
+          // through the meal. Widened here by the maximum offer length and
+          // narrowed to the exact end time below.
+          {
+            state: 'BOOKED',
+            offers: { some: { state: 'ACCEPTED', startsAt: { gt: new Date(now.getTime() - MAX_OFFER_DURATION_MINS * 60_000) } } },
+          },
         ],
       },
       orderBy: { raisedAt: 'desc' },
@@ -267,7 +284,17 @@ export const demandRouter = router({
       },
     });
 
-    return rows.map((row) => ({
+    // The exact boundary the prefilter could not express. A booked demand whose
+    // table has finished is history and stops being returned; a live one is
+    // never dropped by this, because its own branch does not depend on offers.
+    const current = rows.filter((row) => {
+      if (row.state !== 'BOOKED') return true;
+      return row.offers.some(
+        (offer) => offer.state === 'ACCEPTED' && offer.startsAt.getTime() + offer.durationMins * 60_000 > now.getTime(),
+      );
+    });
+
+    return current.map((row) => ({
       id: row.id,
       state: row.state,
       category: row.category,

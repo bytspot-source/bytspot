@@ -4,6 +4,7 @@ import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
+import { openNeeds } from './planRouter';
 
 /**
  * Demand — intent published before supply is known.
@@ -169,7 +170,7 @@ export const demandRouter = router({
     .input(
       z.object({
         planId: z.string().trim().min(1).max(64),
-        planItemId: z.string().trim().min(1).max(64),
+        needKind: z.string().trim().min(1).max(40),
         budgetCents: z.number().int().positive().max(100_000_00).optional(),
         note: z.string().trim().max(280).optional(),
       }),
@@ -180,17 +181,30 @@ export const demandRouter = router({
       // Someone else's Plan is indistinguishable from one that does not exist.
       const plan = await db.plan.findFirst({
         where: { id: input.planId, creatorUserId: ctx.user.userId },
-        select: { id: true, startsAt: true, endsAt: true, latitude: true, longitude: true, partySize: true },
+        select: {
+          id: true,
+          needs: true,
+          startsAt: true,
+          endsAt: true,
+          latitude: true,
+          longitude: true,
+          partySize: true,
+          items: { select: { needKind: true, status: true, coffeeSpotId: true, bookableId: true, partyId: true } },
+        },
       });
       if (!plan) throw new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
-      const item = await db.planItem.findFirst({
-        where: { id: input.planItemId, planId: plan.id },
-        select: { id: true, needKind: true, status: true, bookableId: true },
-      });
-      if (!item) throw new TRPCError({ code: 'NOT_FOUND', message: 'Plan item not found.' });
+      // A need the Plan never declared is not an unmet need; saying it is
+      // "already sorted" would be false.
+      if (!plan.needs.includes(input.needKind)) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'This plan does not have that need.' });
+      }
 
-      const emission = constraintsFromPlan(plan, item, now);
+      // Openness is the Plan's own answer, not a second opinion computed here.
+      // A need can be open with no item behind it at all — "dinner" with no
+      // restaurant chosen is the most common thing to want help with.
+      const open = openNeeds(plan as never, plan.items as never);
+      const emission = constraintsFromPlan(plan, { kind: input.needKind, open: open.includes(input.needKind) }, now);
       if (!emission.ok) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: refusalMessage(emission.reason) });
       }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, before, beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
 import { createCallerFactory } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
@@ -22,6 +22,7 @@ import { DEMAND_DEFAULTS } from './demand';
 
 const createCaller = createCallerFactory(appRouter);
 
+const TZ = 'America/New_York';
 let reachable = false;
 const ids = {
   user: `rail-user-${Date.now()}`,
@@ -36,11 +37,39 @@ const ids = {
 /** Midtown Atlanta, where the seller and the guest both are. */
 const MIDTOWN = { lat: 33.7866, lng: -84.3833 };
 
+/** Minutes east of UTC in Atlanta at a given instant, so DST is never assumed. */
+function atlantaOffsetMinutes(at: Date): number {
+  const label = new Intl.DateTimeFormat('en-US', { timeZone: TZ, timeZoneName: 'longOffset' })
+    .formatToParts(at)
+    .find((part) => part.type === 'timeZoneName')!.value;
+  const match = /GMT([+-])(\d{2}):(\d{2})/.exec(label);
+  if (!match) return 0;
+  return (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3]));
+}
+
+/**
+ * Tomorrow evening as the seller experiences it.
+ *
+ * Built in Atlanta's wall clock rather than by adding hours to now: the seller
+ * declared 17:00-22:00 in their own timezone, so a window computed in UTC
+ * matches or misses depending on what time of day the suite happens to run.
+ * It passed in CI only because CI ran in the UTC evening.
+ */
 function atlantaEveningTomorrow(): { earliest: Date; latest: Date } {
-  // Far enough ahead to clear the contract's lead time, and inside the window
-  // the seller declared once it is read back in their own timezone.
-  const base = new Date(Date.now() + 26 * 60 * 60 * 1000);
-  return { earliest: base, latest: new Date(base.getTime() + 6 * 60 * 60 * 1000) };
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(tomorrow);
+  const field = (type: string) => Number(parts.find((part) => part.type === type)!.value);
+  const offset = atlantaOffsetMinutes(tomorrow);
+  const atHour = (hour: number) =>
+    new Date(Date.UTC(field('year'), field('month') - 1, field('day'), hour, 0, 0) - offset * 60_000);
+  // Inside the declared hours with room either side, and always well clear of
+  // the seller's lead time.
+  return { earliest: atHour(18), latest: atHour(21) };
 }
 
 before(async () => {
@@ -93,6 +122,16 @@ before(async () => {
       active: true,
     },
   });
+});
+
+// Each test starts with no live requests of its own. Six asks share one
+// guest here, and the five-request cap is real, so without this the later
+// tests fail as rate-limited rather than on what they assert. Removing the
+// demand takes its offers and its append-only event log with it; the log
+// refuses to be deleted on its own, by design.
+beforeEach(async () => {
+  if (!reachable) return;
+  await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
 });
 
 after(async () => {
@@ -183,13 +222,11 @@ test('a plan raises the ask, and it reaches the seller like any other', async (t
       latitude: MIDTOWN.lat,
       longitude: MIDTOWN.lng,
       partySize: 4,
+      needs: ['dining'],
     },
   });
-  await db.planItem.create({
-    data: { id: ids.planItem, planId: ids.plan, needKind: 'dining', title: 'Somewhere to eat' },
-  });
 
-  const raised = await guest().demand.fromPlan({ planId: ids.plan, planItemId: ids.planItem });
+  const raised = await guest().demand.fromPlan({ planId: ids.plan, needKind: 'dining' });
   assert.equal(raised.category, 'dining');
 
   // Read back from the database rather than the return value: the plan link is
@@ -202,7 +239,7 @@ test('a plan raises the ask, and it reaches the seller like any other', async (t
   assert.equal(feed.demand.find((entry) => entry.id === raised.id)?.state, 'MATCHED');
 
   // The same gap must not be asked about twice while the first ask is live.
-  await assert.rejects(() => guest().demand.fromPlan({ planId: ids.plan, planItemId: ids.planItem }));
+  await assert.rejects(() => guest().demand.fromPlan({ planId: ids.plan, needKind: 'dining' }));
 
   await guest().demand.withdraw({ demandId: raised.id });
 });

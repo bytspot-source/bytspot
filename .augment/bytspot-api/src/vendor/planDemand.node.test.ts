@@ -15,9 +15,8 @@ const plan = (over: Partial<Parameters<typeof constraintsFromPlan>[0]> = {}) => 
 });
 
 const item = (over: Partial<Parameters<typeof constraintsFromPlan>[1]> = {}) => ({
-  needKind: 'dining',
-  status: 'available',
-  bookableId: null,
+  kind: 'dining',
+  open: true,
   ...over,
 });
 
@@ -74,9 +73,8 @@ test('a plan already under way asks from now, not from a time that has gone', ()
   assert.deepEqual(result.ok && result.envelope.earliest, NOW);
 });
 
-test('a need already met is not asked for again', () => {
-  assert.equal(refusal(constraintsFromPlan(plan(), item({ bookableId: 'bkbl-1' }), NOW)), 'item-filled');
-  assert.equal(refusal(constraintsFromPlan(plan(), item({ status: 'cancelled' }), NOW)), 'item-cancelled');
+test('a need already met, or not this plans at all, is not asked for again', () => {
+  assert.equal(refusal(constraintsFromPlan(plan(), item({ open: false }), NOW)), 'need-not-open');
 });
 
 test('a plan that does not say enough is refused with the reason, never guessed', () => {
@@ -87,7 +85,7 @@ test('a plan that does not say enough is refused with the reason, never guessed'
   );
   // A failed geolocation is not a place the plan is happening.
   assert.equal(refusal(constraintsFromPlan(plan({ latitude: 0, longitude: 0 }), item(), NOW)), 'no-location');
-  assert.equal(refusal(constraintsFromPlan(plan(), item({ needKind: 'automotive' }), NOW)), 'category-unmappable');
+  assert.equal(refusal(constraintsFromPlan(plan(), item({ kind: 'automotive' }), NOW)), 'category-unmappable');
 
   // Not defaulted to one. Capacity is a match rule, so a guessed party size
   // returns offers that cannot seat the group.
@@ -112,8 +110,7 @@ test('a party larger than demand allows is clamped rather than refused', () => {
 
 test('every refusal can be said out loud to a guest', () => {
   const reasons: EmissionRefusal[] = [
-    'item-cancelled',
-    'item-filled',
+    'need-not-open',
     'category-unmappable',
     'no-window',
     'window-passed',

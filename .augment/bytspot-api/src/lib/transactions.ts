@@ -5,9 +5,20 @@ import { db } from './db';
 
 /** Postgres refused to serialize (P2034), or a unique constraint caught the
  *  same race first (P2002). Both mean: someone else got there, try again or
- *  tell the caller. */
+ *  tell the caller.
+ *
+ *  A serialization failure raised inside a raw query arrives as P2010 with
+ *  Postgres' own 40001 buried in it rather than as P2034, so it is recognised
+ *  here too. Without this a `SELECT ... FOR UPDATE` losing a race would be
+ *  reported to the caller as an unhandled raw-query error instead of retried.
+ */
 export function isSerializationConflict(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && ['P2002', 'P2034'].includes((error as { code?: string }).code ?? ''));
+  if (!error || typeof error !== 'object' || !('code' in error)) return false;
+  const code = (error as { code?: string }).code ?? '';
+  if (['P2002', 'P2034'].includes(code)) return true;
+  if (code !== 'P2010') return false;
+  const meta = (error as { meta?: { code?: string } }).meta;
+  return meta?.code === '40001' || String((error as { message?: string }).message ?? '').includes('40001');
 }
 
 /** A transaction alone is atomic, not isolated: under Postgres' default READ

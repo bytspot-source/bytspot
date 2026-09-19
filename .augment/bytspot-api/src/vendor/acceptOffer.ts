@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { db } from '../lib/db';
+import { stateAfterOperation } from './demand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 
 /**
@@ -17,8 +18,16 @@ import { bookableCreateData, offerToBookableSnapshot } from '../services/bookabl
  * rather than under anything this process believes.
  */
 
-/** Nothing more can happen to a demand in one of these. */
-const TERMINAL_DEMAND_STATES = ['BOOKED', 'EXPIRED', 'WITHDRAWN'];
+/**
+ * The one demand state that can hold an acceptable offer, taken from the
+ * contract rather than restated here: OFFER moves a demand to it, so an offer
+ * worth accepting implies it.
+ *
+ * An allowlist, after review pointed out that my denylist of terminal states
+ * was not the fail-closed thing I had claimed in the comment above it — a state
+ * added later would have fallen through it and been accepted.
+ */
+const ACCEPTABLE_DEMAND_STATE = stateAfterOperation('OFFER');
 
 export class OfferGone extends Error {
   constructor() {
@@ -94,11 +103,9 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
       SELECT "state" FROM "demands" WHERE "id" = ${offer.demandId} FOR UPDATE
     `;
     if (!locked) throw new OfferGone();
-    // Re-read under the lock: the state checked before the transaction may
-    // have moved while this accept was waiting its turn. Stated as the terminal
-    // set rather than the live one, so a future state is refused by default
-    // instead of silently becoming acceptable.
-    if (TERMINAL_DEMAND_STATES.includes(locked.state)) throw new OfferGone();
+    // Re-read under the lock: the state checked before the transaction may have
+    // moved while this accept was waiting its turn.
+    if (locked.state !== ACCEPTABLE_DEMAND_STATE) throw new OfferGone();
 
     // A hand-asserted offer answers from no standing window, so there is no
     // slot to commit. The seller took the booking on themselves.

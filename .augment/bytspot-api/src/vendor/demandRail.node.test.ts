@@ -663,8 +663,9 @@ test('a seat cannot speak for a window that is not its business', async (t) => {
 test('two accepts into one empty slot both succeed when there is room for both', async (t) => {
   if (!reachable) return t.skip('no database');
 
-  // Two separate guests, two separate demands, the same empty slot on a window
-  // with room for six. Nothing here should be scarce.
+  // Two separate demands on the same empty slot, on a window with room for six.
+  // (One test user raises both; the race is between the demands, not the users.)
+  // Nothing here should be scarce.
   const first = await offeredTo();
   const second = await offeredTo();
   assert.equal(first.offer.startsAt.getTime(), second.offer.startsAt.getTime(), 'same slot, or this proves nothing');

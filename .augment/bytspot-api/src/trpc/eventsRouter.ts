@@ -192,13 +192,17 @@ export const eventsRouter = router({
         }
         if (batch.length < PAGE_SIZE) break;
       }
-      const granted = kept.length > 0
-        ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: kept.map((row) => row.party.id) }, accessGranted: true }, _count: { _all: true } })
+      // Pages arrive in start order and are filtered in place, so `kept` is
+      // already ordered; the sort restates that rather than relying on it.
+      // Trimming before the occupancy read keeps it to what is answered.
+      const answering = kept
+        .sort((a, b) => a.party.startsAt.getTime() - b.party.startsAt.getTime() || a.party.id.localeCompare(b.party.id))
+        .slice(0, input.limit);
+      const granted = answering.length > 0
+        ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: answering.map((row) => row.party.id) }, accessGranted: true }, _count: { _all: true } })
         : [];
       const grantedMap = new Map(granted.map((row) => [row.partyId, row._count._all]));
-      const parties = kept
-        .sort((a, b) => a.party.startsAt.getTime() - b.party.startsAt.getTime() || a.party.id.localeCompare(b.party.id))
-        .slice(0, input.limit)
+      const parties = answering
         .map(({ party, distanceMiles: distance }) => ({
           id: party.id,
           title: party.title,

@@ -5,6 +5,17 @@ import { distanceMeters } from './checkinProof';
 
 const METERS_PER_MILE = 1609.344;
 
+/** Unrounded, so a point exactly on the boundary is still judged inside.
+ *  `distanceMeters` rounds to whole metres, which at small radii pushes a
+ *  boundary point just outside and quietly skips the case worth testing. */
+function exactMiles(from: { lat: number; lng: number }, to: { lat: number; lng: number }): number {
+  const rad = (d: number) => (d * Math.PI) / 180;
+  const dLat = rad(to.lat - from.lat);
+  const dLng = rad(to.lng - from.lng);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(from.lat)) * Math.cos(rad(to.lat)) * Math.sin(dLng / 2) ** 2;
+  return (2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(a)))) / METERS_PER_MILE;
+}
+
 /** Does the box the query would use actually admit this point? */
 function boxAdmits(box: any, lat: number, lng: number): boolean {
   const latRange = box.AND[0].lat;
@@ -89,8 +100,11 @@ test('The box never hides a point inside the circle, at any latitude or longitud
         const lat = (lat2 * 180) / Math.PI;
         let lng = ((lng2 * 180) / Math.PI + 540) % 360 - 180;
         if (lat > 90 || lat < -90) continue;
-        const measured = distanceMeters({ lat: centre.lat, lng: centre.lng }, { lat, lng }) / METERS_PER_MILE;
-        if (measured > radiusMiles) continue;
+        // Judged with the unrounded distance so boundary points are tested,
+        // and cross-checked against the rounded one the endpoint uses.
+        const measured = exactMiles(centre, { lat, lng });
+        const asEndpointMeasures = distanceMeters({ lat: centre.lat, lng: centre.lng }, { lat, lng }) / METERS_PER_MILE;
+        if (measured > radiusMiles && asEndpointMeasures > radiusMiles) continue;
         assert.ok(
           boxAdmits(box, lat, lng),
           `centre ${centre.lat},${centre.lng} r=${radiusMiles} bearing ${bearing}: point ${lat},${lng} is ${measured.toFixed(4)}mi away but the box excluded it`,

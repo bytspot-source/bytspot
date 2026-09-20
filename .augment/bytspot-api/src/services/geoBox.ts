@@ -18,8 +18,10 @@
 
 const EARTH_RADIUS_MILES = 6_371_000 / 1609.344;
 const DEGREES_PER_RADIAN = 180 / Math.PI;
-/** Floating point must never be the reason a row on the boundary is dropped. */
-const BOUNDARY_PAD_DEGREES = 1e-6;
+/** Floating point must never be the reason a row on the boundary is dropped.
+ *  Wide enough to absorb `distanceMeters` rounding to whole metres, so the
+ *  box admits everything the exact filter would accept. ~1.1m. */
+const BOUNDARY_PAD_DEGREES = 1e-5;
 
 type Range = { gte: number; lte: number };
 

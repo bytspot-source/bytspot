@@ -667,6 +667,15 @@ export const planRouter = router({
       if (wantsNightlife && plan.latitude != null && plan.longitude != null) {
         const attachedPartyIds = new Set(partyIds);
         const BBOX_DELTA = 0.05; // ~3.5 mi
+        const planLat = plan.latitude;
+        const planLng = plan.longitude;
+        // A Party's own coordinates lead; a bound arrival venue answers for
+        // parties published before they existed. Neither means Bytspot does
+        // not know where the Party is, so it reaches no geographic surface.
+        const withinBox = {
+          lat: { gte: planLat - BBOX_DELTA, lte: planLat + BBOX_DELTA },
+          lng: { gte: planLng - BBOX_DELTA, lte: planLng + BBOX_DELTA },
+        };
         const [user, userCircles, discoverableParties] = await Promise.all([
           db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
           db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
@@ -676,25 +685,23 @@ export const planRouter = router({
               closedAt: null,
               admissionPaused: false,
               id: { notIn: [...attachedPartyIds] },
-              // Bounding box from Plan location
-              ...(plan.latitude != null && plan.longitude != null ? {
-                arrivalVenue: {
-                  lat: { gte: plan.latitude - BBOX_DELTA, lte: plan.latitude + BBOX_DELTA },
-                  lng: { gte: plan.longitude - BBOX_DELTA, lte: plan.longitude + BBOX_DELTA },
+              // Two ORs cannot share one `where`, so both clauses are ANDed.
+              AND: [
+                { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
+                // Time overlap: party hasn't ended and starts within 24h of Plan
+                plan.startsAt ? {
+                  startsAt: { lte: new Date(plan.startsAt.getTime() + 24 * 60 * 60 * 1000) },
+                  OR: [{ endsAt: null }, { endsAt: { gte: now } }],
+                } : {
+                  OR: [{ endsAt: null }, { endsAt: { gte: now } }],
                 },
-              } : {}),
-              // Time overlap: party hasn't ended and starts within 24h of Plan
-              ...(plan.startsAt ? {
-                startsAt: { lte: new Date(plan.startsAt.getTime() + 24 * 60 * 60 * 1000) },
-                OR: [{ endsAt: null }, { endsAt: { gte: now } }],
-              } : {
-                OR: [{ endsAt: null }, { endsAt: { gte: now } }],
-              }),
+              ],
             },
             select: {
               id: true, title: true, capacity: true, status: true, admissionPaused: true,
               closedAt: true, endsAt: true, startsAt: true, accessMode: true,
               requiredMembershipTier: true, audienceCircleIds: true,
+              lat: true, lng: true,
               arrivalVenue: { select: { lat: true, lng: true } },
             },
             take: 20,
@@ -714,8 +721,8 @@ export const planRouter = router({
           startsAt: p.startsAt, accessMode: p.accessMode,
           requiredMembershipTier: p.requiredMembershipTier,
           audienceCircleIds: p.audienceCircleIds,
-          latitude: p.arrivalVenue?.lat ?? null,
-          longitude: p.arrivalVenue?.lng ?? null,
+          latitude: p.lat ?? p.arrivalVenue?.lat ?? null,
+          longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
         }));
         discoveredCandidates = candidatesFromDiscovery(discoverable, discoveryOccMap, { userTier, userCircleIds, attachedPartyIds }, now);
       }

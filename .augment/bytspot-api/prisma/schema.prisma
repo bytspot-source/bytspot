@@ -228,6 +228,12 @@ model Party {
   startsAt               DateTime  @map("starts_at")
   endsAt                 DateTime? @map("ends_at")
   venueName              String    @map("venue_name")
+  /// The Party's own coordinates, resolved when the host picked the venue.
+  /// Null means Bytspot does not know where this Party is, so it reaches no
+  /// geographic surface — `venue_name` is free text and is never geocoded
+  /// into a pin. Paired and range-checked by database constraint.
+  lat                    Float?
+  lng                    Float?
   arrivalVenueId         String?   @map("arrival_venue_id")
   locationDisclosure     String    @default("public") @map("location_disclosure")
   capacity               Int

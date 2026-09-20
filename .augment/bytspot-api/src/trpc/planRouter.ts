@@ -669,17 +669,25 @@ export const planRouter = router({
           lat: { gte: planLat - BBOX_DELTA, lte: planLat + BBOX_DELTA },
           lng: { gte: planLng - BBOX_DELTA, lte: planLng + BBOX_DELTA },
         };
-        const [user, userCircles, discoverableParties] = await Promise.all([
+        // Identity is read before the parties, not beside them: tier and
+        // circles belong in the query so an ineligible row cannot take a slot
+        // under `take` from one the user could actually be shown.
+        const [user, userCircles] = await Promise.all([
           db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
           db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
-          db.party.findMany({
+        ]);
+        const discoveryTier = user?.membershipTier ?? '';
+        const discoveryCircleIds = userCircles.map((m) => m.circleId);
+        const discoverableParties = await db.party.findMany({
             where: {
               ...discoverableGate,
               id: { notIn: [...attachedPartyIds] },
+              requiredMembershipTier: { in: Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(discoveryTier, tier)) },
               // Two ORs cannot share one `where`, so both clauses are ANDed.
               AND: [
                 ...discoverableGate.AND,
                 { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
+                { OR: [{ audienceCircleIds: { isEmpty: true } }, ...(discoveryCircleIds.length > 0 ? [{ audienceCircleIds: { hasSome: discoveryCircleIds } }] : [])] },
                 // Time overlap: party hasn't ended and starts within 24h of Plan
                 plan.startsAt ? {
                   startsAt: { lte: new Date(plan.startsAt.getTime() + 24 * 60 * 60 * 1000) },
@@ -698,15 +706,17 @@ export const planRouter = router({
               arrivalVenue: { select: { lat: true, lng: true } },
             },
             take: 20,
-          }),
-        ]);
+        });
         // Occupancy for discovered parties only — not the whole system.
         const discoveredIds = discoverableParties.map((p) => p.id);
         const discoveryOccupancy = discoveredIds.length > 0
           ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: discoveredIds }, accessGranted: true }, _count: { _all: true } })
           : [];
-        const userTier = user?.membershipTier ?? 'green';
-        const userCircleIds = new Set(userCircles.map((m) => m.circleId));
+        // Fail closed when the user row is missing: an absent tier is not
+        // evidence of green, and this is the same default the browse
+        // endpoint uses.
+        const userTier = discoveryTier;
+        const userCircleIds = new Set(discoveryCircleIds);
         const discoveryOccMap = new Map(discoveryOccupancy.map((row) => [row.partyId, row._count._all]));
         const discoverable: DiscoverablePartyFacts[] = discoverableParties.map((p) => ({
           id: p.id, title: p.title, capacity: p.capacity, status: p.status,

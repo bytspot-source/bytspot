@@ -9,6 +9,8 @@ import { db } from '../lib/db';
 import { discoverablePartyWhere, filterDiscoverableParties, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { capabilityForAccessMode } from '../services/bookableProjection';
 import { distanceMeters } from '../services/checkinProof';
+import { boundingBoxWhere } from '../services/geoBox';
+import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
 
 const METERS_PER_MILE = 1609.344;
 
@@ -114,38 +116,45 @@ export const eventsRouter = router({
       if (input.lat === 0 && input.lng === 0) return { parties: [] };
       const now = new Date();
       const gate = discoverablePartyWhere(now);
-      // A degree of latitude is ~69 miles everywhere; a degree of longitude
-      // shrinks with latitude, so the box is widened by that factor rather
-      // than assuming a square. The box over-selects near its corners and the
-      // exact distance filter below trims it.
-      const latDelta = input.radiusMiles / 69;
-      const lngDelta = input.radiusMiles / Math.max(1, 69 * Math.cos((input.lat * Math.PI) / 180));
-      const withinBox = {
-        lat: { gte: input.lat - latDelta, lte: input.lat + latDelta },
-        lng: { gte: input.lng - lngDelta, lte: input.lng + lngDelta },
-      };
-      const [user, circles, rows] = await Promise.all([
+      const withinBox = boundingBoxWhere(input.lat, input.lng, input.radiusMiles);
+      // Who the caller is has to be known before the parties are read, not
+      // alongside: tier and circles belong in the query, so a row the caller
+      // may never see cannot occupy a slot under `take` and push out one
+      // they may. The pure gate still re-checks both.
+      const [user, circles] = await Promise.all([
         db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
         db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
-        db.party.findMany({
-          where: {
-            ...gate,
+      ]);
+      const userTier = user?.membershipTier ?? '';
+      const userCircleIds = circles.map((m) => m.circleId);
+      const allowedTiers = Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(userTier, tier));
+      const rows = await db.party.findMany({
+        where: {
+          ...gate,
+          requiredMembershipTier: { in: allowedTiers },
+          AND: [
+            ...gate.AND,
             // A Party's own coordinates lead; a bound arrival venue answers
             // for parties published before Parties could carry their own.
-            AND: [...gate.AND, { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] }],
-          },
-          select: {
-            id: true, title: true, capacity: true, status: true, admissionPaused: true,
-            closedAt: true, endsAt: true, startsAt: true, accessMode: true,
-            requiredMembershipTier: true, audienceCircleIds: true,
-            templateId: true, locationDisclosure: true, shareLinkExpiresAt: true,
-            venueName: true, lat: true, lng: true,
-            arrivalVenue: { select: { lat: true, lng: true } },
-          },
-          orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-          take: 100,
-        }),
-      ]);
+            { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
+            // Open to everyone, or scoped to a circle this caller is in.
+            { OR: [{ audienceCircleIds: { isEmpty: true } }, ...(userCircleIds.length > 0 ? [{ audienceCircleIds: { hasSome: userCircleIds } }] : [])] },
+          ],
+        },
+        select: {
+          id: true, title: true, capacity: true, status: true, admissionPaused: true,
+          closedAt: true, endsAt: true, startsAt: true, accessMode: true,
+          requiredMembershipTier: true, audienceCircleIds: true,
+          templateId: true, locationDisclosure: true, shareLinkExpiresAt: true,
+          venueName: true, lat: true, lng: true,
+          arrivalVenue: { select: { lat: true, lng: true } },
+        },
+        orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+        // The box is at most ~27% larger in area than the circle it covers, so
+        // reading a few times the asked-for limit leaves ample room for the
+        // corners the exact distance filter will drop.
+        take: Math.min(200, input.limit * 4),
+      });
       const facts: (DiscoverablePartyFacts & { venueName: string })[] = rows.map((p) => ({
         id: p.id, title: p.title, capacity: p.capacity, status: p.status,
         admissionPaused: p.admissionPaused, closedAt: p.closedAt, endsAt: p.endsAt,
@@ -160,8 +169,8 @@ export const eventsRouter = router({
         venueName: p.venueName,
       }));
       const eligible = filterDiscoverableParties(facts, {
-        userTier: user?.membershipTier ?? '',
-        userCircleIds: new Set(circles.map((m) => m.circleId)),
+        userTier,
+        userCircleIds: new Set(userCircleIds),
         attachedPartyIds: new Set<string>(),
         now,
       }) as (DiscoverablePartyFacts & { venueName: string })[];

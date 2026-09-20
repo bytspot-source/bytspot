@@ -1371,6 +1371,29 @@ test('events.nearby falls back to the bound arrival venue, and skips a party wit
   assert.deepEqual(parties.map((p) => p.id).sort(), ['p-own-coords', 'p-via-venue']);
 });
 
+test('events.nearby asks the database for parties this caller may see, so ineligible rows cannot crowd out eligible ones', async () => {
+  // `take` bounds the read. If tier and circles were only applied after it,
+  // parties the caller can never see would occupy slots and silently shorten
+  // the answer — a result count that moves with hidden data.
+  nearbyFixture([nearbyParty()]);
+  (db.socialCircleMember as any).findMany = async () => [{ circleId: 'circle-a' }];
+  let captured: any = null;
+  party.findMany = async (args: any) => { captured = args; return [nearbyParty()]; };
+  await nearby().events.nearby(MIDTOWN);
+
+  // Tier is a column predicate, not an afterthought.
+  assert.ok(captured.where.requiredMembershipTier.in.includes('green'));
+  assert.ok(!captured.where.requiredMembershipTier.in.includes('black'), 'a green member must not read black-tier rows');
+  // Circles likewise: open parties, or ones scoped to a circle held.
+  const circleClause = captured.where.AND.find((c: any) => c.OR?.some((o: any) => o.audienceCircleIds));
+  assert.ok(circleClause, 'expected an audience-circle clause in the query');
+  assert.deepEqual(circleClause.OR[1].audienceCircleIds.hasSome, ['circle-a']);
+  // The privacy gate survives the AND merge rather than being overwritten.
+  assert.equal(captured.where.templateId.not, 'private-party');
+  assert.equal(captured.where.locationDisclosure, 'public');
+  assert.deepEqual(captured.where.accessMode.in, ['free-rsvp', 'paid-ticket']);
+});
+
 test('events.nearby is closed to anonymous callers, because tier is a fact about the caller', async () => {
   nearbyFixture([nearbyParty()]);
   await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'test-events-anon' }).events.nearby(MIDTOWN), { code: 'UNAUTHORIZED' });

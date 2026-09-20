@@ -827,6 +827,10 @@ model PlanItem {
   /// Unreserved coffee selection with a request-capable Bookable snapshot.
   /// Cleared when explicit attach upgrades this item to a reservation.
   coffeeSpotId        String?  @map("coffee_spot_id")
+  /// Third real bookable: a table won on the demand rail. Restricted rather
+  /// than set-null on delete, so a booking can never be hollowed out into an
+  /// item that promises a table with no supply behind it.
+  offerId             String?  @unique @map("offer_id")
   /// Stable sourceKind:sourceId within a Plan, retained through fulfillment.
   /// Legacy attach may leave null; retries also reconcile actual supply ids.
   selectionKey        String?  @map("selection_key")
@@ -843,6 +847,7 @@ model PlanItem {
   party             Party?             @relation(fields: [partyId], references: [id], onDelete: SetNull)
   coffeeReservation CoffeeReservation? @relation(fields: [coffeeReservationId], references: [id], onDelete: SetNull)
   coffeeSpot        CoffeeSpot?        @relation(fields: [coffeeSpotId], references: [id], onDelete: Restrict)
+  offer             Offer?             @relation(fields: [offerId], references: [id], onDelete: Restrict)
   bookable          Bookable?          @relation(fields: [bookableId], references: [id], onDelete: SetNull)
 
   @@unique([planId, selectionKey])
@@ -1319,6 +1324,7 @@ model Offer {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  planItem PlanItem?
   demand   Demand                    @relation(fields: [demandId], references: [id], onDelete: Cascade)
   seller   VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
   location VendorLocation            @relation(fields: [locationId], references: [id], onDelete: Cascade)

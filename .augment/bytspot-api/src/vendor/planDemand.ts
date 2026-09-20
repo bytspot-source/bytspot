@@ -53,6 +53,34 @@ const CATEGORY_FOR_NEED: Readonly<Record<string, string>> = {
   stay: 'boutique_apartment',
 };
 
+/**
+ * The Plan need a demand category came from — the inverse of the map above.
+ *
+ * Built by inverting rather than restated, so the two can never disagree. The
+ * pairing is one-to-one, which is what makes the inverse well defined; a
+ * second need mapping onto an existing category would make this ambiguous, so
+ * it is asserted rather than assumed.
+ */
+const NEED_FOR_CATEGORY: Readonly<Record<string, string>> = Object.freeze(
+  Object.entries(CATEGORY_FOR_NEED).reduce<Record<string, string>>((acc, [need, category]) => {
+    if (acc[category]) throw new Error(`Two needs claim the demand category ${category}`);
+    acc[category] = need;
+    return acc;
+  }, {}),
+);
+
+/**
+ * The Plan need a demand answers, when the category names one.
+ *
+ * A demand raised straight from Concierge may carry a category no Plan need
+ * maps onto. That is not an error; it means a booking won against it has no
+ * honest place in a Plan's need list, so the caller declines to file it rather
+ * than inventing a need the guest never stated.
+ */
+export function needKindForDemandCategory(category: string): string | undefined {
+  return NEED_FOR_CATEGORY[category];
+}
+
 /** The demand category a Plan need maps onto, when one honestly does. */
 export function demandCategoryForNeed(needKind: string): string | undefined {
   const mapped = CATEGORY_FOR_NEED[needKind];

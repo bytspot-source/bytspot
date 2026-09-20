@@ -128,59 +128,75 @@ export const eventsRouter = router({
       const userTier = user?.membershipTier ?? '';
       const userCircleIds = circles.map((m) => m.circleId);
       const allowedTiers = Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(userTier, tier));
-      const rows = await db.party.findMany({
-        where: {
-          ...gate,
-          requiredMembershipTier: { in: allowedTiers },
-          AND: [
-            ...gate.AND,
-            // A Party's own coordinates lead; a bound arrival venue answers
-            // for parties published before Parties could carry their own.
-            { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
-            // Open to everyone, or scoped to a circle this caller is in.
-            { OR: [{ audienceCircleIds: { isEmpty: true } }, ...(userCircleIds.length > 0 ? [{ audienceCircleIds: { hasSome: userCircleIds } }] : [])] },
-          ],
-        },
-        select: {
-          id: true, title: true, capacity: true, status: true, admissionPaused: true,
-          closedAt: true, endsAt: true, startsAt: true, accessMode: true,
-          requiredMembershipTier: true, audienceCircleIds: true,
-          templateId: true, locationDisclosure: true, shareLinkExpiresAt: true,
-          venueName: true, lat: true, lng: true,
-          arrivalVenue: { select: { lat: true, lng: true } },
-        },
-        orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-        // The box is at most ~27% larger in area than the circle it covers, so
-        // reading a few times the asked-for limit leaves ample room for the
-        // corners the exact distance filter will drop.
-        take: Math.min(200, input.limit * 4),
-      });
-      const facts: (DiscoverablePartyFacts & { venueName: string })[] = rows.map((p) => ({
-        id: p.id, title: p.title, capacity: p.capacity, status: p.status,
-        admissionPaused: p.admissionPaused, closedAt: p.closedAt, endsAt: p.endsAt,
-        startsAt: p.startsAt, accessMode: p.accessMode,
-        requiredMembershipTier: p.requiredMembershipTier,
-        audienceCircleIds: p.audienceCircleIds,
-        templateId: p.templateId,
-        locationDisclosure: p.locationDisclosure,
-        shareLinkExpiresAt: p.shareLinkExpiresAt,
-        latitude: p.lat ?? p.arrivalVenue?.lat ?? null,
-        longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
-        venueName: p.venueName,
-      }));
-      const eligible = filterDiscoverableParties(facts, {
-        userTier,
-        userCircleIds: new Set(userCircleIds),
-        attachedPartyIds: new Set<string>(),
-        now,
-      }) as (DiscoverablePartyFacts & { venueName: string })[];
-      const granted = eligible.length > 0
-        ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: eligible.map((p) => p.id) }, accessGranted: true }, _count: { _all: true } })
+      const where = {
+        ...gate,
+        requiredMembershipTier: { in: allowedTiers },
+        AND: [
+          ...gate.AND,
+          // A Party's own coordinates lead; a bound arrival venue answers
+          // for parties published before Parties could carry their own.
+          { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
+          // Open to everyone, or scoped to a circle this caller is in.
+          { OR: [{ audienceCircleIds: { isEmpty: true } }, ...(userCircleIds.length > 0 ? [{ audienceCircleIds: { hasSome: userCircleIds } }] : [])] },
+        ],
+      };
+      // The box admits rows the exact radius will reject, so one bounded read
+      // can come back entirely corners and answer "nothing nearby" while
+      // eligible parties sit just past the cut. Pages are read in the same
+      // order, each filtered before the next is asked for, until enough
+      // survive or the rows run out. The page budget bounds the work;
+      // reaching it truncates the answer rather than corrupting it.
+      const PAGE_SIZE = 200;
+      const MAX_PAGES = 5;
+      const kept: { party: DiscoverablePartyFacts & { venueName: string }; distanceMiles: number }[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < MAX_PAGES && kept.length < input.limit; page += 1) {
+        const batch = await db.party.findMany({
+          where,
+          select: {
+            id: true, title: true, capacity: true, status: true, admissionPaused: true,
+            closedAt: true, endsAt: true, startsAt: true, accessMode: true,
+            requiredMembershipTier: true, audienceCircleIds: true,
+            templateId: true, locationDisclosure: true, shareLinkExpiresAt: true,
+            venueName: true, lat: true, lng: true,
+            arrivalVenue: { select: { lat: true, lng: true } },
+          },
+          orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+          take: PAGE_SIZE,
+          ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+        });
+        if (batch.length === 0) break;
+        cursor = batch[batch.length - 1].id;
+        const facts: (DiscoverablePartyFacts & { venueName: string })[] = batch.map((p) => ({
+          id: p.id, title: p.title, capacity: p.capacity, status: p.status,
+          admissionPaused: p.admissionPaused, closedAt: p.closedAt, endsAt: p.endsAt,
+          startsAt: p.startsAt, accessMode: p.accessMode,
+          requiredMembershipTier: p.requiredMembershipTier,
+          audienceCircleIds: p.audienceCircleIds,
+          templateId: p.templateId,
+          locationDisclosure: p.locationDisclosure,
+          shareLinkExpiresAt: p.shareLinkExpiresAt,
+          latitude: p.lat ?? p.arrivalVenue?.lat ?? null,
+          longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
+          venueName: p.venueName,
+        }));
+        const eligible = filterDiscoverableParties(facts, {
+          userTier,
+          userCircleIds: new Set(userCircleIds),
+          attachedPartyIds: new Set<string>(),
+          now,
+        }) as (DiscoverablePartyFacts & { venueName: string })[];
+        for (const party of eligible) {
+          const distance = partyDistanceMiles(input.lat, input.lng, party.latitude, party.longitude);
+          if (distance !== null && distance <= input.radiusMiles) kept.push({ party, distanceMiles: distance });
+        }
+        if (batch.length < PAGE_SIZE) break;
+      }
+      const granted = kept.length > 0
+        ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: kept.map((row) => row.party.id) }, accessGranted: true }, _count: { _all: true } })
         : [];
       const grantedMap = new Map(granted.map((row) => [row.partyId, row._count._all]));
-      const parties = eligible
-        .map((p) => ({ party: p, distanceMiles: partyDistanceMiles(input.lat, input.lng, p.latitude, p.longitude) }))
-        .filter((row) => row.distanceMiles !== null && row.distanceMiles <= input.radiusMiles)
+      const parties = kept
         .sort((a, b) => a.party.startsAt.getTime() - b.party.startsAt.getTime() || a.party.id.localeCompare(b.party.id))
         .slice(0, input.limit)
         .map(({ party, distanceMiles: distance }) => ({
@@ -194,7 +210,7 @@ export const eventsRouter = router({
           requiredMembershipTier: party.requiredMembershipTier,
           latitude: party.latitude,
           longitude: party.longitude,
-          distanceMiles: Math.round((distance as number) * 10) / 10,
+          distanceMiles: Math.round(distance * 10) / 10,
           // Seats are live occupancy, never Typical. A party whose capacity
           // is already met still shows, so a guest is not told a party does
           // not exist when it is simply full.

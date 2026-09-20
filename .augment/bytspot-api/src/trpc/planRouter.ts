@@ -9,6 +9,7 @@ import { bookableCreateData, capabilityForAccessMode, coffeeToBookableSnapshot, 
 import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { boundingBoxWhere } from '../services/geoBox';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -659,16 +660,13 @@ export const planRouter = router({
       if (wantsNightlife && plan.latitude != null && plan.longitude != null) {
         const attachedPartyIds = new Set(partyIds);
         const discoverableGate = discoverablePartyWhere(now);
-        const BBOX_DELTA = 0.05; // ~3.5 mi
-        const planLat = plan.latitude;
-        const planLng = plan.longitude;
+        const DISCOVERY_RADIUS_MILES = 3.5;
         // A Party's own coordinates lead; a bound arrival venue answers for
         // parties published before they existed. Neither means Bytspot does
         // not know where the Party is, so it reaches no geographic surface.
-        const withinBox = {
-          lat: { gte: planLat - BBOX_DELTA, lte: planLat + BBOX_DELTA },
-          lng: { gte: planLng - BBOX_DELTA, lte: planLng + BBOX_DELTA },
-        };
+        // The box is the shared spherical one: a flat degree offset is
+        // narrower than the circle it stands for, and narrower hides rows.
+        const withinBox = boundingBoxWhere(plan.latitude, plan.longitude, DISCOVERY_RADIUS_MILES);
         // Identity is read before the parties, not beside them: tier and
         // circles belong in the query so an ineligible row cannot take a slot
         // under `take` from one the user could actually be shown.

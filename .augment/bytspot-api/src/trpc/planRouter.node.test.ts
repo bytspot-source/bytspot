@@ -1394,6 +1394,35 @@ test('events.nearby asks the database for parties this caller may see, so inelig
   assert.deepEqual(captured.where.accessMode.in, ['free-rsvp', 'paid-ticket']);
 });
 
+test('events.nearby keeps reading pages rather than answering "nothing" from a page of box corners', async () => {
+  // The box admits corners the exact radius rejects. A single bounded read
+  // could come back entirely corners and report nothing nearby while a real
+  // party sat one row past the cut. Here the whole first page is out of
+  // radius and the eligible party is on the second.
+  nearbyFixture([]);
+  const corner = (i: number) => nearbyParty({ id: `corner-${i}`, lat: 33.7866 + 9 / 69, lng: -84.3833 + 9 / 69 });
+  const firstPage = Array.from({ length: 200 }, (_, i) => corner(i));
+  const pages = [firstPage, [nearbyParty({ id: 'p-really-near' })]];
+  let reads = 0;
+  party.findMany = async (args: any) => {
+    // The second read must continue from the first, not restart it.
+    if (reads > 0) assert.equal(args.cursor?.id, 'corner-199', 'expected the next page to resume after the last row');
+    return pages[reads++] ?? [];
+  };
+  const { parties } = await nearby().events.nearby({ ...MIDTOWN, radiusMiles: 10, limit: 5 });
+  assert.equal(reads, 2, 'expected a second page to be read');
+  assert.deepEqual(parties.map((p) => p.id), ['p-really-near']);
+});
+
+test('events.nearby stops reading once it has enough, so a quiet night is not a full scan', async () => {
+  nearbyFixture([]);
+  let reads = 0;
+  party.findMany = async () => { reads += 1; return [nearbyParty()]; };
+  await nearby().events.nearby(MIDTOWN);
+  // A short page means the rows ran out; there is nothing further to ask for.
+  assert.equal(reads, 1);
+});
+
 test('events.nearby is closed to anonymous callers, because tier is a fact about the caller', async () => {
   nearbyFixture([nearbyParty()]);
   await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'test-events-anon' }).events.nearby(MIDTOWN), { code: 'UNAUTHORIZED' });

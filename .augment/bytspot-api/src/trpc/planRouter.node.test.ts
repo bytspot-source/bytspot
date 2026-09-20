@@ -1280,3 +1280,98 @@ test('attach never resurrects cancelled selections, steals reservations, or repl
   await assert.rejects(() => caller().plans.attach(input), { code: 'CONFLICT' });
   assert.equal(store.state.plan!.items[0].coffeeReservationId, 'different-reservation');
 });
+
+// ─── events.nearby: the browsing entry point ─────────────────────────────────
+
+const nearbyContext: Context = { user: { userId: 'nearby-user', email: 'nearby@bytspot.com' }, clientRateLimitKey: 'test-events-nearby' };
+const nearby = () => createCaller(nearbyContext);
+const MIDTOWN = { lat: 33.7866, lng: -84.3833 };
+
+function nearbyParty(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'party-near', title: 'Rooftop Listening', capacity: 60, status: 'published',
+    admissionPaused: false, closedAt: null,
+    startsAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
+    endsAt: new Date(Date.now() + 6 * 60 * 60 * 1000),
+    accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: [],
+    templateId: 'listening-party', locationDisclosure: 'public', shareLinkExpiresAt: null,
+    venueName: 'Aster Room', lat: 33.7870, lng: -84.3840, arrivalVenue: null, ...overrides,
+  };
+}
+
+function nearbyFixture(rows: Record<string, unknown>[]) {
+  resetLocalRateLimitForTests();
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  (db.socialCircleMember as any).findMany = async () => [];
+  (db.partyGuest as any).groupBy = async () => [];
+  party.findMany = async () => rows;
+}
+
+test('events.nearby answers with parties a guest can actually reach', async () => {
+  nearbyFixture([nearbyParty()]);
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  assert.equal(parties.length, 1);
+  const [found] = parties;
+  assert.equal(found.id, 'party-near');
+  assert.equal(found.venueName, 'Aster Room');
+  // Capability is the one asserted at attach, so the card, the booking and
+  // the ranker cannot disagree about what this party offers.
+  assert.equal(found.capability, 'book');
+  // Distance is measured, not implied by being in the box.
+  assert.ok(found.distanceMiles < 1, `expected a short distance, got ${found.distanceMiles}`);
+  assert.equal(found.spacesRemaining, 60);
+});
+
+test('events.nearby seats come from live occupancy, and a full party still shows', async () => {
+  nearbyFixture([nearbyParty({ capacity: 40 })]);
+  (db.partyGuest as any).groupBy = async () => [{ partyId: 'party-near', _count: { _all: 40 } }];
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  // Full is a fact about the party, not a reason to pretend it does not exist.
+  assert.equal(parties.length, 1);
+  assert.equal(parties[0].spacesRemaining, 0);
+});
+
+test('events.nearby refuses the unresolved 0/0 placeholder rather than answering for the Gulf of Guinea', async () => {
+  nearbyFixture([nearbyParty({ lat: 0.0001, lng: 0.0001 })]);
+  assert.deepEqual((await nearby().events.nearby({ lat: 0, lng: 0 })).parties, []);
+});
+
+test('events.nearby drops parties outside the radius that the bounding box let through', async () => {
+  // A corner of the box is further than the radius; the exact distance is
+  // what decides, so the box may over-select but the answer may not.
+  nearbyFixture([nearbyParty({ id: 'p-far', lat: 33.7866 + 9 / 69, lng: -84.3833 + 9 / 69 })]);
+  const { parties } = await nearby().events.nearby({ ...MIDTOWN, radiusMiles: 10 });
+  assert.deepEqual(parties.map((p) => p.id), []);
+});
+
+test('events.nearby never reveals a party its host closed to strangers', async () => {
+  // Defense in depth: even when the query wrongly returns them, the shared
+  // pure gate refuses. This is the leak the Plan discovery query had.
+  nearbyFixture([
+    nearbyParty({ id: 'p-private', templateId: 'private-party' }),
+    nearbyParty({ id: 'p-withheld', locationDisclosure: 'after-approval' }),
+    nearbyParty({ id: 'p-approval', accessMode: 'private-approval' }),
+    nearbyParty({ id: 'p-expired-link', shareLinkExpiresAt: new Date(Date.now() - 60 * 1000) }),
+    nearbyParty({ id: 'p-circle', audienceCircleIds: ['circle-x'] }),
+    nearbyParty({ id: 'p-tier', requiredMembershipTier: 'black' }),
+    nearbyParty({ id: 'p-open' }),
+  ]);
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  assert.deepEqual(parties.map((p) => p.id), ['p-open']);
+});
+
+test('events.nearby falls back to the bound arrival venue, and skips a party with no location at all', async () => {
+  nearbyFixture([
+    nearbyParty({ id: 'p-own-coords' }),
+    nearbyParty({ id: 'p-via-venue', lat: null, lng: null, arrivalVenue: { lat: 33.7872, lng: -84.3841 } }),
+    nearbyParty({ id: 'p-nowhere', lat: null, lng: null, arrivalVenue: null }),
+  ]);
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  // An unlocated party is absent, not placed at distance zero.
+  assert.deepEqual(parties.map((p) => p.id).sort(), ['p-own-coords', 'p-via-venue']);
+});
+
+test('events.nearby is closed to anonymous callers, because tier is a fact about the caller', async () => {
+  nearbyFixture([nearbyParty()]);
+  await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'test-events-anon' }).events.nearby(MIDTOWN), { code: 'UNAUTHORIZED' });
+});

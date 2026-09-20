@@ -123,6 +123,36 @@ export interface DiscoverablePartyFacts extends PartyFacts {
   startsAt: Date;
   latitude: number | null;
   longitude: number | null;
+  templateId: string;
+  locationDisclosure: string;
+  shareLinkExpiresAt: Date | null;
+}
+
+/** Access modes a stranger may be shown. Anything else is a door that needs
+ * a person, so the party is not offered to someone who has not been let in. */
+const DISCOVERABLE_ACCESS_MODES = ['free-rsvp', 'paid-ticket'];
+
+/**
+ * The database half of the same rule `filterDiscoverableParties` enforces.
+ * Both exist on purpose: this keeps the scan small, the pure gate is what
+ * actually decides, and a caller that forgets one is still refused by the
+ * other. Audience circles are deliberately absent — callers differ on whether
+ * a circle-scoped party is in scope, and that is the one honest difference
+ * between them.
+ */
+export function discoverablePartyWhere(now: Date) {
+  return {
+    status: 'published',
+    closedAt: null,
+    admissionPaused: false,
+    accessMode: { in: DISCOVERABLE_ACCESS_MODES },
+    templateId: { not: 'private-party' },
+    locationDisclosure: 'public',
+    AND: [
+      { OR: [{ endsAt: { gt: now } }, { endsAt: null, startsAt: { gt: new Date(now.getTime() - 6 * 60 * 60 * 1000) } }] },
+      { OR: [{ shareLinkExpiresAt: null }, { shareLinkExpiresAt: { gt: now } }] },
+    ],
+  };
 }
 
 // Preserve the exported helper for existing callers, with no second mapping.
@@ -155,13 +185,29 @@ export function discoveredPartyCandidate(
 /**
  * Pure filter: keep only parties the user is eligible to discover.
  * Excludes parties already attached to the Plan (by partyId).
+ *
+ * Discovery shows a party to someone who was never invited, so every reason a
+ * party is not for strangers is checked here rather than trusted to the query
+ * that loaded it. A host's private party must not become findable because one
+ * call site forgot a clause.
  */
 export function filterDiscoverableParties(
   parties: DiscoverablePartyFacts[],
-  ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string> },
+  ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string>; now: Date },
 ): DiscoverablePartyFacts[] {
   return parties.filter((p) => {
     if (ctx.attachedPartyIds.has(p.id)) return false;
+    if (p.status !== 'published' || p.closedAt !== null || p.admissionPaused) return false;
+    // A private template, a door that needs approval, or an address withheld
+    // until approval all mean the host chose who comes. Discovery is not an
+    // invitation, so none of them are offered.
+    if (p.templateId === 'private-party') return false;
+    if (p.locationDisclosure !== 'public') return false;
+    if (!DISCOVERABLE_ACCESS_MODES.includes(p.accessMode)) return false;
+    // An expired share link is indistinguishable from a deleted party, and
+    // discovery must not be the one surface that reveals it.
+    if (p.shareLinkExpiresAt !== null && ctx.now >= p.shareLinkExpiresAt) return false;
+    if (ctx.now >= (p.endsAt ?? new Date(p.startsAt.getTime() + 6 * 60 * 60 * 1000))) return false;
     if (!meetsRequiredMembershipTier(ctx.userTier, p.requiredMembershipTier)) return false;
     if (p.audienceCircleIds.length > 0 && !p.audienceCircleIds.some((c) => ctx.userCircleIds.has(c))) return false;
     return true;
@@ -178,6 +224,6 @@ export function candidatesFromDiscovery(
   ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string> },
   now: Date,
 ): PrimePathCandidate[] {
-  return filterDiscoverableParties(parties, ctx)
+  return filterDiscoverableParties(parties, { ...ctx, now })
     .map((p) => discoveredPartyCandidate(p, occupancy.get(p.id) ?? 0, now));
 }

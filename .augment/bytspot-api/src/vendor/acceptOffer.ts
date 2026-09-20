@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { db } from '../lib/db';
+import { serializableTransactionWithRetry } from '../lib/transactions';
 import { stateAfterOperation } from './demand';
+import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 
 /**
@@ -87,7 +89,12 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
   if (offer.demand.state === 'BOOKED') throw new OfferGone();
   if (offer.demand.state === 'WITHDRAWN' || offer.demand.state === 'EXPIRED') throw new OfferGone();
 
-  return db.$transaction(async (tx) => {
+  // Serializable, not merely atomic. This reads a Plan and then writes an
+  // item against it while plans.delete reads that Plan's items and then
+  // tombstones it. Postgres only detects that pair when both sides are
+  // serializable, so a Read Committed accept would let a delete decide there
+  // was nothing to protect and strand a table the seller had committed.
+  return serializableTransactionWithRetry(async (tx) => {
     // Take the demand row first, before any capacity or offer row is touched.
     //
     // Two guests cannot accept the same demand, but two *offers* on one demand
@@ -180,6 +187,41 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
       data: { state: 'BOOKED' },
     });
 
+    // File the table in the Plan it was asked for.
+    //
+    // A demand raised from Concierge has no Plan, and a Plan deleted while the
+    // request was live is gone for good — in both cases the booking still
+    // stands, it simply has nowhere to be filed. The demand inbox remains its
+    // home, so nothing is lost by not writing an item here.
+    if (offer.demand.planId) {
+      const needKind = needKindForDemandCategory(offer.demand.category);
+      // Serializable is what protects this read (see the transaction note
+      // above): a Plan deleted between here and the insert turns into a
+      // serialization failure and the retry sees the tombstone.
+      const plan = await tx.plan.findFirst({
+        where: { id: offer.demand.planId, deletedAt: null },
+        select: { id: true },
+      });
+      // No need kind means the category never came from a Plan need. Filing it
+      // under a guessed one would put a booking in a list the guest never
+      // wrote, so it stays unfiled and honest.
+      if (plan && needKind) {
+        await tx.planItem.create({
+          data: {
+            planId: plan.id,
+            needKind,
+            title: offer.location.label,
+            offerId: offer.id,
+            bookableId: snapshot.id,
+            // Capacity is committed; this is a booking, not an intention.
+            capability: 'book',
+            status: 'booked',
+            selectionKey: `vendorOffer:${offer.id}`,
+          },
+        });
+      }
+    }
+
     await tx.demandEvent.create({
       data: {
         demandId: offer.demandId,
@@ -198,5 +240,5 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
       priceCents: offer.priceCents,
       terms: offer.terms ?? undefined,
     };
-  });
+  }, 'Another change to this booking is in flight. Try again.');
 }

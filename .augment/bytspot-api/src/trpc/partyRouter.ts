@@ -120,6 +120,11 @@ const draftInput = z.object({
   startsAt: z.string().datetime({ offset: true }),
   endsAt: z.string().datetime({ offset: true }).nullish(),
   venueName: z.string().trim().min(1).max(200),
+  /// Resolved when the host picked the venue, never geocoded from the free
+  /// text above. Both or neither: half a coordinate is not a location, and
+  /// 0/0 is the unresolved placeholder rather than a point in the Atlantic.
+  lat: z.number().min(-90).max(90).nullish(),
+  lng: z.number().min(-180).max(180).nullish(),
   locationDisclosure: z.enum(locationDisclosures).default('public'),
   capacity: z.number().int().min(2).max(10_000),
   accessMode: z.enum(accessModes),
@@ -132,6 +137,15 @@ const draftInput = z.object({
   templateConfig: z.object({ kind: z.enum(templateConfigKinds) }).passthrough(),
   source: z.literal('host-studio'),
 }).superRefine((input, ctx) => {
+  // The same pairing the database enforces, refused here so the host is told
+  // which field is wrong instead of meeting a constraint violation.
+  const hasLat = input.lat != null;
+  const hasLng = input.lng != null;
+  if (hasLat !== hasLng) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [hasLat ? 'lng' : 'lat'], message: 'A location needs both a latitude and a longitude.' });
+  } else if (hasLat && input.lat === 0 && input.lng === 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lat'], message: 'A location of 0, 0 is an unresolved placeholder, not a venue.' });
+  }
   if (input.endsAt) {
     const startsAt = Date.parse(input.startsAt);
     const endsAt = Date.parse(input.endsAt);
@@ -280,7 +294,7 @@ function isUniqueConstraint(error: unknown): boolean {
 }
 
 type PartyContent = Pick<Prisma.PartyUncheckedCreateInput,
-  'templateId' | 'title' | 'tagline' | 'startsAt' | 'endsAt' | 'venueName' | 'locationDisclosure' | 'capacity' | 'accessMode' |
+  'templateId' | 'title' | 'tagline' | 'startsAt' | 'endsAt' | 'venueName' | 'lat' | 'lng' | 'locationDisclosure' | 'capacity' | 'accessMode' |
   'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig'>;
 
 /**
@@ -297,7 +311,8 @@ function derivedEndsAt(input: z.infer<typeof draftInput>): Date | null {
 
 function partyContent(input: z.infer<typeof draftInput>): PartyContent {
   return {
-    templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), endsAt: derivedEndsAt(input), venueName: input.venueName, locationDisclosure: input.locationDisclosure,
+    templateId: input.templateId, title: input.title, tagline: input.tagline, startsAt: new Date(input.startsAt), endsAt: derivedEndsAt(input), venueName: input.venueName,
+    lat: input.lat ?? null, lng: input.lng ?? null, locationDisclosure: input.locationDisclosure,
     capacity: input.capacity, accessMode: input.accessMode, requiredMembershipTier: input.requiredMembershipTier,
     hostDestinations: (input.hostDestinations ?? null) as Prisma.InputJsonValue, audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
     cohosts: input.cohosts, templateConfig: input.templateConfig as Prisma.InputJsonValue,

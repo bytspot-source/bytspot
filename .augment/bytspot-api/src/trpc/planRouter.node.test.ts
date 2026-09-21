@@ -1480,3 +1480,131 @@ test('events.nearby is closed to anonymous callers, because tier is a fact about
   nearbyFixture([nearbyParty()]);
   await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'test-events-anon' }).events.nearby(MIDTOWN), { code: 'UNAUTHORIZED' });
 });
+
+// ─── plans.feasibility ───────────────────────────────────────────────────────
+
+const offer = db.offer as any;
+
+/** A Plan with one party-backed item, and the supply reads it needs. */
+function feasibilityFixture(overrides: {
+  plan?: Record<string, unknown>;
+  items?: any[];
+  parties?: any[];
+  granted?: { partyId: string; _count: { _all: number } }[];
+  offers?: any[];
+  bookables?: any[];
+  spots?: any[];
+} = {}) {
+  plan.findUnique = async () => planFixture({
+    startsAt: new Date('2026-10-01T18:00:00Z'),
+    endsAt: new Date('2026-10-01T23:59:00Z'),
+    partySize: 4,
+    budgetCents: 40_000,
+    items: overrides.items ?? [],
+    ...overrides.plan,
+  });
+  party.findMany = async () => overrides.parties ?? [];
+  partyGuest.groupBy = async () => overrides.granted ?? [];
+  offer.findMany = async () => overrides.offers ?? [];
+  bookable.findMany = async () => overrides.bookables ?? [];
+  coffeeSpot.findMany = async () => overrides.spots ?? [];
+}
+
+function planItemFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'item-1', position: 0, needKind: 'nightlife', title: 'The Room',
+    status: 'available', partyId: null, offerId: null, bookableId: null,
+    coffeeSpotId: null, coffeeReservation: null, ...overrides,
+  };
+}
+
+const verdictOf = (result: any, check: string) =>
+  result.checks.find((entry: any) => entry.check === check)?.verdict;
+
+test('plans.feasibility is closed to strangers, like every other Plan read', async () => {
+  feasibilityFixture();
+  await assert.rejects(() => stranger().plans.feasibility({ planId: 'plan-1' }), { code: 'NOT_FOUND' });
+});
+
+test('plans.feasibility is open to a seated guest, not just the creator', async () => {
+  // Everyone going is affected by whether the evening works.
+  feasibilityFixture();
+  assert.equal((await guest().plans.feasibility({ planId: 'plan-1' })).verdict, 'unknown');
+});
+
+test('plans.feasibility reads party seats live, so a room that filled up says so', async () => {
+  feasibilityFixture({
+    items: [planItemFixture({ partyId: 'party-1' })],
+    parties: [{ id: 'party-1', startsAt: new Date('2026-10-01T20:00:00Z'), endsAt: new Date('2026-10-01T22:00:00Z'), lat: 33.7726, lng: -84.3654, capacity: 20 }],
+    // Attached when it held twenty; eighteen have been let in since.
+    granted: [{ partyId: 'party-1', _count: { _all: 18 } }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'capacity'), 'breaks', 'two seats left cannot take four');
+});
+
+test('plans.feasibility counts a party as seating the group when the seats are really there', async () => {
+  feasibilityFixture({
+    items: [planItemFixture({ partyId: 'party-1' })],
+    parties: [{ id: 'party-1', startsAt: new Date('2026-10-01T20:00:00Z'), endsAt: new Date('2026-10-01T22:00:00Z'), lat: 33.7726, lng: -84.3654, capacity: 20 }],
+    granted: [{ partyId: 'party-1', _count: { _all: 2 } }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'capacity'), 'fits');
+  assert.equal(verdictOf(result, 'window'), 'fits');
+});
+
+test('plans.feasibility ignores cancelled items, which are history', async () => {
+  feasibilityFixture({
+    items: [
+      planItemFixture({ id: 'dropped', partyId: 'party-1', status: 'cancelled' }),
+      planItemFixture({ id: 'kept', bookableId: 'bkbl-1' }),
+    ],
+    // The dropped room would have broken capacity had it been judged.
+    parties: [{ id: 'party-1', startsAt: null, endsAt: null, lat: null, lng: null, capacity: 1 }],
+    bookables: [{ id: 'bkbl-1', priceCents: 1_000, capacity: 10 }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'capacity'), 'fits');
+});
+
+test('plans.feasibility refuses a budget verdict when no party size was set', async () => {
+  // Prime Path falls back to the count of people going; this must not, because
+  // pricing for too few would report a budget that fits when it does not.
+  feasibilityFixture({
+    plan: { partySize: null },
+    items: [planItemFixture({ bookableId: 'bkbl-1' })],
+    bookables: [{ id: 'bkbl-1', priceCents: 1_000, capacity: 10 }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'budget'), 'unknown');
+  assert.equal(verdictOf(result, 'capacity'), 'unknown');
+});
+
+test('plans.feasibility lets a won offer state the time and price', async () => {
+  feasibilityFixture({
+    items: [planItemFixture({ offerId: 'offer-1', bookableId: 'bkbl-1' })],
+    offers: [{ id: 'offer-1', startsAt: new Date('2026-10-01T19:00:00Z'), durationMins: 90, priceCents: 2_000 }],
+    bookables: [{ id: 'bkbl-1', priceCents: 99_999, capacity: 10 }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'window'), 'fits');
+  // $20 x 4 against the $400 ceiling, not the snapshot's $999.99.
+  assert.equal(verdictOf(result, 'budget'), 'fits');
+});
+
+test('plans.feasibility reports an empty Plan as unknown, never as working', async () => {
+  feasibilityFixture();
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(result.verdict, 'unknown');
+  assert.equal(result.checks.length, 5);
+});
+
+test('plans.feasibility asks for no supply when the Plan holds none', async () => {
+  feasibilityFixture();
+  party.findMany = async () => { throw new Error('must not query parties for an empty Plan'); };
+  offer.findMany = async () => { throw new Error('must not query offers for an empty Plan'); };
+  bookable.findMany = async () => { throw new Error('must not query bookables for an empty Plan'); };
+  coffeeSpot.findMany = async () => { throw new Error('must not query coffee spots for an empty Plan'); };
+  assert.equal((await caller().plans.feasibility({ planId: 'plan-1' })).verdict, 'unknown');
+});

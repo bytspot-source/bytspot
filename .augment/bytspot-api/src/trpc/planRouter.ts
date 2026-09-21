@@ -10,6 +10,8 @@ import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { boundingBoxWhere } from '../services/geoBox';
+import { legsForPlan, type PlanLegSource } from '../services/planLegs';
+import { planFeasibility } from '../services/planFeasibility';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -658,6 +660,86 @@ export const planRouter = router({
     .query(async ({ ctx, input }) => {
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
       return serializePlan(plan, new Date(), ctx.user.userId, await partyBookingFacts([plan]));
+    }),
+
+  /**
+   * Does this Plan actually work? Read-only: it answers the question and
+   * changes nothing, so a guest can ask it as often as they like while they
+   * are still moving things around.
+   *
+   * Unlike Prime Path, a missing party size is NOT filled in from the count of
+   * people who have said yes. Prime Path uses that floor to rank, where
+   * understating the group only mis-orders a list. Here it would total a
+   * per-person price for too few people and tell the guest their budget fits
+   * when it does not, so the checks refuse and name what is missing instead.
+   */
+  feasibility: protectedProcedure
+    .input(z.object({ planId: z.string().min(1) }))
+    .query(async ({ ctx, input }) => {
+      const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
+      // Cancelled items are history. Judging a Plan against something the group
+      // already dropped would report clashes nobody can act on.
+      const live = plan.items.filter((item) => item.status !== 'cancelled');
+
+      const partyIds = [...new Set(live.flatMap((item) => (item.partyId ? [item.partyId] : [])))];
+      const offerIds = [...new Set(live.flatMap((item) => (item.offerId ? [item.offerId] : [])))];
+      const bookableIds = [...new Set(live.flatMap((item) => (item.bookableId ? [item.bookableId] : [])))];
+      const coffeeSpotIds = [...new Set(live.flatMap((item) =>
+        [item.coffeeSpotId, item.coffeeReservation?.coffeeSpotId].filter((id): id is string => !!id)))];
+
+      const [parties, occupancy, offers, bookables, coffeeSpots] = await Promise.all([
+        partyIds.length === 0 ? [] : db.party.findMany({
+          where: { id: { in: partyIds } },
+          select: { id: true, startsAt: true, endsAt: true, lat: true, lng: true, capacity: true },
+        }),
+        partyIds.length === 0 ? [] : db.partyGuest.groupBy({
+          by: ['partyId'], where: { partyId: { in: partyIds }, accessGranted: true }, _count: { _all: true },
+        }),
+        offerIds.length === 0 ? [] : db.offer.findMany({
+          where: { id: { in: offerIds } },
+          select: { id: true, startsAt: true, durationMins: true, priceCents: true },
+        }),
+        bookableIds.length === 0 ? [] : db.bookable.findMany({
+          where: { id: { in: bookableIds } }, select: { id: true, priceCents: true, capacity: true },
+        }),
+        coffeeSpotIds.length === 0 ? [] : db.coffeeSpot.findMany({
+          where: { id: { in: coffeeSpotIds } }, select: { id: true, latitude: true, longitude: true },
+        }),
+      ]);
+
+      const partyMap = new Map(parties.map((party) => [party.id, party]));
+      const grantedMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
+      const offerMap = new Map(offers.map((offer) => [offer.id, offer]));
+      const bookableMap = new Map(bookables.map((bookable) => [bookable.id, bookable]));
+      const spotMap = new Map(coffeeSpots.map((spot) => [spot.id, spot]));
+
+      const sources: PlanLegSource[] = live.map((item) => {
+        const party = item.partyId ? partyMap.get(item.partyId) : undefined;
+        const spotId = item.coffeeSpotId ?? item.coffeeReservation?.coffeeSpotId ?? null;
+        const spot = spotId ? spotMap.get(spotId) : undefined;
+        return {
+          id: item.id,
+          position: item.position,
+          needKind: item.needKind,
+          title: item.title,
+          // Seats are read Live — capacity minus guests already granted — so a
+          // room that filled up since it was attached reports what is actually
+          // left rather than what it once held.
+          party: party ? {
+            startsAt: party.startsAt, endsAt: party.endsAt, lat: party.lat, lng: party.lng,
+            capacity: party.capacity === null ? null
+              : Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
+          } : null,
+          offer: (item.offerId && offerMap.get(item.offerId)) || null,
+          coffeeSpot: spot ? { latitude: spot.latitude, longitude: spot.longitude } : null,
+          bookable: (item.bookableId && bookableMap.get(item.bookableId)) || null,
+        };
+      });
+
+      return planFeasibility(legsForPlan(sources), {
+        startsAt: plan.startsAt, endsAt: plan.endsAt,
+        partySize: plan.partySize, budgetCents: plan.budgetCents,
+      });
     }),
 
   /**

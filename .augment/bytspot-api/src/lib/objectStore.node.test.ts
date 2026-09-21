@@ -60,3 +60,59 @@ test('a missing object is null rather than a thrown 404', async () => {
   });
   assert.equal(await store.get('vendor/missing'), null);
 });
+
+test('a presigned PUT is a query-string URL the browser can hit without our secret', () => {
+  const store = s3CompatibleStore({
+    endpoint: 'https://abc.r2.cloudflarestorage.com',
+    region: 'auto',
+    bucket: 'bytspot-media',
+    accessKeyId: 'AKIAEXAMPLE',
+    secretAccessKey: 'secret-must-not-appear',
+  });
+  const put = store.presignPut({
+    key: 'vendor/s1/location/l1/video/m1',
+    mimeType: 'video/mp4',
+    now: new Date('2026-09-21T12:00:00Z'),
+    expiresInSeconds: 900,
+  });
+  const url = new URL(put.url);
+  assert.equal(put.method, 'PUT');
+  assert.equal(put.headers['Content-Type'], 'video/mp4');
+  assert.equal(url.origin, 'https://abc.r2.cloudflarestorage.com');
+  assert.equal(url.pathname, '/bytspot-media/vendor/s1/location/l1/video/m1');
+  assert.equal(url.searchParams.get('X-Amz-Algorithm'), 'AWS4-HMAC-SHA256');
+  assert.equal(url.searchParams.get('X-Amz-Expires'), '900');
+  assert.equal(url.searchParams.get('X-Amz-SignedHeaders'), 'content-type;host');
+  assert.ok(url.searchParams.get('X-Amz-Signature'));
+  assert.equal(put.url.includes('secret-must-not-appear'), false);
+
+  const get = store.presignGet({
+    key: 'vendor/s1/location/l1/video/m1',
+    now: new Date('2026-09-21T12:00:00Z'),
+  });
+  assert.equal(get.method, 'GET');
+  assert.equal(new URL(get.url).searchParams.get('X-Amz-SignedHeaders'), 'host');
+});
+
+test('HEAD reports size and a missing object is null', async () => {
+  const store = s3CompatibleStore({
+    endpoint: 'https://abc.r2.cloudflarestorage.com',
+    region: 'auto',
+    bucket: 'bytspot-media',
+    accessKeyId: 'AKIAEXAMPLE',
+    secretAccessKey: 'secret',
+    fetchImpl: async (_input, init) => {
+      if (String(init?.method) === 'HEAD') {
+        return new Response(null, {
+          status: 200,
+          headers: { 'content-length': '12', 'content-type': 'video/mp4' },
+        });
+      }
+      return new Response(null, { status: 404 });
+    },
+  });
+  assert.deepEqual(await store.head('vendor/s1/location/l1/video/m1'), {
+    byteSize: 12,
+    mimeType: 'video/mp4',
+  });
+});

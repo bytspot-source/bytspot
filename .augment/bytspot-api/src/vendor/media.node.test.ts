@@ -6,6 +6,7 @@ import {
   mediaHttpStatus,
   parseVendorMediaDataUri,
   planUpload,
+  planVideoUpload,
   seatCanSeeBookable,
   seatCanSeeLocation,
   vendorCanEditMedia,
@@ -35,15 +36,21 @@ test('an owner can hang media on a draft business, a door cannot, and a suspende
   assert.equal(vendorCanEditMedia('owner', 'CLOSED'), false);
 });
 
-test('a menu belongs on a place, not a bookable, and video is refused until object storage exists', () => {
+test('a menu belongs on a place, not a bookable, and video stays closed until object storage exists', () => {
   assert.equal(planUpload({ parent: 'bookable', kind: 'menu', existing: [] }).ok, false);
   assert.equal(planUpload({ parent: 'location', kind: 'video', existing: [] }).ok, false);
-  const video = planUpload({ parent: 'location', kind: 'video', existing: [] });
-  assert.equal(video.ok, false);
-  if (!video.ok) {
-    assert.equal(mediaHttpStatus(video.reason), 413);
-    assert.equal(MEDIA_REFUSALS[video.reason], 'Video uploads are not available yet');
+  const closed = planUpload({ parent: 'location', kind: 'video', existing: [] });
+  assert.equal(closed.ok, false);
+  if (!closed.ok) {
+    assert.equal(mediaHttpStatus(closed.reason), 413);
+    assert.equal(MEDIA_REFUSALS[closed.reason], 'Video uploads are not available yet');
   }
+  assert.deepEqual(planUpload({ parent: 'location', kind: 'video', existing: [], storeConfigured: true }), {
+    ok: true,
+    kind: 'video',
+    position: 0,
+    replace: false,
+  });
 });
 
 test('a second cover replaces the first rather than stacking', () => {
@@ -100,6 +107,14 @@ test('a jpeg still and a pdf menu parse; svg and video data URIs do not', () => 
   const video = parseVendorMediaDataUri('video', 'data:video/mp4;base64,AAAA');
   assert.equal(video.ok, false);
   if (!video.ok) assert.equal(video.reason, 'video-unavailable');
+});
+
+test('a video intent is an MP4, WebM, or QuickTime under 80 MB, never a data URI', () => {
+  assert.deepEqual(planVideoUpload({ mimeType: 'video/mp4', byteSize: 12 }), { ok: true });
+  assert.equal(planVideoUpload({ mimeType: 'video/avi', byteSize: 12 }).ok, false);
+  const huge = planVideoUpload({ mimeType: 'video/mp4', byteSize: 80_000_001 });
+  assert.equal(huge.ok, false);
+  if (!huge.ok) assert.equal(huge.reason, 'too-large');
 });
 
 test('bytes that do not match the declared type are refused', () => {

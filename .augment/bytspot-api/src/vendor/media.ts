@@ -13,6 +13,7 @@ export type MediaParent = 'location' | 'bookable';
 
 export const MEDIA_IMAGE_MIME = ['image/jpeg', 'image/png', 'image/webp'] as const;
 export const MEDIA_MENU_MIME = [...MEDIA_IMAGE_MIME, 'application/pdf'] as const;
+export const MEDIA_VIDEO_MIME = ['video/mp4', 'video/webm', 'video/quicktime'] as const;
 
 export const MEDIA_CAPS = {
   cover: { location: 1, bookable: 1 },
@@ -23,7 +24,9 @@ export const MEDIA_CAPS = {
 
 export const MEDIA_MAX_IMAGE_BYTES = 2_000_000;
 export const MEDIA_MAX_MENU_BYTES = 8_000_000;
+export const MEDIA_MAX_VIDEO_BYTES = 80_000_000;
 export const MEDIA_MAX_PIXELS = 4_096;
+export const MEDIA_PRESIGN_TTL_SECONDS = 900;
 
 export type MediaRefusal =
   | 'forbidden'
@@ -176,7 +179,24 @@ const IMAGE_URI = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2}
 const PDF_URI = /^data:(application\/pdf);base64,([A-Za-z0-9+/]+={0,2})$/;
 const VIDEO_URI = /^data:video\//i;
 
+export function isVideoMime(mimeType: string): boolean {
+  return (MEDIA_VIDEO_MIME as readonly string[]).includes(mimeType);
+}
+
+export function planVideoUpload(options: {
+  mimeType: string;
+  byteSize: number;
+}): { ok: true } | { ok: false; reason: Extract<MediaRefusal, 'bad-payload' | 'too-large'> } {
+  if (!isVideoMime(options.mimeType)) return { ok: false, reason: 'bad-payload' };
+  if (!Number.isInteger(options.byteSize) || options.byteSize <= 0 || options.byteSize > MEDIA_MAX_VIDEO_BYTES) {
+    return { ok: false, reason: 'too-large' };
+  }
+  return { ok: true };
+}
+
 export function parseVendorMediaDataUri(kind: MediaKind, dataUri: string): ParsedMedia {
+  // A data URI is the stills path. Video never rides JSON, even if someone
+  // posts one: the body ceiling is smaller than a useful clip.
   if (kind === 'video' || VIDEO_URI.test(dataUri)) {
     return { ok: false, reason: 'video-unavailable' };
   }
@@ -220,16 +240,17 @@ export function planUpload(options: {
   kind: string;
   position?: number;
   existing: { kind: string; position: number }[];
+  storeConfigured?: boolean;
 }): UploadPlan {
   if (!isMediaKind(options.kind)) return { ok: false, reason: 'unknown-kind' };
   const kind = options.kind;
 
   if (!kindAllowedOn(options.parent, kind)) return { ok: false, reason: 'kind-not-on-parent' };
-  if (kind === 'video') return { ok: false, reason: 'video-unavailable' };
+  if (kind === 'video' && !options.storeConfigured) return { ok: false, reason: 'video-unavailable' };
 
-  if (kind === 'cover') {
+  if (kind === 'cover' || kind === 'video') {
     if (options.position !== undefined && options.position !== 0) return { ok: false, reason: 'cover-has-no-index' };
-    return { ok: true, kind, position: 0, replace: options.existing.some((row) => row.kind === 'cover') };
+    return { ok: true, kind, position: 0, replace: options.existing.some((row) => row.kind === kind) };
   }
 
   const ofKind = options.existing.filter((row) => row.kind === kind);
@@ -253,7 +274,7 @@ export const MEDIA_REFUSALS: Record<MediaRefusal, string> = {
   'unknown-kind': 'Unknown media kind',
   'kind-not-on-parent': 'That file does not belong on this',
   'video-unavailable': 'Video uploads are not available yet',
-  'bad-payload': 'Use a JPEG, PNG, WebP, or PDF',
+  'bad-payload': 'Use a JPEG, PNG, WebP, PDF, MP4, WebM, or MOV',
   'too-large': 'That file is too large',
   'at-capacity': 'This already has as many files as it can hold',
   'cover-has-no-index': 'A cover cannot specify a slot',

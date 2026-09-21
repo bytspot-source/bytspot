@@ -8,7 +8,8 @@ import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membersh
 import { bookableCreateData, capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
-import { candidatesFromPlan, candidatesFromDiscovery, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { boundingBoxWhere } from '../services/geoBox';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -423,15 +424,11 @@ async function publicBookableParties(client: TxClient, userId: string, now: Date
   const parties = await client.party.findMany({
     where: {
       ...(ids ? { id: { in: ids } } : {}),
-      status: 'published', closedAt: null, admissionPaused: false,
-      accessMode: { in: ['free-rsvp', 'paid-ticket'] },
-      templateId: { not: 'private-party' }, locationDisclosure: 'public',
+      ...discoverablePartyWhere(now),
+      // Stricter than discovery on purpose: an attachable party must be open
+      // to anyone, not merely to a circle this user happens to be in.
       audienceCircleIds: { isEmpty: true },
       requiredMembershipTier: { in: allowedTiers },
-      AND: [
-        { OR: [{ endsAt: { gt: now } }, { endsAt: null, startsAt: { gt: new Date(now.getTime() - 6 * 60 * 60 * 1000) } }] },
-        { OR: [{ shareLinkExpiresAt: null }, { shareLinkExpiresAt: { gt: now } }] },
-      ],
     },
     select: {
       id: true, title: true, capacity: true, status: true, admissionPaused: true,
@@ -441,16 +438,12 @@ async function publicBookableParties(client: TxClient, userId: string, now: Date
     },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], take: ids ? 12 : 50,
   });
-  // Defense in depth: all eligibility facts must survive the shared pure gate.
-  const publicParties = parties.filter((party) =>
-    party.status === 'published' && party.closedAt === null && !party.admissionPaused
-    && ['free-rsvp', 'paid-ticket'].includes(party.accessMode)
-    && party.templateId !== 'private-party' && party.locationDisclosure === 'public'
-    && party.audienceCircleIds.length === 0
-    && now < (party.endsAt ?? new Date(party.startsAt.getTime() + 6 * 60 * 60 * 1000))
-    && (party.shareLinkExpiresAt === null || now < party.shareLinkExpiresAt));
+  // Defense in depth: every eligibility fact must survive the shared pure
+  // gate, which now owns the whole rule. The extra circle clause is checked
+  // here because the gate deliberately does not own it.
+  const publicParties = parties.filter((party) => party.audienceCircleIds.length === 0);
   const eligibleIds = new Set(filterDiscoverableParties(publicParties.map((party) => ({ ...party, latitude: null, longitude: null })), {
-    userTier, userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(),
+    userTier, userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(), now,
   }).map((party) => party.id));
   return publicParties.filter((party) => eligibleIds.has(party.id));
 }
@@ -666,28 +659,33 @@ export const planRouter = router({
       let discoveredCandidates: import('../services/primePath').PrimePathCandidate[] = [];
       if (wantsNightlife && plan.latitude != null && plan.longitude != null) {
         const attachedPartyIds = new Set(partyIds);
-        const BBOX_DELTA = 0.05; // ~3.5 mi
-        const planLat = plan.latitude;
-        const planLng = plan.longitude;
+        const discoverableGate = discoverablePartyWhere(now);
+        const DISCOVERY_RADIUS_MILES = 3.5;
         // A Party's own coordinates lead; a bound arrival venue answers for
         // parties published before they existed. Neither means Bytspot does
         // not know where the Party is, so it reaches no geographic surface.
-        const withinBox = {
-          lat: { gte: planLat - BBOX_DELTA, lte: planLat + BBOX_DELTA },
-          lng: { gte: planLng - BBOX_DELTA, lte: planLng + BBOX_DELTA },
-        };
-        const [user, userCircles, discoverableParties] = await Promise.all([
+        // The box is the shared spherical one: a flat degree offset is
+        // narrower than the circle it stands for, and narrower hides rows.
+        const withinBox = boundingBoxWhere(plan.latitude, plan.longitude, DISCOVERY_RADIUS_MILES);
+        // Identity is read before the parties, not beside them: tier and
+        // circles belong in the query so an ineligible row cannot take a slot
+        // under `take` from one the user could actually be shown.
+        const [user, userCircles] = await Promise.all([
           db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
           db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
-          db.party.findMany({
+        ]);
+        const discoveryTier = user?.membershipTier ?? '';
+        const discoveryCircleIds = userCircles.map((m) => m.circleId);
+        const discoverableParties = await db.party.findMany({
             where: {
-              status: 'published',
-              closedAt: null,
-              admissionPaused: false,
+              ...discoverableGate,
               id: { notIn: [...attachedPartyIds] },
+              requiredMembershipTier: { in: Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(discoveryTier, tier)) },
               // Two ORs cannot share one `where`, so both clauses are ANDed.
               AND: [
+                ...discoverableGate.AND,
                 { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
+                { OR: [{ audienceCircleIds: { isEmpty: true } }, ...(discoveryCircleIds.length > 0 ? [{ audienceCircleIds: { hasSome: discoveryCircleIds } }] : [])] },
                 // Time overlap: party hasn't ended and starts within 24h of Plan
                 plan.startsAt ? {
                   startsAt: { lte: new Date(plan.startsAt.getTime() + 24 * 60 * 60 * 1000) },
@@ -701,19 +699,22 @@ export const planRouter = router({
               id: true, title: true, capacity: true, status: true, admissionPaused: true,
               closedAt: true, endsAt: true, startsAt: true, accessMode: true,
               requiredMembershipTier: true, audienceCircleIds: true,
+              templateId: true, locationDisclosure: true, shareLinkExpiresAt: true,
               lat: true, lng: true,
               arrivalVenue: { select: { lat: true, lng: true } },
             },
             take: 20,
-          }),
-        ]);
+        });
         // Occupancy for discovered parties only — not the whole system.
         const discoveredIds = discoverableParties.map((p) => p.id);
         const discoveryOccupancy = discoveredIds.length > 0
           ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: discoveredIds }, accessGranted: true }, _count: { _all: true } })
           : [];
-        const userTier = user?.membershipTier ?? 'green';
-        const userCircleIds = new Set(userCircles.map((m) => m.circleId));
+        // Fail closed when the user row is missing: an absent tier is not
+        // evidence of green, and this is the same default the browse
+        // endpoint uses.
+        const userTier = discoveryTier;
+        const userCircleIds = new Set(discoveryCircleIds);
         const discoveryOccMap = new Map(discoveryOccupancy.map((row) => [row.partyId, row._count._all]));
         const discoverable: DiscoverablePartyFacts[] = discoverableParties.map((p) => ({
           id: p.id, title: p.title, capacity: p.capacity, status: p.status,
@@ -721,6 +722,9 @@ export const planRouter = router({
           startsAt: p.startsAt, accessMode: p.accessMode,
           requiredMembershipTier: p.requiredMembershipTier,
           audienceCircleIds: p.audienceCircleIds,
+          templateId: p.templateId,
+          locationDisclosure: p.locationDisclosure,
+          shareLinkExpiresAt: p.shareLinkExpiresAt,
           latitude: p.lat ?? p.arrivalVenue?.lat ?? null,
           longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
         }));

@@ -75,6 +75,7 @@ function discoverableParty(overrides: Partial<DiscoverablePartyFacts> = {}): Dis
     admissionPaused: false, closedAt: null, endsAt: new Date('2026-09-08T02:00:00Z'),
     startsAt: new Date('2026-09-07T21:00:00Z'), accessMode: 'free-rsvp',
     requiredMembershipTier: 'green', audienceCircleIds: [],
+    templateId: 'rooftop', locationDisclosure: 'public', shareLinkExpiresAt: null,
     latitude: 33.79, longitude: -84.38, ...overrides,
   };
 }
@@ -116,7 +117,7 @@ test('filterDiscoverableParties gates on membership tier (Option B)', () => {
     discoverableParty({ id: 'p-platinum', requiredMembershipTier: 'platinum' }),
     discoverableParty({ id: 'p-black', requiredMembershipTier: 'black' }),
   ];
-  const greenUser = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>() };
+  const greenUser = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(), now };
   assert.deepEqual(filterDiscoverableParties(parties, greenUser).map((p) => p.id), ['p-green']);
   const platUser = { ...greenUser, userTier: 'platinum' };
   assert.deepEqual(filterDiscoverableParties(parties, platUser).map((p) => p.id), ['p-green', 'p-platinum']);
@@ -129,15 +130,50 @@ test('filterDiscoverableParties narrows by audience circles when non-empty', () 
     discoverableParty({ id: 'p-open', audienceCircleIds: [] }),
     discoverableParty({ id: 'p-circle', audienceCircleIds: ['circle-A', 'circle-B'] }),
   ];
-  const noCircles = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>() };
+  const noCircles = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(), now };
   assert.deepEqual(filterDiscoverableParties(parties, noCircles).map((p) => p.id), ['p-open']);
   const inCircleA = { ...noCircles, userCircleIds: new Set(['circle-A']) };
   assert.deepEqual(filterDiscoverableParties(parties, inCircleA).map((p) => p.id), ['p-open', 'p-circle']);
 });
 
+test('A host who chose who comes is never discoverable by a stranger', () => {
+  // Discovery is not an invitation. Each of these is a different way a host
+  // said the party is not open, and each was reachable through the Plan
+  // discovery query, which selected none of these columns.
+  const open = { userTier: 'black', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(), now };
+  const refused: Partial<DiscoverablePartyFacts>[] = [
+    { id: 'p-private-template', templateId: 'private-party' },
+    { id: 'p-address-withheld', locationDisclosure: 'after-approval' },
+    { id: 'p-approval-door', accessMode: 'private-approval' },
+    { id: 'p-unknown-door', accessMode: 'rsvp' },
+    { id: 'p-link-expired', shareLinkExpiresAt: new Date('2026-09-07T19:00:00Z') },
+    { id: 'p-unpublished', status: 'draft' },
+    { id: 'p-closed', closedAt: new Date('2026-09-07T19:00:00Z') },
+    { id: 'p-paused', admissionPaused: true },
+    { id: 'p-over', endsAt: new Date('2026-09-07T19:00:00Z') },
+  ];
+  for (const overrides of refused) {
+    assert.deepEqual(filterDiscoverableParties([discoverableParty(overrides)], open), [], `${overrides.id} must not be discoverable`);
+  }
+
+  // A share link that has not expired yet, and an open party, both stay.
+  assert.equal(filterDiscoverableParties([discoverableParty({ shareLinkExpiresAt: new Date('2026-09-08T02:00:00Z') })], open).length, 1);
+  assert.equal(filterDiscoverableParties([discoverableParty()], open).length, 1);
+});
+
+test('An ended party is judged by endsAt, or six hours past its start when it has none', () => {
+  const open = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(), now };
+  // Started an hour ago, no declared end: still running on the six-hour rule.
+  const running = discoverableParty({ endsAt: null, startsAt: new Date('2026-09-07T19:00:00Z') });
+  assert.equal(filterDiscoverableParties([running], open).length, 1);
+  // Started nine hours ago with no declared end: over.
+  const stale = discoverableParty({ endsAt: null, startsAt: new Date('2026-09-07T11:00:00Z') });
+  assert.deepEqual(filterDiscoverableParties([stale], open), []);
+});
+
 test('filterDiscoverableParties excludes already-attached party IDs', () => {
   const parties = [discoverableParty({ id: 'p-attached' }), discoverableParty({ id: 'p-new' })];
-  const attached = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set(['p-attached']) };
+  const attached = { userTier: 'green', userCircleIds: new Set<string>(), attachedPartyIds: new Set(['p-attached']), now };
   assert.deepEqual(filterDiscoverableParties(parties, attached).map((p) => p.id), ['p-new']);
 });
 

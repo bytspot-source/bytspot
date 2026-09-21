@@ -435,6 +435,8 @@ async function publicBookableParties(client: TxClient, userId: string, now: Date
       closedAt: true, endsAt: true, startsAt: true, accessMode: true,
       requiredMembershipTier: true, audienceCircleIds: true,
       templateId: true, templateConfig: true, locationDisclosure: true, shareLinkExpiresAt: true,
+      venueName: true, lat: true, lng: true,
+      arrivalVenue: { select: { lat: true, lng: true } },
     },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], take: ids ? 12 : 50,
   });
@@ -518,11 +520,40 @@ export const planRouter = router({
         const parties = await publicBookableParties(db, ctx.user.userId, new Date());
         // Events is the all-public-ROOM umbrella, at any hour, not a synonym
         // for nightlife. Each row still carries its actual canonical category.
-        return { offerings: parties.filter((party) => input.category === 'events' || categoryForParty(party.templateConfig) === input.category)
-          .map((party) => ({ id: `party:${party.id}`, sourceKind: 'party' as const,
-            sourceId: party.id, category: categoryForParty(party.templateConfig), title: party.title,
-            ...hostDiscoveryTags(party.templateConfig),
-            capability: capabilityForSupply({ party }) })) };
+        const shown = parties.filter((party) => input.category === 'events' || categoryForParty(party.templateConfig) === input.category);
+        // Seats are live occupancy, never Typical, and a full room still
+        // browses: being full is a fact about the room, not grounds to imply
+        // it does not exist.
+        const granted = shown.length
+          ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: shown.map((party) => party.id) }, accessGranted: true }, _count: { _all: true } })
+          : [];
+        const grantedMap = new Map(granted.map((row) => [row.partyId, row._count._all]));
+        return { offerings: shown
+          .map((party) => {
+            // The shared gate already refuses any room that withholds its
+            // address, so anything here is public and may state where it is.
+            // It falls back to the venue it arrives at rather than inventing
+            // a coordinate, and stays null when neither is known.
+            const placed = party.lat !== null && party.lng !== null
+              ? { lat: party.lat, lng: party.lng }
+              : (party.arrivalVenue?.lat != null && party.arrivalVenue?.lng != null
+                ? { lat: party.arrivalVenue.lat, lng: party.arrivalVenue.lng }
+                : null);
+            return {
+              id: `party:${party.id}`, sourceKind: 'party' as const,
+              sourceId: party.id, category: categoryForParty(party.templateConfig), title: party.title,
+              ...hostDiscoveryTags(party.templateConfig),
+              capability: capabilityForSupply({ party }),
+              startsAt: party.startsAt.toISOString(),
+              endsAt: party.endsAt?.toISOString() ?? null,
+              capacity: party.capacity,
+              spacesRemaining: Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
+              requiredMembershipTier: party.requiredMembershipTier,
+              venueName: party.venueName,
+              latitude: placed?.lat ?? null,
+              longitude: placed?.lng ?? null,
+            };
+          }) };
       }
       return { offerings: [] };
     }),

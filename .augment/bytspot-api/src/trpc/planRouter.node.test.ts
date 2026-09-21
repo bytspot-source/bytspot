@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
+import type { inferRouterOutputs } from '@trpc/server';
 import { createCallerFactory, resetLocalRateLimitForTests } from './trpc';
 import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
@@ -937,12 +938,26 @@ test('confirm, cancel and needs cannot write through a concurrent tombstone', as
 const coffeeSelection = { sourceKind: 'coffeeSpot' as const, sourceId: 'spot-1' };
 const partySelection = { sourceKind: 'party' as const, sourceId: 'party-1' };
 const selectedCreate = { idempotencyKey, title: 'A day out', intent: 'Meet friends', bookableSelections: [coffeeSelection, partySelection] };
+type Bookables = inferRouterOutputs<typeof appRouter>['plans']['bookables'];
+type PartyOffering = Extract<Bookables['offerings'][number], { sourceKind: 'party' }>;
+
+/** bookables spans several kinds of supply, so its offerings are a union and
+ * a coffee spot has no seats or coordinates to read. These assertions are all
+ * about a party, so narrow once and say so loudly if the shape is not the one
+ * under test. */
+function partyOffering(offerings: Bookables['offerings']): PartyOffering {
+  const [offering] = offerings;
+  assert.equal(offering?.sourceKind, 'party', 'expected a party offering to assert against');
+  return offering as PartyOffering;
+}
+
 function publicParty(overrides: Record<string, unknown> = {}) {
   return { id: 'party-1', title: 'Brunch', capacity: 20, status: 'published', admissionPaused: false,
     closedAt: null, startsAt: new Date(Date.now() + 60_000), endsAt: new Date(Date.now() + 3_600_000),
     accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: [],
     templateId: 'pop-up', templateConfig: { hostCategory: 'food-drink', hostType: 'brunch' },
-    locationDisclosure: 'public', shareLinkExpiresAt: null, ...overrides };
+    locationDisclosure: 'public', shareLinkExpiresAt: null,
+    venueName: 'Ponce City Market', lat: 33.7726, lng: -84.3654, arrivalVenue: null, ...overrides };
 }
 
 /** An isolated, versioned transaction double: partial writes are discarded on
@@ -1044,18 +1059,56 @@ test('bookables exposes only recognized HOST category/type pairs without changin
     ['dinner', 'food-drink', 'dining'], ['after-hours', 'nightlife', 'nightlife'],
     ['pop-up-table', 'food-drink', 'dining'], ['hike', 'outdoor', 'green'],
   ];
+  // Fixed hours, because reading the time back out of the result would have
+  // asserted only that a field equals itself.
+  const startsAt = new Date('2099-03-04T20:00:00Z');
+  const endsAt = new Date('2099-03-04T23:00:00Z');
   for (const [hostType, hostCategory, category] of samples) {
-    party.findMany = async () => [publicParty({ templateConfig: {
+    party.findMany = async () => [publicParty({ startsAt, endsAt, templateConfig: {
       hostType, hostCategory, hostFormat: 'room', internalNote: 'Not discovery metadata',
     } })];
     const result = await caller().plans.bookables({ category: 'events' });
     assert.deepEqual(result, { offerings: [{
       id: 'party:party-1', sourceKind: 'party', sourceId: 'party-1', category,
       title: 'Brunch', hostCategory, hostType, capability: 'book',
+      startsAt: '2099-03-04T20:00:00.000Z', endsAt: '2099-03-04T23:00:00.000Z',
+      capacity: 20, spacesRemaining: 20, requiredMembershipTier: 'green',
+      venueName: 'Ponce City Market', latitude: 33.7726, longitude: -84.3654,
     }] });
   }
   assert.equal(store.attempts, 0, 'classification never writes a Plan or admission');
   assert.deepEqual(store.state.snapshots, []);
+});
+
+test('bookables never leaks a withheld address, and counts seats from granted admissions', async () => {
+  selectionStore();
+
+  // A public room places itself, falling back to the venue it arrives at.
+  party.findMany = async () => [publicParty({ lat: null, lng: null, arrivalVenue: { lat: 33.79, lng: -84.38 } })];
+  partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 8 } }];
+  const placed = partyOffering((await caller().plans.bookables({ category: 'events' })).offerings);
+  assert.equal(placed.latitude, 33.79);
+  assert.equal(placed.longitude, -84.38);
+  assert.equal(placed.venueName, 'Ponce City Market');
+  assert.equal(placed.spacesRemaining, 12, 'seats are capacity minus granted admissions');
+
+  // A room that withholds its address until admission never browses at all,
+  // so no coordinate or venue name can escape through this card.
+  party.findMany = async () => [publicParty({ locationDisclosure: 'on-approval' })];
+  assert.deepEqual((await caller().plans.bookables({ category: 'events' })).offerings, []);
+
+  // Neither the party nor its arrival venue placed: state nothing rather
+  // than inventing a coordinate.
+  party.findMany = async () => [publicParty({ lat: null, lng: null, arrivalVenue: null })];
+  const unplaced = partyOffering((await caller().plans.bookables({ category: 'events' })).offerings);
+  assert.equal(unplaced.latitude, null);
+  assert.equal(unplaced.longitude, null);
+
+  // A full room still browses and says it is full.
+  party.findMany = async () => [publicParty()];
+  partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 40 } }];
+  assert.equal(partyOffering((await caller().plans.bookables({ category: 'events' })).offerings).spacesRemaining, 0);
+  partyGuest.groupBy = async () => [];
 });
 
 test('bookables omits legacy, malformed, and mismatched HOST metadata rather than guessing it', async () => {

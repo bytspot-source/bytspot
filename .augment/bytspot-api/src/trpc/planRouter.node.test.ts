@@ -942,7 +942,8 @@ function publicParty(overrides: Record<string, unknown> = {}) {
     closedAt: null, startsAt: new Date(Date.now() + 60_000), endsAt: new Date(Date.now() + 3_600_000),
     accessMode: 'free-rsvp', requiredMembershipTier: 'green', audienceCircleIds: [],
     templateId: 'pop-up', templateConfig: { hostCategory: 'food-drink', hostType: 'brunch' },
-    locationDisclosure: 'public', shareLinkExpiresAt: null, ...overrides };
+    locationDisclosure: 'public', shareLinkExpiresAt: null,
+    venueName: 'Ponce City Market', lat: 33.7726, lng: -84.3654, arrivalVenue: null, ...overrides };
 }
 
 /** An isolated, versioned transaction double: partial writes are discarded on
@@ -1052,10 +1053,44 @@ test('bookables exposes only recognized HOST category/type pairs without changin
     assert.deepEqual(result, { offerings: [{
       id: 'party:party-1', sourceKind: 'party', sourceId: 'party-1', category,
       title: 'Brunch', hostCategory, hostType, capability: 'book',
+      startsAt: result.offerings[0].startsAt, endsAt: result.offerings[0].endsAt,
+      capacity: 20, spacesRemaining: 20, requiredMembershipTier: 'green',
+      venueName: 'Ponce City Market', latitude: 33.7726, longitude: -84.3654,
     }] });
   }
   assert.equal(store.attempts, 0, 'classification never writes a Plan or admission');
   assert.deepEqual(store.state.snapshots, []);
+});
+
+test('bookables never leaks a withheld address, and counts seats from granted admissions', async () => {
+  selectionStore();
+
+  // A public room places itself, falling back to the venue it arrives at.
+  party.findMany = async () => [publicParty({ lat: null, lng: null, arrivalVenue: { lat: 33.79, lng: -84.38 } })];
+  partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 8 } }];
+  const placed = (await caller().plans.bookables({ category: 'events' })).offerings[0];
+  assert.equal(placed.latitude, 33.79);
+  assert.equal(placed.longitude, -84.38);
+  assert.equal(placed.venueName, 'Ponce City Market');
+  assert.equal(placed.spacesRemaining, 12, 'seats are capacity minus granted admissions');
+
+  // A room that withholds its address until admission never browses at all,
+  // so no coordinate or venue name can escape through this card.
+  party.findMany = async () => [publicParty({ locationDisclosure: 'on-approval' })];
+  assert.deepEqual((await caller().plans.bookables({ category: 'events' })).offerings, []);
+
+  // Neither the party nor its arrival venue placed: state nothing rather
+  // than inventing a coordinate.
+  party.findMany = async () => [publicParty({ lat: null, lng: null, arrivalVenue: null })];
+  const unplaced = (await caller().plans.bookables({ category: 'events' })).offerings[0];
+  assert.equal(unplaced.latitude, null);
+  assert.equal(unplaced.longitude, null);
+
+  // A full room still browses and says it is full.
+  party.findMany = async () => [publicParty()];
+  partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 40 } }];
+  assert.equal((await caller().plans.bookables({ category: 'events' })).offerings[0].spacesRemaining, 0);
+  partyGuest.groupBy = async () => [];
 });
 
 test('bookables omits legacy, malformed, and mismatched HOST metadata rather than guessing it', async () => {

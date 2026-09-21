@@ -200,7 +200,7 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
       // serialization failure and the retry sees the tombstone.
       const plan = await tx.plan.findFirst({
         where: { id: offer.demand.planId, deletedAt: null },
-        select: { id: true },
+        select: { id: true, items: { select: { position: true } } },
       });
       // No need kind means the category never came from a Plan need. Filing it
       // under a guessed one would put a booking in a list the guest never
@@ -217,6 +217,9 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
             capability: 'book',
             status: 'booked',
             selectionKey: `vendorOffer:${offer.id}`,
+            // A won table appends to the Plan rather than displacing anything
+            // already in it.
+            position: plan.items.reduce((highest, item) => Math.max(highest, item.position + 1), 0),
           },
         });
       }

@@ -143,7 +143,10 @@ const planInclude = {
   // Plans row actually paints are selected; owner and idempotency stay
   // server-side, and the reservation summary is null for room-backed items.
   items: {
-    orderBy: { createdAt: 'asc' },
+    // Stored order first. createdAt and id break ties so two items attached in
+    // one transaction, which can share a timestamp, still read back in a
+    // stable, total order rather than whatever the planner returns.
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     include: { coffeeReservation: { select: { holdExpiresAt: true, status: true, coffeeSpotId: true } } },
   },
 } satisfies Prisma.PlanInclude;
@@ -482,6 +485,9 @@ async function insertBookableSelections(client: TxClient, planId: string,
   supplies: Awaited<ReturnType<typeof resolveBookableSelections>>,
   existing: LoadedPlan['items'] = []) {
   const ids: string[] = [];
+  // Append after whatever the Plan already holds. Reusing an existing item
+  // leaves the count alone, so a retry cannot walk the order forward.
+  let position = existing.reduce((highest, item) => Math.max(highest, item.position + 1), 0);
   for (const { snapshot, ...supply } of supplies) {
     // Include pre-picker attaches: a NULL/old selection key must not cause a
     // second item for the same party or already-linked coffee spot.
@@ -495,7 +501,7 @@ async function insertBookableSelections(client: TxClient, planId: string,
     if (previous) { ids.push(previous.id); continue; }
     await client.bookable.create({ data: bookableCreateData(snapshot) });
     const item = await client.planItem.create({ data: {
-      planId, ...supply, bookableId: snapshot.id, status: 'available',
+      planId, ...supply, bookableId: snapshot.id, status: 'available', position: position++,
     } });
     ids.push(item.id);
   }
@@ -1122,6 +1128,7 @@ export const planRouter = router({
         planId: plan.id, needKind: input.needKind, title: supply.title,
         capability: supply.capability, partyId, coffeeReservationId,
         selectionKey, bookableId: supply.snapshot?.id ?? null,
+        position: plan.items.reduce((highest, existing) => Math.max(highest, existing.position + 1), 0),
       } });
       return { id: item.id, capability: item.capability, status: item.status };
     }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.')),

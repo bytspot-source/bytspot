@@ -843,6 +843,11 @@ model PlanItem {
   bookableId          String?  @unique @map("bookable_id")
   capability          String   @default("details")
   status              String   @default("available")
+  /// Where this item sits in the Plan's sequence, zero-based and per plan.
+  /// Deliberately not unique: a racing attach may briefly duplicate a position,
+  /// which is a smaller harm than refusing the write. Readers break ties on
+  /// createdAt then id, so the order is always total.
+  position            Int      @default(0)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -856,6 +861,7 @@ model PlanItem {
   @@unique([planId, selectionKey])
   @@index([coffeeSpotId])
   @@index([planId, createdAt])
+  @@index([planId, position], map: "plan_items_plan_position_idx")
   @@map("plan_items")
 }
 

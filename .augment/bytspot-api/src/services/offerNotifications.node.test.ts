@@ -27,3 +27,12 @@ test('a missing or unknown timezone still says something rather than nothing', (
   assert.notEqual(whenLabel(new Date('2026-09-19T23:00:00.000Z'), null), '');
   assert.notEqual(whenLabel(new Date('2026-09-19T23:00:00.000Z'), 'Mars/Olympus'), '');
 });
+
+test('an offer email is on unless the guest turned reservation emails off', async () => {
+  const { permitsReservationEmail } = await import('./offerNotifications');
+  assert.equal(permitsReservationEmail(null), true);
+  assert.equal(permitsReservationEmail({ push: { reservations: false } }), true);
+  assert.equal(permitsReservationEmail({ email: { promotions: false } }), true);
+  assert.equal(permitsReservationEmail({ email: { reservations: false } }), false);
+  assert.equal(permitsReservationEmail({ email: { reservations: 'no' } }), true);
+});

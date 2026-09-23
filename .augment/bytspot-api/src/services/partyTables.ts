@@ -28,7 +28,6 @@ export interface TableHostParty {
   /// floor but no ceiling — an unstated end is unknown, not midnight.
   endsAt: Date | null;
   capacity: number;
-  accessMode: string;
 }
 
 export interface TableIssue {
@@ -63,13 +62,6 @@ export function validateTables(tables: TableDraft[], party: TableHostParty): Tab
     }
     if (table.priceCents < 0) {
       issues.push({ index, field: 'priceCents', message: 'A table cannot cost less than nothing.' });
-    }
-    // A priced table needs a way to take money, and today only a paid-ticket
-    // Party has one wired. This is a limit of the rail, not a statement that
-    // free-entry Parties cannot sell tables: free at the door with paid tables
-    // is an ordinary arrangement and is simply not supported yet.
-    if (table.priceCents > 0 && party.accessMode !== 'paid-ticket') {
-      issues.push({ index, field: 'priceCents', message: 'Only a paid Party can charge for a table today, because that is the only Party with a payment rail.' });
     }
     if (table.name.trim().length === 0) {
       issues.push({ index, field: 'name', message: 'A table needs a name the guest can recognise.' });

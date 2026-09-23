@@ -7,7 +7,6 @@ const party: TableHostParty = {
   startsAt: at('2026-10-01T18:00:00Z'),
   endsAt: at('2026-10-02T02:00:00Z'),
   capacity: 80,
-  accessMode: 'paid-ticket',
 };
 
 function table(over: Partial<TableDraft> = {}): TableDraft {
@@ -66,13 +65,13 @@ test('Tables may overlap, but together they cannot sell more than the room holds
   }]);
 });
 
-test('A priced table needs a payment rail, which only a paid Party has today', () => {
-  const free: TableHostParty = { ...party, accessMode: 'free-rsvp' };
-  assert.deepEqual(validateTables([table({ priceCents: 2500 })], free), [
-    { index: 0, field: 'priceCents', message: 'Only a paid Party can charge for a table today, because that is the only Party with a payment rail.' },
-  ]);
+test('A free-entry Party may still charge for its tables', () => {
+  // Free at the door with paid tables is an ordinary arrangement: the gate fee
+  // and the table fee are separate things, so the door being free says nothing
+  // about what a table costs.
+  assert.deepEqual(validateTables([table({ priceCents: 2500 })], party), []);
   // Zero is a free table, not an unpriced one.
-  assert.deepEqual(validateTables([table({ priceCents: 0 })], free), []);
+  assert.deepEqual(validateTables([table({ priceCents: 0 })], party), []);
 });
 
 test('Two tables cannot share a name, because a pass could not tell them apart', () => {

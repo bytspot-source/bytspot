@@ -331,8 +331,9 @@ model PartyTable {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  party  Party        @relation(fields: [partyId], references: [id], onDelete: Cascade)
-  guests PartyGuest[]
+  party     Party           @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  guests    PartyGuest[]
+  checkouts PartyCheckout[]
 
   @@unique([partyId, position])
   @@index([partyId, startsAt])
@@ -374,8 +375,14 @@ model PartyCheckout {
   idempotencyKey       String    @map("idempotency_key")
   stripeSessionId      String?   @unique @map("stripe_session_id")
   checkoutUrl          String?   @map("checkout_url")
-  ticketTierName       String    @map("ticket_tier_name")
+  /// Null when this checkout buys a table and no gate ticket, which a
+  /// free-entry Party allows.
+  ticketTierName       String?   @map("ticket_tier_name")
+  tableId              String?   @map("table_id")
   amountCents          Int       @map("amount_cents")
+  /// The table's share of the charge, recorded rather than derived from
+  /// today's prices. The gate's share is the remainder.
+  tableAmountCents     Int       @default(0) @map("table_amount_cents")
   /// The split as it stood when this sale was made, recorded per checkout so a
   /// later rate change can never restate what a host already earned.
   platformFeeBps       Int?      @map("platform_fee_bps")
@@ -391,9 +398,11 @@ model PartyCheckout {
   party Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
   guest PartyGuest @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
   user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  table PartyTable? @relation(fields: [tableId], references: [id], onDelete: Restrict)
 
   @@unique([partyId, userId, idempotencyKey])
   @@index([partyId, ticketTierName, status, reservationExpiresAt])
+  @@index([tableId, status, reservationExpiresAt])
   @@index([partyGuestId, updatedAt(sort: Desc)])
   @@map("party_checkouts")
 }

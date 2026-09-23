@@ -46,8 +46,10 @@ function logIgnoredEvent(event: Stripe.Event, session: Stripe.Checkout.Session, 
 
 export class PartyCheckoutValidationError extends Error {}
 
-function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: string): unknown {
-  if (!Array.isArray(ticketTiers)) return null;
+// Null when the checkout bought no gate ticket, which requires nothing of the
+// guest's tier on the gate's behalf.
+function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: string | null): unknown {
+  if (!ticketTierName || !Array.isArray(ticketTiers)) return null;
   return ticketTiers.find((tier): tier is { name: unknown; requiredMembershipTier: unknown } => Boolean(tier) && typeof tier === 'object' && 'name' in tier && 'requiredMembershipTier' in tier && (tier as { name: unknown }).name === ticketTierName)?.requiredMembershipTier ?? null;
 }
 
@@ -55,7 +57,13 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
   if (!checkout) throw new Error('Party Checkout reservation was not found.');
   const expectedTier = metadataValue(session.metadata, 'ticketTierName');
-  if (checkout.partyId !== partyId || checkout.userId !== userId || checkout.ticketTierName !== expectedTier || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
+  const expectedTable = metadataValue(session.metadata, 'tableId');
+  // Absent metadata means the charge did not include that half at all, which
+  // is how a table-only or gate-only checkout states itself. Both sides
+  // normalise to null so a missing key and an empty one agree.
+  if (checkout.partyId !== partyId || checkout.userId !== userId
+    || (checkout.ticketTierName || null) !== expectedTier || (checkout.tableId || null) !== expectedTable
+    || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
     throw new PartyCheckoutValidationError('Party Checkout values did not match the reservation.');
   }
 
@@ -93,7 +101,24 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
       await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
       return false;
     }
-    await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
+    // Taking the seat is guarded, so a table that filled while this payment
+    // was in flight refunds instead of overselling. The database refuses the
+    // oversell either way; this is the half that can still say why.
+    if (current.tableId) {
+      const taken = await tx.partyTable.updateMany({
+        where: { id: current.tableId, committed: { lt: tx.partyTable.fields.capacity } },
+        data: { committed: { increment: 1 } },
+      });
+      if (taken.count !== 1) {
+        await tx.partyCheckout.update({ where: { id: current.id }, data: { status: 'refund-required' } });
+        await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+        return false;
+      }
+    }
+    await tx.partyGuest.update({
+      where: { id: guest.id },
+      data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName, tableId: current.tableId ?? null },
+    });
     return true;
   });
 

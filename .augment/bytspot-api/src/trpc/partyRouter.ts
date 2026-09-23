@@ -1652,18 +1652,50 @@ export const partyRsvpRouter = router({
 export const partyTicketsRouter = router({
   createCheckout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'party-ticket-checkout' }))
-    .input(z.object({ partyId: z.string().min(1).max(128), ticketTierName: z.string().trim().min(1).max(100), idempotencyKey: z.string().uuid() }))
+    .input(z.object({
+      partyId: z.string().min(1).max(128),
+      // Both optional, at least one required: a gate ticket, a table, or both
+      // in one charge. A checkout for neither is a charge for nothing.
+      ticketTierName: z.string().trim().min(1).max(100).optional(),
+      tableId: z.string().min(1).max(128).optional(),
+      idempotencyKey: z.string().uuid(),
+    }).refine((value) => value.ticketTierName || value.tableId, {
+      message: 'A checkout must buy a ticket, a table, or both.',
+    }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       assertShareLinkUsable(party, knownGuest);
-      if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
-      const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
-      if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+
+      // The gate. Only a paid-ticket Party has one; a free-entry Party is
+      // still allowed to sell tables inside it.
+      let ticketTier: { name: string; priceCents: number; quantity: number; requiredMembershipTier?: string | null } | null = null;
+      if (input.ticketTierName) {
+        if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
+        ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0) ?? null;
+        if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+      }
+
+      // The table, which is charged on top of the gate rather than instead
+      // of it.
+      const table = input.tableId
+        ? await db.partyTable.findFirst({ where: { id: input.tableId, partyId: party.id } })
+        : null;
+      if (input.tableId && !table) throw new TRPCError({ code: 'NOT_FOUND', message: 'That table is no longer available.' });
+      if (table && table.priceCents <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'That table is free and does not go through checkout.' });
+
       const membershipTier = await membershipTierFor(ctx.user.userId);
-      if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier) || !meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier)) {
+      if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)
+        || (ticketTier && !meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier))) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party ticket requirement.' });
       }
+      if (table?.requiredMembershipTier && !meetsRequiredMembershipTier(membershipTier, table.requiredMembershipTier)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this table requirement.' });
+      }
+
+      const tableAmountCents = table?.priceCents ?? 0;
+      const amountCents = (ticketTier?.priceCents ?? 0) + tableAmountCents;
+      if (amountCents <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'There is nothing to pay for here.' });
       if (knownGuest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
       if (knownGuest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });
       if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
@@ -1673,7 +1705,7 @@ export const partyTicketsRouter = router({
       const reservation = await serializableTransaction(async (tx) => {
         const existing = await tx.partyCheckout.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
         if (existing) {
-          if (existing.ticketTierName !== ticketTier.name || existing.amountCents !== ticketTier.priceCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match its original ticket tier.' });
+          if ((existing.ticketTierName ?? null) !== (ticketTier?.name ?? null) || (existing.tableId ?? null) !== (table?.id ?? null) || existing.amountCents !== amountCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match what it originally bought.' });
           if (existing.status === 'completed') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket is already confirmed.' });
           if (existing.status === 'expired') throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout expired. Start a new checkout.' });
           return existing;
@@ -1700,24 +1732,31 @@ export const partyTicketsRouter = router({
             { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: now } },
           ],
         };
-        const [activePartyReservations, activeTierReservations] = await Promise.all([
+        const [activePartyReservations, activeTierReservations, activeTableClaims] = await Promise.all([
           tx.partyCheckout.count({ where: activeReservationWhere }),
-          tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }),
+          ticketTier ? tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }) : 0,
+          // Seats already settled plus payments still in flight. Counting only
+          // the settled ones would sell the last table twice while the first
+          // guest was still on Stripe.
+          table ? tx.partyCheckout.count({ where: { ...activeReservationWhere, tableId: table.id } }) : 0,
         ]);
         if (activePartyReservations >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
-        if (activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
+        if (ticketTier && activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
+        if (table && activeTableClaims >= table.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'That table is taken.' });
 
+        const guestFields = { status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier?.name ?? null, tableId: table?.id ?? null };
         const partyGuest = guest
-          ? await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } })
-          : await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } });
+          ? await tx.partyGuest.update({ where: { id: guest.id }, data: guestFields })
+          : await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, ...guestFields } });
         return tx.partyCheckout.create({
           data: {
             partyId: party.id, partyGuestId: partyGuest.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey,
-            ticketTierName: ticketTier.name, amountCents: ticketTier.priceCents, currency: 'usd', status: 'creating',
+            ticketTierName: ticketTier?.name ?? null, tableId: table?.id ?? null,
+            amountCents, tableAmountCents, currency: 'usd', status: 'creating',
             reservationExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
           },
         });
-      }, 'Party ticket inventory changed. Please retry.');
+      }, 'Party ticket or table inventory changed. Please retry.');
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
       // The party's frozen rate, so a mid-sale rate change cannot alter what
@@ -1730,17 +1769,30 @@ export const partyTicketsRouter = router({
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
-        line_items: [{
-          price_data: {
-            currency: 'usd',
-            unit_amount: reservation.amountCents,
-            product_data: { name: `${party.title} · ${reservation.ticketTierName}`, description: party.tagline },
-          },
-          quantity: 1,
-        }],
+        // Itemised, so the guest sees the door and the table as the two
+        // separate things they are rather than one unexplained total.
+        line_items: [
+          ...(reservation.ticketTierName ? [{
+            price_data: {
+              currency: 'usd',
+              unit_amount: reservation.amountCents - reservation.tableAmountCents,
+              product_data: { name: `${party.title} · ${reservation.ticketTierName}`, description: party.tagline },
+            },
+            quantity: 1,
+          }] : []),
+          ...(table ? [{
+            price_data: {
+              currency: 'usd',
+              unit_amount: reservation.tableAmountCents,
+              product_data: { name: `${party.title} · ${table.name}`, description: 'Reserved table' },
+            },
+            quantity: 1,
+          }] : []),
+        ],
         metadata: {
           kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId,
-          ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey,
+          ticketTierName: reservation.ticketTierName ?? '', tableId: reservation.tableId ?? '',
+          idempotencyKey: input.idempotencyKey,
           platformFeeBps: String(ticketFeeBps), platformFeeCents: String(feeCents), hostNetCents: String(hostNetCents),
         },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -1822,7 +1874,7 @@ export const partyTablesRouter = router({
     .mutation(async ({ ctx, input }) => {
       const party = await db.party.findFirst({
         where: { id: input.partyId, hostUserId: ctx.user.userId },
-        select: { id: true, startsAt: true, endsAt: true, capacity: true, accessMode: true },
+        select: { id: true, startsAt: true, endsAt: true, capacity: true },
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
 
@@ -1861,6 +1913,26 @@ export const partyTablesRouter = router({
             code: 'CONFLICT',
             message: `${dropped[0].name} has ${dropped[0].committed} seat(s) already taken and cannot be removed.`,
           });
+        }
+
+        // A payment still in flight has taken no seat yet, so committed says
+        // nothing about it. Removing the table underneath it would leave a
+        // guest paying for something that no longer exists.
+        const removable = existing.filter((table) => !kept.has(table.id));
+        if (removable.length > 0) {
+          const now = new Date();
+          const paying = await tx.partyCheckout.findFirst({
+            where: {
+              tableId: { in: removable.map((table) => table.id) },
+              status: { in: ['creating', 'pending'] },
+              reservationExpiresAt: { gt: now },
+            },
+            select: { tableId: true },
+          });
+          if (paying) {
+            const name = removable.find((table) => table.id === paying.tableId)?.name ?? 'That table';
+            throw new TRPCError({ code: 'CONFLICT', message: `${name} has a payment in flight and cannot be removed yet.` });
+          }
         }
 
         for (const table of input.tables) {

@@ -1489,10 +1489,11 @@ function withTables(rows: any[], captured: any = {}) {
   party.findFirst = async () => tableParty;
   partyTable.findMany = async () => rows;
   partyTable.deleteMany = async (input: any) => { captured.deleted = input.where; return { count: 0 }; };
+  partyCheckout.findFirst = async () => captured.payingCheckout ?? null;
   partyTable.updateMany = async () => ({ count: rows.length });
   partyTable.update = async (input: any) => { (captured.updates ??= []).push(input); return { id: input.where.id }; };
   partyTable.create = async (input: any) => { (captured.creates ??= []).push(input.data); return { id: 'table-new' }; };
-  prisma.$transaction = async (callback: any) => callback({ partyTable });
+  prisma.$transaction = async (callback: any) => callback({ partyTable, partyCheckout });
   return captured;
 }
 
@@ -1617,5 +1618,155 @@ test('A Party the caller does not host has no tables to read or write', async ()
   await assert.rejects(
     () => caller().events.tables.set({ partyId: 'party-1', tables: [tableInputFixture] }),
     { code: 'NOT_FOUND' },
+  );
+});
+
+// ─── Paying for a table ──────────────────────────────────────────────────────
+
+const freeDoorParty = {
+  id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green',
+  capacity: 40, title: 'First Listen', tagline: 'One moment.', ticketTiers: [], ...linkAlive,
+};
+const paidDoorParty = {
+  ...freeDoorParty, accessMode: 'paid-ticket',
+  ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+};
+const frontTable = { id: 'table-1', partyId: 'party-1', name: 'Front Table', capacity: 4, committed: 0, priceCents: 9000, requiredMembershipTier: null };
+
+let buyerSeq = 0;
+
+// Checkout is rate-limited per user, and the shared test user's budget is
+// already spent by the ticket tests above, so each buyer arrives fresh.
+function stubCheckout(over: { table?: any } = {}) {
+  const captured: any = {};
+  buyerSeq += 1;
+  captured.buyer = () => createCaller({
+    user: { userId: `table-buyer-${buyerSeq}`, email: `buyer${buyerSeq}@bytspot.com` },
+    clientRateLimitKey: 'test-party-client',
+  });
+  (config as any).stripeSecretKey = 'test-only-key';
+  partyTable.findFirst = async () => over.table === undefined ? frontTable : over.table;
+  partyCheckout.findUnique = async () => null;
+  partyCheckout.findFirst = async () => null;
+  partyCheckout.updateMany = async () => ({ count: 0 });
+  partyCheckout.count = async (input: any) => { (captured.counts ??= []).push(input.where); return 0; };
+  partyCheckout.create = async (input: any) => { captured.created = input.data; return { ...input.data, id: 'checkout-1' }; };
+  partyCheckout.update = async () => ({});
+  partyGuest.findUnique = async () => null;
+  partyGuest.create = async (input: any) => { captured.guest = input.data; return { id: 'guest-1' }; };
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, partyTable });
+  return captured;
+}
+
+// The reservation is written before Stripe is reached, and Stripe is not
+// reachable from the test, so the assertion is on what was reserved.
+async function reserve(captured: any, input: any) {
+  await assert.rejects(() => captured.buyer().events.tickets.createCheckout(input), () => true);
+  return captured;
+}
+
+test('A free-entry Party can still sell a table, because the door and the table are separate charges', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout();
+
+  await reserve(captured, { partyId: 'party-1', tableId: 'table-1', idempotencyKey });
+
+  // No gate ticket was bought, and the whole charge is the table's.
+  assert.equal(captured.created.ticketTierName, null);
+  assert.equal(captured.created.tableId, 'table-1');
+  assert.equal(captured.created.amountCents, 9000);
+  assert.equal(captured.created.tableAmountCents, 9000);
+});
+
+test('A gate ticket and a table are charged together, and the table is recorded as its own share', async () => {
+  party.findFirst = async () => paidDoorParty;
+  const captured = stubCheckout();
+
+  await reserve(captured, { partyId: 'party-1', ticketTierName: 'First Drop', tableId: 'table-1', idempotencyKey });
+
+  // The gate's share is the remainder, so the two can never drift apart.
+  assert.equal(captured.created.amountCents, 11500);
+  assert.equal(captured.created.tableAmountCents, 9000);
+  assert.equal(captured.created.amountCents - captured.created.tableAmountCents, 2500);
+  assert.equal(captured.guest.tableId, 'table-1');
+});
+
+test('A checkout that buys neither a ticket nor a table is a charge for nothing', async () => {
+  party.findFirst = async () => paidDoorParty;
+  const captured = stubCheckout();
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', idempotencyKey } as any),
+    { code: 'BAD_REQUEST' },
+  );
+});
+
+test('A table is judged taken by payments in flight, not only by seats already settled', async () => {
+  // Counting only settled seats would sell the last table twice while the
+  // first guest was still on Stripe.
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ table: { ...frontTable, capacity: 1, committed: 0 } });
+  partyCheckout.count = async (input: any) => { (captured.counts ??= []).push(input.where); return input.where.tableId ? 1 : 0; };
+
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'table-1', idempotencyKey }),
+    (error: any) => {
+      assert.equal(error.code, 'CONFLICT');
+      assert.equal(error.message, 'That table is taken.');
+      return true;
+    },
+  );
+
+  // The claim counted is the live one: settled seats plus unexpired holds.
+  const tableCount = captured.counts.find((where: any) => where.tableId);
+  assert.equal(tableCount.OR[0].status, 'completed');
+  assert.deepEqual(tableCount.OR[1].status, { in: ['creating', 'pending'] });
+  assert.ok(tableCount.OR[1].reservationExpiresAt.gt instanceof Date);
+});
+
+test('A free table does not go through checkout at all', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ table: { ...frontTable, priceCents: 0 } });
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'table-1', idempotencyKey }),
+    { code: 'BAD_REQUEST' },
+  );
+});
+
+test('A table belonging to another Party is never chargeable here', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ table: null });
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'someone-elses-table', idempotencyKey }),
+    { code: 'NOT_FOUND' },
+  );
+});
+
+test('A table guards its own membership requirement, separately from the gate', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ table: { ...frontTable, requiredMembershipTier: 'black' } });
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'table-1', idempotencyKey }),
+    (error: any) => {
+      assert.equal(error.code, 'FORBIDDEN');
+      assert.match(error.message, /table requirement/);
+      return true;
+    },
+  );
+});
+
+test('A table with a payment in flight cannot be removed underneath the guest paying for it', async () => {
+  // A payment still in flight has taken no seat, so committed says nothing
+  // about it — the table would otherwise vanish mid-checkout.
+  const captured = withTables([{ id: 'table-1', name: 'Front Table', committed: 0 }]);
+  captured.payingCheckout = { tableId: 'table-1' };
+
+  await assert.rejects(
+    () => caller().events.tables.set({ partyId: 'party-1', tables: [] }),
+    (error: any) => {
+      assert.equal(error.code, 'CONFLICT');
+      assert.match(error.message, /Front Table has a payment in flight/);
+      return true;
+    },
   );
 });

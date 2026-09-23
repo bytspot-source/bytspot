@@ -101,7 +101,7 @@ test('signed paid Party event with complete identifiers reconciles without the k
 
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { received: true });
-  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
+  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop', tableId: null });
 });
 
 test('signed partial Party metadata is rejected before reconciliation', async () => {
@@ -141,7 +141,7 @@ test('Party webhook confirms only a matching paid reservation and grants the pas
 
   assert.equal(checkoutUpdate.data.status, 'completed');
   assert.equal(checkoutUpdate.data.stripeSessionId, 'cs_test_1');
-  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
+  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop', tableId: null });
 });
 
 test('Party webhook rejects a mismatched amount before changing Party access', async () => {
@@ -259,7 +259,7 @@ test('Party webhook still grants a payment that occurred before close when the w
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', paymentOccurredAt);
 
   assert.equal(checkoutUpdate.data.status, 'completed');
-  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
+  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop', tableId: null });
 });
 
 test('Party webhook refunds a checkout when the user is downgraded before payment completes', async () => {

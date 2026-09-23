@@ -20,7 +20,7 @@ function partyDistanceMiles(fromLat: number, fromLng: number, lat: number | null
   if (lat === null || lng === null) return null;
   return distanceMeters({ lat: fromLat, lng: fromLng }, { lat, lng }) / METERS_PER_MILE;
 }
-import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
+import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partySessionsRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 
@@ -84,6 +84,7 @@ export const eventsRouter = router({
   hostDestinations: hostDestinationsRouter,
   media: partyMediaRouter,
   recap: partyRecapRouter,
+  sessions: partySessionsRouter,
   publish: partyPublish,
   invite: partyInvite,
   pass: partyPassRouter,

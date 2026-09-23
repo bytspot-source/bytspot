@@ -37,6 +37,7 @@ const anonymousContext: Context = { user: null, clientRateLimitKey: 'test-party-
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
+const partySession = db.partySession as any;
 const partyGuest = db.partyGuest as any;
 const partyCheckout = db.partyCheckout as any;
 const venue = db.venue as any;
@@ -1465,4 +1466,156 @@ test('Abandoned drafts are listable, so the host can name the row that deletes',
   assert.equal(drafts[0].updatedAt, touched.toISOString());
   // The row states its own deadline, so the sweeper is never a surprise.
   assert.equal(drafts[0].expiresAt, new Date(touched.getTime() + ABANDONED_DRAFT_TTL_MS).toISOString());
+});
+
+// ─── Sittings ────────────────────────────────────────────────────────────────
+
+const sessionParty = {
+  id: 'party-1',
+  startsAt: new Date('2026-10-01T18:00:00Z'),
+  endsAt: new Date('2026-10-02T02:00:00Z'),
+  capacity: 80,
+  accessMode: 'paid-ticket',
+};
+const sittingInput = {
+  name: 'First Seating',
+  startsAt: '2026-10-01T19:00:00Z',
+  endsAt: '2026-10-01T21:00:00Z',
+  capacity: 40,
+  priceCents: 2500,
+};
+
+function withSessions(rows: any[], captured: any = {}) {
+  party.findFirst = async () => sessionParty;
+  partySession.findMany = async () => rows;
+  partySession.deleteMany = async (input: any) => { captured.deleted = input.where; return { count: 0 }; };
+  partySession.updateMany = async () => ({ count: rows.length });
+  partySession.update = async (input: any) => { (captured.updates ??= []).push(input); return { id: input.where.id }; };
+  partySession.create = async (input: any) => { (captured.creates ??= []).push(input.data); return { id: 'session-new' }; };
+  prisma.$transaction = async (callback: any) => callback({ partySession });
+  return captured;
+}
+
+test('A sitting the host omits is removed only while nobody holds it', async () => {
+  // Seats already taken are the one thing a host cannot edit away. The refusal
+  // names the sitting, so the host is not left guessing which one blocks them.
+  withSessions([{ id: 'session-1', name: 'First Seating', committed: 12 }]);
+
+  await assert.rejects(
+    () => caller().events.sessions.set({ partyId: 'party-1', sessions: [] }),
+    (error: any) => {
+      assert.equal(error.code, 'CONFLICT');
+      assert.match(error.message, /First Seating has 12 seat\(s\) already taken/);
+      return true;
+    },
+  );
+
+  // An untouched sitting drops without complaint.
+  const captured = withSessions([{ id: 'session-1', name: 'First Seating', committed: 0 }]);
+  assert.deepEqual(await caller().events.sessions.set({ partyId: 'party-1', sessions: [] }), { sessionIds: [] });
+  assert.equal(captured.deleted.committed, 0);
+});
+
+test('A sitting cannot be cut below the seats it has already sold', async () => {
+  withSessions([{ id: 'session-1', name: 'First Seating', committed: 30 }]);
+
+  await assert.rejects(
+    () => caller().events.sessions.set({
+      partyId: 'party-1',
+      sessions: [{ ...sittingInput, id: 'session-1', capacity: 20 }],
+    }),
+    (error: any) => {
+      assert.equal(error.code, 'CONFLICT');
+      assert.match(error.message, /already sold 30 seat\(s\), so it cannot be cut to 20/);
+      return true;
+    },
+  );
+
+  // Cutting to exactly what is sold is honest and allowed: it closes the door
+  // without unseating anyone.
+  withSessions([{ id: 'session-1', name: 'First Seating', committed: 30 }]);
+  const exact = await caller().events.sessions.set({
+    partyId: 'party-1',
+    sessions: [{ ...sittingInput, id: 'session-1', capacity: 30 }],
+  });
+  assert.deepEqual(exact, { sessionIds: ['session-1'] });
+});
+
+test("A stated id that is not this Party's sitting never reaches another Party's row", async () => {
+  withSessions([{ id: 'session-1', name: 'First Seating', committed: 0 }]);
+  await assert.rejects(
+    () => caller().events.sessions.set({
+      partyId: 'party-1',
+      sessions: [{ ...sittingInput, id: 'someone-elses-session' }],
+    }),
+    { code: 'NOT_FOUND' },
+  );
+});
+
+test('Positions are parked before being rewritten, so two sittings can swap', async () => {
+  // The (party_id, position) uniqueness would refuse a straight swap halfway
+  // through the update, so the existing rows move out of the way first.
+  let parked: any;
+  const captured: any = {};
+  withSessions([
+    { id: 'session-1', name: 'First Seating', committed: 0 },
+    { id: 'session-2', name: 'Second Seating', committed: 0 },
+  ], captured);
+  partySession.updateMany = async (input: any) => { parked = input.data; return { count: 2 } };
+
+  await caller().events.sessions.set({
+    partyId: 'party-1',
+    sessions: [
+      { ...sittingInput, id: 'session-2', name: 'Second Seating' },
+      { ...sittingInput, id: 'session-1', startsAt: '2026-10-01T21:30:00Z', endsAt: '2026-10-01T23:30:00Z' },
+    ],
+  });
+
+  assert.deepEqual(parked, { position: { increment: 1000 } });
+  // Rewritten from the submitted order, not from whatever they held before.
+  assert.deepEqual(captured.updates.map((u: any) => [u.where.id, u.data.position]), [['session-2', 0], ['session-1', 1]]);
+});
+
+test('Validation refuses the sitting before any row is touched', async () => {
+  const captured = withSessions([]);
+  await assert.rejects(
+    () => caller().events.sessions.set({
+      partyId: 'party-1',
+      sessions: [{ ...sittingInput, startsAt: '2026-10-01T17:00:00Z' }],
+    }),
+    (error: any) => {
+      assert.equal(error.code, 'BAD_REQUEST');
+      assert.match(error.message, /cannot start before the Party does/);
+      return true;
+    },
+  );
+  assert.equal(captured.creates, undefined);
+});
+
+test('Sittings are listed in the running order the host arranged', async () => {
+  party.findFirst = async () => ({ id: 'party-1' });
+  let order: any;
+  partySession.findMany = async (input: any) => {
+    order = input.orderBy;
+    return [{
+      id: 'session-1', name: 'First Seating',
+      startsAt: new Date('2026-10-01T19:00:00Z'), endsAt: new Date('2026-10-01T21:00:00Z'),
+      capacity: 40, committed: 40, priceCents: 2500, requiredMembershipTier: null,
+    }];
+  };
+
+  const { sessions } = await caller().events.sessions.list({ partyId: 'party-1' });
+  assert.deepEqual(order, [{ position: 'asc' }]);
+  assert.equal(sessions[0].remaining, 0);
+  // Full, not passed: this sitting has not happened yet, it has sold out.
+  assert.equal(sessions[0].state, 'full');
+});
+
+test('A Party the caller does not host has no sittings to read or write', async () => {
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.sessions.list({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(
+    () => caller().events.sessions.set({ partyId: 'party-1', sessions: [sittingInput] }),
+    { code: 'NOT_FOUND' },
+  );
 });

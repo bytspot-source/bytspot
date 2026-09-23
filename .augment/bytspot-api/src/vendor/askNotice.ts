@@ -1,5 +1,6 @@
 import { db } from '../lib/db';
 import { sendVendorAskEmail } from '../lib/email';
+import { deliverPushNotification } from '../services/notificationDelivery';
 import { skuTemplate } from './windows';
 
 /** The seller's contact address if it set one; otherwise every live owner and manager. */
@@ -12,6 +13,14 @@ export function askNoticeRecipients(
     .filter((seat) => seat.state === 'ACTIVE' && (seat.role === 'owner' || seat.role === 'manager'))
     .map((seat) => seat.email);
   return [...new Set(emails)];
+}
+
+/** Who among a seller's seats can answer an ask: its live owners and managers. */
+export function askNoticeSeatUserIds(seats: { role: string; state: string; userId: string }[]): string[] {
+  const ids = seats
+    .filter((seat) => seat.state === 'ACTIVE' && (seat.role === 'owner' || seat.role === 'manager'))
+    .map((seat) => seat.userId);
+  return [...new Set(ids)];
 }
 
 /** The slot in the place's own clock, which is the one the seller reads. */
@@ -41,7 +50,7 @@ export async function notifyAskSeller(
         seller: {
           select: {
             contactEmail: true,
-            seats: { select: { role: true, state: true, user: { select: { email: true } } } },
+            seats: { select: { role: true, state: true, userId: true, user: { select: { email: true } } } },
           },
         },
       },
@@ -51,13 +60,22 @@ export async function notifyAskSeller(
       window.seller.contactEmail,
       window.seller.seats.map((seat) => ({ role: seat.role, state: seat.state, email: seat.user.email })),
     );
-    await sendVendorAskEmail(to, {
-      title: skuTemplate(window.skuTemplateId)?.title ?? 'Your listing',
-      placeLabel: window.location.label,
-      partySize: ask.partySize,
-      when: formatAskWhen(ask.startsAt, window.location.timezone),
-      note: ask.note,
-    });
+    const title = skuTemplate(window.skuTemplateId)?.title ?? 'Your listing';
+    const when = formatAskWhen(ask.startsAt, window.location.timezone);
+    const guests = `${ask.partySize} ${ask.partySize === 1 ? 'guest' : 'guests'}`;
+    await Promise.all([
+      sendVendorAskEmail(to, { title, placeLabel: window.location.label, partySize: ask.partySize, when, note: ask.note }),
+      // A seat is a Bytspot account, so an owner with the app installed hears
+      // about it on their phone as well as in their inbox.
+      deliverPushNotification({
+        userIds: askNoticeSeatUserIds(window.seller.seats),
+        category: 'reservations',
+        title: `New request at ${window.location.label}`,
+        body: `${guests}, ${when} · ${title}. Answer it in your business console.`,
+        url: 'https://bytspot.app/discover',
+        type: 'vendor-ask',
+      }),
+    ]);
   } catch (err: any) {
     console.error('[vendor] ask notice failed:', err?.message);
   }

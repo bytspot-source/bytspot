@@ -171,3 +171,48 @@ export async function sendVendorSignInCode(to: string, code: string, ttlMins: nu
     `,
   });
 }
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
+export interface VendorAskNotice {
+  title: string;
+  placeLabel: string;
+  partySize: number;
+  when: string;
+  note?: string | null;
+}
+
+/**
+ * A guest asked one of a seller's windows. A notification, so a failure is
+ * logged, not thrown: the ask is already in the seller's demand feed.
+ * The note is guest-typed and is escaped before it reaches HTML.
+ */
+export async function sendVendorAskEmail(to: string[], ask: VendorAskNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend || to.length === 0) return;
+
+  const guests = `${ask.partySize} ${ask.partySize === 1 ? 'guest' : 'guests'}`;
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `New request: ${guests}, ${ask.when}`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">A guest is asking</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            ${escapeHtml(ask.title)} at ${escapeHtml(ask.placeLabel)}: ${guests}, ${escapeHtml(ask.when)}.
+          </p>
+          ${ask.note ? `<p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 0 0 8px;">“${escapeHtml(ask.note)}”</p>` : ''}
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 0;">
+            Open your Bytspot business console to offer the time or pass. The request expires if nobody answers.
+          </p>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorAskEmail failed:', err?.message);
+  }
+}

@@ -8,11 +8,13 @@ import { requireVendorSeat, type VendorContext } from '../middleware/vendorAuth'
 import { verifyVendorAccessToken } from '../vendor/accessToken';
 import type { SeatRole, SellerState } from '../vendor/contract';
 import {
+  MEDIA_MAX_VIDEO_BYTES,
   MEDIA_REFUSALS,
   mediaDto,
   mediaHttpStatus,
   parseVendorMediaDataUri,
   planUpload,
+  planVideoUpload,
   seatCanSeeBookable,
   seatCanSeeLocation,
   vendorCanEditMedia,
@@ -22,8 +24,11 @@ import {
 import {
   bytesFromRow,
   deleteVendorObject,
+  headVendorObject,
   nextMediaId,
   objectStoreConfigured,
+  presignVendorGet,
+  presignVendorPut,
   readVendorObject,
   vendorObjectKey,
   writeVendorObject,
@@ -35,6 +40,11 @@ const uploadBody = z.object({
   kind: z.string().trim().min(1).max(16),
   position: z.number().int().min(0).max(32).optional(),
   dataUri: z.string().min(32).max(4_000_000),
+});
+
+const videoIntentBody = z.object({
+  mimeType: z.string().trim().min(1).max(64),
+  byteSize: z.number().int().positive(),
 });
 
 function notFound(res: Response) {
@@ -79,7 +89,7 @@ async function listMedia(parent: MediaParent, id: string) {
     orderBy: [{ kind: 'asc' }, { position: 'asc' }],
     select: { id: true, kind: true, position: true, mimeType: true, byteSize: true },
   });
-  return { media: rows.map(mediaDto) };
+  return { media: rows.map(mediaDto), videoAvailable: objectStoreConfigured() };
 }
 
 async function compactKind(parent: MediaParent, parentId: string, kind: MediaKind): Promise<void> {
@@ -132,6 +142,7 @@ async function saveUpload(
     kind: parsed.data.kind,
     position: parsed.data.position,
     existing,
+    storeConfigured: objectStoreConfigured(),
   });
   if (!plan.ok) {
     refuse(res, plan.reason);
@@ -144,13 +155,9 @@ async function saveUpload(
     return;
   }
 
-  const slotWhere =
-    parent === 'location'
-      ? { locationId_kind_position: { locationId: parentId, kind: plan.kind, position: plan.position } }
-      : { bookableId_kind_position: { bookableId: parentId, kind: plan.kind, position: plan.position } };
   const previous = plan.replace
-    ? await db.vendorMedia.findUnique({
-        where: slotWhere,
+    ? await db.vendorMedia.findFirst({
+        where: { ...listWhere(parent, parentId), kind: plan.kind, position: plan.position },
         select: { id: true, storageKey: true },
       })
     : null;
@@ -185,11 +192,10 @@ async function saveUpload(
   };
 
   try {
-    const row = plan.replace
-      ? await db.vendorMedia.upsert({
-          where: slotWhere,
-          create: data,
-          update: {
+    const row = previous
+      ? await db.vendorMedia.update({
+          where: { id: previous.id },
+          data: {
             mimeType: data.mimeType,
             bytes: data.bytes,
             byteSize: data.byteSize,
@@ -202,9 +208,192 @@ async function saveUpload(
       await deleteVendorObject(previous.storageKey);
     }
 
-    res.status(plan.replace ? 200 : 201).json({ media: mediaDto(row) });
+    res.status(previous ? 200 : 201).json({ media: mediaDto(row) });
   } catch (err) {
     if (storageKey && storageKey !== previous?.storageKey) await deleteVendorObject(storageKey);
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'P2002') {
+      refuse(res, 'at-capacity');
+      return;
+    }
+    throw err;
+  }
+}
+
+async function startVideoUpload(req: Request, res: Response, vendor: VendorContext, parent: MediaParent, parentId: string): Promise<void> {
+  if (!canWrite(vendor)) {
+    refuse(res, 'forbidden');
+    return;
+  }
+  if (!canSeeParent(vendor, parent, parentId)) {
+    notFound(res);
+    return;
+  }
+  if (!objectStoreConfigured()) {
+    refuse(res, 'video-unavailable');
+    return;
+  }
+
+  const parsed = videoIntentBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid media', blockers: ['Attach an MP4, WebM, or QuickTime clip'] });
+    return;
+  }
+
+  const size = planVideoUpload(parsed.data);
+  if (!size.ok) {
+    refuse(res, size.reason);
+    return;
+  }
+
+  const existing = await db.vendorMedia.findMany({
+    where: listWhere(parent, parentId),
+    select: { kind: true, position: true },
+  });
+  const plan = planUpload({
+    parent,
+    kind: 'video',
+    existing,
+    storeConfigured: true,
+  });
+  if (!plan.ok) {
+    refuse(res, plan.reason);
+    return;
+  }
+
+  const mediaId = nextMediaId();
+  const storageKey = vendorObjectKey({
+    sellerId: vendor.seller.id,
+    parent,
+    parentId,
+    kind: 'video',
+    mediaId,
+  });
+  const upload = presignVendorPut({ key: storageKey, mimeType: parsed.data.mimeType });
+
+  res.status(201).json({
+    upload: {
+      mediaId,
+      storageKey,
+      mimeType: parsed.data.mimeType,
+      byteSize: parsed.data.byteSize,
+      url: upload.url,
+      method: upload.method,
+      headers: upload.headers,
+      expiresAt: upload.expiresAt,
+    },
+  });
+}
+
+async function completeVideoUpload(
+  req: Request,
+  res: Response,
+  vendor: VendorContext,
+  parent: MediaParent,
+  parentId: string,
+  mediaId: string,
+): Promise<void> {
+  if (!canWrite(vendor)) {
+    refuse(res, 'forbidden');
+    return;
+  }
+  if (!canSeeParent(vendor, parent, parentId)) {
+    notFound(res);
+    return;
+  }
+  if (!objectStoreConfigured()) {
+    refuse(res, 'video-unavailable');
+    return;
+  }
+
+  const parsed = videoIntentBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid media', blockers: ['Attach an MP4, WebM, or QuickTime clip'] });
+    return;
+  }
+  const size = planVideoUpload(parsed.data);
+  if (!size.ok) {
+    refuse(res, size.reason);
+    return;
+  }
+
+  const storageKey = vendorObjectKey({
+    sellerId: vendor.seller.id,
+    parent,
+    parentId,
+    kind: 'video',
+    mediaId,
+  });
+  const object = await headVendorObject(storageKey);
+  if (!object) {
+    res.status(409).json({ error: 'Could not save', blockers: ['That clip never arrived. Try again.'] });
+    return;
+  }
+  if (object.byteSize <= 0 || object.byteSize > parsed.data.byteSize || object.byteSize > MEDIA_MAX_VIDEO_BYTES) {
+    await deleteVendorObject(storageKey);
+    refuse(res, 'too-large');
+    return;
+  }
+  const storedMime = object.mimeType?.split(';')[0]?.trim().toLowerCase();
+  if (storedMime && storedMime !== parsed.data.mimeType) {
+    await deleteVendorObject(storageKey);
+    refuse(res, 'bad-payload');
+    return;
+  }
+
+  const existing = await db.vendorMedia.findMany({
+    where: listWhere(parent, parentId),
+    select: { kind: true, position: true },
+  });
+  const plan = planUpload({
+    parent,
+    kind: 'video',
+    existing,
+    storeConfigured: true,
+  });
+  if (!plan.ok) {
+    await deleteVendorObject(storageKey);
+    refuse(res, plan.reason);
+    return;
+  }
+
+  const previous = await db.vendorMedia.findFirst({
+    where: { ...listWhere(parent, parentId), kind: 'video', position: 0 },
+    select: { id: true, storageKey: true },
+  });
+  const rowId = previous?.id ?? mediaId;
+
+  const data = {
+    id: rowId,
+    sellerId: vendor.seller.id,
+    locationId: parent === 'location' ? parentId : null,
+    bookableId: parent === 'bookable' ? parentId : null,
+    kind: 'video' as const,
+    position: 0,
+    mimeType: parsed.data.mimeType,
+    bytes: null,
+    byteSize: object.byteSize,
+    storageKey,
+  };
+
+  try {
+    const row = previous
+      ? await db.vendorMedia.update({
+          where: { id: previous.id },
+          data: {
+            mimeType: data.mimeType,
+            bytes: null,
+            byteSize: data.byteSize,
+            storageKey,
+          },
+        })
+      : await db.vendorMedia.create({ data });
+
+    if (previous?.storageKey && previous.storageKey !== storageKey) {
+      await deleteVendorObject(previous.storageKey);
+    }
+    res.status(previous ? 200 : 201).json({ media: mediaDto(row) });
+  } catch (err) {
+    if (storageKey !== previous?.storageKey) await deleteVendorObject(storageKey);
     if (typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'P2002') {
       refuse(res, 'at-capacity');
       return;
@@ -237,6 +426,34 @@ router.post('/vendor/locations/:id/media', requireVendorSeat, async (req, res) =
     await saveUpload(req, res, req.vendor!, 'location', location.id);
   } catch (err) {
     captureError(err, { route: 'vendor/locations/:id/media:post' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+router.post('/vendor/locations/:id/media/uploads', requireVendorSeat, async (req, res) => {
+  try {
+    const location = await loadLocation(req.vendor!.seller.id, String(req.params.id));
+    if (!location) {
+      notFound(res);
+      return;
+    }
+    await startVideoUpload(req, res, req.vendor!, 'location', location.id);
+  } catch (err) {
+    captureError(err, { route: 'vendor/locations/:id/media/uploads:post' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+router.post('/vendor/locations/:id/media/uploads/:mediaId', requireVendorSeat, async (req, res) => {
+  try {
+    const location = await loadLocation(req.vendor!.seller.id, String(req.params.id));
+    if (!location) {
+      notFound(res);
+      return;
+    }
+    await completeVideoUpload(req, res, req.vendor!, 'location', location.id, String(req.params.mediaId));
+  } catch (err) {
+    captureError(err, { route: 'vendor/locations/:id/media/uploads:complete' });
     res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -371,21 +588,31 @@ router.get('/media/vendor/:mediaId', async (req, res) => {
     });
     if (!media) return notFound(res);
 
+    const published = parentIsPublic(media);
+    if (!published) {
+      const userId = requestVendorUserId(req.headers.authorization);
+      if (!userId) return notFound(res);
+      const seat = await db.vendorSeat.findFirst({
+        where: { sellerId: media.sellerId, userId, state: 'ACTIVE' },
+        select: { id: true },
+      });
+      if (!seat) return notFound(res);
+    }
+
+    if (media.storageKey && objectStoreConfigured()) {
+      const signed = presignVendorGet({ key: media.storageKey });
+      res.setHeader('Cache-Control', published ? 'public, max-age=60' : 'private, no-store');
+      return res.redirect(302, signed.url);
+    }
+
     const bytes = await bytesFor(media);
     if (!bytes) return notFound(res);
-
-    const published = parentIsPublic(media);
-    if (published) return sendMedia(res, { mimeType: media.mimeType, bytes }, 'public, max-age=86400', true);
-
-    const userId = requestVendorUserId(req.headers.authorization);
-    if (!userId) return notFound(res);
-
-    const seat = await db.vendorSeat.findFirst({
-      where: { sellerId: media.sellerId, userId, state: 'ACTIVE' },
-      select: { id: true },
-    });
-    if (!seat) return notFound(res);
-    return sendMedia(res, { mimeType: media.mimeType, bytes }, 'private, no-store', false);
+    return sendMedia(
+      res,
+      { mimeType: media.mimeType, bytes },
+      published ? 'public, max-age=86400' : 'private, no-store',
+      published,
+    );
   } catch (err) {
     captureError(err, { route: 'media/vendor/:mediaId' });
     return notFound(res);

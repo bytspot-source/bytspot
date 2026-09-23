@@ -2,7 +2,9 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
-import { DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
+import { categoryForDomain, DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
+import { ASK_INTENT, supplyFor } from '../vendor/demandFeed';
+import { sellableSlots } from '../vendor/availability';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
 import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
@@ -64,7 +66,13 @@ const publishInput = z.object({
 async function raiseDemand(
   userId: string,
   envelope: DemandEnvelope,
-  extras: { planId?: string | null; radiusMiles?: number; budgetCents?: number; note?: string | null },
+  extras: {
+    planId?: string | null;
+    radiusMiles?: number;
+    budgetCents?: number;
+    note?: string | null;
+    targetWindowId?: string;
+  },
   now: Date,
 ) {
   const live = await db.demand.count({
@@ -96,6 +104,7 @@ async function raiseDemand(
       radiusMiles: extras.radiusMiles ?? DEMAND_DEFAULTS.radiusMiles,
       budgetCents: extras.budgetCents ?? null,
       note: extras.note || null,
+      targetWindowId: extras.targetWindowId ?? null,
       expiresAt,
     },
   });
@@ -110,6 +119,10 @@ async function raiseDemand(
     raisedAt: demand.raisedAt.toISOString(),
   };
 }
+
+/** How long past the chosen slot a seller may still offer, before the contract's flexibility. */
+const ASK_SPAN_MINS = 15;
+
 
 export const demandRouter = router({
   /**
@@ -162,6 +175,79 @@ export const demandRouter = router({
           longitude: input.longitude,
         },
         { planId: input.planId, radiusMiles: input.radiusMiles, budgetCents: input.budgetCents, note: input.note },
+        now,
+      );
+    }),
+
+  /**
+   * Ask one seller, from their Discover card.
+   *
+   * The same demand as publish, aimed at one window: only its seller sees it,
+   * and only that window can answer it. The time must be a slot the window can
+   * actually sell to this party now, or the ask would sit unanswerable.
+   */
+  ask: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 20, label: 'demand-ask' }))
+    .input(
+      z.object({
+        windowId: z.string().trim().min(1).max(64),
+        partySize: z.number().int().min(1).max(DEMAND_DEFAULTS.maxPartySize),
+        startsAt: z.coerce.date(),
+        note: z.string().trim().max(280).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+      const window = await db.vendorAvailabilityWindow.findFirst({
+        where: {
+          id: input.windowId,
+          active: true,
+          intent: ASK_INTENT,
+          location: { state: 'ACTIVE' },
+          seller: { state: 'ACTIVE' },
+        },
+        select: { id: true, sellerId: true, domain: true, maxGuests: true, location: { select: { lat: true, lng: true } } },
+      });
+      if (!window) throw new TRPCError({ code: 'NOT_FOUND', message: 'This is no longer taking requests.' });
+
+      if (input.partySize > window.maxGuests) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: `This takes up to ${window.maxGuests} guests.` });
+      }
+
+      const category = categoryForDomain(window.domain);
+      if (!category) throw new TRPCError({ code: 'NOT_FOUND', message: 'This is no longer taking requests.' });
+
+      const { supply } = await supplyFor(window.sellerId, now);
+      const own = supply.find((item) => item.windowId === window.id);
+      const slot = sellableSlots(own?.slots ?? [], window.domain, now).find(
+        (candidate) => candidate.startsAt.getTime() === input.startsAt.getTime(),
+      );
+      if (!slot || slot.startsAt <= now || slot.remaining < input.partySize) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'That time just went. Pick another.' });
+      }
+
+      const already = await db.demand.findFirst({
+        where: {
+          raisedByUserId: ctx.user.userId,
+          targetWindowId: window.id,
+          state: { in: LIVE_STATES },
+          expiresAt: { gt: now },
+        },
+        select: { id: true },
+      });
+      if (already) throw new TRPCError({ code: 'CONFLICT', message: 'You have already asked here.' });
+
+      return raiseDemand(
+        ctx.user.userId,
+        {
+          category,
+          partySize: input.partySize,
+          earliest: slot.startsAt,
+          latest: new Date(slot.startsAt.getTime() + ASK_SPAN_MINS * 60_000),
+          latitude: window.location.lat,
+          longitude: window.location.lng,
+        },
+        { note: input.note, targetWindowId: window.id },
         now,
       );
     }),
@@ -304,6 +390,7 @@ export const demandRouter = router({
       budgetCents: row.budgetCents ?? undefined,
       note: row.note ?? undefined,
       planId: row.planId ?? undefined,
+      targetWindowId: row.targetWindowId ?? undefined,
       raisedAt: row.raisedAt.toISOString(),
       expiresAt: row.expiresAt.toISOString(),
       offers: row.offers.map((offer) => ({

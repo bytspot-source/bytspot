@@ -5,6 +5,7 @@ import {
   DEMAND_DEFAULTS,
   anyMatch,
   canRunDemandOperation,
+  categoryForDomain,
   demandCategoryIds,
   domainsForCategory,
   evaluateDemand,
@@ -175,4 +176,15 @@ test('a declined request returns to open rather than disappearing', () => {
   assert.equal(stateAfterOperation('DECLINE'), 'OPEN');
   assert.equal(stateAfterOperation('WITHDRAW_OFFER'), 'OPEN');
   assert.equal(stateAfterOperation('OFFER'), 'OFFERED');
+});
+
+test('an ask about a window is raised under a category that matches its own domain', () => {
+  // Every domain a window can have must be askable, or its card would show an
+  // Ask that the API refuses.
+  for (const domain of ['dining', 'nightlife', 'wellness', 'automotive', 'stay', 'stall', 'green', 'coffee', 'shopping', 'events', 'fitness']) {
+    const category = categoryForDomain(domain);
+    assert.ok(category, `${domain} has no category`);
+    assert.ok(domainsForCategory(category!).includes(domain));
+  }
+  assert.equal(categoryForDomain('spaceport'), undefined);
 });

@@ -37,12 +37,16 @@ export interface InventoryCard {
   maxGuests: number;
   durationMins: number;
   intent: string;
-  place: { label: string; address: string | null; lat: number; lng: number };
+  place: { label: string; address: string | null; lat: number; lng: number; phone: string | null; website: string | null };
   distanceMiles: number;
   coverUrl: string | null;
   galleryUrls: string[];
   nextSlot: { startsAt: string; remaining: number };
+  /** The times a guest can ask for, soonest first. */
+  upcomingSlots: { startsAt: string; remaining: number }[];
 }
+
+const UPCOMING_SLOTS = 6;
 
 interface MediaRow {
   id: string;
@@ -119,7 +123,8 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
       commitments: byWindow.get(window.id),
       now,
     });
-    const next = sellableSlots(slots, window.domain, now)[0];
+    const open = sellableSlots(slots, window.domain, now);
+    const next = open[0];
     // A published window with nothing to sell is not a card: it would promise a door that is shut.
     if (!next) continue;
 
@@ -141,10 +146,15 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
         address: window.location.address,
         lat: window.location.lat,
         lng: window.location.lng,
+        phone: window.location.phone,
+        website: window.location.website,
       },
       distanceMiles: Math.round(distance * 10) / 10,
       ...pickImagery(window.media, window.location.media),
       nextSlot: { startsAt: next.startsAt.toISOString(), remaining: next.remaining },
+      upcomingSlots: open
+        .slice(0, UPCOMING_SLOTS)
+        .map((slot) => ({ startsAt: slot.startsAt.toISOString(), remaining: slot.remaining })),
     });
   }
 

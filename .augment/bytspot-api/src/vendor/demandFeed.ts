@@ -182,6 +182,7 @@ export async function supplyFor(sellerId: string, now: Date): Promise<SupplySnap
  * before the rule that would have accepted it ran.
  */
 async function demandFor(
+  sellerId: string,
   locations: { lat: number; lng: number; radiusMiles: number | null; state: string }[],
   now: Date,
 ): Promise<EvaluableDemand[]> {
@@ -208,10 +209,16 @@ async function demandFor(
       // on what the feed shows it.
       state: { in: ['OPEN', 'MATCHED', 'OFFERED'] },
       expiresAt: { gt: now },
-      OR: reach.map((box) => ({
-        latitude: { gte: box.minLat, lte: box.maxLat },
-        longitude: { gte: box.minLng, lte: box.maxLng },
-      })),
+      AND: [
+        {
+          OR: reach.map((box) => ({
+            latitude: { gte: box.minLat, lte: box.maxLat },
+            longitude: { gte: box.minLng, lte: box.maxLng },
+          })),
+        },
+        // An ask from one card is that seller's alone; everything else is broadcast.
+        { OR: [{ targetWindowId: null }, { targetWindow: { sellerId } }] },
+      ],
     },
     orderBy: { raisedAt: 'desc' },
     take: 200,
@@ -257,9 +264,9 @@ function demandDto(demand: EvaluableDemand, raisedAt: Date, note: string | null)
  * declined: every matching seller keeps seeing it, and the log remembers who
  * passed.
  */
-export async function buildDemandSnapshot(sellerId: string, locations: Parameters<typeof demandFor>[0], now: Date) {
+export async function buildDemandSnapshot(sellerId: string, locations: Parameters<typeof demandFor>[1], now: Date) {
   const { supply, detail } = await supplyFor(sellerId, now);
-  const demands = await demandFor(locations, now);
+  const demands = await demandFor(sellerId, locations, now);
 
   const matchedIds: string[] = [];
   for (const demand of demands) {
@@ -321,7 +328,7 @@ export interface RespondingSeat {
   sellerId: string;
   seatId: string;
   capabilities: string[];
-  locations: Parameters<typeof demandFor>[0];
+  locations: Parameters<typeof demandFor>[1];
 }
 
 /**
@@ -340,6 +347,12 @@ export async function respondToDemand(
   // Indistinguishable from a demand that never existed, so a seller cannot
   // probe ids to learn what other people are asking for.
   if (!demand || demand.expiresAt <= now) throw new NotFound('request');
+  // An ask about one window is answered from that window, and is invisible to
+  // every other seller, so it reads as missing to them too.
+  if (demand.targetWindowId && demand.targetWindowId !== input.bookableId) {
+    const target = await db.vendorAvailabilityWindow.findUnique({ where: { id: demand.targetWindowId }, select: { sellerId: true } });
+    throw target?.sellerId === seat.sellerId ? new NotFound('offering') : new NotFound('request');
+  }
 
   // The window must be this seller's. Answering from someone else's capacity
   // is the one mistake this endpoint must never make.
@@ -423,6 +436,15 @@ export async function respondToDemand(
         now,
       );
       if (!usable.length) throw new NoCapacity();
+      // An ask names its time; offer that one, or the nearest still open.
+      const chosen = demand.targetWindowId
+        ? usable.reduce((best, slot) =>
+            Math.abs(slot.startsAt.getTime() - demand.earliest.getTime()) <
+            Math.abs(best.startsAt.getTime() - demand.earliest.getTime())
+              ? slot
+              : best,
+          )
+        : usable[0];
 
       const created = await tx.offer.create({
         data: {
@@ -431,7 +453,7 @@ export async function respondToDemand(
           locationId: window.locationId,
           windowId: window.id,
           skuTemplateId: window.skuTemplateId,
-          startsAt: usable[0].startsAt,
+          startsAt: chosen.startsAt,
           durationMins: window.slotMinutes,
           priceCents: window.priceCents,
           capacity: window.maxGuests,

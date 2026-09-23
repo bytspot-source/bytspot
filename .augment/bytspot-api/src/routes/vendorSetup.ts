@@ -47,6 +47,8 @@ function locationDto(location: VendorLocation, coverUrl?: string) {
     lng: location.lng,
     radiusMiles: location.radiusMiles ?? undefined,
     timezone: location.timezone ?? undefined,
+    phone: location.phone ?? undefined,
+    website: location.website ?? undefined,
     coverUrl,
   };
 }
@@ -137,7 +139,34 @@ const locationWrite = z.object({
   lng: z.coerce.number(),
   radiusMiles: z.coerce.number().optional(),
   timezone: z.string().trim().max(64).optional(),
+  phone: z.string().trim().max(40).optional(),
+  website: z.string().trim().max(200).optional(),
 });
+
+/** "+" and digits, or undefined when it cannot be a dialable number. */
+function normalizePhone(raw: string | undefined): string | undefined {
+  if (!raw?.trim()) return undefined;
+  const digits = raw.replace(/[^\d+]/g, '');
+  const plus = digits.startsWith('+');
+  const bare = digits.replace(/\+/g, '');
+  if (bare.length < 7 || bare.length > 15) return undefined;
+  return plus ? `+${bare}` : bare;
+}
+
+/** An absolute http(s) URL with a real host, or undefined. A bare domain gets https. */
+function normalizeWebsite(raw: string | undefined): string | undefined {
+  if (!raw?.trim()) return undefined;
+  const value = /^[a-z][a-z0-9+.-]*:/i.test(raw.trim()) ? raw.trim() : `https://${raw.trim()}`;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+    if (!url.hostname.includes('.') || url.username || url.password) return undefined;
+    const href = url.toString();
+    return href.length <= 200 ? href : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Everything wrong with a place, as the vendor would read it.
@@ -161,6 +190,13 @@ function locationBlockers(input: z.infer<typeof locationWrite>): string[] {
   } else if (input.lat === 0 && input.lng === 0) {
     // A failed geocode that nobody checked looks exactly like this.
     blockers.push('Pick an address so we can place the pin');
+  }
+
+  if (input.phone?.trim() && !normalizePhone(input.phone)) {
+    blockers.push('That phone number does not look right');
+  }
+  if (input.website?.trim() && !normalizeWebsite(input.website)) {
+    blockers.push('That website does not look right');
   }
 
   if (kind.requiresRadius) {
@@ -200,6 +236,8 @@ router.post('/vendor/locations', requireVendorSeat, requireCapability('SELL'), a
       // The pin decides the zone when the console did not send a real one: a
       // place without a zone yields no slots and cannot be published.
       timezone: knownTimezone(parsed.data.timezone) ?? (await timezoneAt(parsed.data.lat, parsed.data.lng)) ?? null,
+      phone: normalizePhone(parsed.data.phone) ?? null,
+      website: normalizeWebsite(parsed.data.website) ?? null,
     };
 
     if (parsed.data.id) {
@@ -369,4 +407,4 @@ router.get('/vendor/payout', requireVendorSeat, async (req, res) => {
 });
 
 export default router;
-export { locationBlockers, locationCanPublish };
+export { locationBlockers, locationCanPublish, normalizePhone, normalizeWebsite };

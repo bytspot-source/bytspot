@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type Stripe from 'stripe';
-import { locationBlockers } from './vendorSetup';
+import { locationBlockers, normalizePhone, normalizeWebsite } from './vendorSetup';
 import { LOCATION_DEFAULTS, locationOperation } from '../vendor/contract';
 import { statusFrom, storedPayout } from '../vendor/payout';
 
@@ -101,4 +101,26 @@ test('an unrecognised stored status reads as pending, never as active', () => {
     payoutDetail: null,
   } as never);
   assert.equal(payout?.status, 'pending');
+});
+
+test('a phone is kept as "+" and digits, and refused when it cannot be dialled', () => {
+  assert.equal(normalizePhone('(404) 555-0123'), '4045550123');
+  assert.equal(normalizePhone('+1 404-555-0123'), '+14045550123');
+  assert.equal(normalizePhone('555'), undefined);
+  assert.equal(normalizePhone(''), undefined);
+  assert.deepEqual(locationBlockers(place({ phone: 'call us' })), ['That phone number does not look right']);
+  assert.deepEqual(locationBlockers(place({ phone: '404 555 0123' })), []);
+});
+
+test('a website is an absolute http(s) URL; a bare domain gets https', () => {
+  assert.equal(normalizeWebsite('peachtable.com'), 'https://peachtable.com/');
+  assert.equal(normalizeWebsite('http://peachtable.com/menu'), 'http://peachtable.com/menu');
+  // Only a web page opens from the Website chip.
+  assert.equal(normalizeWebsite('javascript:alert(1)'), undefined);
+  assert.equal(normalizeWebsite('ftp://peachtable.com'), undefined);
+  assert.equal(normalizeWebsite('localhost'), undefined);
+  assert.equal(normalizeWebsite('https://user:pass@peachtable.com'), undefined);
+  assert.deepEqual(locationBlockers(place({ website: 'not a site' })), ['That website does not look right']);
+  // Both are optional.
+  assert.deepEqual(locationBlockers(place({ phone: '', website: '' })), []);
 });

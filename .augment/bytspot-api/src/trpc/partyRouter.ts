@@ -10,7 +10,7 @@ import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
-import { remainingSeats, sessionState, validateSessions } from '../services/partySessions';
+import { remainingSeats, tableState, validateTables } from '../services/partyTables';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -1758,8 +1758,8 @@ export const partyTicketsRouter = router({
       return { url: session.url };
     }),
 });
-const sessionInput = z.object({
-  // Present means "this is the sitting I already have"; absent means a new
+const tableInput = z.object({
+  // Present means "this is the table I already have"; absent means a new
   // one. Matching on name instead would make a rename look like a deletion
   // and unseat everyone holding it.
   id: z.string().min(1).max(128).optional(),
@@ -1771,9 +1771,9 @@ const sessionInput = z.object({
   requiredMembershipTier: z.enum(tiers).nullish(),
 });
 
-export const partySessionsRouter = router({
+export const partyTablesRouter = router({
   /**
-   * The host's own sittings, in the running order they arranged.
+   * The host's own tables, in the order they arranged them.
    */
   list: protectedProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
@@ -1784,41 +1784,40 @@ export const partySessionsRouter = router({
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
 
-      const sessions = await db.partySession.findMany({
+      const tables = await db.partyTable.findMany({
         where: { partyId: input.partyId },
         orderBy: [{ position: 'asc' }],
       });
       return {
-        sessions: sessions.map((session) => ({
-          id: session.id,
-          name: session.name,
-          startsAt: session.startsAt.toISOString(),
-          endsAt: session.endsAt.toISOString(),
-          capacity: session.capacity,
-          committed: session.committed,
-          remaining: remainingSeats(session),
-          state: sessionState(session),
-          priceCents: session.priceCents,
-          requiredMembershipTier: session.requiredMembershipTier,
+        tables: tables.map((table) => ({
+          id: table.id,
+          name: table.name,
+          startsAt: table.startsAt.toISOString(),
+          endsAt: table.endsAt.toISOString(),
+          capacity: table.capacity,
+          committed: table.committed,
+          remaining: remainingSeats(table),
+          state: tableState(table),
+          priceCents: table.priceCents,
+          requiredMembershipTier: table.requiredMembershipTier,
         })),
       };
     }),
 
   /**
-   * Replace the whole running order in one write, which is how Host Studio
-   * edits it.
+   * Replace the whole floor in one write, which is how Host Studio edits it.
    *
-   * A sitting the host omits is removed — but only while nobody holds it.
+   * A table the host omits is removed — but only while nobody holds it.
    * Seats already taken are the one thing a host cannot edit away: dropping
-   * such a sitting, or shrinking one below what it has already sold, is
-   * refused by name so the host is told which sitting is holding them up
+   * such a table, or shrinking one below what it has already sold, is
+   * refused by name so the host is told which table is holding them up
    * rather than silently unseating a guest who has paid.
    */
   set: protectedProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-sessions-set' }))
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-tables-set' }))
     .input(z.object({
       partyId: z.string().min(1).max(128),
-      sessions: z.array(sessionInput).max(20),
+      tables: z.array(tableInput).max(20),
     }))
     .mutation(async ({ ctx, input }) => {
       const party = await db.party.findFirst({
@@ -1827,36 +1826,36 @@ export const partySessionsRouter = router({
       });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
 
-      const drafts = input.sessions.map((session) => ({
-        name: session.name,
-        startsAt: new Date(session.startsAt),
-        endsAt: new Date(session.endsAt),
-        capacity: session.capacity,
-        priceCents: session.priceCents,
-        requiredMembershipTier: session.requiredMembershipTier ?? null,
+      const drafts = input.tables.map((table) => ({
+        name: table.name,
+        startsAt: new Date(table.startsAt),
+        endsAt: new Date(table.endsAt),
+        capacity: table.capacity,
+        priceCents: table.priceCents,
+        requiredMembershipTier: table.requiredMembershipTier ?? null,
       }));
-      const issues = validateSessions(drafts, party);
+      const issues = validateTables(drafts, party);
       if (issues.length > 0) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: issues[0].message, cause: issues });
       }
 
       return serializableTransaction(async (tx) => {
-        const existing = await tx.partySession.findMany({
+        const existing = await tx.partyTable.findMany({
           where: { partyId: input.partyId },
           select: { id: true, name: true, committed: true },
         });
-        const byId = new Map(existing.map((session) => [session.id, session]));
+        const byId = new Map(existing.map((table) => [table.id, table]));
 
-        // A stated id that is not this Party's sitting is not an update, and
+        // A stated id that is not this Party's table is not an update, and
         // must never be allowed to reach another Party's row.
-        for (const session of input.sessions) {
-          if (session.id && !byId.has(session.id)) {
-            throw new TRPCError({ code: 'NOT_FOUND', message: 'That sitting does not belong to this Party.' });
+        for (const table of input.tables) {
+          if (table.id && !byId.has(table.id)) {
+            throw new TRPCError({ code: 'NOT_FOUND', message: 'That table does not belong to this Party.' });
           }
         }
 
-        const kept = new Set(input.sessions.map((session) => session.id).filter((id): id is string => Boolean(id)));
-        const dropped = existing.filter((session) => !kept.has(session.id) && session.committed > 0);
+        const kept = new Set(input.tables.map((table) => table.id).filter((id): id is string => Boolean(id)));
+        const dropped = existing.filter((table) => !kept.has(table.id) && table.committed > 0);
         if (dropped.length > 0) {
           throw new TRPCError({
             code: 'CONFLICT',
@@ -1864,53 +1863,53 @@ export const partySessionsRouter = router({
           });
         }
 
-        for (const session of input.sessions) {
-          const held = session.id ? byId.get(session.id) : undefined;
-          if (held && session.capacity < held.committed) {
+        for (const table of input.tables) {
+          const held = table.id ? byId.get(table.id) : undefined;
+          if (held && table.capacity < held.committed) {
             throw new TRPCError({
               code: 'CONFLICT',
-              message: `${held.name} has already sold ${held.committed} seat(s), so it cannot be cut to ${session.capacity}.`,
+              message: `${held.name} has already sold ${held.committed} seat(s), so it cannot be cut to ${table.capacity}.`,
             });
           }
         }
 
-        await tx.partySession.deleteMany({
+        await tx.partyTable.deleteMany({
           where: { partyId: input.partyId, id: { notIn: [...kept] }, committed: 0 },
         });
 
         // Positions are rewritten from the submitted order, and moved out of
         // the way first: the (party_id, position) uniqueness would otherwise
-        // refuse a straight swap of two sittings mid-update.
-        await tx.partySession.updateMany({
+        // refuse a straight swap of two tables mid-update.
+        await tx.partyTable.updateMany({
           where: { partyId: input.partyId },
-          data: { position: { increment: SESSION_POSITION_PARK } },
+          data: { position: { increment: TABLE_POSITION_PARK } },
         });
 
         const saved: string[] = [];
-        for (const [position, session] of input.sessions.entries()) {
+        for (const [position, table] of input.tables.entries()) {
           const data = {
-            name: session.name,
-            startsAt: new Date(session.startsAt),
-            endsAt: new Date(session.endsAt),
-            capacity: session.capacity,
-            priceCents: session.priceCents,
-            requiredMembershipTier: session.requiredMembershipTier ?? null,
+            name: table.name,
+            startsAt: new Date(table.startsAt),
+            endsAt: new Date(table.endsAt),
+            capacity: table.capacity,
+            priceCents: table.priceCents,
+            requiredMembershipTier: table.requiredMembershipTier ?? null,
             position,
           };
-          if (session.id) {
-            await tx.partySession.update({ where: { id: session.id }, data });
-            saved.push(session.id);
+          if (table.id) {
+            await tx.partyTable.update({ where: { id: table.id }, data });
+            saved.push(table.id);
           } else {
-            const created = await tx.partySession.create({ data: { ...data, partyId: input.partyId } });
+            const created = await tx.partyTable.create({ data: { ...data, partyId: input.partyId } });
             saved.push(created.id);
           }
         }
-        return { sessionIds: saved };
-      }, 'Another change to these sittings landed first. Try again.');
+        return { tableIds: saved };
+      }, 'Another change to these tables landed first. Try again.');
     }),
 });
 
-// Positions are rewritten in place, so they are parked beyond any real running
-// order first. Without this a straight swap of two sittings would collide with
-// the (party_id, position) uniqueness halfway through the update.
-const SESSION_POSITION_PARK = 1000;
+// Positions are rewritten in place, so existing rows are parked beyond any
+// real position first. Without this a straight swap of two tables would
+// collide with the (party_id, position) uniqueness halfway through the update.
+const TABLE_POSITION_PARK = 1000;

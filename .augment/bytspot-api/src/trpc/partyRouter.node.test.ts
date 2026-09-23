@@ -37,7 +37,7 @@ const anonymousContext: Context = { user: null, clientRateLimitKey: 'test-party-
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
-const partySession = db.partySession as any;
+const partyTable = db.partyTable as any;
 const partyGuest = db.partyGuest as any;
 const partyCheckout = db.partyCheckout as any;
 const venue = db.venue as any;
@@ -1468,61 +1468,61 @@ test('Abandoned drafts are listable, so the host can name the row that deletes',
   assert.equal(drafts[0].expiresAt, new Date(touched.getTime() + ABANDONED_DRAFT_TTL_MS).toISOString());
 });
 
-// ─── Sittings ────────────────────────────────────────────────────────────────
+// ─── Tables ────────────────────────────────────────────────────────────────
 
-const sessionParty = {
+const tableParty = {
   id: 'party-1',
   startsAt: new Date('2026-10-01T18:00:00Z'),
   endsAt: new Date('2026-10-02T02:00:00Z'),
   capacity: 80,
   accessMode: 'paid-ticket',
 };
-const sittingInput = {
-  name: 'First Seating',
+const tableInputFixture = {
+  name: 'Front Table',
   startsAt: '2026-10-01T19:00:00Z',
   endsAt: '2026-10-01T21:00:00Z',
   capacity: 40,
   priceCents: 2500,
 };
 
-function withSessions(rows: any[], captured: any = {}) {
-  party.findFirst = async () => sessionParty;
-  partySession.findMany = async () => rows;
-  partySession.deleteMany = async (input: any) => { captured.deleted = input.where; return { count: 0 }; };
-  partySession.updateMany = async () => ({ count: rows.length });
-  partySession.update = async (input: any) => { (captured.updates ??= []).push(input); return { id: input.where.id }; };
-  partySession.create = async (input: any) => { (captured.creates ??= []).push(input.data); return { id: 'session-new' }; };
-  prisma.$transaction = async (callback: any) => callback({ partySession });
+function withTables(rows: any[], captured: any = {}) {
+  party.findFirst = async () => tableParty;
+  partyTable.findMany = async () => rows;
+  partyTable.deleteMany = async (input: any) => { captured.deleted = input.where; return { count: 0 }; };
+  partyTable.updateMany = async () => ({ count: rows.length });
+  partyTable.update = async (input: any) => { (captured.updates ??= []).push(input); return { id: input.where.id }; };
+  partyTable.create = async (input: any) => { (captured.creates ??= []).push(input.data); return { id: 'table-new' }; };
+  prisma.$transaction = async (callback: any) => callback({ partyTable });
   return captured;
 }
 
-test('A sitting the host omits is removed only while nobody holds it', async () => {
+test('A table the host omits is removed only while nobody holds it', async () => {
   // Seats already taken are the one thing a host cannot edit away. The refusal
-  // names the sitting, so the host is not left guessing which one blocks them.
-  withSessions([{ id: 'session-1', name: 'First Seating', committed: 12 }]);
+  // names the table, so the host is not left guessing which one blocks them.
+  withTables([{ id: 'table-1', name: 'Front Table', committed: 12 }]);
 
   await assert.rejects(
-    () => caller().events.sessions.set({ partyId: 'party-1', sessions: [] }),
+    () => caller().events.tables.set({ partyId: 'party-1', tables: [] }),
     (error: any) => {
       assert.equal(error.code, 'CONFLICT');
-      assert.match(error.message, /First Seating has 12 seat\(s\) already taken/);
+      assert.match(error.message, /Front Table has 12 seat\(s\) already taken/);
       return true;
     },
   );
 
-  // An untouched sitting drops without complaint.
-  const captured = withSessions([{ id: 'session-1', name: 'First Seating', committed: 0 }]);
-  assert.deepEqual(await caller().events.sessions.set({ partyId: 'party-1', sessions: [] }), { sessionIds: [] });
+  // An untouched table drops without complaint.
+  const captured = withTables([{ id: 'table-1', name: 'Front Table', committed: 0 }]);
+  assert.deepEqual(await caller().events.tables.set({ partyId: 'party-1', tables: [] }), { tableIds: [] });
   assert.equal(captured.deleted.committed, 0);
 });
 
-test('A sitting cannot be cut below the seats it has already sold', async () => {
-  withSessions([{ id: 'session-1', name: 'First Seating', committed: 30 }]);
+test('A table cannot be cut below the seats it has already sold', async () => {
+  withTables([{ id: 'table-1', name: 'Front Table', committed: 30 }]);
 
   await assert.rejects(
-    () => caller().events.sessions.set({
+    () => caller().events.tables.set({
       partyId: 'party-1',
-      sessions: [{ ...sittingInput, id: 'session-1', capacity: 20 }],
+      tables: [{ ...tableInputFixture, id: 'table-1', capacity: 20 }],
     }),
     (error: any) => {
       assert.equal(error.code, 'CONFLICT');
@@ -1533,55 +1533,55 @@ test('A sitting cannot be cut below the seats it has already sold', async () => 
 
   // Cutting to exactly what is sold is honest and allowed: it closes the door
   // without unseating anyone.
-  withSessions([{ id: 'session-1', name: 'First Seating', committed: 30 }]);
-  const exact = await caller().events.sessions.set({
+  withTables([{ id: 'table-1', name: 'Front Table', committed: 30 }]);
+  const exact = await caller().events.tables.set({
     partyId: 'party-1',
-    sessions: [{ ...sittingInput, id: 'session-1', capacity: 30 }],
+    tables: [{ ...tableInputFixture, id: 'table-1', capacity: 30 }],
   });
-  assert.deepEqual(exact, { sessionIds: ['session-1'] });
+  assert.deepEqual(exact, { tableIds: ['table-1'] });
 });
 
-test("A stated id that is not this Party's sitting never reaches another Party's row", async () => {
-  withSessions([{ id: 'session-1', name: 'First Seating', committed: 0 }]);
+test("A stated id that is not this Party's table never reaches another Party's row", async () => {
+  withTables([{ id: 'table-1', name: 'Front Table', committed: 0 }]);
   await assert.rejects(
-    () => caller().events.sessions.set({
+    () => caller().events.tables.set({
       partyId: 'party-1',
-      sessions: [{ ...sittingInput, id: 'someone-elses-session' }],
+      tables: [{ ...tableInputFixture, id: 'someone-elses-table' }],
     }),
     { code: 'NOT_FOUND' },
   );
 });
 
-test('Positions are parked before being rewritten, so two sittings can swap', async () => {
+test('Positions are parked before being rewritten, so two tables can swap', async () => {
   // The (party_id, position) uniqueness would refuse a straight swap halfway
   // through the update, so the existing rows move out of the way first.
   let parked: any;
   const captured: any = {};
-  withSessions([
-    { id: 'session-1', name: 'First Seating', committed: 0 },
-    { id: 'session-2', name: 'Second Seating', committed: 0 },
+  withTables([
+    { id: 'table-1', name: 'Front Table', committed: 0 },
+    { id: 'table-2', name: 'Balcony Two', committed: 0 },
   ], captured);
-  partySession.updateMany = async (input: any) => { parked = input.data; return { count: 2 } };
+  partyTable.updateMany = async (input: any) => { parked = input.data; return { count: 2 } };
 
-  await caller().events.sessions.set({
+  await caller().events.tables.set({
     partyId: 'party-1',
-    sessions: [
-      { ...sittingInput, id: 'session-2', name: 'Second Seating' },
-      { ...sittingInput, id: 'session-1', startsAt: '2026-10-01T21:30:00Z', endsAt: '2026-10-01T23:30:00Z' },
+    tables: [
+      { ...tableInputFixture, id: 'table-2', name: 'Balcony Two' },
+      { ...tableInputFixture, id: 'table-1', startsAt: '2026-10-01T21:30:00Z', endsAt: '2026-10-01T23:30:00Z' },
     ],
   });
 
   assert.deepEqual(parked, { position: { increment: 1000 } });
   // Rewritten from the submitted order, not from whatever they held before.
-  assert.deepEqual(captured.updates.map((u: any) => [u.where.id, u.data.position]), [['session-2', 0], ['session-1', 1]]);
+  assert.deepEqual(captured.updates.map((u: any) => [u.where.id, u.data.position]), [['table-2', 0], ['table-1', 1]]);
 });
 
-test('Validation refuses the sitting before any row is touched', async () => {
-  const captured = withSessions([]);
+test('Validation refuses the table before any row is touched', async () => {
+  const captured = withTables([]);
   await assert.rejects(
-    () => caller().events.sessions.set({
+    () => caller().events.tables.set({
       partyId: 'party-1',
-      sessions: [{ ...sittingInput, startsAt: '2026-10-01T17:00:00Z' }],
+      tables: [{ ...tableInputFixture, startsAt: '2026-10-01T17:00:00Z' }],
     }),
     (error: any) => {
       assert.equal(error.code, 'BAD_REQUEST');
@@ -1592,30 +1592,30 @@ test('Validation refuses the sitting before any row is touched', async () => {
   assert.equal(captured.creates, undefined);
 });
 
-test('Sittings are listed in the running order the host arranged', async () => {
+test('Tables are listed in the order the host arranged them', async () => {
   party.findFirst = async () => ({ id: 'party-1' });
   let order: any;
-  partySession.findMany = async (input: any) => {
+  partyTable.findMany = async (input: any) => {
     order = input.orderBy;
     return [{
-      id: 'session-1', name: 'First Seating',
+      id: 'table-1', name: 'Front Table',
       startsAt: new Date('2026-10-01T19:00:00Z'), endsAt: new Date('2026-10-01T21:00:00Z'),
       capacity: 40, committed: 40, priceCents: 2500, requiredMembershipTier: null,
     }];
   };
 
-  const { sessions } = await caller().events.sessions.list({ partyId: 'party-1' });
+  const { tables } = await caller().events.tables.list({ partyId: 'party-1' });
   assert.deepEqual(order, [{ position: 'asc' }]);
-  assert.equal(sessions[0].remaining, 0);
-  // Full, not passed: this sitting has not happened yet, it has sold out.
-  assert.equal(sessions[0].state, 'full');
+  assert.equal(tables[0].remaining, 0);
+  // Full, not passed: this table has not gone by, it has sold out.
+  assert.equal(tables[0].state, 'full');
 });
 
-test('A Party the caller does not host has no sittings to read or write', async () => {
+test('A Party the caller does not host has no tables to read or write', async () => {
   party.findFirst = async () => null;
-  await assert.rejects(() => caller().events.sessions.list({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => caller().events.tables.list({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   await assert.rejects(
-    () => caller().events.sessions.set({ partyId: 'party-1', sessions: [sittingInput] }),
+    () => caller().events.tables.set({ partyId: 'party-1', tables: [tableInputFixture] }),
     { code: 'NOT_FOUND' },
   );
 });

@@ -1,6 +1,7 @@
 import { db } from '../lib/db';
-import { sendVendorAskEmail } from '../lib/email';
+import { sendVendorAskEmail, sendVendorBookedEmail } from '../lib/email';
 import { deliverPushNotification } from '../services/notificationDelivery';
+import { priceLabel } from '../services/offerNotifications';
 import { skuTemplate } from './windows';
 
 /** The seller's contact address if it set one; otherwise every live owner and manager. */
@@ -78,5 +79,50 @@ export async function notifyAskSeller(
     ]);
   } catch (err: any) {
     console.error('[vendor] ask notice failed:', err?.message);
+  }
+}
+
+/** Tell a seller a guest took their offer. Never throws. */
+export async function notifyOfferAcceptedSeller(offerId: string): Promise<void> {
+  try {
+    const offer = await db.offer.findUnique({
+      where: { id: offerId },
+      select: {
+        startsAt: true,
+        priceCents: true,
+        demand: { select: { partySize: true } },
+        location: { select: { label: true, timezone: true } },
+        window: { select: { skuTemplateId: true } },
+        seller: {
+          select: {
+            contactEmail: true,
+            seats: { select: { role: true, state: true, userId: true, user: { select: { email: true } } } },
+          },
+        },
+      },
+    });
+    if (!offer) return;
+    const to = askNoticeRecipients(
+      offer.seller.contactEmail,
+      offer.seller.seats.map((seat) => ({ role: seat.role, state: seat.state, email: seat.user.email })),
+    );
+    const title = (offer.window && skuTemplate(offer.window.skuTemplateId)?.title) || 'Your listing';
+    const when = formatAskWhen(offer.startsAt, offer.location.timezone);
+    const price = priceLabel(offer.priceCents);
+    const partySize = offer.demand.partySize;
+    const guests = `${partySize} ${partySize === 1 ? 'guest' : 'guests'}`;
+    await Promise.all([
+      sendVendorBookedEmail(to, { title, placeLabel: offer.location.label, partySize, when, price }),
+      deliverPushNotification({
+        userIds: askNoticeSeatUserIds(offer.seller.seats),
+        category: 'reservations',
+        title: `Booked at ${offer.location.label}`,
+        body: `${guests}, ${when} · ${price}. The guest accepted your offer.`,
+        url: 'https://bytspot.app/discover',
+        type: 'vendor-booked',
+      }),
+    ]);
+  } catch (err: any) {
+    console.error('[vendor] booked notice failed:', err?.message);
   }
 }

@@ -217,6 +217,45 @@ export async function sendVendorAskEmail(to: string[], ask: VendorAskNotice): Pr
   }
 }
 
+export interface VendorBookedNotice {
+  title: string;
+  placeLabel: string;
+  partySize: number;
+  when: string;
+  price: string;
+}
+
+/**
+ * A guest took a seller's offer. The slot is already committed, so, like the
+ * ask email, a failure is logged rather than thrown.
+ */
+export async function sendVendorBookedEmail(to: string[], booked: VendorBookedNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend || to.length === 0) return;
+
+  const guests = `${booked.partySize} ${booked.partySize === 1 ? 'guest' : 'guests'}`;
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Booked: ${guests}, ${booked.when}`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Your offer was accepted</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            ${escapeHtml(booked.title)} at ${escapeHtml(booked.placeLabel)}: ${guests}, ${escapeHtml(booked.when)} · ${escapeHtml(booked.price)}.
+          </p>
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 0;">
+            The time is now held for this guest and counts against the window's capacity. Any other offers on this request were released.
+          </p>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorBookedEmail failed:', err?.message);
+  }
+}
+
 export interface GuestOfferNotice {
   where: string;
   when: string;

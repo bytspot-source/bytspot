@@ -1172,3 +1172,19 @@ test('an item carries one supply, and an offer is not an exception', async (t) =
     /plan_items_selection_supply_check/,
   );
 });
+
+test('the seller is told when a guest takes their offer, and a failure never reaches the guest', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { notifyOfferAcceptedSeller } = await import('./askNotice');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+
+  const { offer } = await offeredTo();
+  await guest().demand.acceptOffer({ offerId: offer.id });
+
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => logged.push(args.map(String).join(' ')));
+  await notifyOfferAcceptedSeller(offer.id);
+  await notifyOfferAcceptedSeller(randomUUID());
+  assert.deepEqual(logged.filter((line) => line.includes('booked notice failed')), []);
+});

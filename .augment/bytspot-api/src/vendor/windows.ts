@@ -4,6 +4,7 @@ import { db } from '../lib/db';
 import { availabilityDefaultsFor } from './availability';
 import { BOOKABLE_TEMPLATES, locationCanPublish, type LocationState, type SellerState } from './contract';
 import { coverUrlFor } from './media';
+import { timezoneAt } from './geocode';
 import { NotFound } from './demandFeed';
 
 /**
@@ -191,10 +192,17 @@ export async function setWindowPublished(input: {
   if (!window) throw new NotFound('offering');
 
   if (input.published) {
+    // A place saved before its zone was looked up is filled in here rather than
+    // sent back to the vendor for something they never chose.
+    let timezone = window.location.timezone;
+    if (!timezone) {
+      timezone = (await timezoneAt(window.location.lat, window.location.lng)) ?? null;
+      if (timezone) await db.vendorLocation.update({ where: { id: window.location.id }, data: { timezone } });
+    }
     const blockers = publishBlockers({
       sellerState: input.sellerState,
       locationState: window.location.state as LocationState,
-      timezone: window.location.timezone,
+      timezone,
       skuTemplateId: window.skuTemplateId,
     });
     if (blockers.length) throw new WindowRefused(blockers);

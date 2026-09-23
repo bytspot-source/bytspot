@@ -15,7 +15,7 @@ import {
   type LocationOperationId,
   type LocationState,
 } from '../vendor/contract';
-import { candidateBlockers, geocode, geocodeIsConfigured } from '../vendor/geocode';
+import { candidateBlockers, geocode, geocodeIsConfigured, knownTimezone, timezoneAt } from '../vendor/geocode';
 import { onboardingLink, payoutIsConfigured, refreshPayout, storedPayout } from '../vendor/payout';
 import { coverUrlFor } from '../vendor/media';
 import { advanceSeller } from '../vendor/sellerState';
@@ -197,7 +197,9 @@ router.post('/vendor/locations', requireVendorSeat, requireCapability('SELL'), a
       lat: parsed.data.lat,
       lng: parsed.data.lng,
       radiusMiles: kind.requiresRadius ? (parsed.data.radiusMiles ?? LOCATION_DEFAULTS.radiusMiles) : null,
-      timezone: parsed.data.timezone ?? null,
+      // The pin decides the zone when the console did not send a real one: a
+      // place without a zone yields no slots and cannot be published.
+      timezone: knownTimezone(parsed.data.timezone) ?? (await timezoneAt(parsed.data.lat, parsed.data.lng)) ?? null,
     };
 
     if (parsed.data.id) {

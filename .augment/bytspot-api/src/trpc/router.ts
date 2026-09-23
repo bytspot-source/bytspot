@@ -35,6 +35,7 @@ import { mobilityRouter } from './mobilityRouter';
 import { planRouter } from './planRouter';
 import { coffeeRouter } from './coffeeRouter';
 import { demandRouter } from './demandRouter';
+import { inventoryRouter } from './inventoryRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -1304,6 +1305,7 @@ export const appRouter = router({
   plans: planRouter,
   coffee: coffeeRouter,
   demand: demandRouter,
+  inventory: inventoryRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

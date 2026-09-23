@@ -27,6 +27,7 @@ import vendorAuthRouter from './routes/vendorAuth';
 import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-in (separate origin, cookie-based refresh)
 import vendorDemandRouter from './routes/vendorDemand';
 import vendorMediaRouter from './routes/vendorMedia';
+import vendorWindowsRouter from './routes/vendorWindows';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -91,6 +92,7 @@ app.use(vendorAuthRouter);
 app.use(vendorSetupRouter);
 app.use(vendorDemandRouter);
 app.use(vendorMediaRouter);
+app.use(vendorWindowsRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

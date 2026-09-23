@@ -10,6 +10,8 @@ import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { boundingBoxWhere } from '../services/geoBox';
+import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
+import { planFeasibility } from '../services/planFeasibility';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -143,7 +145,15 @@ const planInclude = {
   // Plans row actually paints are selected; owner and idempotency stay
   // server-side, and the reservation summary is null for room-backed items.
   items: {
-    orderBy: { createdAt: 'asc' },
+    // Stored order first. createdAt and id break ties so two items attached in
+    // one transaction, which can share a timestamp, still read back in a
+    // stable, total order rather than whatever the planner returns.
+    //
+    // Postgres sorts NULLs last on ASC, which is what an item with no stated
+    // position should get: appended, in the order it was attached. legsForPlan
+    // sorts on the same three keys so feasibility judges the sequence the
+    // guest is actually looking at.
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     include: { coffeeReservation: { select: { holdExpiresAt: true, status: true, coffeeSpotId: true } } },
   },
 } satisfies Prisma.PlanInclude;
@@ -255,6 +265,19 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
 }
 
 /** A Plan is indistinguishable from a deleted one to anyone not on it. */
+/** Feasibility issues several supply queries sized by the Plan's item count.
+ *  Nothing else caps that count, so this is the ceiling the endpoint refuses
+ *  above. Far beyond any real evening. */
+const FEASIBILITY_MAX_ITEMS = 100;
+
+/** Settle items a previous deploy left unpositioned. Runs in the caller's
+ *  transaction: a half-renumbered Plan is worse than an unnumbered one. */
+async function applyPositionRepairs(client: TxClient, repairs: { id: string; position: number }[]) {
+  for (const repair of repairs) {
+    await client.planItem.update({ where: { id: repair.id }, data: { position: repair.position } });
+  }
+}
+
 const planNotFound = () => new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
 /** Keep the original unique key occupied; an ambiguous create retry must not
@@ -482,6 +505,15 @@ async function insertBookableSelections(client: TxClient, planId: string,
   supplies: Awaited<ReturnType<typeof resolveBookableSelections>>,
   existing: LoadedPlan['items'] = []) {
   const ids: string[] = [];
+  // Append after whatever the Plan already holds. Reusing an existing item
+  // leaves the count alone, so a retry cannot walk the order forward.
+  //
+  // Any item left unpositioned by a previous deploy is settled first, in the
+  // same transaction and into the slot readers were already giving it, so the
+  // append cannot overtake it.
+  const sequence = sequenceForAppend(existing);
+  await applyPositionRepairs(client, sequence.repairs);
+  let position = sequence.position;
   for (const { snapshot, ...supply } of supplies) {
     // Include pre-picker attaches: a NULL/old selection key must not cause a
     // second item for the same party or already-linked coffee spot.
@@ -495,7 +527,7 @@ async function insertBookableSelections(client: TxClient, planId: string,
     if (previous) { ids.push(previous.id); continue; }
     await client.bookable.create({ data: bookableCreateData(snapshot) });
     const item = await client.planItem.create({ data: {
-      planId, ...supply, bookableId: snapshot.id, status: 'available',
+      planId, ...supply, bookableId: snapshot.id, status: 'available', position: position++,
     } });
     ids.push(item.id);
   }
@@ -652,6 +684,93 @@ export const planRouter = router({
     .query(async ({ ctx, input }) => {
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
       return serializePlan(plan, new Date(), ctx.user.userId, await partyBookingFacts([plan]));
+    }),
+
+  /**
+   * Does this Plan actually work? Read-only: it answers the question and
+   * changes nothing, so a guest can ask it as often as they like while they
+   * are still moving things around.
+   *
+   * Unlike Prime Path, a missing party size is NOT filled in from the count of
+   * people who have said yes. Prime Path uses that floor to rank, where
+   * understating the group only mis-orders a list. Here it would total a
+   * per-person price for too few people and tell the guest their budget fits
+   * when it does not, so the checks refuse and name what is missing instead.
+   */
+  feasibility: protectedProcedure
+    .input(z.object({ planId: z.string().min(1) }))
+    .query(async ({ ctx, input }) => {
+      const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
+      // Cancelled items are history. Judging a Plan against something the group
+      // already dropped would report clashes nobody can act on.
+      const live = plan.items.filter((item) => item.status !== 'cancelled');
+
+      // Nothing caps how many items a Plan may hold, and every seated
+      // participant can reach this. Rather than let one Plan dictate the size
+      // of five supply queries, an oversized one is refused outright. Saying
+      // so is honest; silently judging the first N would not be.
+      if (live.length > FEASIBILITY_MAX_ITEMS) {
+        throw new TRPCError({
+          code: 'PAYLOAD_TOO_LARGE',
+          message: `This Plan holds ${live.length} items. Feasibility is measured for up to ${FEASIBILITY_MAX_ITEMS}.`,
+        });
+      }
+
+      const partyIds = [...new Set(live.flatMap((item) => (item.partyId ? [item.partyId] : [])))];
+      const offerIds = [...new Set(live.flatMap((item) => (item.offerId ? [item.offerId] : [])))];
+      const coffeeSpotIds = [...new Set(live.flatMap((item) =>
+        [item.coffeeSpotId, item.coffeeReservation?.coffeeSpotId].filter((id): id is string => !!id)))];
+
+      const [parties, occupancy, offers, coffeeSpots] = await Promise.all([
+        partyIds.length === 0 ? [] : db.party.findMany({
+          where: { id: { in: partyIds } },
+          select: { id: true, startsAt: true, endsAt: true, lat: true, lng: true, capacity: true },
+        }),
+        partyIds.length === 0 ? [] : db.partyGuest.groupBy({
+          by: ['partyId'], where: { partyId: { in: partyIds }, accessGranted: true }, _count: { _all: true },
+        }),
+        offerIds.length === 0 ? [] : db.offer.findMany({
+          where: { id: { in: offerIds } },
+          // capacity comes from the offer, never from its Bookable snapshot.
+          select: { id: true, startsAt: true, durationMins: true, priceCents: true, capacity: true },
+        }),
+        coffeeSpotIds.length === 0 ? [] : db.coffeeSpot.findMany({
+          where: { id: { in: coffeeSpotIds } }, select: { id: true, latitude: true, longitude: true },
+        }),
+      ]);
+
+      const partyMap = new Map(parties.map((party) => [party.id, party]));
+      const grantedMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
+      const offerMap = new Map(offers.map((offer) => [offer.id, offer]));
+      const spotMap = new Map(coffeeSpots.map((spot) => [spot.id, spot]));
+
+      const sources: PlanLegSource[] = live.map((item) => {
+        const party = item.partyId ? partyMap.get(item.partyId) : undefined;
+        const spotId = item.coffeeSpotId ?? item.coffeeReservation?.coffeeSpotId ?? null;
+        const spot = spotId ? spotMap.get(spotId) : undefined;
+        return {
+          id: item.id,
+          position: item.position,
+          createdAt: item.createdAt,
+          needKind: item.needKind,
+          title: item.title,
+          // Seats are read Live — capacity minus guests already granted — so a
+          // room that filled up since it was attached reports what is actually
+          // left rather than what it once held.
+          party: party ? {
+            startsAt: party.startsAt, endsAt: party.endsAt, lat: party.lat, lng: party.lng,
+            capacity: party.capacity === null ? null
+              : Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
+          } : null,
+          offer: (item.offerId && offerMap.get(item.offerId)) || null,
+          coffeeSpot: spot ? { latitude: spot.latitude, longitude: spot.longitude } : null,
+        };
+      });
+
+      return planFeasibility(legsForPlan(sources), {
+        startsAt: plan.startsAt, endsAt: plan.endsAt,
+        partySize: plan.partySize, budgetCents: plan.budgetCents,
+      });
     }),
 
   /**
@@ -1118,10 +1237,13 @@ export const planRouter = router({
         return { id: item.id, capability: item.capability, status: item.status };
       }
       if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
+      const attachSequence = sequenceForAppend(plan.items);
+      await applyPositionRepairs(tx, attachSequence.repairs);
       const item = await tx.planItem.create({ data: {
         planId: plan.id, needKind: input.needKind, title: supply.title,
         capability: supply.capability, partyId, coffeeReservationId,
         selectionKey, bookableId: supply.snapshot?.id ?? null,
+        position: attachSequence.position,
       } });
       return { id: item.id, capability: item.capability, status: item.status };
     }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.')),
@@ -1208,6 +1330,10 @@ export const planRouter = router({
               partyId: supply.partyId,
               coffeeReservationId: supply.coffeeReservationId,
               bookableId: supply.snapshot?.id ?? null,
+              // The first item of a brand new Plan. Stated explicitly: leaving
+              // it null would mean this code writes the very rows the nullable
+              // column exists to identify as written by older code.
+              position: 0,
             },
           });
           return { id: plan.id };

@@ -843,6 +843,16 @@ model PlanItem {
   bookableId          String?  @unique @map("bookable_id")
   capability          String   @default("details")
   status              String   @default("available")
+  /// Where this item sits in the Plan's sequence, zero-based and per plan.
+  /// Deliberately not unique: a racing attach may briefly duplicate a position,
+  /// which is a smaller harm than refusing the write. Readers break ties on
+  /// createdAt then id, so the order is always total.
+  ///
+  /// Nullable and without a default, so a row written by an instance still on
+  /// the previous deploy records that it has no stated position instead of
+  /// claiming slot 0. Readers sort those last, which is where an appended item
+  /// belongs. Every current writer sets it.
+  position            Int?
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -856,6 +866,7 @@ model PlanItem {
   @@unique([planId, selectionKey])
   @@index([coffeeSpotId])
   @@index([planId, createdAt])
+  @@index([planId, position], map: "plan_items_plan_position_idx")
   @@map("plan_items")
 }
 

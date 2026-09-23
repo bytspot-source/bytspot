@@ -907,6 +907,26 @@ test('a table won on the rail lands in the Plan it was asked for', async (t) => 
   assert.equal(item!.bookableId, (await db.offer.findUniqueOrThrow({ where: { id: offer.id } })).bookableId);
 });
 
+test('a won table settles an item left unpositioned by an older deploy rather than overtaking it', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  const planId = await planWithDiningNeed();
+  // A row as an instance predating the position column would have written it.
+  // Readers put it last; the danger is that the accepted table takes a finite
+  // position, finite sorts before null, and it is overtaken for good.
+  const older = await db.planItem.create({
+    data: { planId, needKind: 'nightlife', title: 'Attached before the column existed', position: null },
+  });
+
+  const { offer } = await offeredToPlan(planId);
+  await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+  assert.equal((await db.planItem.findUniqueOrThrow({ where: { id: older.id } })).position, 0,
+    'the older item keeps the slot readers were already giving it');
+  assert.equal((await db.planItem.findUniqueOrThrow({ where: { offerId: offer.id } })).position, 1,
+    'the won table appends after it, not ahead of it');
+});
+
 test('the guest sees the won table when they open the Plan', async (t) => {
   if (!reachable) return t.skip('no database');
 

@@ -10,7 +10,7 @@ import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { boundingBoxWhere } from '../services/geoBox';
-import { legsForPlan, type PlanLegSource } from '../services/planLegs';
+import { legsForPlan, nextPosition, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
@@ -148,6 +148,11 @@ const planInclude = {
     // Stored order first. createdAt and id break ties so two items attached in
     // one transaction, which can share a timestamp, still read back in a
     // stable, total order rather than whatever the planner returns.
+    //
+    // Postgres sorts NULLs last on ASC, which is what an item with no stated
+    // position should get: appended, in the order it was attached. legsForPlan
+    // sorts on the same three keys so feasibility judges the sequence the
+    // guest is actually looking at.
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     include: { coffeeReservation: { select: { holdExpiresAt: true, status: true, coffeeSpotId: true } } },
   },
@@ -260,6 +265,11 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
 }
 
 /** A Plan is indistinguishable from a deleted one to anyone not on it. */
+/** Feasibility issues several supply queries sized by the Plan's item count.
+ *  Nothing else caps that count, so this is the ceiling the endpoint refuses
+ *  above. Far beyond any real evening. */
+const FEASIBILITY_MAX_ITEMS = 100;
+
 const planNotFound = () => new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
 /** Keep the original unique key occupied; an ambiguous create retry must not
@@ -489,7 +499,7 @@ async function insertBookableSelections(client: TxClient, planId: string,
   const ids: string[] = [];
   // Append after whatever the Plan already holds. Reusing an existing item
   // leaves the count alone, so a retry cannot walk the order forward.
-  let position = existing.reduce((highest, item) => Math.max(highest, item.position + 1), 0);
+  let position = nextPosition(existing);
   for (const { snapshot, ...supply } of supplies) {
     // Include pre-picker attaches: a NULL/old selection key must not cause a
     // second item for the same party or already-linked coffee spot.
@@ -681,13 +691,23 @@ export const planRouter = router({
       // already dropped would report clashes nobody can act on.
       const live = plan.items.filter((item) => item.status !== 'cancelled');
 
+      // Nothing caps how many items a Plan may hold, and every seated
+      // participant can reach this. Rather than let one Plan dictate the size
+      // of five supply queries, an oversized one is refused outright. Saying
+      // so is honest; silently judging the first N would not be.
+      if (live.length > FEASIBILITY_MAX_ITEMS) {
+        throw new TRPCError({
+          code: 'PAYLOAD_TOO_LARGE',
+          message: `This Plan holds ${live.length} items. Feasibility is measured for up to ${FEASIBILITY_MAX_ITEMS}.`,
+        });
+      }
+
       const partyIds = [...new Set(live.flatMap((item) => (item.partyId ? [item.partyId] : [])))];
       const offerIds = [...new Set(live.flatMap((item) => (item.offerId ? [item.offerId] : [])))];
-      const bookableIds = [...new Set(live.flatMap((item) => (item.bookableId ? [item.bookableId] : [])))];
       const coffeeSpotIds = [...new Set(live.flatMap((item) =>
         [item.coffeeSpotId, item.coffeeReservation?.coffeeSpotId].filter((id): id is string => !!id)))];
 
-      const [parties, occupancy, offers, bookables, coffeeSpots] = await Promise.all([
+      const [parties, occupancy, offers, coffeeSpots] = await Promise.all([
         partyIds.length === 0 ? [] : db.party.findMany({
           where: { id: { in: partyIds } },
           select: { id: true, startsAt: true, endsAt: true, lat: true, lng: true, capacity: true },
@@ -697,10 +717,8 @@ export const planRouter = router({
         }),
         offerIds.length === 0 ? [] : db.offer.findMany({
           where: { id: { in: offerIds } },
-          select: { id: true, startsAt: true, durationMins: true, priceCents: true },
-        }),
-        bookableIds.length === 0 ? [] : db.bookable.findMany({
-          where: { id: { in: bookableIds } }, select: { id: true, priceCents: true, capacity: true },
+          // capacity comes from the offer, never from its Bookable snapshot.
+          select: { id: true, startsAt: true, durationMins: true, priceCents: true, capacity: true },
         }),
         coffeeSpotIds.length === 0 ? [] : db.coffeeSpot.findMany({
           where: { id: { in: coffeeSpotIds } }, select: { id: true, latitude: true, longitude: true },
@@ -710,7 +728,6 @@ export const planRouter = router({
       const partyMap = new Map(parties.map((party) => [party.id, party]));
       const grantedMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
       const offerMap = new Map(offers.map((offer) => [offer.id, offer]));
-      const bookableMap = new Map(bookables.map((bookable) => [bookable.id, bookable]));
       const spotMap = new Map(coffeeSpots.map((spot) => [spot.id, spot]));
 
       const sources: PlanLegSource[] = live.map((item) => {
@@ -720,6 +737,7 @@ export const planRouter = router({
         return {
           id: item.id,
           position: item.position,
+          createdAt: item.createdAt,
           needKind: item.needKind,
           title: item.title,
           // Seats are read Live — capacity minus guests already granted — so a
@@ -732,7 +750,6 @@ export const planRouter = router({
           } : null,
           offer: (item.offerId && offerMap.get(item.offerId)) || null,
           coffeeSpot: spot ? { latitude: spot.latitude, longitude: spot.longitude } : null,
-          bookable: (item.bookableId && bookableMap.get(item.bookableId)) || null,
         };
       });
 
@@ -1210,7 +1227,7 @@ export const planRouter = router({
         planId: plan.id, needKind: input.needKind, title: supply.title,
         capability: supply.capability, partyId, coffeeReservationId,
         selectionKey, bookableId: supply.snapshot?.id ?? null,
-        position: plan.items.reduce((highest, existing) => Math.max(highest, existing.position + 1), 0),
+        position: nextPosition(plan.items),
       } });
       return { id: item.id, capability: item.capability, status: item.status };
     }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.')),

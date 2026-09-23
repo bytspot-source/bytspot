@@ -4,6 +4,7 @@ import { serializableTransactionWithRetry } from '../lib/transactions';
 import { stateAfterOperation } from './demand';
 import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
+import { nextPosition } from '../services/planLegs';
 
 /**
  * Taking an offer.
@@ -219,7 +220,7 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
             selectionKey: `vendorOffer:${offer.id}`,
             // A won table appends to the Plan rather than displacing anything
             // already in it.
-            position: plan.items.reduce((highest, item) => Math.max(highest, item.position + 1), 0),
+            position: nextPosition(plan.items),
           },
         });
       }

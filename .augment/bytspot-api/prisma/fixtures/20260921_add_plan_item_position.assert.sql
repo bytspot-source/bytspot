@@ -1,8 +1,8 @@
 -- Position is what turns a bag of items into a sequence, so this fixture
--- asserts the closed side holds: the column is NOT NULL with a default, the
--- backfill reproduced the attach order per plan rather than globally, plans do
--- not share a numbering, duplicate positions remain storable, and the read
--- index exists.
+-- asserts the closed side holds: the column is nullable and has no default,
+-- the backfill reproduced the attach order per plan rather than globally,
+-- plans do not share a numbering, duplicate positions remain storable, an
+-- unpositioned row sorts last rather than first, and the read index exists.
 DO $$
 DECLARE
   u_id TEXT := 'fixture-position-user';
@@ -15,16 +15,26 @@ BEGIN
     RAISE EXCEPTION 'plan_items table missing';
   END IF;
 
-  -- NOT NULL with a default: every item has a place in the list, and an
-  -- existing row could be given one without inventing anything.
+  -- Nullable, so a row inserted by an instance still on the previous deploy
+  -- records that it has no stated position rather than silently claiming
+  -- slot 0 and reordering someone's evening.
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
-    WHERE table_name = 'plan_items' AND column_name = 'position' AND is_nullable = 'NO'
+    WHERE table_name = 'plan_items' AND column_name = 'position' AND is_nullable = 'YES'
   ) THEN
-    RAISE EXCEPTION 'plan_items.position missing or nullable';
+    RAISE EXCEPTION 'plan_items.position missing or NOT NULL';
   END IF;
 
-  -- No row was left behind by the backfill.
+  -- And no default, which is what makes that row distinguishable at all.
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'plan_items' AND column_name = 'position'
+      AND column_default IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'plan_items.position has a default, so an old writer cannot be told apart';
+  END IF;
+
+  -- The backfill left no existing row unpositioned.
   SELECT count(*) INTO got FROM plan_items WHERE "position" IS NULL;
   IF got <> 0 THEN
     RAISE EXCEPTION 'backfill left % plan_items without a position', got;
@@ -77,12 +87,22 @@ BEGIN
     RAISE EXCEPTION 'expected a duplicate position to be storable, found % rows', got;
   END IF;
 
-  -- The default exists so an insert that states no position still lands.
+  -- An insert that states no position still lands, exactly as one from an
+  -- instance running the previous deploy would.
   INSERT INTO plan_items (id, plan_id, need_kind, title, created_at, updated_at)
   VALUES ('fixture-position-default', plan_b, 'coffee', 'B default', now(), now());
-  SELECT "position" INTO got FROM plan_items WHERE id = 'fixture-position-default';
-  IF got <> 0 THEN
-    RAISE EXCEPTION 'default position is %, not 0', got;
+  SELECT count(*) INTO got
+  FROM plan_items WHERE id = 'fixture-position-default' AND "position" IS NULL;
+  IF got <> 1 THEN
+    RAISE EXCEPTION 'an insert stating no position did not record it as unstated';
+  END IF;
+
+  -- And it is lived last, not first. This is the whole reason the column is
+  -- nullable: with a default of 0 this row would have displaced B first.
+  SELECT string_agg(title, ',' ORDER BY "position" NULLS LAST, created_at, id) INTO ordered
+  FROM plan_items WHERE plan_id = plan_b;
+  IF ordered <> 'B first,B default' THEN
+    RAISE EXCEPTION 'an unpositioned item read back as %, not appended', ordered;
   END IF;
 
   DELETE FROM plan_items WHERE plan_id IN (plan_a, plan_b);

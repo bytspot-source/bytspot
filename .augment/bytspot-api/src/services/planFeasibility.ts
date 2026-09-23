@@ -144,11 +144,18 @@ function checkOverlap(legs: readonly PlanLeg[]): CheckResult {
   return fits('overlap', 'Nothing here runs into anything else.');
 }
 
-/** Enough time to physically get from each leg to the next. */
+/**
+ * Enough time to physically get from each leg to the next.
+ *
+ * The journeys measured are the ones the Plan states, in the sequence it
+ * states them. Re-sorting by start time would measure a different evening
+ * from the one the guest arranged: a Plan that says the room first and the
+ * table second, with times that run the other way, is a contradiction the
+ * guest needs told about, and sorting it into chronological order hides
+ * exactly that by answering a question nobody asked.
+ */
 function checkTravel(legs: readonly PlanLeg[]): CheckResult {
-  const ordered = legs
-    .filter((leg) => leg.startsAt && placed(leg))
-    .sort((a, b) => a.startsAt!.getTime() - b.startsAt!.getTime());
+  const ordered = legs.filter((leg) => leg.startsAt && placed(leg));
 
   if (ordered.length < 2) {
     return unknown('travel', 'Fewer than two of these state both a place and a time, so no journey can be measured.');
@@ -164,6 +171,14 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
     // ever reduce the number of Plans called impossible.
     const leaveAt = endOf(from) ?? from.startsAt!;
     const availableMins = (to.startsAt!.getTime() - leaveAt.getTime()) / 60_000;
+    // Negative time is the sequence contradicting itself: the next leg starts
+    // before this one is done. Reported plainly rather than as a distance the
+    // group could not have covered anyway.
+    if (availableMins < 0) {
+      return breaks('travel',
+        `${to.title} starts before ${from.title} is over, but it comes after it in this Plan.`,
+        [from.itemId, to.itemId]);
+    }
     const metres = distanceMeters(
       { lat: from.latitude!, lng: from.longitude! },
       { lat: to.latitude!, lng: to.longitude! },

@@ -189,6 +189,30 @@ test('travel is judged from the end of a leg, not its start', () => {
   assert.equal(verdictFor('travel', legs, plan()), 'breaks');
 });
 
+test('travel measures the sequence the Plan states, not the one the clock suggests', () => {
+  // The Plan says the room first and the table second. The stated times run
+  // the other way, so the sequence contradicts itself. Sorting these into
+  // chronological order measures an evening nobody arranged and reports it as
+  // a fit, which is the failure this test exists to hold shut.
+  const legs = [
+    leg({ position: 0, title: 'The room', startsAt: at('21:00'), durationMins: 60, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+    leg({ position: 1, title: 'The table', startsAt: at('19:00'), durationMins: 60, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+  ];
+  assert.equal(verdictFor('travel', legs, plan()), 'breaks');
+  const detail = planFeasibility(legs, plan()).checks.find((c) => c.check === 'travel')!.detail;
+  assert.match(detail, /The table starts before The room is over/);
+});
+
+test('a sequence whose times agree with it is still judged in Plan order', () => {
+  // The same two legs, stated in the order they are lived, are fine. The
+  // previous test must be failing on the contradiction, not on the pair.
+  const legs = [
+    leg({ position: 0, title: 'The table', startsAt: at('19:00'), durationMins: 60, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+    leg({ position: 1, title: 'The room', startsAt: at('21:00'), durationMins: 60, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+  ];
+  assert.equal(verdictFor('travel', legs, plan()), 'fits');
+});
+
 test('the solver is pure: the same Plan twice gives the same answer', () => {
   const legs = [
     leg({ startsAt: at('19:00'), durationMins: 60, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng, priceCents: 1_000, seats: 8 }),

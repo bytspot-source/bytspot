@@ -1492,7 +1492,6 @@ function feasibilityFixture(overrides: {
   parties?: any[];
   granted?: { partyId: string; _count: { _all: number } }[];
   offers?: any[];
-  bookables?: any[];
   spots?: any[];
 } = {}) {
   plan.findUnique = async () => planFixture({
@@ -1506,13 +1505,13 @@ function feasibilityFixture(overrides: {
   party.findMany = async () => overrides.parties ?? [];
   partyGuest.groupBy = async () => overrides.granted ?? [];
   offer.findMany = async () => overrides.offers ?? [];
-  bookable.findMany = async () => overrides.bookables ?? [];
   coffeeSpot.findMany = async () => overrides.spots ?? [];
 }
 
 function planItemFixture(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'item-1', position: 0, needKind: 'nightlife', title: 'The Room',
+    id: 'item-1', position: 0, createdAt: new Date('2026-09-01T00:00:00Z'),
+    needKind: 'nightlife', title: 'The Room',
     status: 'available', partyId: null, offerId: null, bookableId: null,
     coffeeSpotId: null, coffeeReservation: null, ...overrides,
   };
@@ -1558,11 +1557,11 @@ test('plans.feasibility ignores cancelled items, which are history', async () =>
   feasibilityFixture({
     items: [
       planItemFixture({ id: 'dropped', partyId: 'party-1', status: 'cancelled' }),
-      planItemFixture({ id: 'kept', bookableId: 'bkbl-1' }),
+      planItemFixture({ id: 'kept', offerId: 'offer-1' }),
     ],
     // The dropped room would have broken capacity had it been judged.
     parties: [{ id: 'party-1', startsAt: null, endsAt: null, lat: null, lng: null, capacity: 1 }],
-    bookables: [{ id: 'bkbl-1', priceCents: 1_000, capacity: 10 }],
+    offers: [{ id: 'offer-1', startsAt: new Date('2026-10-01T20:00:00Z'), durationMins: 60, priceCents: 1_000, capacity: 10 }],
   });
   const result = await caller().plans.feasibility({ planId: 'plan-1' });
   assert.equal(verdictOf(result, 'capacity'), 'fits');
@@ -1573,8 +1572,8 @@ test('plans.feasibility refuses a budget verdict when no party size was set', as
   // pricing for too few would report a budget that fits when it does not.
   feasibilityFixture({
     plan: { partySize: null },
-    items: [planItemFixture({ bookableId: 'bkbl-1' })],
-    bookables: [{ id: 'bkbl-1', priceCents: 1_000, capacity: 10 }],
+    items: [planItemFixture({ offerId: 'offer-1' })],
+    offers: [{ id: 'offer-1', startsAt: new Date('2026-10-01T20:00:00Z'), durationMins: 60, priceCents: 1_000, capacity: 10 }],
   });
   const result = await caller().plans.feasibility({ planId: 'plan-1' });
   assert.equal(verdictOf(result, 'budget'), 'unknown');
@@ -1584,13 +1583,35 @@ test('plans.feasibility refuses a budget verdict when no party size was set', as
 test('plans.feasibility lets a won offer state the time and price', async () => {
   feasibilityFixture({
     items: [planItemFixture({ offerId: 'offer-1', bookableId: 'bkbl-1' })],
-    offers: [{ id: 'offer-1', startsAt: new Date('2026-10-01T19:00:00Z'), durationMins: 90, priceCents: 2_000 }],
-    bookables: [{ id: 'bkbl-1', priceCents: 99_999, capacity: 10 }],
+    offers: [{ id: 'offer-1', startsAt: new Date('2026-10-01T19:00:00Z'), durationMins: 90, priceCents: 2_000, capacity: 10 }],
   });
   const result = await caller().plans.feasibility({ planId: 'plan-1' });
   assert.equal(verdictOf(result, 'window'), 'fits');
-  // $20 x 4 against the $400 ceiling, not the snapshot's $999.99.
+  // $20 x 4 against the $400 ceiling.
   assert.equal(verdictOf(result, 'budget'), 'fits');
+});
+
+test('plans.feasibility never prices a party from its Bookable snapshot', async () => {
+  // partyToBookableSnapshot writes priceCents 0 because a Plan item attaches
+  // to a room, not a ticket tier, and tier pricing is read live at booking
+  // time. Reading that back as a fact reports a paid party as free and tells
+  // the group their night is within budget when nobody has priced it.
+  feasibilityFixture({
+    plan: { budgetCents: 1 },
+    items: [planItemFixture({ partyId: 'party-1', bookableId: 'bkbl-1' })],
+    parties: [{ id: 'party-1', startsAt: new Date('2026-10-01T20:00:00Z'), endsAt: new Date('2026-10-01T22:00:00Z'), lat: 33.7726, lng: -84.3654, capacity: 20 }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'budget'), 'unknown', 'a $0.01 budget must not be reported as fitting a paid room');
+  assert.equal(verdictOf(result, 'capacity'), 'fits', 'the party still states its own seats');
+});
+
+test('plans.feasibility refuses a Plan too large to measure rather than judging part of it', async () => {
+  feasibilityFixture({
+    items: Array.from({ length: 101 }, (_, index) =>
+      planItemFixture({ id: `item-${index}`, position: index })),
+  });
+  await assert.rejects(() => caller().plans.feasibility({ planId: 'plan-1' }), { code: 'PAYLOAD_TOO_LARGE' });
 });
 
 test('plans.feasibility reports an empty Plan as unknown, never as working', async () => {

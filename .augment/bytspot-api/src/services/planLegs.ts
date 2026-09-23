@@ -17,7 +17,10 @@
  */
 export interface PlanLeg {
   itemId: string;
-  position: number;
+  /** Null for a row written before this column existed, or by an instance
+   *  still running the previous deploy. Such an item has no stated place in
+   *  the sequence and is lived last, in the order it was attached. */
+  position: number | null;
   needKind: string;
   title: string;
   /** Null when no supply under this item states a start. */
@@ -36,7 +39,10 @@ export interface PlanLeg {
  *  what they have, and a kind that is absent simply contributes nothing. */
 export interface PlanLegSource {
   id: string;
-  position: number;
+  position: number | null;
+  /** The tie-break between items sharing a position, and the whole ordering
+   *  for items that have none. Matches how `plans.get` reads them back. */
+  createdAt: Date;
   needKind: string;
   title: string;
   party?: {
@@ -50,6 +56,7 @@ export interface PlanLegSource {
     startsAt: Date;
     durationMins: number;
     priceCents: number;
+    capacity: number;
     lat?: number | null;
     lng?: number | null;
   } | null;
@@ -57,7 +64,26 @@ export interface PlanLegSource {
     coffeeSpot?: { latitude: number | null; longitude: number | null } | null;
   } | null;
   coffeeSpot?: { latitude: number | null; longitude: number | null } | null;
-  bookable?: { priceCents: number | null; capacity: number | null } | null;
+}
+
+/**
+ * The position an item appended to this Plan should take.
+ *
+ * One item past the highest stated position, so an attach adds to the end of
+ * the sequence rather than displacing anything already in it. Reusing an
+ * existing item leaves the count alone, so a retry cannot walk the order
+ * forward.
+ *
+ * Items with no stated position are skipped rather than counted as zero. They
+ * can only be rows written by an instance still on the previous deploy, they
+ * sort last on read, and a new item may therefore be sequenced ahead of one
+ * for the length of a single deploy. That ambiguity resolves the moment the
+ * Plan is next written to, and it is the small end of the trade the nullable
+ * column buys: the alternative was those rows permanently claiming slot 0.
+ */
+export function nextPosition(items: readonly { position: number | null }[]): number {
+  return items.reduce((highest, item) =>
+    item.position === null ? highest : Math.max(highest, item.position + 1), 0);
 }
 
 /** Whole minutes between two instants, or null when either end is unstated or
@@ -88,7 +114,7 @@ function coordinate(lat: number | null | undefined, lng: number | null | undefin
  * projection sitting behind it. Nothing is invented to fill a gap.
  */
 export function legForItem(source: PlanLegSource): PlanLeg {
-  const { offer, party, bookable } = source;
+  const { offer, party } = source;
 
   const startsAt = offer?.startsAt ?? party?.startsAt ?? null;
 
@@ -102,12 +128,20 @@ export function legForItem(source: PlanLegSource): PlanLeg {
     ?? coordinate(source.coffeeReservation?.coffeeSpot?.latitude, source.coffeeReservation?.coffeeSpot?.longitude)
     ?? coordinate(source.coffeeSpot?.latitude, source.coffeeSpot?.longitude);
 
-  // The offer's agreed price outranks the snapshot. `?? null` rather than `|| 0`
-  // throughout: a free item costs 0 and a priceless one costs nothing knowable,
-  // and a budget check has to tell those apart.
-  const priceCents = offer?.priceCents ?? bookable?.priceCents ?? null;
+  // Only an accepted offer states a price. The `Bookable` snapshot is not
+  // consulted: `partyToBookableSnapshot` and `coffeeToBookableSnapshot` write
+  // `priceCents: 0` as a placeholder because a Plan item attaches to a room
+  // rather than a ticket tier, and tier pricing is read live at booking time.
+  // Reading that placeholder here would report a paid party as free — the
+  // exact collapse of unknown into fact this module exists to prevent.
+  // `?? null` rather than `|| 0`: a free item costs 0 and a priceless one
+  // costs nothing knowable, and a budget check has to tell those apart.
+  const priceCents = offer?.priceCents ?? null;
 
-  const seats = party?.capacity ?? bookable?.capacity ?? null;
+  // Same reasoning for seats. A party counts them, an offer states them, and
+  // the coffee snapshot's `capacity: 0`/`1` is a placeholder for supply that
+  // does not count seats at all.
+  const seats = party?.capacity ?? offer?.capacity ?? null;
 
   return {
     itemId: source.id,
@@ -123,10 +157,24 @@ export function legForItem(source: PlanLegSource): PlanLeg {
   };
 }
 
-/** Every item as a leg, in the order the Plan states. Ties break on position
- *  then id so the sequence is total even where positions collide. */
+/**
+ * Every item as a leg, in the order the Plan states.
+ *
+ * The tie-break is position, then createdAt, then id — the same three keys,
+ * in the same order, that `plans.get` reads items back with. Feasibility
+ * judging a different sequence from the one the guest is looking at would be
+ * a subtle and very hard to see lie.
+ *
+ * An item with no position sorts after every item that has one. A row written
+ * by an instance still on the previous deploy has not stated where it belongs,
+ * and appending it is the only reading that does not reorder someone's
+ * evening behind their back.
+ */
 export function legsForPlan(sources: readonly PlanLegSource[]): PlanLeg[] {
   return [...sources]
-    .sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
+    .sort((a, b) =>
+      (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER)
+      || a.createdAt.getTime() - b.createdAt.getTime()
+      || a.id.localeCompare(b.id))
     .map(legForItem);
 }

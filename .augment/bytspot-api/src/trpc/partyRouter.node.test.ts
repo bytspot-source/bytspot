@@ -6,6 +6,7 @@ import { appRouter } from './router';
 import { db } from '../lib/db';
 import type { Context } from './context';
 import { config } from '../config';
+import { ABANDONED_DRAFT_TTL_MS } from './partyRouter';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000001';
 const draftInput = {
@@ -1434,4 +1435,34 @@ test('A retracted recap closes to guests again immediately', async () => {
   party.findUnique = async () => ({ ...stagedRecap, recapPublishedAt: null });
   partyGuest.findUnique = async () => ({ accessGranted: true });
   await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+});
+
+test('Abandoned drafts are listable, so the host can name the row that deletes', async () => {
+  // Party Control lists published rooms only. Without events.drafts.list an
+  // abandoned draft is unreachable: invisible to the host and impossible to
+  // hand to delete, which is how the rows accumulated in the first place.
+  const touched = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+  let query: any;
+  party.findMany = async (input: any) => {
+    query = input;
+    return [{
+      id: 'party-1', title: 'First Listen', venueName: 'Sample Venue',
+      startsAt: new Date('2026-08-10T20:00:00Z'), capacity: 80,
+      accessMode: 'free-rsvp', updatedAt: touched,
+    }];
+  };
+
+  const { drafts } = await caller().events.drafts.list();
+
+  // Scoped to this host's own drafts, never another host's and never a
+  // published room.
+  assert.deepEqual(query.where, { hostUserId: 'test-user-id', status: 'draft' });
+  // Most recently worked on first: the host is looking for what they left,
+  // not for whichever party starts soonest.
+  assert.deepEqual(query.orderBy, [{ updatedAt: 'desc' }]);
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].id, 'party-1');
+  assert.equal(drafts[0].updatedAt, touched.toISOString());
+  // The row states its own deadline, so the sweeper is never a surprise.
+  assert.equal(drafts[0].expiresAt, new Date(touched.getTime() + ABANDONED_DRAFT_TTL_MS).toISOString());
 });

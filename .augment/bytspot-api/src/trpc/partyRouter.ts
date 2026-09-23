@@ -380,6 +380,39 @@ export const partyDraftsRouter = router({
     }),
 
   /**
+   * Drafts this host abandoned in Host Studio. Without this the rows are
+   * unreachable: Party Control lists only published rooms, so an abandoned
+   * draft could never be named and never be handed to `delete`.
+   * `updatedAt` leads because the host is looking for what they were last
+   * working on, not for whenever the party was scheduled to start.
+   */
+  list: protectedProcedure.query(async ({ ctx }) => {
+    const drafts = await db.party.findMany({
+      where: { hostUserId: ctx.user.userId, status: 'draft' },
+      orderBy: [{ updatedAt: 'desc' }],
+      take: HOST_ROOM_PAGE,
+      select: {
+        id: true, title: true, venueName: true, startsAt: true,
+        capacity: true, accessMode: true, updatedAt: true,
+      },
+    });
+    return {
+      drafts: drafts.map((draft) => ({
+        id: draft.id,
+        title: draft.title,
+        venueName: draft.venueName,
+        startsAt: draft.startsAt.toISOString(),
+        capacity: draft.capacity,
+        accessMode: draft.accessMode,
+        updatedAt: draft.updatedAt.toISOString(),
+        // A draft has no share link and no pass code by construction: both are
+        // minted at publish. Saying so keeps the host from hunting for one.
+        expiresAt: new Date(draft.updatedAt.getTime() + ABANDONED_DRAFT_TTL_MS).toISOString(),
+      })),
+    };
+  }),
+
+  /**
    * Delete a party the caller hosts. Drafts always delete. Published
    * parties delete only while money is not in motion: deletion is refused
    * once any guest is ticketed or checked in, or any Stripe checkout is
@@ -1142,6 +1175,10 @@ export const partyPassRouter = router({
  */
 const HOST_ROOM_STALE_MS = 24 * 60 * 60 * 1000;
 const HOST_ROOM_PAGE = 50;
+// How long an untouched Host Studio draft survives before the sweeper takes
+// it. Long enough that a host who walks away mid-build still finds the work
+// next week; short enough that abandoned rows stop accumulating forever.
+export const ABANDONED_DRAFT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 type HostRoomRow = {
   id: string; title: string; venueName: string; startsAt: Date; endsAt: Date | null;

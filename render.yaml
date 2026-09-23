@@ -124,3 +124,24 @@ services:
       - key: SENTRY_DSN
         sync: false
 
+  # ─── Draft sweep: Host Studio leaves a row behind on every abandoned build ─
+  # Party Control lists published rooms only, so an untouched draft is
+  # invisible to its host. Published parties are never eligible.
+  - type: cron
+    name: bytspot-purge-party-drafts
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    schedule: "41 7 * * *"
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: node dist/scripts/purgePartyDrafts.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BYTSPOT_RUNTIME
+        value: job
+      - key: DATABASE_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+

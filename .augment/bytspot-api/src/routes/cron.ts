@@ -5,6 +5,7 @@ import { captureError } from '../lib/observability';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { purgeExpiredAccounts } from '../services/accountDeletion';
+import { purgeAbandonedPartyDrafts } from '../services/abandonedDrafts';
 
 const router = Router();
 
@@ -81,6 +82,26 @@ router.post('/cron/purge-accounts', async (req, res) => {
   } catch (err) {
     console.error('[cron/purge-accounts] error:', err);
     captureError(err, { job: 'purge-accounts' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * POST /cron/purge-party-drafts
+ * Removes Host Studio drafts left untouched past their TTL. Published
+ * parties are never eligible.
+ */
+router.post('/cron/purge-party-drafts', async (req, res) => {
+  if (!verifyCronSecret(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  try {
+    const result = await purgeAbandonedPartyDrafts();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[cron/purge-party-drafts] error:', err);
+    captureError(err, { job: 'purge-party-drafts' });
     res.status(500).json({ error: 'Internal error' });
   }
 });

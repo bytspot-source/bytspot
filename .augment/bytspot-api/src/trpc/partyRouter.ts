@@ -10,7 +10,7 @@ import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
-import { remainingSeats, tableState, validateTables } from '../services/partyTables';
+import { liveClaimWhere, liveRemainingSeats, liveTableState, remainingSeats, tableState, validateTables } from '../services/partyTables';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -978,6 +978,18 @@ export const partyInvite = publicProcedure
     const recapPhotoCount = canReadRecap(party, guest, ctx.user?.userId)
       ? party.media.filter((media) => media.kind === 'recap').length
       : 0;
+    const now = new Date();
+    const tables = await db.partyTable.findMany({ where: { partyId: party.id }, orderBy: [{ position: 'asc' }] });
+    // Holds are counted per table so the seats a guest reads are the seats
+    // checkout will actually sell them.
+    const tableHolds = tables.length > 0
+      ? await db.partyCheckout.groupBy({
+        by: ['tableId'],
+        where: { ...liveClaimWhere(party.id, now), tableId: { in: tables.map((table) => table.id) } },
+        _count: { _all: true },
+      })
+      : [];
+    const holdsByTable = new Map(tableHolds.map((row) => [row.tableId, row._count._all]));
     return {
       id: party.id,
       source: 'host-studio-party' as const,
@@ -1005,6 +1017,24 @@ export const partyInvite = publicProcedure
       capacity: party.capacity,
       participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
       ticketTiers: parsedTicketTiers(party.ticketTiers),
+      // A table is reserved space charged on top of the door, never instead of
+      // it, so a free-entry Party may still have priced tables here. The
+      // host's own seat counts and per-table commitments stay on the host
+      // side; a guest is told only what is left and what it costs.
+      tables: tables.map((table) => {
+        const remaining = liveRemainingSeats(table, holdsByTable.get(table.id) ?? 0);
+        return {
+          id: table.id,
+          name: table.name,
+          startsAt: table.startsAt.toISOString(),
+          endsAt: table.endsAt.toISOString(),
+          capacity: table.capacity,
+          remaining,
+          state: liveTableState(table, remaining, now),
+          priceCents: table.priceCents,
+          requiredMembershipTier: table.requiredMembershipTier,
+        };
+      }),
       activityHighlights: activityHighlights(party.itinerary),
       heroImageURL: cover ? partyMediaUrl(cover.id) : null,
       thumbnailURL: cover ? partyMediaUrl(cover.id) : null,
@@ -1725,13 +1755,7 @@ export const partyTicketsRouter = router({
         });
         if (existingActiveCheckout) throw new TRPCError({ code: 'CONFLICT', message: 'An active checkout already exists for this Party.' });
 
-        const activeReservationWhere = {
-          partyId: party.id,
-          OR: [
-            { status: 'completed' },
-            { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: now } },
-          ],
-        };
+        const activeReservationWhere = liveClaimWhere(party.id, now);
         const [activePartyReservations, activeTierReservations, activeTableClaims] = await Promise.all([
           tx.partyCheckout.count({ where: activeReservationWhere }),
           ticketTier ? tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }) : 0,

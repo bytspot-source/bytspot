@@ -70,6 +70,8 @@ beforeEach(() => {
   partyCheckout.create = async ({ data }: any) => ({ id: 'checkout-1', ...data });
   partyCheckout.update = async () => ({ id: 'checkout-1' });
   partyCheckout.updateMany = async () => ({ count: 0 });
+  partyCheckout.groupBy = async () => [];
+  partyTable.findMany = async () => [];
   venue.findUnique = async () => null;
   user.findUnique = async () => ({ membershipTier: 'green' });
   (config as any).stripeSecretKey = '';
@@ -1769,4 +1771,95 @@ test('A table with a payment in flight cannot be removed underneath the guest pa
       return true;
     },
   );
+});
+
+// ─── What a guest is told about the floor ────────────────────────────────────
+
+function partyWithTables(over: Record<string, unknown> = {}) {
+  party.findFirst = async () => ({
+    id: 'party-1', title: 'First Listen', tagline: 'One moment.', templateId: 'listening-party',
+    requiredMembershipTier: 'green', startsAt: linkAlive.startsAt, endsAt: linkAlive.endsAt, shareLinkExpiresAt: null,
+    venueName: 'Fixture Room', locationDisclosure: 'public', accessMode: 'free-rsvp', capacity: 40,
+    hostDestinations: {}, itinerary: [], ticketTiers: [], host: { name: 'Host' }, media: [], ...over,
+  });
+}
+
+const soon = new Date(Date.now() + 2 * 60 * 60 * 1000);
+
+test('A free-entry Party still shows its priced tables to a guest', async () => {
+  // The door being free says nothing about what a table costs, so a guest who
+  // is told only the access mode has been told the cheaper half of the truth.
+  partyWithTables();
+  partyTable.findMany = async () => [
+    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 4, committed: 0, priceCents: 9000, requiredMembershipTier: null, position: 0 },
+  ];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(invite.accessMode, 'free-rsvp');
+  assert.deepEqual(invite.ticketTiers, []);
+  assert.equal(invite.tables.length, 1);
+  assert.equal(invite.tables[0].priceCents, 9000);
+  assert.equal(invite.tables[0].remaining, 4);
+  assert.equal(invite.tables[0].state, 'open');
+});
+
+test('Seats a guest reads already count the payments in flight', async () => {
+  // Showing settled seats only would offer room that checkout then refuses.
+  partyWithTables();
+  partyTable.findMany = async () => [
+    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 4, committed: 1, priceCents: 9000, requiredMembershipTier: null, position: 0 },
+  ];
+  partyCheckout.groupBy = async () => [{ tableId: 'table-1', _count: { _all: 3 } }];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  // Three live claims against four seats, not one settled seat against four.
+  assert.equal(invite.tables[0].remaining, 1);
+  assert.equal(invite.tables[0].state, 'open');
+});
+
+test('A table held to its last seat by a payment in flight reads full, not open', async () => {
+  // State and seats come from one number, so a table cannot say open while
+  // saying nothing is left.
+  partyWithTables();
+  partyTable.findMany = async () => [
+    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 2, committed: 0, priceCents: 9000, requiredMembershipTier: null, position: 0 },
+  ];
+  partyCheckout.groupBy = async () => [{ tableId: 'table-1', _count: { _all: 2 } }];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(invite.tables[0].remaining, 0);
+  assert.equal(invite.tables[0].state, 'full');
+});
+
+test('A table that already started is passed, which is not the same as full', async () => {
+  partyWithTables();
+  partyTable.findMany = async () => [
+    { id: 'table-1', name: 'Early Table', startsAt: new Date(Date.now() - 60 * 1000), endsAt: linkAlive.endsAt, capacity: 4, committed: 0, priceCents: 9000, requiredMembershipTier: null, position: 0 },
+  ];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  // Seats remain, and they are still unreachable: come-back-later and
+  // this-already-happened are different facts.
+  assert.equal(invite.tables[0].remaining, 4);
+  assert.equal(invite.tables[0].state, 'passed');
+});
+
+test('An invitation never hands a guest the host floor counts', async () => {
+  partyWithTables();
+  partyTable.findMany = async () => [
+    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 4, committed: 2, priceCents: 9000, requiredMembershipTier: null, position: 0 },
+  ];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  // How many seats are gone is the host's business; a guest is told what is
+  // left and what it costs.
+  assert.deepEqual(Object.keys(invite.tables[0]).sort(), [
+    'capacity', 'endsAt', 'id', 'name', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state',
+  ]);
+});
+
+test('A Party with no tables says so with an empty floor, not a missing one', async () => {
+  partyWithTables();
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.deepEqual(invite.tables, []);
 });

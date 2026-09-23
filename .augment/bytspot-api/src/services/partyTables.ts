@@ -106,10 +106,53 @@ export function tableState(
   table: { startsAt: Date; capacity: number; committed: number },
   now: Date = new Date(),
 ): TableState {
+  return liveTableState(table, remainingSeats(table), now);
+}
+
+/**
+ * The same three facts, told about seats that already account for payments in
+ * flight. State and seats are derived from one number so a table cannot read
+ * `open` while saying nothing is left.
+ */
+export function liveTableState(
+  table: { startsAt: Date },
+  remaining: number,
+  now: Date = new Date(),
+): TableState {
   if (table.startsAt.getTime() <= now.getTime()) return 'passed';
-  return table.committed >= table.capacity ? 'full' : 'open';
+  return remaining === 0 ? 'full' : 'open';
 }
 
 export function remainingSeats(table: { capacity: number; committed: number }): number {
   return Math.max(0, table.capacity - table.committed);
+}
+
+/**
+ * The claim rule checkout enforces, written once so the number a guest reads
+ * and the number the till applies cannot drift apart.
+ *
+ * A seat is claimed when it is settled or when a payment for it is still in
+ * flight. Counting only settled seats would show a guest room that checkout
+ * then refuses, which is a promise the till does not keep.
+ */
+export function liveClaimWhere(partyId: string, now: Date) {
+  return {
+    partyId,
+    OR: [
+      { status: 'completed' },
+      { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: now } },
+    ],
+  };
+}
+
+/**
+ * Seats left once payments in flight are counted.
+ *
+ * The two counts overlap rather than add: a settled checkout is both a
+ * committed seat and a completed row, so summing them would take the same
+ * seat twice. The larger is taken instead, which also covers a seat committed
+ * without a checkout behind it, such as one the host gave away.
+ */
+export function liveRemainingSeats(table: { capacity: number; committed: number }, holds: number): number {
+  return Math.max(0, table.capacity - Math.max(table.committed, holds));
 }

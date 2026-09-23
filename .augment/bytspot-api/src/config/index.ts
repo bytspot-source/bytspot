@@ -66,6 +66,14 @@ const envSchema = z.object({
   // will never match member identity hashes. The dev default is public in
   // this repo, so production refuses to start with it (checked below).
   CONTACT_HASH_SALT:      z.string().default(isDev ? 'dev-contact-salt-change-me' : ''),
+  // S3-compatible media bucket (R2, S3, MinIO). Unset keeps stills in Postgres
+  // and refuses video. All four of bucket + keys must be set before writes leave
+  // the database; endpoint/region have safe defaults for R2.
+  MEDIA_S3_ENDPOINT: z.string().default(''),
+  MEDIA_S3_REGION: z.string().default('auto'),
+  MEDIA_S3_BUCKET: z.string().default(''),
+  MEDIA_S3_ACCESS_KEY_ID: z.string().default(''),
+  MEDIA_S3_SECRET_ACCESS_KEY: z.string().default(''),
 });
 
 // In dev mode, allow missing DATABASE_URL and JWT_SECRET with fallbacks
@@ -143,6 +151,11 @@ export const config = {
     if (!env.CONTACT_HASH_SALT) throw new Error('CONTACT_HASH_SALT is not configured in this runtime (job mode does not hash contacts).');
     return env.CONTACT_HASH_SALT;
   },
+  mediaS3Endpoint: env.MEDIA_S3_ENDPOINT.replace(/\/$/, ''),
+  mediaS3Region: env.MEDIA_S3_REGION,
+  mediaS3Bucket: env.MEDIA_S3_BUCKET,
+  mediaS3AccessKeyId: env.MEDIA_S3_ACCESS_KEY_ID,
+  mediaS3SecretAccessKey: env.MEDIA_S3_SECRET_ACCESS_KEY,
 } as const;
 
 /**
@@ -172,5 +185,10 @@ export function printConfigDiagnostics(): void {
   check(config.apnsKeyId && config.apnsTeamId && config.apnsKeyPath && config.apnsBundleId ? 'ok' : '', 'APNs', 'native push will not send');
   check(config.appleClientId, 'Sign in with Apple', 'native Apple sign-in will not work');
   check(config.googleServerClientId, 'Google Sign-In', 'native Google sign-in will not work');
+  check(
+    config.mediaS3Bucket && config.mediaS3AccessKeyId && config.mediaS3SecretAccessKey ? 'ok' : '',
+    'Media object store',
+    'vendor stills stay in Postgres; video stays closed',
+  );
   console.log('');
 }

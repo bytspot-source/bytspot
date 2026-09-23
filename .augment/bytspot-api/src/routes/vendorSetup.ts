@@ -17,6 +17,7 @@ import {
 } from '../vendor/contract';
 import { candidateBlockers, geocode, geocodeIsConfigured } from '../vendor/geocode';
 import { onboardingLink, payoutIsConfigured, refreshPayout, storedPayout } from '../vendor/payout';
+import { coverUrlFor } from '../vendor/media';
 import { advanceSeller } from '../vendor/sellerState';
 
 const router = Router();
@@ -35,7 +36,7 @@ interface ProfileBody {
   payout?: unknown;
 }
 
-function locationDto(location: VendorLocation) {
+function locationDto(location: VendorLocation, coverUrl?: string) {
   return {
     id: location.id,
     label: location.label,
@@ -46,6 +47,7 @@ function locationDto(location: VendorLocation) {
     lng: location.lng,
     radiusMiles: location.radiusMiles ?? undefined,
     timezone: location.timezone ?? undefined,
+    coverUrl,
   };
 }
 
@@ -55,11 +57,12 @@ async function profileFor(seller: VendorSeller): Promise<ProfileBody> {
     // reference them, not for the vendor to look at.
     where: { sellerId: seller.id, state: { not: 'CLOSED' } },
     orderBy: { createdAt: 'asc' },
+    include: { media: { where: { kind: 'cover' }, select: { id: true, kind: true } } },
   });
   return {
     legalName: seller.legalName ?? undefined,
     contactEmail: seller.contactEmail ?? undefined,
-    locations: locations.map(locationDto),
+    locations: locations.map((location) => locationDto(location, coverUrlFor(location.media))),
     payout: storedPayout(seller),
   };
 }

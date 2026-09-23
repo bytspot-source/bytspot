@@ -965,6 +965,13 @@ enum VendorEndpointState {
   DISABLED
 }
 
+enum VendorMediaKind {
+  cover
+  gallery
+  video
+  menu
+}
+
 /// A business. Identity only; what it sells lives on its bookables.
 ///
 /// There is deliberately no `satisfied` column. Which requirements a seller has
@@ -994,6 +1001,7 @@ model VendorSeller {
   endpoints VendorWebhookEndpoint[]
   windows   VendorAvailabilityWindow[]
   offers    Offer[]
+  media     VendorMedia[]
 
   @@index([state])
   @@map("vendor_sellers")
@@ -1054,6 +1062,7 @@ model VendorLocation {
   seller  VendorSeller               @relation(fields: [sellerId], references: [id], onDelete: Cascade)
   windows VendorAvailabilityWindow[]
   offers  Offer[]
+  media   VendorMedia[]
 
   /// Every profile read filters a seller's places by state.
   @@index([sellerId, state])
@@ -1268,6 +1277,7 @@ model VendorAvailabilityWindow {
   location    VendorLocation         @relation(fields: [locationId], references: [id], onDelete: Cascade)
   commitments VendorSlotCommitment[]
   offers      Offer[]
+  media       VendorMedia[]
 
   @@index([sellerId, active])
   /// The demand feed reads only windows a vendor actually wants offers from.
@@ -1275,6 +1285,42 @@ model VendorAvailabilityWindow {
   @@index([domain, active])
   @@index([locationId, skuTemplateId])
   @@map("vendor_availability_windows")
+}
+
+/// A photo, menu file, or (later) short clip hanging off a PIN or a window.
+/// Exactly one parent: a dump folder on the seller would mix two places.
+/// The console still calls a seller's offering a bookable; that id is the
+/// window. The blob is Postgres `bytes` until object storage is configured;
+/// then `storageKey` is the object and `bytes` is cleared. Clients never see
+/// the key.
+model VendorMedia {
+  id         String          @id @default(cuid())
+  sellerId   String          @map("seller_id")
+  locationId String?         @map("location_id")
+  /// The window this hangs off. Named `bookableId` because that is the id the
+  /// console already uses for a seller's offering.
+  bookableId String?         @map("bookable_id")
+  kind       VendorMediaKind
+  position   Int             @default(0)
+  mimeType   String          @map("mime_type")
+  bytes      Bytes?
+  byteSize   Int             @map("byte_size")
+  storageKey String?         @map("storage_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  seller   VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location VendorLocation?           @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  bookable VendorAvailabilityWindow? @relation(fields: [bookableId], references: [id], onDelete: Cascade)
+
+  @@unique([locationId, kind, position])
+  @@unique([bookableId, kind, position])
+  @@unique([storageKey])
+  @@index([sellerId])
+  @@index([locationId])
+  @@index([bookableId])
+  @@map("vendor_media")
 }
 
 /// The facts taken against one derived slot. A row exists only once someone

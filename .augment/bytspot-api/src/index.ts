@@ -26,6 +26,7 @@ import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 import vendorAuthRouter from './routes/vendorAuth';
 import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-in (separate origin, cookie-based refresh)
 import vendorDemandRouter from './routes/vendorDemand';
+import vendorMediaRouter from './routes/vendorMedia';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -51,6 +52,8 @@ app.use(
 // Stripe signatures are calculated over the exact raw request body. This route
 // must remain before express.json(), which would otherwise consume that body.
 app.use(partyStripeWebhookRouter);
+app.use('/vendor/locations', express.json({ limit: '4mb' }));
+app.use('/vendor/bookables', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // Global rate limiting: 300 requests per 15 min per IP
@@ -87,6 +90,7 @@ app.use(diagnosticsRouter);
 app.use(vendorAuthRouter);
 app.use(vendorSetupRouter);
 app.use(vendorDemandRouter);
+app.use(vendorMediaRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

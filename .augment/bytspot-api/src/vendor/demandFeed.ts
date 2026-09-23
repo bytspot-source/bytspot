@@ -22,6 +22,7 @@ import {
   type EvaluableDemand,
   type EvaluableSupply,
 } from './demand';
+import { coverUrlFor } from './media';
 
 /** Two seats answered at once, or the slot went between reading and writing. */
 export class DemandMoved extends Error {}
@@ -46,7 +47,7 @@ export class NoCapacity extends Error {}
 const MILES_PER_DEGREE_LAT = 69;
 
 /** Window id to the seller-facing detail the console renders. */
-type SupplyDetail = Map<string, { title: string; locationId: string; location: LocationDto }>;
+type SupplyDetail = Map<string, { title: string; locationId: string; location: LocationDto; coverUrl?: string }>;
 
 interface SupplySnapshot {
   supply: EvaluableSupply[];
@@ -116,7 +117,7 @@ export async function supplyFor(sellerId: string, now: Date): Promise<SupplySnap
     // window the seller has not offered for this never reaches the feed and
     // cannot be answered from by any later path.
     where: { sellerId, active: true, intent: ASK_INTENT, location: { state: 'ACTIVE' } },
-    include: { location: true },
+    include: { location: true, media: { where: { kind: 'cover' }, select: { id: true, kind: true } } },
   });
 
   const detail: SupplyDetail = new Map();
@@ -165,6 +166,7 @@ export async function supplyFor(sellerId: string, now: Date): Promise<SupplySnap
       title: window.skuTemplateId,
       locationId: window.locationId,
       location: locationDto(window.location),
+      coverUrl: coverUrlFor(window.media),
     });
   }
 
@@ -293,6 +295,7 @@ export async function buildDemandSnapshot(sellerId: string, locations: Parameter
         title: info?.title ?? item.windowId,
         domain: item.domain,
         location: info?.location,
+        coverUrl: info?.coverUrl,
         priceCents: item.priceCents,
         maxGuests: item.maxGuests,
         slots: item.slots.map(slotDto),

@@ -269,6 +269,7 @@ model Party {
   arrivalVenue    Venue?                @relation("partyArrivalVenue", fields: [arrivalVenueId], references: [id], onDelete: Restrict)
   media           PartyMedia[]
   guests          PartyGuest[]
+  sessions        PartySession[]
   checkouts       PartyCheckout[]
   planItems       PlanItem[]
   encounterOptIns PartyEncounterOptIn[]
@@ -297,6 +298,47 @@ model PlatformFeeSetting {
   @@map("platform_fee_settings")
 }
 
+/// A time-boxed seating inside a Party: a 7pm sitting and a 9pm sitting, each
+/// with its own door. Sessions are stored facts, not derived ones — unlike a
+/// vendor availability window, which recurs across a horizon and therefore has
+/// to materialise a row per instant before anything can be taken against it.
+/// A session's identity is its own id, so capacity is held here and taken by a
+/// guarded increment rather than through a separate commitment table.
+model PartySession {
+  id       String @id @default(cuid())
+  partyId  String @map("party_id")
+  name     String
+  /// Bounded by the Party's own window; the API refuses a session that starts
+  /// before the party or ends after it.
+  startsAt DateTime @map("starts_at")
+  endsAt   DateTime @map("ends_at")
+
+  /// Seats for this sitting. The sum across a Party's sessions may not exceed
+  /// the Party capacity, because the room cannot hold more than the room.
+  capacity  Int
+  /// Seats already taken. Never exceeds capacity — the database refuses it, so
+  /// a lost race cannot oversell a sitting.
+  committed Int @default(0)
+
+  /// Zero is a free sitting, not an unpriced one.
+  priceCents             Int     @default(0) @map("price_cents")
+  requiredMembershipTier String? @map("required_membership_tier")
+
+  /// The order the host arranged the sittings in, not the order they were
+  /// typed. Matches the PlanItem convention.
+  position Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  party  Party        @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  guests PartyGuest[]
+
+  @@unique([partyId, position])
+  @@index([partyId, startsAt])
+  @@map("party_sessions")
+}
+
 model PartyGuest {
   id             String    @id @default(cuid())
   partyId        String    @map("party_id")
@@ -304,6 +346,9 @@ model PartyGuest {
   status         String    @default("pending")
   accessGranted  Boolean   @default(false) @map("access_granted")
   ticketTierName String?   @map("ticket_tier_name")
+  /// The sitting this guest holds. Null when the Party runs no sessions, which
+  /// is every Party that existed before sessions did.
+  sessionId      String?   @map("session_id")
   credential     String?   @unique
   checkedInAt    DateTime? @map("checked_in_at")
   createdAt      DateTime  @default(now()) @map("created_at")
@@ -311,6 +356,7 @@ model PartyGuest {
 
   party     Party           @relation(fields: [partyId], references: [id], onDelete: Cascade)
   user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session   PartySession?   @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   checkouts PartyCheckout[]
 
   @@unique([partyId, userId])

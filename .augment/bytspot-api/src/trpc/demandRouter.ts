@@ -8,6 +8,7 @@ import { sellableSlots } from '../vendor/availability';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
 import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
+import { notifyAskSeller } from '../vendor/askNotice';
 
 /**
  * Demand — intent published before supply is known.
@@ -237,7 +238,7 @@ export const demandRouter = router({
       });
       if (already) throw new TRPCError({ code: 'CONFLICT', message: 'You have already asked here.' });
 
-      return raiseDemand(
+      const raised = await raiseDemand(
         ctx.user.userId,
         {
           category,
@@ -250,6 +251,9 @@ export const demandRouter = router({
         { note: input.note, targetWindowId: window.id },
         now,
       );
+      // Not awaited: the ask is already in the seller's feed; the email only says so.
+      void notifyAskSeller(window.id, { partySize: input.partySize, startsAt: slot.startsAt, note: input.note });
+      return raised;
     }),
 
   /**
@@ -367,6 +371,7 @@ export const demandRouter = router({
           orderBy: { startsAt: 'asc' },
           include: { location: { select: { label: true } } },
         },
+        targetWindow: { select: { location: { select: { label: true } }, seller: { select: { legalName: true } } } },
       },
     });
 
@@ -391,6 +396,10 @@ export const demandRouter = router({
       note: row.note ?? undefined,
       planId: row.planId ?? undefined,
       targetWindowId: row.targetWindowId ?? undefined,
+      // Who an ask went to, so it can be named before anyone has answered.
+      askedOf: row.targetWindow
+        ? { sellerName: row.targetWindow.seller.legalName ?? row.targetWindow.location.label, place: row.targetWindow.location.label }
+        : undefined,
       raisedAt: row.raisedAt.toISOString(),
       expiresAt: row.expiresAt.toISOString(),
       offers: row.offers.map((offer) => ({

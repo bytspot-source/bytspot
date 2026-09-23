@@ -213,6 +213,39 @@ test('a sequence whose times agree with it is still judged in Plan order', () =>
   assert.equal(verdictFor('travel', legs, plan()), 'fits');
 });
 
+test('travel will not call it a fit when a leg it measured from never said how long it runs', () => {
+  // Leaving the instant they arrive is the generous reading, and generosity is
+  // right while looking for a break. It is not right as a conclusion: if the
+  // first leg actually runs an hour, the hop may be impossible. A tick here
+  // would be a guess wearing one.
+  const legs = [
+    leg({ position: 0, title: 'Coffee', startsAt: at('19:00'), durationMins: null, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+    leg({ position: 1, title: 'The room', startsAt: at('21:00'), durationMins: 60, latitude: FAR.lat, longitude: FAR.lng }),
+  ];
+  assert.equal(verdictFor('travel', legs, plan()), 'unknown');
+  const detail = planFeasibility(legs, plan()).checks.find((c) => c.check === 'travel')!.detail;
+  assert.match(detail, /Coffee does not say how long it runs/);
+});
+
+test('travel still fits when every leg it measured from stated its length', () => {
+  // The previous test must be failing on the missing duration, not the pair.
+  const legs = [
+    leg({ position: 0, title: 'Coffee', startsAt: at('19:00'), durationMins: 30, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+    leg({ position: 1, title: 'The room', startsAt: at('21:00'), durationMins: 60, latitude: FAR.lat, longitude: FAR.lng }),
+  ];
+  assert.equal(verdictFor('travel', legs, plan()), 'fits');
+});
+
+test('a missing duration on the last leg alone does not cloud travel', () => {
+  // Nothing is measured from the final leg, so its length cannot change any
+  // journey. Refusing here would be over-caution, which is its own dishonesty.
+  const legs = [
+    leg({ position: 0, title: 'Coffee', startsAt: at('19:00'), durationMins: 30, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng }),
+    leg({ position: 1, title: 'The room', startsAt: at('21:00'), durationMins: null, latitude: FAR.lat, longitude: FAR.lng }),
+  ];
+  assert.equal(verdictFor('travel', legs, plan()), 'fits');
+});
+
 test('the solver is pure: the same Plan twice gives the same answer', () => {
   const legs = [
     leg({ startsAt: at('19:00'), durationMins: 60, latitude: MIDTOWN.lat, longitude: MIDTOWN.lng, priceCents: 1_000, seats: 8 }),

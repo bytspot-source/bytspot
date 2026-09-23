@@ -590,6 +590,10 @@ test('createSolo wraps one supply in a single-need Plan of one, deriving capabil
   assert.match(bookableData.id, /^BYT-party_ticket-/);
   // The skeleton settles nothing: the item is never seeded booked.
   assert.equal(itemData.status, undefined);
+  // The first item of a new Plan states where it sits. Leaving this null would
+  // mean current code writes the very rows the nullable column exists to mark
+  // as written by older code — and the next item added would sort ahead of it.
+  assert.equal(itemData.position, 0);
 });
 
 test('createSolo is idempotent: a replayed key returns the same Plan and writes nothing new', async () => {
@@ -1248,6 +1252,29 @@ test('parallel create/add conflicts retry on a fresh transaction and produce exa
   assert.equal(store.state.snapshots.length, 2);
   assert.equal(store.attempts, 3);
   }
+});
+
+test('adding to a Plan holding an item from an older deploy settles it rather than overtaking it', async () => {
+  // A row written by an instance that predated the position column has no
+  // stated position, and readers put it last. That is right in isolation but
+  // it does not self-correct: the appended item would take a finite position,
+  // finite sorts before null, and the older item would be overtaken for good.
+  const store = selectionStore(planFixture({
+    needs: ['coffee', 'nightlife'],
+    items: [{
+      id: 'from-old-deploy', position: null, createdAt: new Date('2026-09-01T00:00:00Z'),
+      needKind: 'nightlife', title: 'Attached before the column existed',
+      status: 'available', selectionKey: null, partyId: null, coffeeSpotId: null, coffeeReservation: null,
+    }],
+  }));
+
+  await caller().plans.addBookables({ planId: 'plan-1', bookableSelections: [coffeeSelection] });
+
+  const items = store.state.plan!.items;
+  const settled = items.find((item: any) => item.id === 'from-old-deploy');
+  assert.equal(settled.position, 0, 'the older item keeps the slot readers were already giving it');
+  const appended = items.find((item: any) => item.id !== 'from-old-deploy');
+  assert.equal(appended.position, 1, 'the new item goes after it, not ahead of it');
 });
 
 test('add is creator-only, preserves cancelled selections, and never changes get/list DTOs on retry', async () => {

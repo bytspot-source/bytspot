@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { legForItem, legsForPlan, minutesBetween, nextPosition, type PlanLegSource } from './planLegs';
+import { legForItem, legsForPlan, minutesBetween, nextPosition, sequenceForAppend, type PlanLegSource } from './planLegs';
 
 const at = (iso: string) => new Date(iso);
 
@@ -165,6 +165,38 @@ test('an item with no stated position is lived last, not first', () => {
     source({ id: 'p', position: null, title: 'Earlier', createdAt: at('2026-09-03T00:00:00Z') }),
   ]);
   assert.deepEqual(many.map((leg) => leg.title), ['Earlier', 'Later']);
+});
+
+test('an append settles the items a previous deploy left unpositioned instead of overtaking them', () => {
+  // Left alone this never self-corrects: the appended item takes a finite
+  // position, finite sorts before null, and the older item is overtaken for
+  // good. So the write is the moment to settle it, into the slot readers were
+  // already giving it, which makes the repair invisible.
+  const { repairs, position } = sequenceForAppend([
+    { id: 'placed', position: 0, createdAt: at('2026-09-01T00:00:00Z') },
+    { id: 'orphan', position: null, createdAt: at('2026-09-02T00:00:00Z') },
+  ]);
+  assert.deepEqual(repairs, [{ id: 'orphan', position: 1 }]);
+  assert.equal(position, 2, 'the new item goes after the item it would otherwise have overtaken');
+});
+
+test('several unpositioned items are settled in the order they were attached', () => {
+  const { repairs, position } = sequenceForAppend([
+    { id: 'b', position: null, createdAt: at('2026-09-03T00:00:00Z') },
+    { id: 'a', position: null, createdAt: at('2026-09-02T00:00:00Z') },
+    { id: 'placed', position: 4, createdAt: at('2026-09-01T00:00:00Z') },
+  ]);
+  assert.deepEqual(repairs, [{ id: 'a', position: 5 }, { id: 'b', position: 6 }]);
+  assert.equal(position, 7);
+});
+
+test('a fully positioned Plan needs no repair', () => {
+  const { repairs, position } = sequenceForAppend([
+    { id: 'a', position: 0, createdAt: at('2026-09-01T00:00:00Z') },
+    { id: 'b', position: 1, createdAt: at('2026-09-02T00:00:00Z') },
+  ]);
+  assert.deepEqual(repairs, []);
+  assert.equal(position, 2);
 });
 
 test('an appended item goes after the sequence, and an unpositioned sibling is not counted as zero', () => {

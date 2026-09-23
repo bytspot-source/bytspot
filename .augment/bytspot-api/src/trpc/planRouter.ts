@@ -10,7 +10,7 @@ import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { boundingBoxWhere } from '../services/geoBox';
-import { legsForPlan, nextPosition, type PlanLegSource } from '../services/planLegs';
+import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
@@ -270,6 +270,14 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
  *  above. Far beyond any real evening. */
 const FEASIBILITY_MAX_ITEMS = 100;
 
+/** Settle items a previous deploy left unpositioned. Runs in the caller's
+ *  transaction: a half-renumbered Plan is worse than an unnumbered one. */
+async function applyPositionRepairs(client: TxClient, repairs: { id: string; position: number }[]) {
+  for (const repair of repairs) {
+    await client.planItem.update({ where: { id: repair.id }, data: { position: repair.position } });
+  }
+}
+
 const planNotFound = () => new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
 
 /** Keep the original unique key occupied; an ambiguous create retry must not
@@ -499,7 +507,13 @@ async function insertBookableSelections(client: TxClient, planId: string,
   const ids: string[] = [];
   // Append after whatever the Plan already holds. Reusing an existing item
   // leaves the count alone, so a retry cannot walk the order forward.
-  let position = nextPosition(existing);
+  //
+  // Any item left unpositioned by a previous deploy is settled first, in the
+  // same transaction and into the slot readers were already giving it, so the
+  // append cannot overtake it.
+  const sequence = sequenceForAppend(existing);
+  await applyPositionRepairs(client, sequence.repairs);
+  let position = sequence.position;
   for (const { snapshot, ...supply } of supplies) {
     // Include pre-picker attaches: a NULL/old selection key must not cause a
     // second item for the same party or already-linked coffee spot.
@@ -1223,11 +1237,13 @@ export const planRouter = router({
         return { id: item.id, capability: item.capability, status: item.status };
       }
       if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
+      const attachSequence = sequenceForAppend(plan.items);
+      await applyPositionRepairs(tx, attachSequence.repairs);
       const item = await tx.planItem.create({ data: {
         planId: plan.id, needKind: input.needKind, title: supply.title,
         capability: supply.capability, partyId, coffeeReservationId,
         selectionKey, bookableId: supply.snapshot?.id ?? null,
-        position: nextPosition(plan.items),
+        position: attachSequence.position,
       } });
       return { id: item.id, capability: item.capability, status: item.status };
     }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.')),
@@ -1314,6 +1330,10 @@ export const planRouter = router({
               partyId: supply.partyId,
               coffeeReservationId: supply.coffeeReservationId,
               bookableId: supply.snapshot?.id ?? null,
+              // The first item of a brand new Plan. Stated explicitly: leaving
+              // it null would mean this code writes the very rows the nullable
+              // column exists to identify as written by older code.
+              position: 0,
             },
           });
           return { id: plan.id };

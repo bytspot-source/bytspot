@@ -162,6 +162,10 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
   }
 
   let compared = 0;
+  // Legs measured from without a stated length. The generous reading below
+  // can only ever clear a journey it should have refused, so a Plan carrying
+  // one cannot come back as a clean fit.
+  const assumedImmediateDeparture: PlanLeg[] = [];
   for (let i = 1; i < ordered.length; i += 1) {
     const from = ordered[i - 1];
     const to = ordered[i];
@@ -169,6 +173,7 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
     // its start, which assumes the group leaves the instant they arrive. That
     // is the most generous reading, and generosity is right here: it can only
     // ever reduce the number of Plans called impossible.
+    if (endOf(from) === null) assumedImmediateDeparture.push(from);
     const leaveAt = endOf(from) ?? from.startsAt!;
     const availableMins = (to.startsAt!.getTime() - leaveAt.getTime()) / 60_000;
     // Negative time is the sequence contradicting itself: the next leg starts
@@ -198,6 +203,18 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
     return unknown('travel',
       `The ${compared === 1 ? 'one journey' : `${compared} journeys`} that could be measured leave enough time, but ${unplaceable} of these have no stated place or time.`,
       legs.filter((leg) => !leg.startsAt || !placed(leg)).map((leg) => leg.itemId));
+  }
+
+  // Every journey cleared, but at least one of them was measured from a leg
+  // that never said how long it runs. The group was assumed to leave the
+  // moment they arrived; if that leg actually runs an hour, the hop after it
+  // may not be possible at all. Reporting a fit here would be a guess wearing
+  // a tick.
+  if (assumedImmediateDeparture.length > 0) {
+    const names = [...new Set(assumedImmediateDeparture.map((leg) => leg.title))].join(', ');
+    return unknown('travel',
+      `There is time to get between these only if the group leaves the moment they arrive: ${names} ${assumedImmediateDeparture.length === 1 ? 'does not say' : 'do not say'} how long it runs.`,
+      [...new Set(assumedImmediateDeparture.map((leg) => leg.itemId))]);
   }
   return fits('travel', 'There is time to get between all of these.');
 }

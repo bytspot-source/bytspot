@@ -74,16 +74,48 @@ export interface PlanLegSource {
  * existing item leaves the count alone, so a retry cannot walk the order
  * forward.
  *
- * Items with no stated position are skipped rather than counted as zero. They
- * can only be rows written by an instance still on the previous deploy, they
- * sort last on read, and a new item may therefore be sequenced ahead of one
- * for the length of a single deploy. That ambiguity resolves the moment the
- * Plan is next written to, and it is the small end of the trade the nullable
- * column buys: the alternative was those rows permanently claiming slot 0.
+ * Items with no stated position are skipped rather than counted as zero, so
+ * this is only the whole answer for a Plan where every item has one. Callers
+ * that are about to write must use `sequenceForAppend`, which repairs the
+ * unpositioned rows first — left alone they sort last forever, and the
+ * appended item would overtake them permanently rather than for one deploy.
  */
 export function nextPosition(items: readonly { position: number | null }[]): number {
   return items.reduce((highest, item) =>
     item.position === null ? highest : Math.max(highest, item.position + 1), 0);
+}
+
+export interface SequencedItem {
+  id: string;
+  position: number | null;
+  createdAt: Date;
+}
+
+/**
+ * Where an appended item goes, and what has to be fixed first.
+ *
+ * A row with no stated position can only have been written by an instance
+ * running a deploy that predates the column. Readers put it last, which is
+ * right in isolation, but it is not self-correcting: the next append takes a
+ * finite position, finite sorts before null, and the older item is overtaken
+ * for good. So a write is the moment to settle it. Each unpositioned row is
+ * given a real position after the highest stated one, in the order it was
+ * attached, which is exactly where readers had been placing it — the repair
+ * is therefore invisible, and it happens once.
+ *
+ * `repairs` must be applied in the same transaction as the insert, or a
+ * failed write leaves the Plan half-renumbered.
+ */
+export function sequenceForAppend(items: readonly SequencedItem[]): {
+  repairs: { id: string; position: number }[];
+  position: number;
+} {
+  let next = nextPosition(items);
+  const repairs = items
+    .filter((item) => item.position === null)
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))
+    .map((item) => ({ id: item.id, position: next++ }));
+  return { repairs, position: next };
 }
 
 /** Whole minutes between two instants, or null when either end is unstated or

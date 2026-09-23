@@ -4,7 +4,7 @@ import { serializableTransactionWithRetry } from '../lib/transactions';
 import { stateAfterOperation } from './demand';
 import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
-import { nextPosition } from '../services/planLegs';
+import { sequenceForAppend } from '../services/planLegs';
 
 /**
  * Taking an offer.
@@ -201,12 +201,19 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
       // serialization failure and the retry sees the tombstone.
       const plan = await tx.plan.findFirst({
         where: { id: offer.demand.planId, deletedAt: null },
-        select: { id: true, items: { select: { position: true } } },
+        select: { id: true, items: { select: { id: true, position: true, createdAt: true } } },
       });
       // No need kind means the category never came from a Plan need. Filing it
       // under a guessed one would put a booking in a list the guest never
       // wrote, so it stays unfiled and honest.
       if (plan && needKind) {
+        // Settle anything a previous deploy left unpositioned before
+        // appending, in this same transaction, so the won table cannot
+        // overtake an item that was already in the Plan.
+        const sequence = sequenceForAppend(plan.items);
+        for (const repair of sequence.repairs) {
+          await tx.planItem.update({ where: { id: repair.id }, data: { position: repair.position } });
+        }
         await tx.planItem.create({
           data: {
             planId: plan.id,
@@ -220,7 +227,7 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
             selectionKey: `vendorOffer:${offer.id}`,
             // A won table appends to the Plan rather than displacing anything
             // already in it.
-            position: nextPosition(plan.items),
+            position: sequence.position,
           },
         });
       }

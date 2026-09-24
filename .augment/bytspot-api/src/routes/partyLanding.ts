@@ -88,7 +88,9 @@ interface PublicParty {
 function renderPage(party: PublicParty): string {
   const title = escapeHtml(party.title);
   const host = escapeHtml(party.hostName);
-  const tagline = escapeHtml(party.tagline || 'One moment. Your people.');
+  // A host who cleared the subtitle meant to clear it. Reinstating the default
+  // here put words back in their mouth that the editor had just taken out.
+  const tagline = escapeHtml(party.tagline);
   const description = `${host} · ${escapeHtml(party.when)}${party.venue ? ` · ${escapeHtml(party.venue)}` : ''}`;
   const chips = [escapeHtml(party.tier.toUpperCase()), escapeHtml(party.access), escapeHtml(party.when)]
     .map((chip) => `<span class="chip">${chip}</span>`).join('');
@@ -137,7 +139,7 @@ h1{font-size:30px;font-weight:900;line-height:1.1;margin:18px 0 6px}
 <div class="brand">BYTSPOT PARTY PASS</div>
 ${cover}
 <h1>${title}</h1>
-<p class="tagline">${tagline}</p>
+${tagline ? `<p class="tagline">${tagline}</p>` : ''}
 <p class="host">Hosted by ${host}</p>
 <div class="chips">${chips}</div>
 ${party.venue ? `<p class="venue">${escapeHtml(party.venue)}</p>` : `<p class="note">${escapeHtml(party.disclosureNote)}</p>`}

@@ -32,6 +32,11 @@ export function domainsForCategory(id: string): string[] {
   return categories.find((category) => category.id === id)?.domains ?? [];
 }
 
+/** The demand category an ask about a window of this domain is raised under. */
+export function categoryForDomain(domain: string): string | undefined {
+  return categories.find((category) => category.domains.includes(domain))?.id;
+}
+
 export function isActionable(state: string): boolean {
   return demandContract.actionableStates.includes(state);
 }

@@ -31,3 +31,84 @@ test('words whose rail does not exist are refused at the door', () => {
     assert.equal(setIntentInput.safeParse({ intent }).success, false);
   }
 });
+
+/* ── Authoring and publishing a window ─────────────────────────────────── */
+
+import { createWindowInput, publishBlockers, skuTemplate, windowBlockers } from './windows';
+import { boundingBox, pickImagery } from './inventory';
+
+const draft = {
+  skuTemplateId: 'automotive.private-transfer',
+  locationId: 'loc_1',
+  weekdays: [1, 2, 3, 4, 5],
+  openMins: 9 * 60,
+  closeMins: 17 * 60,
+  quantity: 2,
+};
+
+test('a window is a catalog template sold from one of your places', () => {
+  assert.ok(skuTemplate(draft.skuTemplateId));
+  assert.deepEqual(windowBlockers(draft, skuTemplate(draft.skuTemplateId), { state: 'DRAFT' }), []);
+  assert.deepEqual(windowBlockers({ ...draft, skuTemplateId: 'made.up' }, undefined, { state: 'ACTIVE' }), [
+    'That is not something Bytspot sells yet',
+  ]);
+  assert.deepEqual(windowBlockers(draft, skuTemplate(draft.skuTemplateId), undefined), ['Choose one of your places']);
+  assert.deepEqual(windowBlockers(draft, skuTemplate(draft.skuTemplateId), { state: 'CLOSED' }), ['That place is closed']);
+});
+
+test('a window has to be open long enough to hold a slot', () => {
+  const template = skuTemplate(draft.skuTemplateId);
+  assert.deepEqual(windowBlockers({ ...draft, closeMins: draft.openMins }, template, { state: 'ACTIVE' }), [
+    'Closing has to come after opening',
+  ]);
+  // Automotive rolls in 60-minute slots, so 30 minutes holds none.
+  assert.deepEqual(windowBlockers({ ...draft, closeMins: draft.openMins + 30 }, template, { state: 'ACTIVE' }), [
+    'Open for at least 60 minutes',
+  ]);
+});
+
+test('the shape of a window is bounded before it reaches the database', () => {
+  assert.equal(createWindowInput.safeParse(draft).success, true);
+  assert.equal(createWindowInput.safeParse({ ...draft, weekdays: [] }).success, false);
+  assert.equal(createWindowInput.safeParse({ ...draft, weekdays: [7] }).success, false);
+  assert.equal(createWindowInput.safeParse({ ...draft, quantity: 0 }).success, false);
+  assert.equal(createWindowInput.safeParse({ ...draft, openMins: -1 }).success, false);
+});
+
+test('publishing needs an approved business, an active place and a time zone', () => {
+  const ready = {
+    sellerState: 'ACTIVE' as const,
+    locationState: 'ACTIVE' as const,
+    timezone: 'America/New_York',
+    skuTemplateId: draft.skuTemplateId,
+  };
+  assert.deepEqual(publishBlockers(ready), []);
+  assert.deepEqual(publishBlockers({ ...ready, sellerState: 'PENDING' }), ['Your business has to be approved first']);
+  assert.deepEqual(publishBlockers({ ...ready, locationState: 'PAUSED' }), ['Activate this place first']);
+  assert.deepEqual(publishBlockers({ ...ready, timezone: null }), ['This place needs a time zone']);
+});
+
+test('a card shows the seller\'s own pictures, window first, and never a stock one', () => {
+  const window = [
+    { id: 'w_gal', kind: 'gallery', position: 0 },
+    { id: 'w_cov', kind: 'cover', position: 0 },
+  ];
+  const place = [
+    { id: 'p_cov', kind: 'cover', position: 0 },
+    { id: 'p_gal1', kind: 'gallery', position: 1 },
+    { id: 'p_gal0', kind: 'gallery', position: 0 },
+  ];
+  const both = pickImagery(window, place);
+  assert.match(both.coverUrl ?? '', /\/media\/vendor\/w_cov$/);
+  assert.deepEqual(both.galleryUrls.map((url) => url.split('/').pop()), ['w_gal', 'p_gal0', 'p_gal1']);
+
+  assert.match(pickImagery([], place).coverUrl ?? '', /\/media\/vendor\/p_cov$/);
+  assert.deepEqual(pickImagery([], []), { coverUrl: null, galleryUrls: [] });
+});
+
+test('the search box contains the radius it stands in for', () => {
+  const box = boundingBox(33.75, -84.39, 15);
+  assert.ok(box.maxLat - 33.75 >= 15 / 69 - 1e-9);
+  // Longitude degrees shrink away from the equator, so the box widens.
+  assert.ok(box.maxLng - -84.39 > box.maxLat - 33.75);
+});

@@ -1111,6 +1111,9 @@ model VendorLocation {
   /// Only meaningful when the vendor is the one travelling.
   radiusMiles Float?  @map("radius_miles")
   timezone    String?
+  /// Shown to guests on Discover as Call and Website. Normalised on write.
+  phone       String?
+  website     String?
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1281,12 +1284,17 @@ model Demand {
   /// about whether the need is still live.
   expiresAt DateTime @map("expires_at")
 
-  plan   Plan?   @relation(fields: [planId], references: [id], onDelete: SetNull)
-  offers Offer[]
+  /// An ask from one Discover card: only that window's seller sees it.
+  targetWindowId String? @map("target_window_id")
+
+  plan         Plan?                     @relation(fields: [planId], references: [id], onDelete: SetNull)
+  targetWindow VendorAvailabilityWindow? @relation(fields: [targetWindowId], references: [id], onDelete: Cascade)
+  offers       Offer[]
 
   @@index([state, expiresAt])
   @@index([category, state, latitude, longitude])
   @@index([planId])
+  @@index([targetWindowId])
   @@index([raisedByUserId, raisedAt(sort: Desc)])
   @@map("demands")
 }
@@ -1334,6 +1342,7 @@ model VendorAvailabilityWindow {
   commitments VendorSlotCommitment[]
   offers      Offer[]
   media       VendorMedia[]
+  asks        Demand[]
 
   @@index([sellerId, active])
   /// The demand feed reads only windows a vendor actually wants offers from.

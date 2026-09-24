@@ -49,33 +49,34 @@ export function precisionSufficientFor(kind: LocationKindId, precision: GeocodeP
 }
 
 /**
- * Google's location_type, which is the field most integrations discard.
+ * Precision from the place's types, which is all Places reports.
  *
  * Every provider returns something for almost any input: ask for a street that
  * does not exist and you get the centre of the town, with no error. Storing
  * that as a restaurant's pin puts it a mile from the door and nothing
  * downstream can tell.
  *
- * RANGE_INTERPOLATED is a point estimated between two known house numbers —
- * street-accurate, not rooftop. GEOMETRIC_CENTER is the midpoint of a line or
- * polygon, so it is street-accurate for a road and no better than a locality
- * for anything larger; it is read down to locality rather than up, because
- * over-stating precision is the failure this field exists to prevent.
+ * A building or a business is its own pin. A street address may be estimated
+ * between two known house numbers, so it is street-accurate, not rooftop; the
+ * types are read down rather than up, because over-stating precision is the
+ * failure this field exists to prevent.
  */
-function precisionFrom(locationType: string, types: string[]): GeocodePrecision {
-  if (locationType === 'ROOFTOP') return 'rooftop';
-  if (locationType === 'RANGE_INTERPOLATED') return 'street';
-  if (locationType === 'GEOMETRIC_CENTER') return types.includes('route') ? 'street' : 'locality';
-  if (types.some((type) => type === 'locality' || type === 'postal_code' || type === 'sublocality')) {
+function precisionFrom(types: string[]): GeocodePrecision {
+  if (types.some((type) => type === 'premise' || type === 'subpremise' || type === 'establishment' || type === 'point_of_interest')) {
+    return 'rooftop';
+  }
+  if (types.some((type) => type === 'street_address' || type === 'route' || type === 'intersection')) return 'street';
+  if (types.some((type) => type === 'locality' || type === 'postal_code' || type === 'sublocality' || type === 'neighborhood')) {
     return 'locality';
   }
   return 'region';
 }
 
-interface GoogleResult {
-  formatted_address?: string;
+interface GooglePlace {
+  formattedAddress?: string;
   types?: string[];
-  geometry?: { location?: { lat?: number; lng?: number }; location_type?: string };
+  location?: { latitude?: number; longitude?: number };
+  timeZone?: { id?: string };
 }
 
 export type GeocodeOutcome =
@@ -89,36 +90,83 @@ export function geocodeIsConfigured(): boolean {
   return Boolean(config.googlePlacesApiKey);
 }
 
+const PLACES_BASE = 'https://places.googleapis.com/v1';
+
+/**
+ * Places API (New), not the Geocoding API: the key the rest of the API already
+ * uses for Places is the one the vendor console has, and it returns the place's
+ * time zone in the same call.
+ */
+async function placesPost(path: string, body: unknown, fieldMask: string): Promise<{ places?: GooglePlace[] } | undefined> {
+  const response = await geocodeFetch.call(`${PLACES_BASE}/${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': config.googlePlacesApiKey,
+      'X-Goog-FieldMask': fieldMask,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) return undefined;
+  return (await response.json()) as { places?: GooglePlace[] };
+}
+
 export async function geocode(query: string): Promise<GeocodeOutcome> {
   if (!geocodeIsConfigured()) return { ok: false, reason: 'unconfigured' };
 
-  const url = new URL('https://maps.googleapis.com/maps/api/geocode/json');
-  url.searchParams.set('address', query);
-  url.searchParams.set('key', config.googlePlacesApiKey);
-
   try {
-    const response = await geocodeFetch.call(url.toString(), {
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!response.ok) return { ok: false, reason: 'upstream' };
-
-    const body = (await response.json()) as { status?: string; results?: GoogleResult[] };
-    // ZERO_RESULTS is a real answer: the address does not exist. Anything else
-    // non-OK is our problem, not the vendor's, and must not read as "no match".
-    if (body.status === 'ZERO_RESULTS') return { ok: true, candidates: [] };
-    if (body.status !== 'OK') return { ok: false, reason: 'upstream' };
-
-    return { ok: true, candidates: mapCandidates(body.results ?? []) };
+    const body = await placesPost(
+      'places:searchText',
+      { textQuery: query, maxResultCount: 5 },
+      'places.formattedAddress,places.location,places.types,places.timeZone',
+    );
+    // A refusal is our problem, not the vendor's, and must not read as "no match".
+    if (!body) return { ok: false, reason: 'upstream' };
+    // No places is a real answer: the address does not exist.
+    return { ok: true, candidates: mapCandidates(body.places ?? []) };
   } catch {
     return { ok: false, reason: 'upstream' };
   }
 }
 
-export function mapCandidates(results: GoogleResult[]): GeocodeCandidate[] {
+/** Only a zone this runtime can format in; anything else would yield no slots. */
+export function knownTimezone(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The IANA zone a pin keeps, from the nearest place Google knows.
+ *
+ * A window's slots are computed in the place's own time zone, and a place
+ * without one publishes nothing. Undefined on any failure: a guessed zone would
+ * sell a 7pm table at 4pm.
+ */
+export async function timezoneAt(lat: number, lng: number): Promise<string | undefined> {
+  if (!geocodeIsConfigured()) return undefined;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) return undefined;
+  try {
+    const body = await placesPost(
+      'places:searchNearby',
+      { maxResultCount: 1, locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius: 50_000 } } },
+      'places.timeZone',
+    );
+    return knownTimezone(body?.places?.[0]?.timeZone?.id);
+  } catch {
+    return undefined;
+  }
+}
+
+export function mapCandidates(places: GooglePlace[]): GeocodeCandidate[] {
   const candidates: GeocodeCandidate[] = [];
-  for (const result of results) {
-    const lat = result.geometry?.location?.lat;
-    const lng = result.geometry?.location?.lng;
+  for (const place of places) {
+    const lat = place.location?.latitude;
+    const lng = place.location?.longitude;
     if (typeof lat !== 'number' || typeof lng !== 'number') continue;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     if (Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
@@ -127,10 +175,11 @@ export function mapCandidates(results: GoogleResult[]): GeocodeCandidate[] {
     if (lat === 0 && lng === 0) continue;
 
     candidates.push({
-      formatted: result.formatted_address ?? '',
+      formatted: place.formattedAddress ?? '',
       lat,
       lng,
-      precision: precisionFrom(result.geometry?.location_type ?? '', result.types ?? []),
+      precision: precisionFrom(place.types ?? []),
+      timezone: knownTimezone(place.timeZone?.id),
     });
   }
   // Most precise first, which is the order the console offers them in.

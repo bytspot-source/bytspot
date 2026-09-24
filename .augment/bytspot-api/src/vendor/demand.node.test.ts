@@ -5,6 +5,7 @@ import {
   DEMAND_DEFAULTS,
   anyMatch,
   canRunDemandOperation,
+  categoryForDomain,
   demandCategoryIds,
   domainsForCategory,
   evaluateDemand,
@@ -175,4 +176,50 @@ test('a declined request returns to open rather than disappearing', () => {
   assert.equal(stateAfterOperation('DECLINE'), 'OPEN');
   assert.equal(stateAfterOperation('WITHDRAW_OFFER'), 'OPEN');
   assert.equal(stateAfterOperation('OFFER'), 'OFFERED');
+});
+
+test('an ask about a window is raised under a category that matches its own domain', () => {
+  // Every domain a window can have must be askable, or its card would show an
+  // Ask that the API refuses.
+  for (const domain of ['dining', 'nightlife', 'wellness', 'automotive', 'stay', 'stall', 'green', 'coffee', 'shopping', 'events', 'fitness']) {
+    const category = categoryForDomain(domain);
+    assert.ok(category, `${domain} has no category`);
+    assert.ok(domainsForCategory(category!).includes(domain));
+  }
+  assert.equal(categoryForDomain('spaceport'), undefined);
+});
+
+test('an ask notice goes to the seller contact, else its live owners and managers', async () => {
+  const { askNoticeRecipients } = await import('./askNotice');
+  const seats = [
+    { role: 'owner', state: 'ACTIVE', email: 'o@x.com' },
+    { role: 'manager', state: 'ACTIVE', email: 'm@x.com' },
+    { role: 'manager', state: 'REVOKED', email: 'gone@x.com' },
+    { role: 'staff', state: 'ACTIVE', email: 's@x.com' },
+    { role: 'owner', state: 'ACTIVE', email: 'o@x.com' },
+  ];
+  assert.deepEqual(askNoticeRecipients(' front@x.com ', seats), ['front@x.com']);
+  assert.deepEqual(askNoticeRecipients(null, seats), ['o@x.com', 'm@x.com']);
+  assert.deepEqual(askNoticeRecipients('', []), []);
+});
+
+test('an ask notice names the time in the place\'s own clock', async () => {
+  const { formatAskWhen } = await import('./askNotice');
+  const at = new Date('2026-09-24T23:00:00.000Z');
+  assert.equal(formatAskWhen(at, 'America/New_York'), 'Thu, Sep 24, 7:00 PM');
+  assert.match(formatAskWhen(at, null), /11:00 PM UTC$/);
+});
+
+test('an ask is pushed to the live owners and managers who can answer it', async () => {
+  const { askNoticeSeatUserIds } = await import('./askNotice');
+  assert.deepEqual(
+    askNoticeSeatUserIds([
+      { role: 'owner', state: 'ACTIVE', userId: 'u1' },
+      { role: 'manager', state: 'INVITED', userId: 'u2' },
+      { role: 'door', state: 'ACTIVE', userId: 'u3' },
+      { role: 'manager', state: 'ACTIVE', userId: 'u4' },
+      { role: 'owner', state: 'ACTIVE', userId: 'u1' },
+    ]),
+    ['u1', 'u4'],
+  );
 });

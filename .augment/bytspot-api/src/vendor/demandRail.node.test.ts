@@ -1348,6 +1348,48 @@ test('a payment that arrives after the offer is gone is refunded in full', async
   });
 });
 
+test('two paid checkouts for one offer book it once and refund the other', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { stripeHandle } = await import('./payout');
+  const { settleOfferCheckout } = await import('./offerCheckout');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+  const fake = fakeStripe();
+  t.mock.method(stripeHandle, 'client', () => fake.stripe);
+
+  await withPayout(async () => {
+    const { demandId, offer } = await paidOfferTo();
+    await guest().demand.payOffer({ offerId: offer.id });
+    const first = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id } });
+    // Our record of the first checkout lapses, so asking again opens a second,
+    // while Stripe may still take payment on the first.
+    await db.offerCheckout.update({ where: { id: first.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await guest().demand.payOffer({ offerId: offer.id });
+    const second = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id, id: { not: first.id } } });
+
+    // The second is paid and has booked the offer, but stopped before
+    // recording its checkout as completed.
+    await db.offerCheckout.update({ where: { id: second.id }, data: { status: 'settling' } });
+    const { acceptOffer } = await import('./acceptOffer');
+    await acceptOffer({ offerId: offer.id, userId: second.userId, now: second.createdAt, paid: true });
+
+    // The first payment lands. The offer is accepted, but not by it.
+    assert.equal(await settleOfferCheckout(paidSession(first), fake.stripe), 'refunded');
+    assert.equal(fake.calls.refunds.length, 1);
+    assert.equal(fake.calls.refunds[0].opts.idempotencyKey, `offer-refund-${first.id}`);
+
+    // The second's redelivery records its own booking without a refund.
+    assert.equal(await settleOfferCheckout(paidSession(second), fake.stripe), 'completed');
+    assert.equal(fake.calls.refunds.length, 1);
+    assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
+    const statuses = (await db.offerCheckout.findMany({ where: { offerId: offer.id }, orderBy: { createdAt: 'asc' } })).map((c) => c.status);
+    assert.deepEqual(statuses, ['refunded', 'completed']);
+
+    // The index holds even if the code did not: a second claim on one offer is refused.
+    await assert.rejects(() => db.offerCheckout.update({ where: { id: first.id }, data: { status: 'settling' } }), /Unique constraint/);
+  });
+});
+
 test('a payment for the wrong amount is refunded rather than booked', async (t) => {
   if (!reachable) return t.skip('no database');
   const { stripeHandle } = await import('./payout');

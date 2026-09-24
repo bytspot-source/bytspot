@@ -1545,7 +1545,7 @@ model OfferCheckout {
   platformFeeCents Int       @map("platform_fee_cents")
   sellerNetCents   Int       @map("seller_net_cents")
   currency         String    @default("usd")
-  /// creating | pending | completed | refunded | expired
+  /// creating | pending | settling | completed | refunded | expired
   status           String    @default("creating")
   stripeSessionId  String?   @unique @map("stripe_session_id")
   checkoutUrl      String?   @map("checkout_url")

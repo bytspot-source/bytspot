@@ -139,6 +139,7 @@ export function paymentState(
   if (!checkout) return undefined;
   if (checkout.status === 'completed') return { state: 'paid' };
   if (checkout.status === 'refunded') return { state: 'refunded', reason: checkout.refundReason ?? undefined };
+  if (checkout.status === 'settling') return { state: 'paying' };
   if ((checkout.status === 'pending' || checkout.status === 'creating') && checkout.expiresAt > now) return { state: 'paying' };
   return undefined;
 }
@@ -392,7 +393,12 @@ export const demandRouter = router({
               { state: 'OFFERED', holdExpiresAt: { gt: now } },
               {
                 state: 'OFFERED',
-                checkouts: { some: { userId: ctx.user.userId, status: { in: ['creating', 'pending'] }, expiresAt: { gt: now } } },
+                checkouts: {
+                  some: {
+                    userId: ctx.user.userId,
+                    OR: [{ status: { in: ['creating', 'pending'] }, expiresAt: { gt: now } }, { status: 'settling' }],
+                  },
+                },
               },
               { state: 'ACCEPTED' },
             ],

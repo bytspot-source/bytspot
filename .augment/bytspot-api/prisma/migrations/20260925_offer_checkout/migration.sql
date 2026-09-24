@@ -43,12 +43,15 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   ALTER TABLE "offer_checkouts" ADD CONSTRAINT "offer_checkouts_status_check"
-    CHECK ("status" IN ('creating', 'pending', 'completed', 'refunded', 'expired'));
+    CHECK ("status" IN ('creating', 'pending', 'settling', 'completed', 'refunded', 'expired'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS "offer_checkouts_stripe_session_id_key" ON "offer_checkouts"("stripe_session_id");
 CREATE INDEX IF NOT EXISTS "offer_checkouts_offer_id_status_idx" ON "offer_checkouts"("offer_id", "status");
 CREATE INDEX IF NOT EXISTS "offer_checkouts_user_id_created_at_idx" ON "offer_checkouts"("user_id", "created_at" DESC);
+-- One payment books an offer. A checkout claims the offer ('settling') before
+-- booking it, so a second paid checkout finds the claim taken and is refunded.
+CREATE UNIQUE INDEX IF NOT EXISTS "offer_checkouts_one_settled_offer_key" ON "offer_checkouts"("offer_id") WHERE "status" IN ('settling', 'completed');
 
 DO $$ BEGIN
   ALTER TABLE "offer_checkouts" ADD CONSTRAINT "offer_checkouts_offer_id_fkey"

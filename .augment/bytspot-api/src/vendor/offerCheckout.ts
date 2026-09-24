@@ -29,6 +29,8 @@ export const OFFER_BOOKING_KIND = 'offer-booking';
 const CHECKOUT_MINUTES = 31;
 
 const OPEN_STATES = ['creating', 'pending'];
+/** At most one checkout per offer is in these, enforced by a partial unique index. */
+const SETTLED_STATES = ['settling', 'completed'];
 
 export class PaymentsUnavailable extends Error {
   constructor() {
@@ -73,7 +75,7 @@ export async function startOfferCheckout(input: { offerId: string; userId: strin
       where: { offerId: offer.id, status: { in: OPEN_STATES }, expiresAt: { lte: now } },
       data: { status: 'expired' },
     });
-    const completed = await tx.offerCheckout.findFirst({ where: { offerId: offer.id, status: 'completed' } });
+    const completed = await tx.offerCheckout.findFirst({ where: { offerId: offer.id, status: { in: SETTLED_STATES } } });
     if (completed) throw new OfferGone();
     const open = await tx.offerCheckout.findFirst({
       where: { offerId: offer.id, userId: input.userId, status: { in: OPEN_STATES }, expiresAt: { gt: now } },
@@ -161,8 +163,9 @@ export async function settleOfferCheckout(session: Stripe.Checkout.Session, stri
   if (session.amount_total !== checkout.amountCents || session.currency?.toLowerCase() !== checkout.currency) {
     return refund(checkout, session.id, paymentIntentId, 'The amount paid did not match the offer.', stripe);
   }
-  const winner = await db.offerCheckout.findFirst({ where: { offerId: checkout.offerId, status: 'completed', id: { not: checkout.id } } });
-  if (winner) return refund(checkout, session.id, paymentIntentId, 'This offer was already paid for.', stripe);
+  if (!(await claimOffer(checkout))) {
+    return refund(checkout, session.id, paymentIntentId, 'This offer was already paid for.', stripe);
+  }
 
   try {
     // Judged as of when checkout began, so a guest who started inside the hold
@@ -172,16 +175,39 @@ export async function settleOfferCheckout(session: Stripe.Checkout.Session, stri
     if (!(error instanceof OfferGone || error instanceof OfferExpired || error instanceof SlotTaken || error instanceof NotYours)) {
       throw error;
     }
+    // This checkout holds the claim, so an accepted offer is its own booking
+    // from an attempt that stopped before recording it.
     const offer = await db.offer.findUnique({ where: { id: checkout.offerId }, select: { state: true } });
     if (offer?.state !== 'ACCEPTED') return refund(checkout, session.id, paymentIntentId, error.message, stripe);
   }
 
   await db.offerCheckout.updateMany({
-    where: { id: checkout.id, status: { in: [...OPEN_STATES, 'expired'] } },
+    where: { id: checkout.id, status: 'settling' },
     data: { status: 'completed', completedAt: new Date(), stripeSessionId: session.id, paymentIntentId },
   });
   void notifyOfferAcceptedSeller(checkout.offerId, { sellerNetCents: checkout.sellerNetCents });
   return 'completed';
+}
+
+/**
+ * Claims the offer for this checkout. False when another checkout already
+ * holds it, in which case this payment must be refunded rather than booked.
+ */
+async function claimOffer(checkout: OfferCheckout): Promise<boolean> {
+  if (checkout.status === 'settling') return true;
+  try {
+    const { count } = await db.offerCheckout.updateMany({
+      where: { id: checkout.id, status: { in: [...OPEN_STATES, 'expired'] } },
+      data: { status: 'settling' },
+    });
+    if (count === 1) return true;
+  } catch (error) {
+    if ((error as { code?: string })?.code === 'P2002') return false;
+    throw error;
+  }
+  // A concurrent delivery of this same session claimed it first.
+  const current = await db.offerCheckout.findUnique({ where: { id: checkout.id }, select: { status: true } });
+  return current?.status === 'settling';
 }
 
 async function refund(
@@ -202,7 +228,7 @@ async function refund(
     { idempotencyKey: `offer-refund-${checkout.id}` },
   );
   await db.offerCheckout.updateMany({
-    where: { id: checkout.id, status: { in: [...OPEN_STATES, 'expired'] } },
+    where: { id: checkout.id, status: { in: [...OPEN_STATES, 'expired', 'settling'] } },
     data: { status: 'refunded', refundId: refunded.id, refundReason: reason, stripeSessionId: sessionId, paymentIntentId },
   });
   void deliverPushNotification({

@@ -191,13 +191,17 @@ test('Withdrawal counts and retires under one lock', async () => {
   let inTransaction = false;
   let countedInside = false;
   let retiredInside = false;
+  let checkoutsCountedInside = false;
+  let checkoutQuery: any;
   prisma.$transaction = async (callback: any, options: any) => {
     assert.equal(options.isolationLevel, 'Serializable');
     inTransaction = true;
     const result = await callback({
       partySession: { updateMany: async () => { retiredInside = inTransaction; return { count: 1 }; } },
       partySessionClaim: { count: async () => { countedInside = inTransaction; return 0; } },
-      partyCheckout: { count: async () => 0 },
+      // The checkout count is the one that matters most here: the race this
+      // closes is a checkout row inserted while the floor is being retired.
+      partyCheckout: { count: async (input: any) => { checkoutsCountedInside = inTransaction; checkoutQuery = input; return 0; } },
     });
     inTransaction = false;
     return result;
@@ -205,7 +209,15 @@ test('Withdrawal counts and retires under one lock', async () => {
 
   await withdrawPartySession('seller-1', 'session-1');
   assert.ok(countedInside);
+  assert.ok(checkoutsCountedInside);
   assert.ok(retiredInside);
+
+  // And counted on the same terms the guest is told: a lapsed reservation
+  // no longer reduces `remaining`, so it must not hold the floor shut.
+  assert.equal(checkoutQuery.where.sessionId, 'session-1');
+  assert.deepEqual(checkoutQuery.where.OR[0], { status: 'completed' });
+  assert.deepEqual(checkoutQuery.where.OR[1].status, { in: ['creating', 'pending'] });
+  assert.ok(checkoutQuery.where.OR[1].reservationExpiresAt.gt instanceof Date);
 });
 
 test('Losing the serialization race reads as held, not as a crash', async () => {

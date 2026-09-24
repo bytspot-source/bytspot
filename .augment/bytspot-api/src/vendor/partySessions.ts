@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
 import { isSerializationConflict } from '../lib/transactions';
-import { validateSessions, type SessionDraft, type SessionIssue } from '../services/partySessions';
+import { liveClaimWhere, validateSessions, type SessionDraft, type SessionIssue } from '../services/partySessions';
 
 /**
  * Authoring the bottles-and-hours a Party sells.
@@ -277,9 +277,13 @@ export async function withdrawPartySession(sellerId: string, sessionId: string):
   // spent history; neither speaks for a unit. Only a live hold does.
   try {
     await db.$transaction(async (tx) => {
+      // Live is defined once, in liveClaimWhere, and the guest is told what
+      // is left on those terms. A lapsed reservation that has stopped
+      // reducing `remaining` for guests must not still hold the floor shut
+      // for the seller; the two have to mean the same thing.
       const [claims, checkouts] = await Promise.all([
         tx.partySessionClaim.count({ where: { sessionId: session.id, state: 'held' } }),
-        tx.partyCheckout.count({ where: { sessionId: session.id, status: { in: ['creating', 'pending', 'completed'] } } }),
+        tx.partyCheckout.count({ where: { ...liveClaimWhere(session.partyId, new Date()), sessionId: session.id } }),
       ]);
       if (session.committed > 0 || claims > 0 || checkouts > 0) {
         throw new SessionInUse(['Someone is already holding this. Cancel their claim first.']);

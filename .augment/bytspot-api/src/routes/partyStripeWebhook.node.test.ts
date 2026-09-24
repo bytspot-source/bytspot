@@ -373,3 +373,47 @@ test('Party ticket payments are unaffected by the shared endpoint', async () => 
   assert.equal(membershipTouched, false);
   assert.equal(checkoutUpdate.data.status, 'completed');
 });
+
+test('A ticket tier naming no requirement is not a tier nobody qualifies for', async () => {
+  // meetsRequiredMembershipTier demands two real tiers, so asking it about an
+  // absent requirement answers "not met" and refunds a payment nobody
+  // objected to. This guest is black against a green Party.
+  let checkoutUpdate: any;
+  let guestUpdate: any;
+  user.findUnique = async () => ({ membershipTier: 'black' });
+  party.findUnique = async () => ({ requiredMembershipTier: 'green', ticketTiers: [{ name: 'First Drop' }] });
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async (input: any) => { guestUpdate = input; return { id: 'guest-1' }; };
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+
+  assert.equal(checkoutUpdate.data.status, 'completed');
+  assert.equal(guestUpdate.data.status, 'ticketed');
+  assert.equal(guestUpdate.data.accessGranted, true);
+});
+
+test('A stated ticket-tier requirement is still enforced', async () => {
+  // The allowance is for absence only. A tier that names black still refuses
+  // a green guest, or the fix would sell past the requirement.
+  let checkoutUpdate: any;
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  party.findUnique = async () => ({ requiredMembershipTier: 'green', ticketTiers: [{ name: 'First Drop', requiredMembershipTier: 'black' }] });
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async () => ({ id: 'guest-1' });
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+});
+
+test('A missing Party requirement still fails closed', async () => {
+  // The Party column is NOT NULL, so an absent requirement there is broken
+  // data rather than an absence, and must not be waved through.
+  let checkoutUpdate: any;
+  user.findUnique = async () => ({ membershipTier: 'black' });
+  party.findUnique = async () => ({ requiredMembershipTier: null, ticketTiers: [{ name: 'First Drop' }] });
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async () => ({ id: 'guest-1' });
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+});

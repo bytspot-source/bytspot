@@ -70,8 +70,14 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     ]);
     if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
     const ticketTierRequirement = ticketRequiredMembershipTier(party?.ticketTiers, current.ticketTierName);
+    // `meetsRequiredMembershipTier` demands two real tiers, so asking it about
+    // an absent requirement reads "not met" and refunds a payment nobody
+    // objected to. A ticket tier naming no tier is not a tier nobody
+    // qualifies for. The Party's own requirement gets no such allowance: that
+    // column is NOT NULL, so a missing one is broken data rather than an
+    // absence, and it must keep failing closed.
     const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
-      && meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement);
+      && (ticketTierRequirement == null || meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement));
     // A delayed webhook for a payment that happened before close still grants
     // the pass. A payment that completed after closedAt is a new arrival and
     // must not confirm — the host closed the room.

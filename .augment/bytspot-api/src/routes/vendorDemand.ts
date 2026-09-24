@@ -10,6 +10,7 @@ import {
   respondInput,
   respondToDemand,
 } from '../vendor/demandFeed';
+import { NotPayable, PayoutNotReady } from '../vendor/acceptOffer';
 
 /**
  * The vendor console's two endpoints. Both are thin: the feed and the answer
@@ -59,6 +60,14 @@ router.post('/vendor/demand/:id/respond', requireVendorSeat, requireCapability('
     }
     if (err instanceof NoCapacity) {
       res.status(409).json({ error: 'No capacity', blockers: ['That slot has gone since you looked'] });
+      return;
+    }
+    if (err instanceof PayoutNotReady) {
+      res.status(409).json({ error: 'Payouts not ready', blockers: ['Finish payout setup to take payment in the app'] });
+      return;
+    }
+    if (err instanceof NotPayable) {
+      res.status(409).json({ error: 'Nothing to charge', blockers: ['Set a price on this offering to take payment in the app'] });
       return;
     }
     captureError(err, { route: 'vendor/demand:respond' });

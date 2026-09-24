@@ -5,6 +5,7 @@ import { db } from '../lib/db';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services/partyAlerts';
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
+import { applyOfferCheckoutEvent } from '../vendor/offerCheckout';
 
 const partyStripeWebhookRouter = Router();
 
@@ -196,6 +197,19 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   } catch (error) {
     console.error('[subscription-webhook] membership transition failed', error);
     res.status(500).json({ error: 'Membership transition will be retried.' });
+    return;
+  }
+
+  // Offer payments are marked by their own metadata kind, so they are claimed
+  // before the Party cast just like subscriptions.
+  try {
+    if (await applyOfferCheckoutEvent(event)) {
+      res.json({ received: true });
+      return;
+    }
+  } catch (error) {
+    console.error('[offer-checkout-webhook] payment settlement failed', error);
+    res.status(500).json({ error: 'Offer payment settlement will be retried.' });
     return;
   }
 

@@ -40,3 +40,14 @@ test('rounding never favours the platform over the host', () => {
 test('a zero fee leaves the whole ticket with the host', () => {
   assert.deepEqual(splitTicketAmount(5_000, 0), { feeCents: 0, hostNetCents: 5_000 });
 });
+
+test('a booking fee is the rate, with a minimum that never takes more than half', async () => {
+  const { splitBookingAmount } = await import('./platformFee');
+  assert.deepEqual(splitBookingAmount(5_000, 1_000, 100), { feeCents: 500, sellerNetCents: 4_500 });
+  // 10% of $8 is 80¢, so the $1 minimum applies.
+  assert.deepEqual(splitBookingAmount(800, 1_000, 100), { feeCents: 100, sellerNetCents: 700 });
+  // The minimum is capped at half a very small booking.
+  assert.deepEqual(splitBookingAmount(150, 1_000, 100), { feeCents: 75, sellerNetCents: 75 });
+  // A zero rate means no fee at all, minimum included.
+  assert.deepEqual(splitBookingAmount(5_000, 0, 100), { feeCents: 0, sellerNetCents: 5_000 });
+});

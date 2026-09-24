@@ -2,6 +2,7 @@ import { db } from '../lib/db';
 import { config } from '../config';
 
 export const PARTY_TICKET_FEE_SCOPE = 'party-ticket';
+export const VENDOR_BOOKING_FEE_SCOPE = 'vendor-booking';
 /// A fee is a share of a sale, so anything at or above 100% is not a fee.
 export const MAX_FEE_BPS = 5_000;
 
@@ -10,11 +11,14 @@ export const MAX_FEE_BPS = 5_000;
  * appended row keeps every past rate on record, which is what lets a host
  * dispute a fee and what a Stripe Capital review asks for.
  */
-export async function currentPlatformFeeBps(scope = PARTY_TICKET_FEE_SCOPE): Promise<number> {
+export async function currentPlatformFeeBps(
+  scope = PARTY_TICKET_FEE_SCOPE,
+  fallbackBps = config.defaultPlatformFeeBps,
+): Promise<number> {
   const latest = await db.platformFeeSetting
     .findFirst({ where: { scope }, orderBy: { createdAt: 'desc' }, select: { feeBps: true } })
     .catch(() => null);
-  return clampFeeBps(latest?.feeBps ?? config.defaultPlatformFeeBps);
+  return clampFeeBps(latest?.feeBps ?? fallbackBps);
 }
 
 export function clampFeeBps(value: number): number {
@@ -38,4 +42,22 @@ export function splitTicketAmount(amountCents: number, feeBps: number): { feeCen
   // Round the fee down so rounding never favours the platform over the host.
   const feeCents = Math.min(gross, Math.floor((gross * clampFeeBps(feeBps)) / 10_000));
   return { feeCents, hostNetCents: gross - feeCents };
+}
+
+/**
+ * Split an offer paid in the app into Bytspot's fee and the seller's net.
+ *
+ * The minimum applies only when the rate is non-zero, so a zero rate set by an
+ * admin still means no fee, and it never takes more than half the booking.
+ */
+export function splitBookingAmount(
+  amountCents: number,
+  feeBps: number,
+  minFeeCents: number,
+): { feeCents: number; sellerNetCents: number } {
+  const { feeCents: rated } = splitTicketAmount(amountCents, feeBps);
+  const gross = Math.max(0, Math.round(amountCents));
+  const floor = clampFeeBps(feeBps) > 0 ? Math.min(Math.max(0, Math.round(minFeeCents)), Math.floor(gross / 2)) : 0;
+  const feeCents = Math.max(rated, floor);
+  return { feeCents, sellerNetCents: gross - feeCents };
 }

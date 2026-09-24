@@ -206,6 +206,8 @@ test('a guest can see what they asked for and what came back', async () => {
           priceCents: 5000,
           terms: null,
           holdExpiresAt: new Date(now + 3600_000),
+          payAt: 'venue',
+          checkouts: [],
         },
       ],
     },
@@ -217,6 +219,8 @@ test('a guest can see what they asked for and what came back', async () => {
   // The place, not the business: a guest recognises where they are going.
   assert.equal(mine[0].offers[0].where, 'Broni Home Taste');
   assert.equal(mine[0].offers[0].priceCents, 5000);
+  assert.equal(mine[0].offers[0].payAt, 'venue');
+  assert.equal(mine[0].offers[0].payment, undefined);
 });
 
 test('an expired hold is not shown as an offer that is still standing', async () => {
@@ -378,4 +382,21 @@ test('a plan cannot outrun the cap that applies to every other request', async (
   await assert.rejects(() => caller().demand.fromPlan({ planId: 'plan-1', needKind: 'dining' }), {
     code: 'CONFLICT',
   });
+});
+
+test('a guest sees where their payment for an offer stands', async () => {
+  const { paymentState } = await import('./demandRouter');
+  const now = new Date();
+  const later = new Date(now.getTime() + 60_000);
+  const earlier = new Date(now.getTime() - 60_000);
+  assert.equal(paymentState(undefined, now), undefined);
+  assert.deepEqual(paymentState({ status: 'pending', expiresAt: later, refundReason: null }, now), { state: 'paying' });
+  // A checkout the processor has closed is not still paying; the guest can start again.
+  assert.equal(paymentState({ status: 'pending', expiresAt: earlier, refundReason: null }, now), undefined);
+  assert.equal(paymentState({ status: 'expired', expiresAt: earlier, refundReason: null }, now), undefined);
+  assert.deepEqual(paymentState({ status: 'completed', expiresAt: earlier, refundReason: null }, now), { state: 'paid' });
+  assert.deepEqual(
+    paymentState({ status: 'refunded', expiresAt: earlier, refundReason: 'Someone took the last one.' }, now),
+    { state: 'refunded', reason: 'Someone took the last one.' },
+  );
 });

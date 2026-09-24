@@ -60,6 +60,7 @@ model User {
   coffeeReservations    CoffeeReservation[]   @relation("coffeeReservationRequester")
   partyCheckouts        PartyCheckout[]
   partySessionClaims    PartySessionClaim[]
+  offerCheckouts        OfferCheckout[]
   mobilityQuotes        MobilityQuote[]
   mobilityTrips         MobilityTrip[]
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
@@ -1503,6 +1504,9 @@ model Offer {
   state         String   @default("OFFERED")
   /// A hold is a promise with a deadline or it is not a hold.
   holdExpiresAt DateTime @map("hold_expires_at")
+  /// `venue` settles at the door, as every offer did before; `bytspot` is
+  /// paid in the app before the table is committed.
+  payAt         String   @default("venue") @map("pay_at")
 
   createdBySeatId String  @map("created_by_seat_id")
   bookableId      String? @unique @map("bookable_id")
@@ -1510,17 +1514,56 @@ model Offer {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  planItem PlanItem?
-  demand   Demand                    @relation(fields: [demandId], references: [id], onDelete: Cascade)
-  seller   VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  location VendorLocation            @relation(fields: [locationId], references: [id], onDelete: Cascade)
-  window   VendorAvailabilityWindow? @relation(fields: [windowId], references: [id], onDelete: SetNull)
-  bookable Bookable?                 @relation(fields: [bookableId], references: [id], onDelete: SetNull)
+  planItem  PlanItem?
+  checkouts OfferCheckout[]
+  demand    Demand                    @relation(fields: [demandId], references: [id], onDelete: Cascade)
+  seller    VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location  VendorLocation            @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  window    VendorAvailabilityWindow? @relation(fields: [windowId], references: [id], onDelete: SetNull)
+  bookable  Bookable?                 @relation(fields: [bookableId], references: [id], onDelete: SetNull)
 
   @@index([demandId, state])
   @@index([sellerId, state, createdAt])
   @@index([state, holdExpiresAt])
   @@map("offers")
+}
+
+/// A guest paying for an offer before it is accepted.
+///
+/// The charge is Bytspot's and the seller is paid by transfer, so the split is
+/// recorded here as it stood at checkout: a later rate change can never
+/// restate what a seller was promised on a booking already paid for.
+model OfferCheckout {
+  id               String    @id @default(cuid())
+  offerId          String    @map("offer_id")
+  userId           String    @map("user_id")
+  sellerId         String    @map("seller_id")
+  /// The seller's payout account the transfer goes to.
+  destination      String
+  amountCents      Int       @map("amount_cents")
+  platformFeeBps   Int       @map("platform_fee_bps")
+  platformFeeCents Int       @map("platform_fee_cents")
+  sellerNetCents   Int       @map("seller_net_cents")
+  currency         String    @default("usd")
+  /// creating | pending | completed | refunded | expired
+  status           String    @default("creating")
+  stripeSessionId  String?   @unique @map("stripe_session_id")
+  checkoutUrl      String?   @map("checkout_url")
+  paymentIntentId  String?   @map("payment_intent_id")
+  refundId         String?   @map("refund_id")
+  /// Why a paid checkout was refunded instead of booked, in the guest's words.
+  refundReason     String?   @map("refund_reason")
+  expiresAt        DateTime  @map("expires_at")
+  completedAt      DateTime? @map("completed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([offerId, status])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("offer_checkouts")
 }
 
 /// Append-only. Every broadcast, every decline and its miss rule, every accept

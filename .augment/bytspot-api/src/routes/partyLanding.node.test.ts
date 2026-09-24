@@ -196,3 +196,20 @@ test('Every access mode renders a human label', async () => {
     assert.match(html, new RegExp(`<span class="chip">${label}</span>`), `${mode} must not render raw`);
   }
 });
+
+test('A host who writes their own subtitle gets their words, not the default', async () => {
+  party.findFirst = async () => ({ ...published, tagline: 'Bring nothing but yourself.' });
+  const page = await get('party-1');
+  assert.match(page.html, /Bring nothing but yourself\./);
+  assert.doesNotMatch(page.html, /One moment\. Your people\./);
+});
+
+test('A host who clears the subtitle publishes no subtitle', async () => {
+  // Falling back to the default here reinstated wording the host had just
+  // deleted, which is why the subtitle read as unchangeable.
+  party.findFirst = async () => ({ ...published, tagline: '' });
+  const page = await get('party-1');
+  assert.doesNotMatch(page.html, /One moment\. Your people\./);
+  // The empty paragraph goes with it rather than leaving a gap under the title.
+  assert.doesNotMatch(page.html, /<p class="tagline"><\/p>/);
+});

@@ -5,6 +5,7 @@ import { requirementsForState, effectiveCapabilities, sellerCanTransition } from
 import * as dbModule from '../lib/db';
 import {
   advanceSeller,
+  markVerified,
   outstandingRequirements,
   satisfiedRequirements,
   toSeatDto,
@@ -216,4 +217,32 @@ test('suspension and closure are decisions about a business, not consequences of
     assert.equal((await advanceSeller(held, [location()])).state, state);
   }
   assert.equal(updates.length, 0);
+});
+
+test('a business is verified once, by whichever request stamps it first', async () => {
+  const calls: unknown[] = [];
+  let stamped = false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (dbModule.db.vendorSeller as any).updateMany = async (args: unknown) => {
+    calls.push(args);
+    const count = stamped ? 0 : 1;
+    stamped = true;
+    return { count };
+  };
+  const now = new Date('2026-09-24T15:00:00Z');
+
+  const first = await markVerified(seller({ verifiedAt: null }), now);
+  assert.equal(first.first, true);
+  assert.equal(first.seller.verifiedAt, now);
+  assert.deepEqual(calls[0], { where: { id: 'sel_1', verifiedAt: null }, data: { verifiedAt: now } });
+
+  // A racing request read the same unstamped row but loses the conditional write.
+  const racing = await markVerified(seller({ verifiedAt: null }), now);
+  assert.equal(racing.first, false);
+
+  // Already stamped, or not live: no write at all.
+  const before = calls.length;
+  assert.equal((await markVerified(seller({ verifiedAt: now }))).first, false);
+  assert.equal((await markVerified(seller({ state: 'PENDING', verifiedAt: null }))).first, false);
+  assert.equal(calls.length, before);
 });

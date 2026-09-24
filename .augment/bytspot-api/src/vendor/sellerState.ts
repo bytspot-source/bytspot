@@ -151,3 +151,20 @@ export async function advanceSeller(
 
   return db.vendorSeller.update({ where: { id: seller.id }, data: { state: target } });
 }
+
+/**
+ * Stamps the first time a live business met every requirement. Conditional on
+ * the stamp being absent, so of two requests racing past the same transition
+ * exactly one reports `first` and sends the notice.
+ */
+export async function markVerified(
+  seller: VendorSeller,
+  now: Date = new Date(),
+): Promise<{ seller: VendorSeller; first: boolean }> {
+  if (seller.state !== 'ACTIVE' || seller.verifiedAt) return { seller, first: false };
+  const stamped = await db.vendorSeller.updateMany({
+    where: { id: seller.id, verifiedAt: null },
+    data: { verifiedAt: now },
+  });
+  return { seller: { ...seller, verifiedAt: now }, first: stamped.count === 1 };
+}

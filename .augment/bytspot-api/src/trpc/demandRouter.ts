@@ -7,8 +7,9 @@ import { ASK_INTENT, supplyFor } from '../vendor/demandFeed';
 import { sellableSlots } from '../vendor/availability';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
-import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
+import { acceptOffer, NotYours, OfferExpired, OfferGone, PaymentRequired, SlotTaken } from '../vendor/acceptOffer';
 import { notifyAskSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
+import { NotPayable, PaymentsUnavailable, PayoutNotReady, startOfferCheckout } from '../vendor/offerCheckout';
 
 /**
  * Demand — intent published before supply is known.
@@ -124,6 +125,24 @@ async function raiseDemand(
 /** How long past the chosen slot a seller may still offer, before the contract's flexibility. */
 const ASK_SPAN_MINS = 15;
 
+
+/**
+ * Where a guest's payment for one offer stands, from their newest checkout.
+ *
+ * An open checkout past its deadline reads as nothing, so the guest can start
+ * again rather than wait on a session the processor has already closed.
+ */
+export function paymentState(
+  checkout: { status: string; expiresAt: Date; refundReason: string | null } | undefined,
+  now: Date,
+): { state: 'paying' | 'paid' | 'refunded'; reason?: string } | undefined {
+  if (!checkout) return undefined;
+  if (checkout.status === 'completed') return { state: 'paid' };
+  if (checkout.status === 'refunded') return { state: 'refunded', reason: checkout.refundReason ?? undefined };
+  if (checkout.status === 'settling') return { state: 'paying' };
+  if ((checkout.status === 'pending' || checkout.status === 'creating') && checkout.expiresAt > now) return { state: 'paying' };
+  return undefined;
+}
 
 export const demandRouter = router({
   /**
@@ -367,9 +386,33 @@ export const demandRouter = router({
       include: {
         offers: {
           // An accepted offer is the answer; the rest are history once one wins.
-          where: { OR: [{ state: 'OFFERED', holdExpiresAt: { gt: now } }, { state: 'ACCEPTED' }] },
+          // One the guest is paying for stays in view past its hold, because
+          // the payment still books it.
+          where: {
+            OR: [
+              { state: 'OFFERED', holdExpiresAt: { gt: now } },
+              {
+                state: 'OFFERED',
+                checkouts: {
+                  some: {
+                    userId: ctx.user.userId,
+                    OR: [{ status: { in: ['creating', 'pending'] }, expiresAt: { gt: now } }, { status: 'settling' }],
+                  },
+                },
+              },
+              { state: 'ACCEPTED' },
+            ],
+          },
           orderBy: { startsAt: 'asc' },
-          include: { location: { select: { label: true } } },
+          include: {
+            location: { select: { label: true } },
+            checkouts: {
+              where: { userId: ctx.user.userId },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              select: { status: true, expiresAt: true, refundReason: true },
+            },
+          },
         },
         targetWindow: { select: { location: { select: { label: true } }, seller: { select: { legalName: true } } } },
       },
@@ -414,6 +457,8 @@ export const demandRouter = router({
         // The client must be able to tell a table it holds from one it is being
         // shown, without inferring it from the demand's state.
         accepted: offer.state === 'ACCEPTED',
+        payAt: offer.payAt,
+        payment: paymentState(offer.checkouts[0], now),
       })),
     }));
   }),
@@ -454,6 +499,38 @@ export const demandRouter = router({
         }
         if (error instanceof SlotTaken) {
           throw new TRPCError({ code: 'CONFLICT', message: new SlotTaken().message });
+        }
+        if (error instanceof PaymentRequired) {
+          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: error.message });
+        }
+        throw error;
+      }
+    }),
+
+  /**
+   * Pay for an offer the seller asked to be paid in the app.
+   *
+   * Returns a hosted checkout URL. The table is committed when the payment is
+   * confirmed, and refunded in full if it is gone by then.
+   */
+  payOffer: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 40, label: 'demand-pay' }))
+    .input(z.object({ offerId: z.string().trim().min(1).max(64) }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await startOfferCheckout({ offerId: input.offerId, userId: ctx.user.userId });
+      } catch (error) {
+        if (error instanceof OfferGone || error instanceof NotYours) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'That offer is no longer available.' });
+        }
+        if (error instanceof OfferExpired) {
+          throw new TRPCError({ code: 'CONFLICT', message: error.message });
+        }
+        if (error instanceof NotPayable || error instanceof PayoutNotReady) {
+          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: error.message });
+        }
+        if (error instanceof PaymentsUnavailable) {
+          throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: error.message });
         }
         throw error;
       }

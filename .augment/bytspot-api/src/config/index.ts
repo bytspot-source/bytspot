@@ -39,6 +39,10 @@ const envSchema = z.object({
   // Starting rate only. The live rate is the newest PlatformFeeSetting row,
   // which admins change without a deploy.
   DEFAULT_PLATFORM_FEE_BPS: z.coerce.number().int().min(0).max(5_000).default(0),
+  // Bytspot's share of an offer paid in the app, taken from the seller's
+  // transfer. Same override path: the newest `vendor-booking` fee row wins.
+  VENDOR_BOOKING_FEE_BPS: z.coerce.number().int().min(0).max(5_000).default(1_000),
+  VENDOR_BOOKING_FEE_MIN_CENTS: z.coerce.number().int().min(0).default(100),
   ADMIN_PASSWORD:         z.string().default(''),
   ADMIN_USER_IDS:         z.string().default(''),
   ADMIN_BOOTSTRAP_EMAILS: z.string().default(''),
@@ -126,6 +130,8 @@ export const config = {
   stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
   stripePremiumPriceId: env.STRIPE_PREMIUM_PRICE_ID,
   defaultPlatformFeeBps: env.DEFAULT_PLATFORM_FEE_BPS,
+  vendorBookingFeeBps: env.VENDOR_BOOKING_FEE_BPS,
+  vendorBookingFeeMinCents: env.VENDOR_BOOKING_FEE_MIN_CENTS,
   frontendUrl: env.FRONTEND_URL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,

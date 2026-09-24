@@ -83,7 +83,7 @@ export async function notifyAskSeller(
 }
 
 /** Tell a seller a guest took their offer. Never throws. */
-export async function notifyOfferAcceptedSeller(offerId: string): Promise<void> {
+export async function notifyOfferAcceptedSeller(offerId: string, paid?: { sellerNetCents: number }): Promise<void> {
   try {
     const offer = await db.offer.findUnique({
       where: { id: offerId },
@@ -108,7 +108,9 @@ export async function notifyOfferAcceptedSeller(offerId: string): Promise<void> 
     );
     const title = (offer.window && skuTemplate(offer.window.skuTemplateId)?.title) || 'Your listing';
     const when = formatAskWhen(offer.startsAt, offer.location.timezone);
-    const price = priceLabel(offer.priceCents);
+    const price = paid
+      ? `${priceLabel(offer.priceCents)} paid, you receive ${priceLabel(paid.sellerNetCents)}`
+      : priceLabel(offer.priceCents);
     const partySize = offer.demand.partySize;
     const guests = `${partySize} ${partySize === 1 ? 'guest' : 'guests'}`;
     await Promise.all([

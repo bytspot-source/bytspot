@@ -23,6 +23,7 @@ import {
   type EvaluableSupply,
 } from './demand';
 import { coverUrlFor } from './media';
+import { NotPayable, PayoutNotReady } from './acceptOffer';
 
 /** Two seats answered at once, or the slot went between reading and writing. */
 export class DemandMoved extends Error {}
@@ -322,6 +323,8 @@ export class NotFound extends Error {
 export const respondInput = z.object({
   operation: z.enum(['OFFER', 'WITHDRAW_OFFER', 'DECLINE']),
   bookableId: z.string().trim().min(1).max(100),
+  /** How an offer is paid. Absent means at the venue, as before. */
+  payAt: z.enum(['venue', 'bytspot']).optional(),
 });
 
 export interface RespondingSeat {
@@ -366,6 +369,17 @@ export async function respondToDemand(
   if (!window) throw new NotFound('offering');
 
   if (!canRunDemandOperation(input.operation, demand.state, seat.capabilities)) throw new DemandMoved();
+
+  // Paid in the app needs somewhere to send the money and something to charge.
+  const payAt = input.operation === 'OFFER' && input.payAt === 'bytspot' ? 'bytspot' : 'venue';
+  if (payAt === 'bytspot') {
+    if (window.priceCents <= 0) throw new NotPayable();
+    const payout = await db.vendorSeller.findUnique({
+      where: { id: seat.sellerId },
+      select: { payoutReference: true, payoutStatus: true },
+    });
+    if (payout?.payoutStatus !== 'active' || !payout.payoutReference) throw new PayoutNotReady();
+  }
 
   const nextState = stateAfterOperation(input.operation);
   if (!nextState) throw new DemandMoved();
@@ -457,6 +471,7 @@ export async function respondToDemand(
           durationMins: window.slotMinutes,
           priceCents: window.priceCents,
           capacity: window.maxGuests,
+          payAt,
           createdBySeatId: seat.seatId,
           // A hold is a promise with a deadline.
           holdExpiresAt: new Date(now.getTime() + 120 * 60_000),

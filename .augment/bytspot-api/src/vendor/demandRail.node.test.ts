@@ -1188,3 +1188,269 @@ test('the seller is told when a guest takes their offer, and a failure never rea
   await notifyOfferAcceptedSeller(randomUUID());
   assert.deepEqual(logged.filter((line) => line.includes('booked notice failed')), []);
 });
+
+/**
+ * Paying for an offer in the app.
+ *
+ * Stripe is stubbed at the handle; everything on our side of it runs against
+ * the real schema, including the CHECK that the split adds up.
+ */
+
+function fakeStripe() {
+  const calls = { sessions: [] as { params: any; opts: any }[], refunds: [] as { params: any; opts: any }[] };
+  const stripe = {
+    checkout: {
+      sessions: {
+        create: async (params: any, opts: any) => {
+          calls.sessions.push({ params, opts });
+          return { id: `cs_test_${randomUUID()}`, url: `https://checkout.stripe.test/${calls.sessions.length}`, expires_at: params.expires_at };
+        },
+      },
+    },
+    refunds: {
+      create: async (params: any, opts: any) => {
+        calls.refunds.push({ params, opts });
+        return { id: `re_test_${calls.refunds.length}` };
+      },
+    },
+  };
+  return { stripe: stripe as unknown as import('stripe').default, calls };
+}
+
+async function withPayout<T>(run: () => Promise<T>): Promise<T> {
+  await db.vendorSeller.update({ where: { id: ids.seller }, data: { payoutReference: 'acct_rail_test', payoutStatus: 'active' } });
+  try {
+    return await run();
+  } finally {
+    await db.vendorSeller.update({ where: { id: ids.seller }, data: { payoutReference: null, payoutStatus: null } });
+  }
+}
+
+async function paidOfferTo() {
+  const when = atlantaEveningTomorrow();
+  const published = await guest().demand.publish({
+    category: 'dining',
+    partySize: 2,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window, payAt: 'bytspot' });
+  const offer = await db.offer.findFirstOrThrow({ where: { demandId: published.id, state: 'OFFERED' } });
+  return { demandId: published.id, offer };
+}
+
+function paidSession(checkout: { id: string; stripeSessionId: string | null; amountCents: number }, overrides: Record<string, unknown> = {}) {
+  return {
+    id: checkout.stripeSessionId,
+    object: 'checkout.session',
+    mode: 'payment',
+    payment_status: 'paid',
+    amount_total: checkout.amountCents,
+    currency: 'usd',
+    payment_intent: 'pi_rail_test',
+    metadata: { kind: 'offer-booking', checkoutId: checkout.id },
+    ...overrides,
+  } as unknown as import('stripe').default.Checkout.Session;
+}
+
+test('an offer paid in the app is booked only once the payment is confirmed', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { stripeHandle } = await import('./payout');
+  const { settleOfferCheckout } = await import('./offerCheckout');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+  const fake = fakeStripe();
+  t.mock.method(stripeHandle, 'client', () => fake.stripe);
+
+  await withPayout(async () => {
+    const { demandId, offer } = await paidOfferTo();
+    assert.equal(offer.payAt, 'bytspot');
+
+    // Accepting without paying is refused, so the charge cannot be skipped.
+    await assert.rejects(() => guest().demand.acceptOffer({ offerId: offer.id }), /paid in the app/);
+
+    const first = await guest().demand.payOffer({ offerId: offer.id });
+    const again = await guest().demand.payOffer({ offerId: offer.id });
+    // Asking twice reuses the open checkout rather than creating a second charge.
+    assert.equal(again.url, first.url);
+    assert.equal(fake.calls.sessions.length, 1);
+
+    const { params } = fake.calls.sessions[0];
+    assert.equal(params.line_items[0].price_data.unit_amount, 5000);
+    // 10% of $50, taken from the seller's transfer.
+    assert.equal(params.payment_intent_data.application_fee_amount, 500);
+    assert.equal(params.payment_intent_data.transfer_data.destination, 'acct_rail_test');
+
+    const checkout = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id } });
+    assert.equal(checkout.status, 'pending');
+    assert.equal(checkout.sellerNetCents, 4500);
+
+    // Nothing is committed while the guest is paying.
+    assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'OFFERED');
+    const paying = (await guest().demand.mine()).find((item) => item.id === demandId);
+    assert.deepEqual(paying?.offers[0].payment, { state: 'paying' });
+
+    // The hold lapses while the guest is on the payment page. The offer stays
+    // in view, and the payment still books it.
+    await db.offer.update({ where: { id: offer.id }, data: { holdExpiresAt: new Date(checkout.createdAt.getTime() + 1) } });
+    const lapsed = (await guest().demand.mine()).find((item) => item.id === demandId);
+    assert.equal(lapsed?.offers[0]?.id, offer.id);
+
+    assert.equal(await settleOfferCheckout(paidSession(checkout), fake.stripe), 'completed');
+    assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
+    assert.equal((await db.offer.findUniqueOrThrow({ where: { id: offer.id } })).state, 'ACCEPTED');
+    const paid = (await guest().demand.mine()).find((item) => item.id === demandId);
+    assert.deepEqual(paid?.offers[0].payment, { state: 'paid' });
+
+    // Stripe redelivers. A second confirmation changes nothing and refunds nothing.
+    assert.equal(await settleOfferCheckout(paidSession(checkout), fake.stripe), 'completed');
+    assert.equal(fake.calls.refunds.length, 0);
+  });
+});
+
+test('a payment that arrives after the offer is gone is refunded in full', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { stripeHandle } = await import('./payout');
+  const { settleOfferCheckout } = await import('./offerCheckout');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+  const fake = fakeStripe();
+  t.mock.method(stripeHandle, 'client', () => fake.stripe);
+
+  await withPayout(async () => {
+    const { demandId, offer } = await paidOfferTo();
+    await guest().demand.payOffer({ offerId: offer.id });
+    const checkout = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id } });
+
+    // The seller withdraws while the guest is on the payment page.
+    await respondToDemand(await seat(), demandId, { operation: 'WITHDRAW_OFFER', bookableId: ids.window });
+
+    assert.equal(await settleOfferCheckout(paidSession(checkout), fake.stripe), 'refunded');
+    assert.equal(fake.calls.refunds.length, 1);
+    const { params, opts } = fake.calls.refunds[0];
+    assert.equal(params.payment_intent, 'pi_rail_test');
+    // The seller's transfer and Bytspot's fee both come back.
+    assert.equal(params.reverse_transfer, true);
+    assert.equal(params.refund_application_fee, true);
+    assert.equal(opts.idempotencyKey, `offer-refund-${checkout.id}`);
+
+    const stored = await db.offerCheckout.findUniqueOrThrow({ where: { id: checkout.id } });
+    assert.equal(stored.status, 'refunded');
+    assert.equal(stored.refundId, 're_test_1');
+    assert.notEqual((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
+
+    // A redelivery does not refund twice.
+    assert.equal(await settleOfferCheckout(paidSession(checkout), fake.stripe), 'refunded');
+    assert.equal(fake.calls.refunds.length, 1);
+  });
+});
+
+test('two paid checkouts for one offer book it once and refund the other', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { stripeHandle } = await import('./payout');
+  const { settleOfferCheckout } = await import('./offerCheckout');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+  const fake = fakeStripe();
+  t.mock.method(stripeHandle, 'client', () => fake.stripe);
+
+  await withPayout(async () => {
+    const { demandId, offer } = await paidOfferTo();
+    await guest().demand.payOffer({ offerId: offer.id });
+    const first = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id } });
+    // Our record of the first checkout lapses, so asking again opens a second,
+    // while Stripe may still take payment on the first.
+    await db.offerCheckout.update({ where: { id: first.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await guest().demand.payOffer({ offerId: offer.id });
+    const second = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id, id: { not: first.id } } });
+
+    // The second is paid and has booked the offer, but stopped before
+    // recording its checkout as completed.
+    await db.offerCheckout.update({ where: { id: second.id }, data: { status: 'settling' } });
+    const { acceptOffer } = await import('./acceptOffer');
+    await acceptOffer({ offerId: offer.id, userId: second.userId, now: second.createdAt, paid: true });
+
+    // The first payment lands. The offer is accepted, but not by it.
+    assert.equal(await settleOfferCheckout(paidSession(first), fake.stripe), 'refunded');
+    assert.equal(fake.calls.refunds.length, 1);
+    assert.equal(fake.calls.refunds[0].opts.idempotencyKey, `offer-refund-${first.id}`);
+
+    // The second's redelivery records its own booking without a refund.
+    assert.equal(await settleOfferCheckout(paidSession(second), fake.stripe), 'completed');
+    assert.equal(fake.calls.refunds.length, 1);
+    assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
+    const statuses = (await db.offerCheckout.findMany({ where: { offerId: offer.id }, orderBy: { createdAt: 'asc' } })).map((c) => c.status);
+    assert.deepEqual(statuses, ['refunded', 'completed']);
+
+    // The index holds even if the code did not: a second claim on one offer is refused.
+    await assert.rejects(() => db.offerCheckout.update({ where: { id: first.id }, data: { status: 'settling' } }), /Unique constraint/);
+  });
+});
+
+test('a payment for the wrong amount is refunded rather than booked', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { stripeHandle } = await import('./payout');
+  const { settleOfferCheckout } = await import('./offerCheckout');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+  const fake = fakeStripe();
+  t.mock.method(stripeHandle, 'client', () => fake.stripe);
+
+  await withPayout(async () => {
+    const { demandId, offer } = await paidOfferTo();
+    await guest().demand.payOffer({ offerId: offer.id });
+    const checkout = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id } });
+
+    assert.equal(await settleOfferCheckout(paidSession(checkout, { amount_total: 100 }), fake.stripe), 'refunded');
+    assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'OFFERED');
+    const mine = (await guest().demand.mine()).find((item) => item.id === demandId);
+    assert.equal(mine?.offers[0].payment?.state, 'refunded');
+  });
+});
+
+test('a seller without payouts cannot ask to be paid in the app', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { PayoutNotReady } = await import('./acceptOffer');
+  const when = atlantaEveningTomorrow();
+  const published = await guest().demand.publish({
+    category: 'dining',
+    partySize: 2,
+    earliest: when.earliest,
+    latest: when.latest,
+    latitude: MIDTOWN.lat,
+    longitude: MIDTOWN.lng,
+  });
+  await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+  await assert.rejects(
+    async () => respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window, payAt: 'bytspot' }),
+    PayoutNotReady,
+  );
+  assert.equal(await db.offer.count({ where: { demandId: published.id } }), 0);
+});
+
+test('the shared Stripe endpoint hands on events that are not offer payments, and records expiry', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { stripeHandle } = await import('./payout');
+  const { applyOfferCheckoutEvent } = await import('./offerCheckout');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+  const fake = fakeStripe();
+  t.mock.method(stripeHandle, 'client', () => fake.stripe);
+
+  const party = { type: 'checkout.session.completed', data: { object: { metadata: { kind: 'party-ticket' } } } };
+  assert.equal(await applyOfferCheckoutEvent(party as never), false);
+  const subscription = { type: 'customer.subscription.updated', data: { object: {} } };
+  assert.equal(await applyOfferCheckoutEvent(subscription as never), false);
+
+  await withPayout(async () => {
+    const { offer } = await paidOfferTo();
+    await guest().demand.payOffer({ offerId: offer.id });
+    const checkout = await db.offerCheckout.findFirstOrThrow({ where: { offerId: offer.id } });
+    const expired = { type: 'checkout.session.expired', data: { object: paidSession(checkout, { payment_status: 'unpaid' }) } };
+    assert.equal(await applyOfferCheckoutEvent(expired as never), true);
+    assert.equal((await db.offerCheckout.findUniqueOrThrow({ where: { id: checkout.id } })).status, 'expired');
+  });
+});

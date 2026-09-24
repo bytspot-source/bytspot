@@ -56,6 +56,24 @@ export class NotYours extends Error {
   }
 }
 
+export class PaymentRequired extends Error {
+  constructor() {
+    super('This offer is paid in the app. Pay to book it.');
+  }
+}
+
+export class NotPayable extends Error {
+  constructor() {
+    super('This offer is paid at the venue.');
+  }
+}
+
+export class PayoutNotReady extends Error {
+  constructor() {
+    super('This business cannot take payments in the app yet.');
+  }
+}
+
 export interface AcceptedOffer {
   offerId: string;
   demandId: string;
@@ -74,7 +92,13 @@ export interface AcceptedOffer {
  * annoyed; a guest holding a confirmation for a table that does not exist is a
  * problem for a real business on a real evening.
  */
-export async function acceptOffer(input: { offerId: string; userId: string; now?: Date }): Promise<AcceptedOffer> {
+export async function acceptOffer(input: {
+  offerId: string;
+  userId: string;
+  now?: Date;
+  /** Set only by payment confirmation, never from a guest's request. */
+  paid?: boolean;
+}): Promise<AcceptedOffer> {
   const now = input.now ?? new Date();
 
   const offer = await db.offer.findUnique({
@@ -86,6 +110,7 @@ export async function acceptOffer(input: { offerId: string; userId: string; now?
   // offer ids learns nothing about which ones exist.
   if (offer.demand.raisedByUserId !== input.userId) throw new NotYours();
   if (offer.state !== 'OFFERED') throw new OfferGone();
+  if (offer.payAt === 'bytspot' && !input.paid) throw new PaymentRequired();
   if (offer.holdExpiresAt <= now) throw new OfferExpired();
   if (offer.demand.state === 'BOOKED') throw new OfferGone();
   if (offer.demand.state === 'WITHDRAWN' || offer.demand.state === 'EXPIRED') throw new OfferGone();

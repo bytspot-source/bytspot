@@ -1762,7 +1762,11 @@ export const partyTicketsRouter = router({
         if (existing) {
           if ((existing.ticketTierName ?? null) !== (ticketTier?.name ?? null) || (existing.sessionId ?? null) !== (partySession?.id ?? null) || existing.amountCents !== amountCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match what it originally bought.' });
           if (existing.status === 'completed') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket is already confirmed.' });
-          if (existing.status === 'expired') throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout expired. Start a new checkout.' });
+          // A retry is not a new inventory hold. Never resurrect an elapsed
+          // creating reservation or send refunded/cancelled rows back to Stripe.
+          if (!['creating', 'pending'].includes(existing.status) || existing.reservationExpiresAt <= new Date()) {
+            throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout is no longer active. Refresh your purchases before starting a new checkout.' });
+          }
           return existing;
         }
 

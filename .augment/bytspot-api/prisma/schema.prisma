@@ -69,6 +69,7 @@ model User {
   ownedCircles          SocialCircle[]
   circleMemberships     SocialCircleMember[]
   partyEncounterOptIns  PartyEncounterOptIn[]
+  confirmedPartyCredits PartyPerformer[] @relation("performerConfirmation")
 
   @@map("users")
 }
@@ -274,12 +275,40 @@ model Party {
   checkouts       PartyCheckout[]
   planItems       PlanItem[]
   encounterOptIns PartyEncounterOptIn[]
+  performers      PartyPerformer[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
   @@index([status, startsAt])
   @@index([arrivalVenueId])
   @@map("parties")
+}
+
+/// Host-proposed credit; only the invited account can consent to publication.
+/// invitedUserId is deliberately not a relation: recording an unknown ID has
+/// exactly the same result as recording an existing ID (no account lookup).
+/// confirmedUserId is bound to that identity on acceptance, never by the host.
+model PartyPerformer {
+  id              String    @id @default(cuid())
+  partyId         String    @map("party_id")
+  invitedUserId   String    @map("invited_user_id")
+  confirmedUserId String?   @map("confirmed_user_id")
+  displayName     String    @map("display_name")
+  role            String
+  status          String    @default("pending") // pending | accepted | declined | withdrawn | removed
+  tipHandles      Json      @default("[]") @map("tip_handles")
+  confirmedAt     DateTime? @map("confirmed_at")
+  version         Int       @default(0)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  party     Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  confirmedUser User? @relation("performerConfirmation", fields: [confirmedUserId], references: [id], onDelete: Cascade)
+
+  @@index([partyId, status])
+  @@index([invitedUserId, status, createdAt])
+  @@index([confirmedUserId])
+  @@map("party_performers")
 }
 
 // The platform's cut, adjustable at any time to steady the market. Rows are

@@ -245,11 +245,29 @@ test('Paid checkout retries return the persisted pending reservation', async () 
   (config as any).stripeSecretKey = 'test-only-key';
   partyCheckout.findUnique = async () => ({
     id: 'checkout-1', ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', status: 'pending', checkoutUrl: 'https://checkout.stripe.test/session',
+    reservationExpiresAt: new Date(Date.now() + 60_000),
   });
 
   assert.deepEqual(await caller().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), {
     url: 'https://checkout.stripe.test/session',
   });
+});
+
+test('Checkout recovery refuses elapsed holds and terminal rows before reaching Stripe', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40,
+    title: 'First Listen', tagline: '', ...linkAlive,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+  (config as any).stripeSecretKey = 'test-only-key';
+  for (const [status, elapsed] of [['creating', true], ['pending', true], ['cancelled', false], ['refund-required', false], ['refunded', false]] as const) {
+    partyCheckout.findUnique = async () => ({
+      id: 'checkout-1', ticketTierName: 'First Drop', amountCents: 2500, currency: 'usd', status,
+      reservationExpiresAt: new Date(Date.now() + (elapsed ? -60_000 : 60_000)),
+    });
+    const scoped = createCaller({ ...authenticatedContext, user: { userId: `recovery-${status}`, email: 'recovery@example.test' } });
+    await assert.rejects(() => scoped.events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }), { code: 'CONFLICT' });
+  }
 });
 
 test('Paid checkout rejects an idempotent retry that changes tier and a second active reservation', async () => {

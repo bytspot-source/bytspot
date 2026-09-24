@@ -99,6 +99,9 @@ export async function purgeExpiredAccounts(now = new Date()): Promise<{ purged: 
     // Relations cascade at the schema level; identity hashes are removed first
     // so a purged member can never resurface in contact discovery.
     await db.userIdentityHash.deleteMany({ where: { userId: id } });
+    // Opaque invitation IDs intentionally have no FK. The confirmed-user
+    // cascade cannot remove unconfirmed (pending, declined or removed) rows.
+    await db.partyPerformer.deleteMany({ where: { invitedUserId: id } });
     await db.user.delete({ where: { id } });
   }
   return { purged: due.length };

@@ -256,6 +256,42 @@ export async function sendVendorBookedEmail(to: string[], booked: VendorBookedNo
   }
 }
 
+export interface VendorVerifiedNotice {
+  legalName: string;
+  consoleUrl: string;
+}
+
+/**
+ * A business met every requirement and went live. Logged, not thrown: the
+ * console shows the same badge whether or not this lands.
+ */
+export async function sendVendorVerifiedEmail(to: string, verified: VendorVerifiedNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `${verified.legalName} is verified on Bytspot`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">You are verified</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            ${escapeHtml(verified.legalName)} passed every check: business name, contact email, a live location and a payout account.
+          </p>
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 24px;">
+            You can now publish times and take bookings. Guests see your places on Bytspot once a window is published.
+          </p>
+          <a href="${escapeHtml(verified.consoleUrl)}" style="display: inline-block; background: #fff; color: #0d0d0d; font-weight: 600; text-decoration: none; padding: 12px 20px; border-radius: 10px;">Open your console</a>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorVerifiedEmail failed:', err?.message);
+  }
+}
+
 export interface GuestOfferNotice {
   where: string;
   when: string;

@@ -170,6 +170,10 @@ test('a new place is created under our id, even when the console sends a placeho
   try {
     const live = await save({ id: 'loc_1790000000000', state: 'ACTIVE' });
     assert.equal(live.status, 200);
+    // The console reads the business's state from the profile, not from sign-in.
+    const body = (await live.json()) as { state: string; verifiedAt?: string };
+    assert.equal(body.state, 'PENDING');
+    assert.equal(body.verifiedAt, undefined);
     // Tried as an edit first, scoped to this business, then created.
     assert.deepEqual(updatedWhere, [{ id: 'loc_1790000000000', sellerId: 'sel_1' }]);
     assert.equal(created.length, 1);

@@ -1139,6 +1139,9 @@ model VendorSeller {
   payoutLast4     String?             @map("payout_last4")
   payoutDetail    String?             @map("payout_detail")
 
+  /// When the business first met every requirement for going live. Set once.
+  verifiedAt DateTime? @map("verified_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

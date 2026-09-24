@@ -425,3 +425,30 @@ test('A ticket tier that names no membership requirement is not treated as an un
   assert.equal(result.status, 200);
   assert.deepEqual(written, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
 });
+
+
+test('A stated ticket-tier requirement is still enforced', async () => {
+  // The allowance is for absence only. A tier that names black still refuses
+  // a green guest, or the fix would sell past the requirement.
+  let checkoutUpdate: any;
+  user.findUnique = async () => ({ membershipTier: 'green' });
+  party.findUnique = async () => ({ requiredMembershipTier: 'green', ticketTiers: [{ name: 'First Drop', requiredMembershipTier: 'black' }] });
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async () => ({ id: 'guest-1' });
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+});
+
+test('A missing Party requirement still fails closed', async () => {
+  // The Party column is NOT NULL, so an absent requirement there is broken
+  // data rather than an absence, and must not be waved through.
+  let checkoutUpdate: any;
+  user.findUnique = async () => ({ membershipTier: 'black' });
+  party.findUnique = async () => ({ requiredMembershipTier: null, ticketTiers: [{ name: 'First Drop' }] });
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  partyGuest.update = async () => ({ id: 'guest-1' });
+
+  await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
+  assert.equal(checkoutUpdate.data.status, 'refund-required');
+});

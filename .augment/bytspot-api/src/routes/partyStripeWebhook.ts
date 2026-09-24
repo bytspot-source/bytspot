@@ -84,14 +84,13 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     const sessionRequirement = boughtSession?.requiredMembershipTier ?? null;
     if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
     const ticketTierRequirement = ticketRequiredMembershipTier(party?.ticketTiers, current.ticketTierName);
-    // `meetsRequiredMembershipTier` answers false when there is no
-    // requirement, because it demands two real tiers. Asking it about an
-    // absent one therefore reads "not met" and refunds a payment nobody
-    // objected to: a session carries no tier of its own, and neither does a
-    // ticket tier that never named one. A stated requirement is enforced; an
-    // absent one is not a failed one. The Party's own tier is not optional —
-    // the column is NOT NULL, so a missing one is broken data, not an
-    // absence.
+    // `meetsRequiredMembershipTier` demands two real tiers, so asking it about
+    // an absent requirement reads "not met" and refunds a payment nobody
+    // objected to. A ticket tier naming no tier is not a tier nobody
+    // qualifies for, and neither is a session, which carries no tier of its
+    // own. The Party's own requirement gets no such allowance: that column is
+    // NOT NULL, so a missing one is broken data rather than an absence, and
+    // it must keep failing closed.
     const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
       && (ticketTierRequirement == null || meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement))
       && (sessionRequirement == null || meetsRequiredMembershipTier(user?.membershipTier, sessionRequirement));

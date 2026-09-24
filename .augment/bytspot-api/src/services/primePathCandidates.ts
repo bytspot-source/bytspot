@@ -250,6 +250,7 @@ export async function partySessionPriceFloors(
   const sessions = await db.partySession.findMany({
     where: {
       partyId: { in: partyIds },
+      withdrawnAt: null,
       startsAt: { gt: now },
       priceCents: { gt: 0 },
       committed: { lt: db.partySession.fields.quantity },

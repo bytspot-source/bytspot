@@ -356,6 +356,12 @@ model PartySession {
   /// The order the floor was arranged in, not the order rows were typed.
   position Int
 
+  /// Set when the seller takes the session off the floor. Retired rather
+  /// than deleted, because a refunded claim and a settled checkout still
+  /// point at what they bought; deleting the row would either destroy that
+  /// record or be refused by it.
+  withdrawnAt DateTime? @map("withdrawn_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -365,6 +371,7 @@ model PartySession {
   checkouts PartyCheckout[]
 
   @@unique([partyId, position])
+  @@index([partyId, withdrawnAt])
   @@index([partyId, startsAt])
   @@index([sellerId, startsAt])
   @@map("party_sessions")

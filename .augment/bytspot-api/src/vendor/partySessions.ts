@@ -134,7 +134,7 @@ async function sellablePartyFor(sellerId: string, partyId: string) {
 export async function listPartySessions(sellerId: string, partyId: string): Promise<VendorSessionDto[]> {
   await sellablePartyFor(sellerId, partyId);
   const rows = await db.partySession.findMany({
-    where: { partyId, sellerId },
+    where: { partyId, sellerId, withdrawnAt: null },
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
   });
   return rows.map(vendorSessionDto);
@@ -154,11 +154,15 @@ export async function authorPartySession(
 ): Promise<VendorSessionDto> {
   await sellablePartyFor(sellerId, partyId);
 
-  const existing = await db.partySession.findMany({
+  // Retired rows keep their slot, so they are still read for position; the
+  // unique index counts them and reusing a number would collide. They are
+  // dropped before the name check, because a name nobody sells is free.
+  const onFloor = await db.partySession.findMany({
     where: { partyId },
     orderBy: [{ position: 'asc' }],
-    select: { name: true, position: true },
+    select: { name: true, position: true, withdrawnAt: true },
   });
+  const existing = onFloor.filter((row) => row.withdrawnAt === null);
   if (existing.length >= MAX_SESSIONS_PER_PARTY) {
     throw new SessionRefused([{ index: null, field: 'quantity', message: 'This Party already sells as many sessions as Bytspot carries.' }]);
   }
@@ -209,7 +213,7 @@ export async function authorPartySession(
   // straight; the loser re-reads and takes the slot after. Retried rather
   // than surfaced, because the vendor did nothing wrong and the second
   // attempt is against a floor that has stopped moving.
-  let position = existing.reduce((highest, row) => Math.max(highest, row.position), -1) + 1;
+  let position = onFloor.reduce((highest, row) => Math.max(highest, row.position), -1) + 1;
   for (let attempt = 0; ; attempt += 1) {
     try {
       return vendorSessionDto(await db.partySession.create({ data: { ...data, position } }));
@@ -240,25 +244,28 @@ function isPositionTaken(err: unknown): boolean {
  * Three things can speak for a unit and all three are checked: a committed
  * count, a held claim, and a checkout still on Stripe. The last one is the
  * easiest to miss — between paying and settling there is no claim and no
- * committed unit yet, only a live checkout row — and missing it turned a
- * refusal into a foreign-key crash.
+ * committed unit yet, only a live checkout row.
  *
- * The database refuses all three too, through RESTRICT on both the claim and
- * the checkout. That is the half that actually holds: this check races, and
- * a claim written between the count and the delete would slip past it, so
- * the constraint is what makes the rule true and this is what makes it
- * readable. A violation is translated rather than surfaced as a 500.
+ * Withdrawal retires the row rather than deleting it. Deleting was the wrong
+ * verb: a refunded claim and a settled checkout still point at what they
+ * bought, so a delete either destroys that record or is refused by it — and
+ * being refused by it meant a session nobody held could not be taken off the
+ * floor because somebody had once been refunded for it. Retiring keeps the
+ * history pointing somewhere true and takes the session off every read.
+ *
+ * The RESTRICT on the claim and the checkout stays as the backstop it was
+ * always meant to be. This path no longer deletes, so it no longer trips it.
  */
 export async function withdrawPartySession(sellerId: string, sessionId: string): Promise<void> {
   const session = await db.partySession.findFirst({
-    where: { id: sessionId, sellerId },
+    where: { id: sessionId, sellerId, withdrawnAt: null },
     select: { id: true, partyId: true, committed: true },
   });
   if (!session) throw new SessionPartyNotFound();
   await sellablePartyFor(sellerId, session.partyId);
 
-  // `released` is a refunded or expired hold, which no longer speaks for a
-  // unit. `held` is the only state that does.
+  // `released` is a refunded or expired hold and an inactive checkout is
+  // spent history; neither speaks for a unit. Only a live hold does.
   const [claims, checkouts] = await Promise.all([
     db.partySessionClaim.count({ where: { sessionId: session.id, state: 'held' } }),
     db.partyCheckout.count({ where: { sessionId: session.id, status: { in: ['creating', 'pending', 'completed'] } } }),
@@ -267,18 +274,13 @@ export async function withdrawPartySession(sellerId: string, sessionId: string):
     throw new SessionInUse(['Someone is already holding this. Cancel their claim first.']);
   }
 
-  try {
-    await db.partySession.delete({ where: { id: session.id } });
-  } catch (err) {
-    // Lost the race: a claim or checkout landed after the counts. The
-    // constraint held, so report what it means.
-    if (isForeignKeyViolation(err)) {
-      throw new SessionInUse(['Someone took this while you were withdrawing it.']);
-    }
-    throw err;
+  // Guarded so a hold taken between the counts and this write loses: the
+  // update refuses a row that stopped being free.
+  const retired = await db.partySession.updateMany({
+    where: { id: session.id, withdrawnAt: null, committed: 0 },
+    data: { withdrawnAt: new Date() },
+  });
+  if (retired.count === 0) {
+    throw new SessionInUse(['Someone took this while you were withdrawing it.']);
   }
-}
-
-function isForeignKeyViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2003';
 }

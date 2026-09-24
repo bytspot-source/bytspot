@@ -979,7 +979,7 @@ export const partyInvite = publicProcedure
       ? party.media.filter((media) => media.kind === 'recap').length
       : 0;
     const now = new Date();
-    const sessions = await db.partySession.findMany({ where: { partyId: party.id }, orderBy: [{ position: 'asc' }] });
+    const sessions = await db.partySession.findMany({ where: { partyId: party.id, withdrawnAt: null }, orderBy: [{ position: 'asc' }] });
     // Holds are counted per session so what a guest reads is what checkout
     // will actually sell them.
     const sessionHolds = sessions.length > 0
@@ -1721,7 +1721,7 @@ export const partyTicketsRouter = router({
       // The session, which is charged on top of the gate rather than instead
       // of it.
       const partySession = input.sessionId
-        ? await db.partySession.findFirst({ where: { id: input.sessionId, partyId: party.id } })
+        ? await db.partySession.findFirst({ where: { id: input.sessionId, partyId: party.id, withdrawnAt: null } })
         : null;
       if (input.sessionId && !partySession) throw new TRPCError({ code: 'NOT_FOUND', message: 'That session is no longer available.' });
       if (partySession && partySession.priceCents <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'That session is free and does not go through checkout.' });
@@ -1930,7 +1930,7 @@ export const partySessionsRouter = router({
 
       const now = new Date();
       const sessions = await db.partySession.findMany({
-        where: { partyId: input.partyId },
+        where: { partyId: input.partyId, withdrawnAt: null },
         orderBy: [{ position: 'asc' }],
       });
       return {

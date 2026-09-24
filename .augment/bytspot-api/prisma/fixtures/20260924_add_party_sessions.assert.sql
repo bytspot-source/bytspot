@@ -202,6 +202,35 @@ BEGIN
   EXCEPTION WHEN foreign_key_violation THEN NULL;
   END;
 
+  -- ── Retirement outlives the history that points at it ─────────────────
+
+  -- The seller takes the session off the floor while a spent checkout and a
+  -- refunded claim still reference it. Deleting was refused by exactly this
+  -- history, which stranded sessions nobody held; retiring must not be.
+  UPDATE "party_session_claims" SET "state" = 'released' WHERE "id" = 'fixture-session-claim';
+  UPDATE "party_checkouts" SET "status" = 'expired' WHERE "id" = 'fixture-session-checkout';
+
+  -- Deletion is still refused by that spent history, which is the whole
+  -- reason withdrawal retires instead. Nobody holds this session and it
+  -- could not be removed.
+  BEGIN
+    DELETE FROM "party_sessions" WHERE "id" = s_id;
+    RAISE EXCEPTION 'spent history must still refuse deletion';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+
+  UPDATE "party_sessions" SET "withdrawn_at" = NOW() WHERE "id" = s_id;
+
+  IF (SELECT "withdrawn_at" FROM "party_sessions" WHERE "id" = s_id) IS NULL THEN
+    RAISE EXCEPTION 'a session with only spent history must be retirable';
+  END IF;
+
+  -- And the history still points somewhere true.
+  IF NOT EXISTS (SELECT 1 FROM "party_session_claims" WHERE "id" = 'fixture-session-claim')
+    OR NOT EXISTS (SELECT 1 FROM "party_checkouts" WHERE "id" = 'fixture-session-checkout') THEN
+    RAISE EXCEPTION 'retiring a session must not destroy what was bought';
+  END IF;
+
   -- ── Cleanup ───────────────────────────────────────────────────────────
   DELETE FROM "party_checkouts" WHERE "party_id" = fx_party;
   DELETE FROM "party_session_claims" WHERE "party_id" = fx_party;

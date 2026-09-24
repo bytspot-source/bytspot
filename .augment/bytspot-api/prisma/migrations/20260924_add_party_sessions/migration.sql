@@ -24,6 +24,9 @@ CREATE TABLE "party_sessions" (
   "committed"                INTEGER NOT NULL DEFAULT 0,
   "required_membership_tier" TEXT,
   "position"                 INTEGER NOT NULL,
+  -- Retirement, not deletion. A refunded claim and a settled checkout still
+  -- point at what they bought, so the row outlives the floor.
+  "withdrawn_at"             TIMESTAMP(3),
   "created_at"               TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at"               TIMESTAMP(3) NOT NULL,
   CONSTRAINT "party_sessions_pkey" PRIMARY KEY ("id")
@@ -71,6 +74,7 @@ ALTER TABLE "party_sessions" ADD CONSTRAINT "party_sessions_coordinates_paired"
   CHECK (("lat" IS NULL) = ("lng" IS NULL));
 
 CREATE UNIQUE INDEX "party_sessions_party_id_position_key" ON "party_sessions"("party_id", "position");
+CREATE INDEX "party_sessions_party_id_withdrawn_at_idx" ON "party_sessions"("party_id", "withdrawn_at");
 CREATE INDEX "party_sessions_party_id_starts_at_idx" ON "party_sessions"("party_id", "starts_at");
 CREATE INDEX "party_sessions_seller_id_starts_at_idx" ON "party_sessions"("seller_id", "starts_at");
 

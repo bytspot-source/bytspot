@@ -41,7 +41,7 @@ beforeEach(() => {
   partySession.findMany = async () => [];
   partySession.findFirst = async () => null;
   partySession.create = async (input: any) => { created = input.data; return { id: 'session-1', committed: 0, ...input.data }; };
-  partySession.delete = async () => ({ id: 'session-1' });
+  partySession.updateMany = async () => ({ count: 1 });
   partySessionClaim.count = async () => 0;
 });
 
@@ -123,7 +123,7 @@ test('Every complaint about a draft arrives at once', async () => {
 test('A second session cannot take a name the floor already uses', async () => {
   // validateSessions only sees what it is handed, so the collision with the
   // stored floor is the one worth asserting.
-  partySession.findMany = async () => [{ name: 'Front Table', position: 0 }];
+  partySession.findMany = async () => [{ name: 'Front Table', position: 0, withdrawnAt: null }];
   const refusal = await authorPartySession('seller-1', 'party-1', draft({ name: 'front table  ' })).catch((err) => err);
   assert.ok(refusal instanceof SessionRefused);
   assert.deepEqual(refusal.issues, [{ index: 0, field: 'name', message: 'Two sessions cannot share a name.' }]);
@@ -132,7 +132,7 @@ test('A second session cannot take a name the floor already uses', async () => {
 test('A new session lands after the floor already arranged, including another vendors', async () => {
   // Position is read across the whole Party rather than this seller's rows,
   // so two businesses selling into one night do not both claim slot zero.
-  partySession.findMany = async () => [{ name: 'Front Table', position: 0 }, { name: 'Back Booth', position: 3 }];
+  partySession.findMany = async () => [{ name: 'Front Table', position: 0, withdrawnAt: null }, { name: 'Back Booth', position: 3, withdrawnAt: null }];
   await authorPartySession('seller-1', 'party-1', draft({ name: 'Balcony' }));
   assert.equal(created.position, 4);
 });
@@ -163,18 +163,51 @@ test('A released claim no longer speaks for a unit', async () => {
   assert.equal(claimQuery.where.state, 'held');
 });
 
-test('Losing the race to a claim is a refusal, not a crash', async () => {
-  // The counts race the delete, so the constraint is what makes the rule
-  // true. A violation has to read as "someone took this", not a 500.
+test('Withdrawal retires the session rather than deleting what was bought', async () => {
+  // A refunded claim and a settled checkout still point at this row.
+  // Deleting it would either destroy that record or be refused by it.
   partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
-  partySession.delete = async () => { throw Object.assign(new Error('FK'), { code: 'P2003' }); };
+  let retired: any;
+  partySession.updateMany = async (input: any) => { retired = input; return { count: 1 }; };
+  partySession.delete = async () => { throw new Error('withdrawal must not delete'); };
+
+  await withdrawPartySession('seller-1', 'session-1');
+  assert.ok(retired.data.withdrawnAt instanceof Date);
+  // Guarded, so a hold taken since the counts loses.
+  assert.equal(retired.where.withdrawnAt, null);
+  assert.equal(retired.where.committed, 0);
+});
+
+test('Losing the race to a hold is a refusal, not a crash', async () => {
+  // The counts race the write, so the guard is what makes the rule true.
+  // Matching nothing means the row stopped being free.
+  partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
+  partySession.updateMany = async () => ({ count: 0 });
   await assert.rejects(() => withdrawPartySession('seller-1', 'session-1'), SessionInUse);
+});
+
+test('A retired session is off every read and frees its name', async () => {
+  // It keeps its slot, because the unique index still counts it, but the
+  // name it no longer sells is available again.
+  let listQuery: any;
+  partySession.findMany = async (input: any) => {
+    if (input.select) return [{ name: 'Front Table', position: 0, withdrawnAt: new Date() }];
+    listQuery = input;
+    return [];
+  };
+  await listPartySessions('seller-1', 'party-1');
+  assert.equal(listQuery.where.withdrawnAt, null);
+
+  let created: any;
+  partySession.create = async (input: any) => { created = input.data; return { id: 'session-2', committed: 0, ...input.data }; };
+  await authorPartySession('seller-1', 'party-1', draft({ name: 'Front Table' }));
+  assert.equal(created.position, 1);
 });
 
 test('A position taken mid-write is retried rather than refused', async () => {
   // Two sellers arranging one night compute the same next slot. The loser
   // re-reads and takes the one after; the vendor did nothing wrong.
-  partySession.findMany = async () => [{ name: 'Front Table', position: 0 }];
+  partySession.findMany = async () => [{ name: 'Front Table', position: 0, withdrawnAt: null }];
   partySession.findFirst = async () => ({ position: 7 });
   let attempts = 0;
   partySession.create = async (input: any) => {
@@ -189,11 +222,11 @@ test('A position taken mid-write is retried rather than refused', async () => {
 });
 
 test('A session nobody has touched can be withdrawn', async () => {
-  let deleted: any;
+  let retired: any;
   partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
-  partySession.delete = async (input: any) => { deleted = input.where; return { id: 'session-1' }; };
+  partySession.updateMany = async (input: any) => { retired = input.where; return { count: 1 }; };
   await withdrawPartySession('seller-1', 'session-1');
-  assert.deepEqual(deleted, { id: 'session-1' });
+  assert.deepEqual(retired, { id: 'session-1', withdrawnAt: null, committed: 0 });
 });
 
 test('One business cannot withdraw another businesss session', async () => {
@@ -207,5 +240,5 @@ test('A listing is scoped to the business that authored it', async () => {
   let query: any;
   partySession.findMany = async (input: any) => { query = input; return []; };
   await listPartySessions('seller-1', 'party-1');
-  assert.deepEqual(query.where, { partyId: 'party-1', sellerId: 'seller-1' });
+  assert.deepEqual(query.where, { partyId: 'party-1', sellerId: 'seller-1', withdrawnAt: null });
 });

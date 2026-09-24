@@ -533,19 +533,19 @@
         "managedIn": "payouts"
       }
     ],
-    "$statesComment": "What the gate says in each state a console can be open in. PENDING is the only one with nothing for the vendor to do, so it is the only one that is not a checklist.",
+    "$statesComment": "What the gate says in each state a console can be open in. Verification is automatic: a business goes live the moment every requirement is met, so PENDING keeps the checklist of what is still owed.",
     "states": [
       {
         "state": "DRAFT",
         "title": "Finish setting up",
-        "body": "You can build bookables now. You cannot sell one until this is done.",
+        "body": "You can build bookables now. Once everything below is done we verify the business automatically and you can sell.",
         "checklist": true
       },
       {
         "state": "PENDING",
-        "title": "With us for review",
-        "body": "Nothing for you to do. We will email the contact address when this moves.",
-        "checklist": false
+        "title": "Verifying your business",
+        "body": "Your name and email check out. Add a live location and a payout account and we verify you automatically. No one needs to review it, and we email you the moment it is done.",
+        "checklist": true
       },
       {
         "state": "ACTIVE",

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { remainingSeats, tableState, validateTables, type TableDraft, type TableHostParty } from './partyTables';
+import { liveRemainingSeats, liveTableState, remainingSeats, tablePriceFloors, tableState, validateTables, type TableDraft, type TableHostParty } from './partyTables';
 
 const at = (iso: string) => new Date(iso);
 const party: TableHostParty = {
@@ -108,4 +108,40 @@ test('Remaining seats never reports a negative room', () => {
   assert.equal(remainingSeats({ capacity: 40, committed: 10 }), 30);
   assert.equal(remainingSeats({ capacity: 40, committed: 40 }), 0);
   assert.equal(remainingSeats({ capacity: 40, committed: 41 }), 0);
+});
+
+test('The cheapest table a Party still sells is the floor its card may claim', () => {
+  const floors = tablePriceFloors([
+    { partyId: 'party-1', priceCents: 12000 },
+    { partyId: 'party-1', priceCents: 9000 },
+    { partyId: 'party-2', priceCents: 4500 },
+  ]);
+  assert.equal(floors.get('party-1'), 9000);
+  assert.equal(floors.get('party-2'), 4500);
+});
+
+test('A Party with no takeable table claims no floor at all', () => {
+  // Absent is not zero: a Party selling nothing must not read as selling
+  // something free.
+  const floors = tablePriceFloors([]);
+  assert.equal(floors.get('party-1'), undefined);
+});
+
+test('Seats left count the larger of what is settled and what is claimed', () => {
+  // A settled checkout is both a committed seat and a completed row, so
+  // adding them would take the same seat twice.
+  assert.equal(liveRemainingSeats({ capacity: 4, committed: 2 }, 2), 2);
+  // A payment in flight has taken no seat yet and still holds one.
+  assert.equal(liveRemainingSeats({ capacity: 4, committed: 0 }, 3), 1);
+  // A seat given away by the host has no checkout behind it.
+  assert.equal(liveRemainingSeats({ capacity: 4, committed: 3 }, 0), 1);
+  assert.equal(liveRemainingSeats({ capacity: 4, committed: 9 }, 0), 0);
+});
+
+test('A table states one fact about its room, whichever number is asked', () => {
+  const future = { startsAt: at('2099-01-01T20:00:00Z') };
+  assert.equal(liveTableState(future, 2), 'open');
+  assert.equal(liveTableState(future, 0), 'full');
+  // Already started outranks both: seats may remain and still be unreachable.
+  assert.equal(liveTableState({ startsAt: at('2000-01-01T20:00:00Z') }, 4), 'passed');
 });

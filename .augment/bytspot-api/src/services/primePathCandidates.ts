@@ -13,6 +13,8 @@
 
 import { capabilityForAccessMode, type BookableCapability } from './bookableProjection';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
+import { tablePriceFloors } from './partyTables';
+import { db } from '../lib/db';
 import type { PrimePathCandidate } from './primePath';
 
 export interface PlanItemFacts {
@@ -226,4 +228,24 @@ export function candidatesFromDiscovery(
 ): PrimePathCandidate[] {
   return filterDiscoverableParties(parties, { ...ctx, now })
     .map((p) => discoveredPartyCandidate(p, occupancy.get(p.id) ?? 0, now));
+}
+
+/**
+ * The cheapest table still takeable in each of these Parties.
+ *
+ * Both card projections ask this one question so a Party cannot advertise one
+ * floor in Discover and another on the Prime Path.
+ */
+export async function partyTablePriceFloors(partyIds: string[], now: Date): Promise<Map<string, number>> {
+  if (partyIds.length === 0) return new Map();
+  const tables = await db.partyTable.findMany({
+    where: {
+      partyId: { in: partyIds },
+      startsAt: { gt: now },
+      priceCents: { gt: 0 },
+      committed: { lt: db.partyTable.fields.capacity },
+    },
+    select: { partyId: true, priceCents: true },
+  });
+  return tablePriceFloors(tables);
 }

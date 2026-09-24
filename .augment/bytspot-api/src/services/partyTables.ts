@@ -156,3 +156,27 @@ export function liveClaimWhere(partyId: string, now: Date) {
 export function liveRemainingSeats(table: { capacity: number; committed: number }, holds: number): number {
   return Math.max(0, table.capacity - Math.max(table.committed, holds));
 }
+
+/**
+ * The cheapest table a guest could still take, per Party.
+ *
+ * A card that names only the door price tells a free-entry Party selling
+ * priced tables as free, which is the cheaper half of the truth. The floor is
+ * a claim about price, so a table that has already started or is already
+ * spoken for is not part of it.
+ *
+ * Settled seats decide fullness here rather than live claims: a list of cards
+ * cannot afford a per-table hold count, and the detail view stays the
+ * authority on whether a particular table is still open.
+ */
+export function tablePriceFloors(
+  tables: { partyId: string; priceCents: number }[],
+): Map<string, number> {
+  const floors = new Map<string, number>();
+  for (const table of tables) {
+    const current = floors.get(table.partyId);
+    if (current === undefined || table.priceCents < current) floors.set(table.partyId, table.priceCents);
+  }
+  return floors;
+}
+

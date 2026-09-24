@@ -58,6 +58,7 @@ beforeEach(() => {
   // Every serializable write re-reads on the transaction client, so the mock
   // has to hand the caller back the same tables it would see outside.
   (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>) => fn(db);
+  (db.partyTable as any).findMany = async () => [];
   plan.findUnique = async () => null;
   plan.findMany = async () => [];
   plan.create = async () => ({ id: 'plan-1' });
@@ -1078,6 +1079,7 @@ test('bookables exposes only recognized HOST category/type pairs without changin
       startsAt: '2099-03-04T20:00:00.000Z', endsAt: '2099-03-04T23:00:00.000Z',
       capacity: 20, spacesRemaining: 20, requiredMembershipTier: 'green',
       venueName: 'Ponce City Market', latitude: 33.7726, longitude: -84.3654,
+      tablesFromCents: null,
     }] });
   }
   assert.equal(store.attempts, 0, 'classification never writes a Plan or admission');

@@ -8,7 +8,7 @@ import { sellableSlots } from '../vendor/availability';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
 import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
-import { notifyAskSeller } from '../vendor/askNotice';
+import { notifyAskSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
 
 /**
  * Demand — intent published before supply is known.
@@ -439,7 +439,10 @@ export const demandRouter = router({
     .input(z.object({ offerId: z.string().trim().min(1).max(64) }))
     .mutation(async ({ ctx, input }) => {
       try {
-        return await acceptOffer({ offerId: input.offerId, userId: ctx.user.userId });
+        const accepted = await acceptOffer({ offerId: input.offerId, userId: ctx.user.userId });
+        // Not awaited: the booking is committed; the push and email only say so.
+        void notifyOfferAcceptedSeller(accepted.offerId);
+        return accepted;
       } catch (error) {
         // Gone and not-yours are both NOT_FOUND: a stranger probing offer ids
         // must not learn which ones exist.

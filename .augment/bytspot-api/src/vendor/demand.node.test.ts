@@ -209,3 +209,17 @@ test('an ask notice names the time in the place\'s own clock', async () => {
   assert.equal(formatAskWhen(at, 'America/New_York'), 'Thu, Sep 24, 7:00 PM');
   assert.match(formatAskWhen(at, null), /11:00 PM UTC$/);
 });
+
+test('an ask is pushed to the live owners and managers who can answer it', async () => {
+  const { askNoticeSeatUserIds } = await import('./askNotice');
+  assert.deepEqual(
+    askNoticeSeatUserIds([
+      { role: 'owner', state: 'ACTIVE', userId: 'u1' },
+      { role: 'manager', state: 'INVITED', userId: 'u2' },
+      { role: 'door', state: 'ACTIVE', userId: 'u3' },
+      { role: 'manager', state: 'ACTIVE', userId: 'u4' },
+      { role: 'owner', state: 'ACTIVE', userId: 'u1' },
+    ]),
+    ['u1', 'u4'],
+  );
+});

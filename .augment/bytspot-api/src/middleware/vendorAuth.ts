@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { VendorLocation, VendorSeat, VendorSeller } from '@prisma/client';
 import { db } from '../lib/db';
 import { verifyVendorAccessToken } from '../vendor/accessToken';
-import { effectiveCapabilities, sellerCanUseConsole } from '../vendor/contract';
+import { canSetUpSeller, effectiveCapabilities, sellerCanUseConsole } from '../vendor/contract';
 
 /** The business this request acts on, and what the caller may do to it. */
 export interface VendorContext {
@@ -104,4 +104,14 @@ export function requireCapability(capability: string) {
     }
     next();
   };
+}
+
+/** Refuses a request whose seat may not fill in the business's own setup. */
+export function requireSetupAccess(req: Request, res: Response, next: NextFunction): void {
+  const vendor = req.vendor;
+  if (!vendor || !canSetUpSeller(vendor.seat.role as never, vendor.seller.state as never)) {
+    res.status(403).json({ error: 'Not permitted', blockers: ['Your role cannot do that'] });
+    return;
+  }
+  next();
 }

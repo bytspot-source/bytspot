@@ -4,7 +4,7 @@ import type { VendorLocation, VendorSeller } from '@prisma/client';
 import { db } from '../lib/db';
 import { normalizeEmail } from '../lib/contactHash';
 import { captureError } from '../lib/observability';
-import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
+import { requireSetupAccess, requireVendorSeat } from '../middleware/vendorAuth';
 import { config } from '../config';
 import {
   LOCATION_DEFAULTS,
@@ -103,7 +103,7 @@ const profileWrite = z
     message: 'Nothing to save',
   });
 
-router.post('/vendor/profile', requireVendorSeat, requireCapability('SELL'), async (req, res) => {
+router.post('/vendor/profile', requireVendorSeat, requireSetupAccess, async (req, res) => {
   const parsed = profileWrite.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid profile', blockers: ['Enter a value first'] });
@@ -210,7 +210,7 @@ function locationBlockers(input: z.infer<typeof locationWrite>): string[] {
   return blockers;
 }
 
-router.post('/vendor/locations', requireVendorSeat, requireCapability('SELL'), async (req, res) => {
+router.post('/vendor/locations', requireVendorSeat, requireSetupAccess, async (req, res) => {
   const parsed = locationWrite.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid place', blockers: ['Fill in the name and address'] });
@@ -272,7 +272,7 @@ const stateWrite = z.object({
  * Takes the operation the vendor pressed, not the state to land in, so the
  * transition table in the catalog is the only thing that decides what is legal.
  */
-router.post('/vendor/locations/:id/state', requireVendorSeat, requireCapability('SELL'), async (req, res) => {
+router.post('/vendor/locations/:id/state', requireVendorSeat, requireSetupAccess, async (req, res) => {
   const parsed = stateWrite.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Unknown operation' });
@@ -367,7 +367,7 @@ router.post('/vendor/geocode', requireVendorSeat, async (req, res) => {
   }
 });
 
-router.post('/vendor/payout/onboarding', requireVendorSeat, requireCapability('SELL'), async (req, res) => {
+router.post('/vendor/payout/onboarding', requireVendorSeat, requireSetupAccess, async (req, res) => {
   if (!payoutIsConfigured()) {
     res.status(503).json({ error: 'Payouts are unavailable', blockers: ['Payout setup is down'] });
     return;

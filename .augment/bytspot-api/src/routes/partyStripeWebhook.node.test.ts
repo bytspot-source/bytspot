@@ -101,7 +101,7 @@ test('signed paid Party event with complete identifiers reconciles without the k
 
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { received: true });
-  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop', tableId: null });
+  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
 });
 
 test('signed partial Party metadata is rejected before reconciliation', async () => {
@@ -141,7 +141,7 @@ test('Party webhook confirms only a matching paid reservation and grants the pas
 
   assert.equal(checkoutUpdate.data.status, 'completed');
   assert.equal(checkoutUpdate.data.stripeSessionId, 'cs_test_1');
-  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop', tableId: null });
+  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
 });
 
 test('Party webhook rejects a mismatched amount before changing Party access', async () => {
@@ -259,7 +259,7 @@ test('Party webhook still grants a payment that occurred before close when the w
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', paymentOccurredAt);
 
   assert.equal(checkoutUpdate.data.status, 'completed');
-  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop', tableId: null });
+  assert.deepEqual(guestUpdate.data, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
 });
 
 test('Party webhook refunds a checkout when the user is downgraded before payment completes', async () => {
@@ -372,4 +372,56 @@ test('Party ticket payments are unaffected by the shared endpoint', async () => 
   assert.equal(result.status, 200);
   assert.equal(membershipTouched, false);
   assert.equal(checkoutUpdate.data.status, 'completed');
+});
+
+test('A settled session purchase never rewrites the pass the guest already holds', async () => {
+  // This is the sale the night is built on: the door was paid up front and a
+  // promoter sold bottles to somebody already inside. Granting or clearing
+  // admission here would rewrite a pass the guest is actively using.
+  let guestWritten = false;
+  let claim: any;
+  const session1 = { id: 'session-1', quantity: 1, committed: 0 };
+  partyGuest.update = async () => { guestWritten = true; return { id: 'guest-1' }; };
+  partyCheckout.findUnique = async () => ({ ...reservation(), ticketTierName: null, sessionId: 'session-1', amountCents: 90000 });
+  const partySession = {
+    updateMany: async () => ({ count: 1 }),
+    findUnique: async () => ({ requiredMembershipTier: null }),
+    fields: { quantity: session1.quantity },
+  };
+  const partySessionClaim = { create: async (input: any) => { claim = input.data; return { id: 'claim-1' }; } };
+  party.findUnique = async () => ({ requiredMembershipTier: 'green', ticketTiers: [], closedAt: null });
+  prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, party, user, partySession, partySessionClaim });
+
+  const result = await deliverSignedEvent(event(session({
+    mode: 'payment', payment_status: 'paid', amount_total: 90000,
+    metadata: { checkoutId: 'checkout-1', partyId: 'party-1', userId: 'user-1', sessionId: 'session-1' },
+  })));
+
+  assert.equal(result.status, 200);
+  assert.equal(guestWritten, false, 'admission is left exactly as the guest arrived with it');
+  // The hold lives on its own row instead, so bottles and the door are
+  // independently refundable.
+  assert.deepEqual(claim, { sessionId: 'session-1', partyId: 'party-1', userId: 'user-1', state: 'held' });
+});
+
+test('A ticket tier that names no membership requirement is not treated as an unmet one', async () => {
+  // meetsRequiredMembershipTier demands two real tiers, so asking it about an
+  // absent requirement answered "not met" and refunded a paid ticket nobody
+  // had objected to. An unstated requirement is not a failed one.
+  let written: any;
+  partyGuest.update = async (input: any) => { written = input.data; return { id: 'guest-1' }; };
+  party.findUnique = async () => ({
+    requiredMembershipTier: 'green',
+    ticketTiers: [{ name: 'First Drop', requiredMembershipTier: null }],
+    closedAt: null,
+  });
+  user.findUnique = async () => ({ membershipTier: 'green' });
+
+  const result = await deliverSignedEvent(event(session({
+    mode: 'payment', payment_status: 'paid',
+    metadata: { checkoutId: 'checkout-1', partyId: 'party-1', userId: 'user-1', ticketTierName: 'First Drop' },
+  })));
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(written, { status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' });
 });

@@ -37,7 +37,7 @@ const anonymousContext: Context = { user: null, clientRateLimitKey: 'test-party-
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
 const partyMedia = db.partyMedia as any;
-const partyTable = db.partyTable as any;
+const partySession = db.partySession as any;
 const partyGuest = db.partyGuest as any;
 const partyCheckout = db.partyCheckout as any;
 const venue = db.venue as any;
@@ -71,7 +71,7 @@ beforeEach(() => {
   partyCheckout.update = async () => ({ id: 'checkout-1' });
   partyCheckout.updateMany = async () => ({ count: 0 });
   partyCheckout.groupBy = async () => [];
-  partyTable.findMany = async () => [];
+  partySession.findMany = async () => [];
   venue.findUnique = async () => null;
   user.findUnique = async () => ({ membershipTier: 'green' });
   (config as any).stripeSecretKey = '';
@@ -1470,160 +1470,7 @@ test('Abandoned drafts are listable, so the host can name the row that deletes',
   assert.equal(drafts[0].expiresAt, new Date(touched.getTime() + ABANDONED_DRAFT_TTL_MS).toISOString());
 });
 
-// ─── Tables ────────────────────────────────────────────────────────────────
-
-const tableParty = {
-  id: 'party-1',
-  startsAt: new Date('2026-10-01T18:00:00Z'),
-  endsAt: new Date('2026-10-02T02:00:00Z'),
-  capacity: 80,
-  accessMode: 'paid-ticket',
-};
-const tableInputFixture = {
-  name: 'Front Table',
-  startsAt: '2026-10-01T19:00:00Z',
-  endsAt: '2026-10-01T21:00:00Z',
-  capacity: 40,
-  priceCents: 2500,
-};
-
-function withTables(rows: any[], captured: any = {}) {
-  party.findFirst = async () => tableParty;
-  partyTable.findMany = async () => rows;
-  partyTable.deleteMany = async (input: any) => { captured.deleted = input.where; return { count: 0 }; };
-  partyCheckout.findFirst = async () => captured.payingCheckout ?? null;
-  partyTable.updateMany = async () => ({ count: rows.length });
-  partyTable.update = async (input: any) => { (captured.updates ??= []).push(input); return { id: input.where.id }; };
-  partyTable.create = async (input: any) => { (captured.creates ??= []).push(input.data); return { id: 'table-new' }; };
-  prisma.$transaction = async (callback: any) => callback({ partyTable, partyCheckout });
-  return captured;
-}
-
-test('A table the host omits is removed only while nobody holds it', async () => {
-  // Seats already taken are the one thing a host cannot edit away. The refusal
-  // names the table, so the host is not left guessing which one blocks them.
-  withTables([{ id: 'table-1', name: 'Front Table', committed: 12 }]);
-
-  await assert.rejects(
-    () => caller().events.tables.set({ partyId: 'party-1', tables: [] }),
-    (error: any) => {
-      assert.equal(error.code, 'CONFLICT');
-      assert.match(error.message, /Front Table has 12 seat\(s\) already taken/);
-      return true;
-    },
-  );
-
-  // An untouched table drops without complaint.
-  const captured = withTables([{ id: 'table-1', name: 'Front Table', committed: 0 }]);
-  assert.deepEqual(await caller().events.tables.set({ partyId: 'party-1', tables: [] }), { tableIds: [] });
-  assert.equal(captured.deleted.committed, 0);
-});
-
-test('A table cannot be cut below the seats it has already sold', async () => {
-  withTables([{ id: 'table-1', name: 'Front Table', committed: 30 }]);
-
-  await assert.rejects(
-    () => caller().events.tables.set({
-      partyId: 'party-1',
-      tables: [{ ...tableInputFixture, id: 'table-1', capacity: 20 }],
-    }),
-    (error: any) => {
-      assert.equal(error.code, 'CONFLICT');
-      assert.match(error.message, /already sold 30 seat\(s\), so it cannot be cut to 20/);
-      return true;
-    },
-  );
-
-  // Cutting to exactly what is sold is honest and allowed: it closes the door
-  // without unseating anyone.
-  withTables([{ id: 'table-1', name: 'Front Table', committed: 30 }]);
-  const exact = await caller().events.tables.set({
-    partyId: 'party-1',
-    tables: [{ ...tableInputFixture, id: 'table-1', capacity: 30 }],
-  });
-  assert.deepEqual(exact, { tableIds: ['table-1'] });
-});
-
-test("A stated id that is not this Party's table never reaches another Party's row", async () => {
-  withTables([{ id: 'table-1', name: 'Front Table', committed: 0 }]);
-  await assert.rejects(
-    () => caller().events.tables.set({
-      partyId: 'party-1',
-      tables: [{ ...tableInputFixture, id: 'someone-elses-table' }],
-    }),
-    { code: 'NOT_FOUND' },
-  );
-});
-
-test('Positions are parked before being rewritten, so two tables can swap', async () => {
-  // The (party_id, position) uniqueness would refuse a straight swap halfway
-  // through the update, so the existing rows move out of the way first.
-  let parked: any;
-  const captured: any = {};
-  withTables([
-    { id: 'table-1', name: 'Front Table', committed: 0 },
-    { id: 'table-2', name: 'Balcony Two', committed: 0 },
-  ], captured);
-  partyTable.updateMany = async (input: any) => { parked = input.data; return { count: 2 } };
-
-  await caller().events.tables.set({
-    partyId: 'party-1',
-    tables: [
-      { ...tableInputFixture, id: 'table-2', name: 'Balcony Two' },
-      { ...tableInputFixture, id: 'table-1', startsAt: '2026-10-01T21:30:00Z', endsAt: '2026-10-01T23:30:00Z' },
-    ],
-  });
-
-  assert.deepEqual(parked, { position: { increment: 1000 } });
-  // Rewritten from the submitted order, not from whatever they held before.
-  assert.deepEqual(captured.updates.map((u: any) => [u.where.id, u.data.position]), [['table-2', 0], ['table-1', 1]]);
-});
-
-test('Validation refuses the table before any row is touched', async () => {
-  const captured = withTables([]);
-  await assert.rejects(
-    () => caller().events.tables.set({
-      partyId: 'party-1',
-      tables: [{ ...tableInputFixture, startsAt: '2026-10-01T17:00:00Z' }],
-    }),
-    (error: any) => {
-      assert.equal(error.code, 'BAD_REQUEST');
-      assert.match(error.message, /cannot start before the Party does/);
-      return true;
-    },
-  );
-  assert.equal(captured.creates, undefined);
-});
-
-test('Tables are listed in the order the host arranged them', async () => {
-  party.findFirst = async () => ({ id: 'party-1' });
-  let order: any;
-  partyTable.findMany = async (input: any) => {
-    order = input.orderBy;
-    return [{
-      id: 'table-1', name: 'Front Table',
-      startsAt: new Date('2026-10-01T19:00:00Z'), endsAt: new Date('2026-10-01T21:00:00Z'),
-      capacity: 40, committed: 40, priceCents: 2500, requiredMembershipTier: null,
-    }];
-  };
-
-  const { tables } = await caller().events.tables.list({ partyId: 'party-1' });
-  assert.deepEqual(order, [{ position: 'asc' }]);
-  assert.equal(tables[0].remaining, 0);
-  // Full, not passed: this table has not gone by, it has sold out.
-  assert.equal(tables[0].state, 'full');
-});
-
-test('A Party the caller does not host has no tables to read or write', async () => {
-  party.findFirst = async () => null;
-  await assert.rejects(() => caller().events.tables.list({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
-  await assert.rejects(
-    () => caller().events.tables.set({ partyId: 'party-1', tables: [tableInputFixture] }),
-    { code: 'NOT_FOUND' },
-  );
-});
-
-// ─── Paying for a table ──────────────────────────────────────────────────────
+// ─── Sessions: bottles and a stretch of time ────────────────────────────────
 
 const freeDoorParty = {
   id: 'party-1', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green',
@@ -1633,31 +1480,36 @@ const paidDoorParty = {
   ...freeDoorParty, accessMode: 'paid-ticket',
   ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
 };
-const frontTable = { id: 'table-1', partyId: 'party-1', name: 'Front Table', capacity: 4, committed: 0, priceCents: 9000, requiredMembershipTier: null };
+const frontTable = {
+  id: 'session-1', partyId: 'party-1', name: 'Front Table', kind: 'table',
+  quantity: 1, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'included',
+  requiredMembershipTier: null,
+};
 
 let buyerSeq = 0;
 
 // Checkout is rate-limited per user, and the shared test user's budget is
 // already spent by the ticket tests above, so each buyer arrives fresh.
-function stubCheckout(over: { table?: any } = {}) {
+function stubCheckout(over: { session?: any; guest?: any } = {}) {
   const captured: any = {};
   buyerSeq += 1;
   captured.buyer = () => createCaller({
-    user: { userId: `table-buyer-${buyerSeq}`, email: `buyer${buyerSeq}@bytspot.com` },
+    user: { userId: `session-buyer-${buyerSeq}`, email: `buyer${buyerSeq}@bytspot.com` },
     clientRateLimitKey: 'test-party-client',
   });
   (config as any).stripeSecretKey = 'test-only-key';
-  partyTable.findFirst = async () => over.table === undefined ? frontTable : over.table;
+  partySession.findFirst = async () => over.session === undefined ? frontTable : over.session;
   partyCheckout.findUnique = async () => null;
   partyCheckout.findFirst = async () => null;
   partyCheckout.updateMany = async () => ({ count: 0 });
   partyCheckout.count = async (input: any) => { (captured.counts ??= []).push(input.where); return 0; };
   partyCheckout.create = async (input: any) => { captured.created = input.data; return { ...input.data, id: 'checkout-1' }; };
   partyCheckout.update = async () => ({});
-  partyGuest.findUnique = async () => null;
-  partyGuest.create = async (input: any) => { captured.guest = input.data; return { id: 'guest-1' }; };
+  partyGuest.findUnique = async () => over.guest ?? null;
+  partyGuest.create = async (input: any) => { captured.guestCreated = input.data; return { id: 'guest-1' }; };
+  partyGuest.update = async (input: any) => { captured.guestUpdated = input.data; return { id: 'guest-1' }; };
   user.findUnique = async () => ({ membershipTier: 'green' });
-  prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, partyTable });
+  prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, partySession });
   return captured;
 }
 
@@ -1668,33 +1520,75 @@ async function reserve(captured: any, input: any) {
   return captured;
 }
 
-test('A free-entry Party can still sell a table, because the door and the table are separate charges', async () => {
+test('A guest already inside can buy bottles from a promoter', async () => {
+  // The ordinary sale of the night: the door was paid an hour ago and the
+  // promoter is selling a table to somebody standing in the room. Refusing a
+  // confirmed pass refused exactly this.
   party.findFirst = async () => freeDoorParty;
-  const captured = stubCheckout();
+  const admitted = { id: 'guest-1', status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' };
+  const captured = stubCheckout({ guest: admitted });
 
-  await reserve(captured, { partyId: 'party-1', tableId: 'table-1', idempotencyKey });
-
-  // No gate ticket was bought, and the whole charge is the table's.
-  assert.equal(captured.created.ticketTierName, null);
-  assert.equal(captured.created.tableId, 'table-1');
-  assert.equal(captured.created.amountCents, 9000);
-  assert.equal(captured.created.tableAmountCents, 9000);
+  await reserve(captured, { partyId: 'party-1', sessionId: 'session-1', idempotencyKey });
+  assert.equal(captured.created.sessionId, 'session-1');
+  assert.equal(captured.created.sessionAmountCents, 90000);
 });
 
-test('A gate ticket and a table are charged together, and the table is recorded as its own share', async () => {
+test('Buying bottles never touches the door the guest already paid for', async () => {
+  // Writing the admission row here knocked a confirmed guest back to
+  // checkout-pending and took away entry they were already using.
+  party.findFirst = async () => freeDoorParty;
+  const admitted = { id: 'guest-1', status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' };
+  const captured = stubCheckout({ guest: admitted });
+
+  await reserve(captured, { partyId: 'party-1', sessionId: 'session-1', idempotencyKey });
+  assert.equal(captured.guestUpdated, undefined, 'the admission row is left alone');
+});
+
+test('Buying the door twice is still refused', async () => {
+  party.findFirst = async () => paidDoorParty;
+  const admitted = { id: 'guest-1', status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' };
+  const captured = stubCheckout({ guest: admitted });
+
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }),
+    { code: 'CONFLICT' },
+  );
+});
+
+test('A guest who buys only bottles is not admitted by the purchase', async () => {
+  // Bottles are not a door. A session-only buyer with no pass stays
+  // unadmitted rather than acquiring entry they never paid for.
   party.findFirst = async () => paidDoorParty;
   const captured = stubCheckout();
 
-  await reserve(captured, { partyId: 'party-1', ticketTierName: 'First Drop', tableId: 'table-1', idempotencyKey });
-
-  // The gate's share is the remainder, so the two can never drift apart.
-  assert.equal(captured.created.amountCents, 11500);
-  assert.equal(captured.created.tableAmountCents, 9000);
-  assert.equal(captured.created.amountCents - captured.created.tableAmountCents, 2500);
-  assert.equal(captured.guest.tableId, 'table-1');
+  await reserve(captured, { partyId: 'party-1', sessionId: 'session-1', idempotencyKey });
+  assert.equal(captured.guestCreated.accessGranted, false);
+  assert.equal(captured.guestCreated.status, 'pending');
+  assert.equal(captured.guestCreated.ticketTierName, null);
 });
 
-test('A checkout that buys neither a ticket nor a table is a charge for nothing', async () => {
+test('A free-entry Party can still sell a session, because the door and the bottles are separate charges', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout();
+
+  await reserve(captured, { partyId: 'party-1', sessionId: 'session-1', idempotencyKey });
+  assert.equal(captured.created.ticketTierName, null);
+  assert.equal(captured.created.amountCents, 90000);
+});
+
+test('A gate ticket and a session are charged together, and the session is recorded as its own share', async () => {
+  party.findFirst = async () => paidDoorParty;
+  const captured = stubCheckout();
+
+  await reserve(captured, { partyId: 'party-1', ticketTierName: 'First Drop', sessionId: 'session-1', idempotencyKey });
+  // Additive: the gate fee and the session are both charged, never one
+  // instead of the other.
+  assert.equal(captured.created.amountCents, 92500);
+  assert.equal(captured.created.sessionAmountCents, 90000);
+  assert.equal(captured.created.ticketTierName, 'First Drop');
+});
+
+test('A checkout that buys neither a ticket nor a session is a charge for nothing', async () => {
   party.findFirst = async () => paidDoorParty;
   const captured = stubCheckout();
   await assert.rejects(
@@ -1703,79 +1597,83 @@ test('A checkout that buys neither a ticket nor a table is a charge for nothing'
   );
 });
 
-test('A table is judged taken by payments in flight, not only by seats already settled', async () => {
-  // Counting only settled seats would sell the last table twice while the
+test('A session is judged taken by payments in flight, not only by units already settled', async () => {
+  // Counting only settled units would sell the last table twice while the
   // first guest was still on Stripe.
   party.findFirst = async () => freeDoorParty;
-  const captured = stubCheckout({ table: { ...frontTable, capacity: 1, committed: 0 } });
-  partyCheckout.count = async (input: any) => { (captured.counts ??= []).push(input.where); return input.where.tableId ? 1 : 0; };
+  const captured = stubCheckout({ session: { ...frontTable, quantity: 1, committed: 0 } });
+  partyCheckout.count = async (input: any) => (input.where.sessionId ? 1 : 0);
 
   await assert.rejects(
-    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'table-1', idempotencyKey }),
-    (error: any) => {
-      assert.equal(error.code, 'CONFLICT');
-      assert.equal(error.message, 'That table is taken.');
-      return true;
-    },
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'CONFLICT' },
   );
-
-  // The claim counted is the live one: settled seats plus unexpired holds.
-  const tableCount = captured.counts.find((where: any) => where.tableId);
-  assert.equal(tableCount.OR[0].status, 'completed');
-  assert.deepEqual(tableCount.OR[1].status, { in: ['creating', 'pending'] });
-  assert.ok(tableCount.OR[1].reservationExpiresAt.gt instanceof Date);
 });
 
-test('A free table does not go through checkout at all', async () => {
+test('A free session does not go through checkout at all', async () => {
   party.findFirst = async () => freeDoorParty;
-  const captured = stubCheckout({ table: { ...frontTable, priceCents: 0 } });
+  const captured = stubCheckout({ session: { ...frontTable, priceCents: 0 } });
   await assert.rejects(
-    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'table-1', idempotencyKey }),
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
     { code: 'BAD_REQUEST' },
   );
 });
 
-test('A table belonging to another Party is never chargeable here', async () => {
+test('A session belonging to another Party is never chargeable here', async () => {
   party.findFirst = async () => freeDoorParty;
-  const captured = stubCheckout({ table: null });
+  const captured = stubCheckout({ session: null });
   await assert.rejects(
-    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'someone-elses-table', idempotencyKey }),
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'someone-elses-session', idempotencyKey }),
     { code: 'NOT_FOUND' },
   );
 });
 
-test('A table guards its own membership requirement, separately from the gate', async () => {
+test('A session guards its own membership requirement, separately from the gate', async () => {
   party.findFirst = async () => freeDoorParty;
-  const captured = stubCheckout({ table: { ...frontTable, requiredMembershipTier: 'black' } });
+  const captured = stubCheckout({ session: { ...frontTable, requiredMembershipTier: 'black' } });
   await assert.rejects(
-    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', tableId: 'table-1', idempotencyKey }),
-    (error: any) => {
-      assert.equal(error.code, 'FORBIDDEN');
-      assert.match(error.message, /table requirement/);
-      return true;
-    },
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'FORBIDDEN' },
   );
 });
 
-test('A table with a payment in flight cannot be removed underneath the guest paying for it', async () => {
-  // A payment still in flight has taken no seat, so committed says nothing
-  // about it — the table would otherwise vanish mid-checkout.
-  const captured = withTables([{ id: 'table-1', name: 'Front Table', committed: 0 }]);
-  captured.payingCheckout = { tableId: 'table-1' };
-
+test('A retry that swaps the session it buys is refused', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout();
+  partyCheckout.findUnique = async () => ({
+    id: 'checkout-1', ticketTierName: null, sessionId: 'a-different-session',
+    amountCents: 90000, currency: 'usd', status: 'pending',
+  });
   await assert.rejects(
-    () => caller().events.tables.set({ partyId: 'party-1', tables: [] }),
-    (error: any) => {
-      assert.equal(error.code, 'CONFLICT');
-      assert.match(error.message, /Front Table has a payment in flight/);
-      return true;
-    },
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'CONFLICT' },
   );
 });
+
+test('A host reads the unit counts a guest is not shown', async () => {
+  party.findFirst = async () => ({ id: 'party-1' });
+  partySession.findMany = async () => [{
+    id: 'session-1', name: 'Front Table', kind: 'table',
+    startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 5 * 60 * 60 * 1000),
+    venueName: null, lat: null, lng: null,
+    bottleCount: 4, bottleTerms: 'included', priceCents: 90000,
+    quantity: 3, committed: 1, requiredMembershipTier: null, position: 0,
+  }];
+  const { sessions } = await caller().events.sessions.list({ partyId: 'party-1' });
+  assert.equal(sessions[0].committed, 1);
+  assert.equal(sessions[0].remaining, 2);
+  assert.equal(sessions[0].bottleTerms, 'included');
+});
+
+test('A Party the caller does not host has no sessions to read', async () => {
+  party.findFirst = async () => null;
+  await assert.rejects(() => caller().events.sessions.list({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+});
+
 
 // ─── What a guest is told about the floor ────────────────────────────────────
 
-function partyWithTables(over: Record<string, unknown> = {}) {
+function partyWithSessions(over: Record<string, unknown> = {}) {
   party.findFirst = async () => ({
     id: 'party-1', title: 'First Listen', tagline: 'One moment.', templateId: 'listening-party',
     requiredMembershipTier: 'green', startsAt: linkAlive.startsAt, endsAt: linkAlive.endsAt, shareLinkExpiresAt: null,
@@ -1786,80 +1684,117 @@ function partyWithTables(over: Record<string, unknown> = {}) {
 
 const soon = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
-test('A free-entry Party still shows its priced tables to a guest', async () => {
-  // The door being free says nothing about what a table costs, so a guest who
+function sessionRow(over: Record<string, unknown> = {}) {
+  return {
+    id: 'session-1', name: 'Front Table', kind: 'table',
+    startsAt: soon, endsAt: linkAlive.endsAt, venueName: null, lat: null, lng: null,
+    quantity: 4, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'included',
+    requiredMembershipTier: null, position: 0, ...over,
+  };
+}
+
+test('A free-entry Party still shows its priced sessions to a guest', async () => {
+  // The door being free says nothing about what bottles cost, so a guest who
   // is told only the access mode has been told the cheaper half of the truth.
-  partyWithTables();
-  partyTable.findMany = async () => [
-    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 4, committed: 0, priceCents: 9000, requiredMembershipTier: null, position: 0 },
-  ];
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow()];
 
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
   assert.equal(invite.accessMode, 'free-rsvp');
   assert.deepEqual(invite.ticketTiers, []);
-  assert.equal(invite.tables.length, 1);
-  assert.equal(invite.tables[0].priceCents, 9000);
-  assert.equal(invite.tables[0].remaining, 4);
-  assert.equal(invite.tables[0].state, 'open');
+  assert.equal(invite.sessions.length, 1);
+  assert.equal(invite.sessions[0].priceCents, 90000);
+  assert.equal(invite.sessions[0].bottleCount, 4);
+  assert.equal(invite.sessions[0].bottleTerms, 'included');
+  assert.equal(invite.sessions[0].remaining, 4);
+  assert.equal(invite.sessions[0].state, 'open');
 });
 
-test('Seats a guest reads already count the payments in flight', async () => {
-  // Showing settled seats only would offer room that checkout then refuses.
-  partyWithTables();
-  partyTable.findMany = async () => [
-    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 4, committed: 1, priceCents: 9000, requiredMembershipTier: null, position: 0 },
-  ];
-  partyCheckout.groupBy = async () => [{ tableId: 'table-1', _count: { _all: 3 } }];
+test('A guest is told when bottles are charged on top of the price', async () => {
+  // Under `minimum` the number is not the bill. Sending it without the terms
+  // would quote a price no guest can actually pay.
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow({ priceCents: 20000, bottleTerms: 'minimum', bottleCount: 2 })];
 
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
-  // Three live claims against four seats, not one settled seat against four.
-  assert.equal(invite.tables[0].remaining, 1);
-  assert.equal(invite.tables[0].state, 'open');
+  assert.equal(invite.sessions[0].bottleTerms, 'minimum');
+  assert.equal(invite.sessions[0].priceCents, 20000);
+  assert.equal(invite.sessions[0].bottleCount, 2);
 });
 
-test('A table held to its last seat by a payment in flight reads full, not open', async () => {
-  // State and seats come from one number, so a table cannot say open while
-  // saying nothing is left.
-  partyWithTables();
-  partyTable.findMany = async () => [
-    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 2, committed: 0, priceCents: 9000, requiredMembershipTier: null, position: 0 },
-  ];
-  partyCheckout.groupBy = async () => [{ tableId: 'table-1', _count: { _all: 2 } }];
+test('An after-hours session states the address it is actually held at', async () => {
+  // Inheriting the Party's address would send the guest to a closed room.
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow({
+    id: 'session-2', name: 'After Hours', kind: 'after-hours',
+    startsAt: new Date(linkAlive.endsAt.getTime() + 30 * 60 * 1000),
+    endsAt: new Date(linkAlive.endsAt.getTime() + 4 * 60 * 60 * 1000),
+    venueName: 'The Annex', lat: 33.77, lng: -84.36,
+  })];
 
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
-  assert.equal(invite.tables[0].remaining, 0);
-  assert.equal(invite.tables[0].state, 'full');
+  assert.equal(invite.sessions[0].kind, 'after-hours');
+  assert.equal(invite.sessions[0].venueName, 'The Annex');
+  assert.equal(invite.sessions[0].latitude, 33.77);
+  // And it runs past the Party's end, which is the whole point of it.
+  assert.ok(new Date(invite.sessions[0].startsAt) > linkAlive.endsAt);
 });
 
-test('A table that already started is passed, which is not the same as full', async () => {
-  partyWithTables();
-  partyTable.findMany = async () => [
-    { id: 'table-1', name: 'Early Table', startsAt: new Date(Date.now() - 60 * 1000), endsAt: linkAlive.endsAt, capacity: 4, committed: 0, priceCents: 9000, requiredMembershipTier: null, position: 0 },
-  ];
+test('A session held where the Party is names no separate address', async () => {
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow()];
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(invite.sessions[0].venueName, null);
+  assert.equal(invite.sessions[0].latitude, null);
+});
+
+test('Units a guest reads already count the payments in flight', async () => {
+  // Showing settled units only would offer room that checkout then refuses.
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow({ quantity: 4, committed: 1 })];
+  partyCheckout.groupBy = async () => [{ sessionId: 'session-1', _count: { _all: 3 } }];
 
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
-  // Seats remain, and they are still unreachable: come-back-later and
+  assert.equal(invite.sessions[0].remaining, 1);
+  assert.equal(invite.sessions[0].state, 'open');
+});
+
+test('A session held to its last unit by a payment in flight reads full, not open', async () => {
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow({ quantity: 2, committed: 0 })];
+  partyCheckout.groupBy = async () => [{ sessionId: 'session-1', _count: { _all: 2 } }];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(invite.sessions[0].remaining, 0);
+  assert.equal(invite.sessions[0].state, 'full');
+});
+
+test('A session that already started is passed, which is not the same as full', async () => {
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow({ startsAt: new Date(Date.now() - 60 * 1000) })];
+
+  const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  // Units remain, and they are still unreachable: come-back-later and
   // this-already-happened are different facts.
-  assert.equal(invite.tables[0].remaining, 4);
-  assert.equal(invite.tables[0].state, 'passed');
+  assert.equal(invite.sessions[0].remaining, 4);
+  assert.equal(invite.sessions[0].state, 'passed');
 });
 
-test('An invitation never hands a guest the host floor counts', async () => {
-  partyWithTables();
-  partyTable.findMany = async () => [
-    { id: 'table-1', name: 'Front Table', startsAt: soon, endsAt: linkAlive.endsAt, capacity: 4, committed: 2, priceCents: 9000, requiredMembershipTier: null, position: 0 },
-  ];
+test('An invitation never hands a guest the vendor unit counts', async () => {
+  partyWithSessions();
+  partySession.findMany = async () => [sessionRow({ committed: 2 })];
 
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
-  // How many seats are gone is the host's business; a guest is told what is
-  // left and what it costs.
-  assert.deepEqual(Object.keys(invite.tables[0]).sort(), [
-    'capacity', 'endsAt', 'id', 'name', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state',
+  // How many units are gone is the vendor's business; a guest is told what
+  // is left, what it costs, and on what terms.
+  assert.deepEqual(Object.keys(invite.sessions[0]).sort(), [
+    'bottleCount', 'bottleTerms', 'endsAt', 'id', 'kind', 'latitude', 'longitude',
+    'name', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state', 'venueName',
   ]);
 });
 
-test('A Party with no tables says so with an empty floor, not a missing one', async () => {
-  partyWithTables();
+test('A Party with no sessions says so with an empty floor, not a missing one', async () => {
+  partyWithSessions();
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
-  assert.deepEqual(invite.tables, []);
+  assert.deepEqual(invite.sessions, []);
 });

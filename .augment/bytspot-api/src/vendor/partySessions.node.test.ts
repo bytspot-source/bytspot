@@ -20,6 +20,7 @@ const party = db.party as any;
 const partyCheckout = db.partyCheckout as any;
 const partySession = db.partySession as any;
 const partySessionClaim = db.partySessionClaim as any;
+const prisma = db as any;
 
 const hour = 60 * 60 * 1000;
 const startsAt = new Date(Date.now() + 24 * hour);
@@ -43,6 +44,9 @@ beforeEach(() => {
   partySession.create = async (input: any) => { created = input.data; return { id: 'session-1', committed: 0, ...input.data }; };
   partySession.updateMany = async () => ({ count: 1 });
   partySessionClaim.count = async () => 0;
+  // Withdrawal counts and retires in one serializable transaction, so the
+  // counts cannot be a photograph of a floor that moved underneath them.
+  prisma.$transaction = async (callback: any) => callback({ partySession, partySessionClaim, partyCheckout });
 });
 
 test('A business may only sell into a Party its own host runs', async () => {
@@ -176,6 +180,40 @@ test('Withdrawal retires the session rather than deleting what was bought', asyn
   // Guarded, so a hold taken since the counts loses.
   assert.equal(retired.where.withdrawnAt, null);
   assert.equal(retired.where.committed, 0);
+});
+
+test('Withdrawal counts and retires under one lock', async () => {
+  // Counted outside the transaction, a buyer could open a checkout in the
+  // gap and the retirement would still succeed, selling the table out from
+  // under them. Checkout re-reads the row inside its own transaction, so
+  // the two contend.
+  partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
+  let inTransaction = false;
+  let countedInside = false;
+  let retiredInside = false;
+  prisma.$transaction = async (callback: any, options: any) => {
+    assert.equal(options.isolationLevel, 'Serializable');
+    inTransaction = true;
+    const result = await callback({
+      partySession: { updateMany: async () => { retiredInside = inTransaction; return { count: 1 }; } },
+      partySessionClaim: { count: async () => { countedInside = inTransaction; return 0; } },
+      partyCheckout: { count: async () => 0 },
+    });
+    inTransaction = false;
+    return result;
+  };
+
+  await withdrawPartySession('seller-1', 'session-1');
+  assert.ok(countedInside);
+  assert.ok(retiredInside);
+});
+
+test('Losing the serialization race reads as held, not as a crash', async () => {
+  // A buyer winning the contention is the ordinary outcome, not a fault.
+  // It has to reach the console as 409.
+  partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
+  prisma.$transaction = async () => { throw Object.assign(new Error('serialize'), { code: 'P2034' }); };
+  await assert.rejects(() => withdrawPartySession('seller-1', 'session-1'), SessionInUse);
 });
 
 test('Losing the race to a hold is a refusal, not a crash', async () => {

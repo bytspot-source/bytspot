@@ -1575,6 +1575,27 @@ test('Bottles sold do not fill the room against the door', async () => {
   assert.equal(captured.counts.some((where: any) => where.ticketTierName?.not === null), true);
 });
 
+test('A session retired while the buyer was deciding is not sold', async () => {
+  // The liveness check happens before the transaction opens. A seller
+  // retiring the floor in that gap would otherwise have sold a table that
+  // no longer exists, so checkout reads the row again under the lock.
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout();
+  let reads = 0;
+  partySession.findFirst = async () => {
+    reads += 1;
+    // Live when checked, retired by the time the transaction looks.
+    return reads === 1 ? frontTable : null;
+  };
+
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'NOT_FOUND' },
+  );
+  assert.equal(reads, 2);
+  assert.equal(captured.created, undefined);
+});
+
 test('A session whose hour has gone is no longer payable', async () => {
   // The card stops offering a passed session, but a guest holding a usable
   // link could post straight here and be sent to Stripe for a table that

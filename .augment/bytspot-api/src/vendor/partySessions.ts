@@ -1,5 +1,7 @@
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
+import { isSerializationConflict } from '../lib/transactions';
 import { validateSessions, type SessionDraft, type SessionIssue } from '../services/partySessions';
 
 /**
@@ -264,23 +266,39 @@ export async function withdrawPartySession(sellerId: string, sessionId: string):
   if (!session) throw new SessionPartyNotFound();
   await sellablePartyFor(sellerId, session.partyId);
 
+  // Counted and retired in one serializable transaction. Read outside it,
+  // these counts were a photograph of a floor that could change while the
+  // write was on its way: a guest passing the checkout's own liveness check
+  // could open a checkout in the gap, and the retirement would still
+  // succeed and sell the table out from under them. Checkout re-reads this
+  // row inside its transaction, so the two now contend and one loses.
+  //
   // `released` is a refunded or expired hold and an inactive checkout is
   // spent history; neither speaks for a unit. Only a live hold does.
-  const [claims, checkouts] = await Promise.all([
-    db.partySessionClaim.count({ where: { sessionId: session.id, state: 'held' } }),
-    db.partyCheckout.count({ where: { sessionId: session.id, status: { in: ['creating', 'pending', 'completed'] } } }),
-  ]);
-  if (session.committed > 0 || claims > 0 || checkouts > 0) {
-    throw new SessionInUse(['Someone is already holding this. Cancel their claim first.']);
-  }
+  try {
+    await db.$transaction(async (tx) => {
+      const [claims, checkouts] = await Promise.all([
+        tx.partySessionClaim.count({ where: { sessionId: session.id, state: 'held' } }),
+        tx.partyCheckout.count({ where: { sessionId: session.id, status: { in: ['creating', 'pending', 'completed'] } } }),
+      ]);
+      if (session.committed > 0 || claims > 0 || checkouts > 0) {
+        throw new SessionInUse(['Someone is already holding this. Cancel their claim first.']);
+      }
 
-  // Guarded so a hold taken between the counts and this write loses: the
-  // update refuses a row that stopped being free.
-  const retired = await db.partySession.updateMany({
-    where: { id: session.id, withdrawnAt: null, committed: 0 },
-    data: { withdrawnAt: new Date() },
-  });
-  if (retired.count === 0) {
-    throw new SessionInUse(['Someone took this while you were withdrawing it.']);
+      const retired = await tx.partySession.updateMany({
+        where: { id: session.id, withdrawnAt: null, committed: 0 },
+        data: { withdrawnAt: new Date() },
+      });
+      if (retired.count === 0) {
+        throw new SessionInUse(['Someone took this while you were withdrawing it.']);
+      }
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  } catch (err) {
+    // Losing to a buyer is the ordinary outcome of this race, not a fault.
+    // It has to read as 409 on the console, never as a 500.
+    if (isSerializationConflict(err)) {
+      throw new SessionInUse(['Someone took this while you were withdrawing it.']);
+    }
+    throw err;
   }
 }

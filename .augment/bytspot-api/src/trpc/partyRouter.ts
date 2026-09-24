@@ -1784,6 +1784,18 @@ export const partyTicketsRouter = router({
         });
         if (existingActiveCheckout) throw new TRPCError({ code: 'CONFLICT', message: 'An active checkout already exists for this Party.' });
 
+        // Re-read the session inside the transaction. The check above was
+        // made before it began, so a seller retiring the floor between the
+        // two would have sold a table that no longer exists; reading it here
+        // puts both writers on the same row and lets serialization pick one.
+        if (partySession) {
+          const stillOnFloor = await tx.partySession.findFirst({
+            where: { id: partySession.id, partyId: party.id, withdrawnAt: null },
+            select: { id: true },
+          });
+          if (!stillOnFloor) throw new TRPCError({ code: 'NOT_FOUND', message: 'That session is no longer available.' });
+        }
+
         const activeReservationWhere = liveClaimWhere(party.id, now);
         const [activeGateReservations, activeTierReservations, activeSessionClaims] = await Promise.all([
           // Only the door counts against the door, and only a checkout

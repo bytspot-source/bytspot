@@ -8,7 +8,7 @@ import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membersh
 import { bookableCreateData, capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
-import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, partySessionPriceFloors, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
@@ -560,6 +560,7 @@ export const planRouter = router({
           ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: shown.map((party) => party.id) }, accessGranted: true }, _count: { _all: true } })
           : [];
         const grantedMap = new Map(granted.map((row) => [row.partyId, row._count._all]));
+        const sessionFloors = await partySessionPriceFloors(shown.map((party) => party.id), new Date());
         return { offerings: shown
           .map((party) => {
             // The shared gate already refuses any room that withholds its
@@ -584,6 +585,9 @@ export const planRouter = router({
               venueName: party.venueName,
               latitude: placed?.lat ?? null,
               longitude: placed?.lng ?? null,
+              // Null when this Party sells no session a guest could still
+              // take, which is a different fact from one that costs nothing.
+              sessionsFrom: sessionFloors.get(party.id) ?? null,
             };
           }) };
       }

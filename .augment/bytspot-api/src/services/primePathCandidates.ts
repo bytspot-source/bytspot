@@ -13,6 +13,8 @@
 
 import { capabilityForAccessMode, type BookableCapability } from './bookableProjection';
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
+import { sessionPriceFloors, type SessionPriceFloor } from './partySessions';
+import { db } from '../lib/db';
 import type { PrimePathCandidate } from './primePath';
 
 export interface PlanItemFacts {
@@ -226,4 +228,38 @@ export function candidatesFromDiscovery(
 ): PrimePathCandidate[] {
   return filterDiscoverableParties(parties, { ...ctx, now })
     .map((p) => discoveredPartyCandidate(p, occupancy.get(p.id) ?? 0, now));
+}
+
+/**
+ * The cheapest session still takeable in each of these Parties, with the terms
+ * that decide how it may be worded.
+ *
+ * Both card projections ask this one question so a Party cannot advertise one
+ * floor in Discover and another on the Prime Path.
+ *
+ * Settled units decide takeability here rather than live claims: a list of
+ * cards cannot afford a per-session hold count, and the claim is about price
+ * rather than availability. The detail view stays the authority on whether a
+ * particular session is still open.
+ */
+export async function partySessionPriceFloors(
+  partyIds: string[],
+  now: Date,
+): Promise<Map<string, SessionPriceFloor>> {
+  if (partyIds.length === 0) return new Map();
+  const sessions = await db.partySession.findMany({
+    where: {
+      partyId: { in: partyIds },
+      withdrawnAt: null,
+      startsAt: { gt: now },
+      priceCents: { gt: 0 },
+      committed: { lt: db.partySession.fields.quantity },
+    },
+    select: { partyId: true, priceCents: true, bottleTerms: true },
+  });
+  return sessionPriceFloors(sessions.map((session) => ({
+    partyId: session.partyId,
+    priceCents: session.priceCents,
+    bottleTerms: session.bottleTerms === 'minimum' ? 'minimum' : 'included',
+  })));
 }

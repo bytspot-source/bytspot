@@ -10,6 +10,7 @@ import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
+import { liveClaimWhere, liveGateClaimWhere, liveRemaining, sessionState, validateSessions } from '../services/partySessions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -378,6 +379,39 @@ export const partyDraftsRouter = router({
         throw error;
       }
     }),
+
+  /**
+   * Drafts this host abandoned in Host Studio. Without this the rows are
+   * unreachable: Party Control lists only published rooms, so an abandoned
+   * draft could never be named and never be handed to `delete`.
+   * `updatedAt` leads because the host is looking for what they were last
+   * working on, not for whenever the party was scheduled to start.
+   */
+  list: protectedProcedure.query(async ({ ctx }) => {
+    const drafts = await db.party.findMany({
+      where: { hostUserId: ctx.user.userId, status: 'draft' },
+      orderBy: [{ updatedAt: 'desc' }],
+      take: HOST_ROOM_PAGE,
+      select: {
+        id: true, title: true, venueName: true, startsAt: true,
+        capacity: true, accessMode: true, updatedAt: true,
+      },
+    });
+    return {
+      drafts: drafts.map((draft) => ({
+        id: draft.id,
+        title: draft.title,
+        venueName: draft.venueName,
+        startsAt: draft.startsAt.toISOString(),
+        capacity: draft.capacity,
+        accessMode: draft.accessMode,
+        updatedAt: draft.updatedAt.toISOString(),
+        // A draft has no share link and no pass code by construction: both are
+        // minted at publish. Saying so keeps the host from hunting for one.
+        expiresAt: new Date(draft.updatedAt.getTime() + ABANDONED_DRAFT_TTL_MS).toISOString(),
+      })),
+    };
+  }),
 
   /**
    * Delete a party the caller hosts. Drafts always delete. Published
@@ -944,6 +978,18 @@ export const partyInvite = publicProcedure
     const recapPhotoCount = canReadRecap(party, guest, ctx.user?.userId)
       ? party.media.filter((media) => media.kind === 'recap').length
       : 0;
+    const now = new Date();
+    const sessions = await db.partySession.findMany({ where: { partyId: party.id, withdrawnAt: null }, orderBy: [{ position: 'asc' }] });
+    // Holds are counted per session so what a guest reads is what checkout
+    // will actually sell them.
+    const sessionHolds = sessions.length > 0
+      ? await db.partyCheckout.groupBy({
+        by: ['sessionId'],
+        where: { ...liveClaimWhere(party.id, now), sessionId: { in: sessions.map((session) => session.id) } },
+        _count: { _all: true },
+      })
+      : [];
+    const holdsBySession = new Map(sessionHolds.map((row) => [row.sessionId, row._count._all]));
     return {
       id: party.id,
       source: 'host-studio-party' as const,
@@ -971,6 +1017,36 @@ export const partyInvite = publicProcedure
       capacity: party.capacity,
       participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
       ticketTiers: parsedTicketTiers(party.ticketTiers),
+      // Bottles are charged on top of the door, never instead of it, so a
+      // free-entry Party may still sell priced sessions here. The vendor's
+      // unit counts stay on the vendor side; a guest is told what is left,
+      // what it costs, and under which terms.
+      //
+      // `venueName` and the coordinates are null when the session is held
+      // where the Party is. An after-hours session states its own address,
+      // because telling a guest to stay put would send them to the wrong
+      // place.
+      sessions: sessions.map((session) => {
+        const remaining = liveRemaining(session, holdsBySession.get(session.id) ?? 0);
+        return {
+          id: session.id,
+          name: session.name,
+          kind: session.kind,
+          startsAt: session.startsAt.toISOString(),
+          endsAt: session.endsAt.toISOString(),
+          venueName: session.venueName,
+          latitude: session.lat,
+          longitude: session.lng,
+          bottleCount: session.bottleCount,
+          // `minimum` means the price is not what the guest will pay, so the
+          // terms travel beside the number rather than being inferred from it.
+          bottleTerms: session.bottleTerms,
+          priceCents: session.priceCents,
+          remaining,
+          state: sessionState(session, remaining, now),
+          requiredMembershipTier: session.requiredMembershipTier,
+        };
+      }),
       activityHighlights: activityHighlights(party.itinerary),
       heroImageURL: cover ? partyMediaUrl(cover.id) : null,
       thumbnailURL: cover ? partyMediaUrl(cover.id) : null,
@@ -1142,6 +1218,10 @@ export const partyPassRouter = router({
  */
 const HOST_ROOM_STALE_MS = 24 * 60 * 60 * 1000;
 const HOST_ROOM_PAGE = 50;
+// How long an untouched Host Studio draft survives before the sweeper takes
+// it. Long enough that a host who walks away mid-build still finds the work
+// next week; short enough that abandoned rows stop accumulating forever.
+export const ABANDONED_DRAFT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 type HostRoomRow = {
   id: string; title: string; venueName: string; startsAt: Date; endsAt: Date | null;
@@ -1614,28 +1694,73 @@ export const partyRsvpRouter = router({
 export const partyTicketsRouter = router({
   createCheckout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'party-ticket-checkout' }))
-    .input(z.object({ partyId: z.string().min(1).max(128), ticketTierName: z.string().trim().min(1).max(100), idempotencyKey: z.string().uuid() }))
+    .input(z.object({
+      partyId: z.string().min(1).max(128),
+      // Both optional, at least one required: a gate ticket, a table, or both
+      // in one charge. A checkout for neither is a charge for nothing.
+      ticketTierName: z.string().trim().min(1).max(100).optional(),
+      sessionId: z.string().min(1).max(128).optional(),
+      idempotencyKey: z.string().uuid(),
+    }).refine((value) => value.ticketTierName || value.sessionId, {
+      message: 'A checkout must buy a ticket, a session, or both.',
+    }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       assertShareLinkUsable(party, knownGuest);
-      if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
-      const ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0);
-      if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+
+      // The gate. Only a paid-ticket Party has one; a free-entry Party is
+      // still allowed to sell sessions inside it.
+      let ticketTier: { name: string; priceCents: number; quantity: number; requiredMembershipTier?: string | null } | null = null;
+      if (input.ticketTierName) {
+        if (party.accessMode !== 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This Party does not use paid tickets.' });
+        ticketTier = parsedTicketTiers(party.ticketTiers).find((tier) => tier.name === input.ticketTierName && tier.priceCents > 0) ?? null;
+        if (!ticketTier) throw new TRPCError({ code: 'NOT_FOUND', message: 'That ticket tier is no longer available.' });
+      }
+
+      // The session, which is charged on top of the gate rather than instead
+      // of it.
+      const partySession = input.sessionId
+        ? await db.partySession.findFirst({ where: { id: input.sessionId, partyId: party.id, withdrawnAt: null } })
+        : null;
+      if (input.sessionId && !partySession) throw new TRPCError({ code: 'NOT_FOUND', message: 'That session is no longer available.' });
+      if (partySession && partySession.priceCents <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'That session is free and does not go through checkout.' });
+      // A session the pass already reads as `passed` must not still be
+      // payable. The card stops offering it, but a guest holding a usable
+      // link could post straight here and be sent to Stripe for a table
+      // whose hour has gone.
+      if (partySession && partySession.startsAt.getTime() <= Date.now()) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'That session has already started.' });
+      }
+
       const membershipTier = await membershipTierFor(ctx.user.userId);
-      if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier) || !meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier)) {
+      if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)
+        || (ticketTier && !meetsRequiredMembershipTier(membershipTier, ticketTier.requiredMembershipTier))) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party ticket requirement.' });
       }
+      if (partySession?.requiredMembershipTier && !meetsRequiredMembershipTier(membershipTier, partySession.requiredMembershipTier)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this partySession requirement.' });
+      }
+
+      const sessionAmountCents = partySession?.priceCents ?? 0;
+      const amountCents = (ticketTier?.priceCents ?? 0) + sessionAmountCents;
+      if (amountCents <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'There is nothing to pay for here.' });
       if (knownGuest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
       if (knownGuest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });
-      if (knownGuest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
+      // A confirmed pass blocks buying the door twice and nothing else. The
+      // ordinary sale is a promoter reaching someone already inside who paid
+      // the door an hour ago, so refusing them for being admitted would
+      // refuse the sale the night is built on.
+      if (input.ticketTierName && knownGuest?.accessGranted) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
+      }
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
 
       const now = new Date();
       const reservation = await serializableTransaction(async (tx) => {
         const existing = await tx.partyCheckout.findUnique({ where: { partyId_userId_idempotencyKey: { partyId: party.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
         if (existing) {
-          if (existing.ticketTierName !== ticketTier.name || existing.amountCents !== ticketTier.priceCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match its original ticket tier.' });
+          if ((existing.ticketTierName ?? null) !== (ticketTier?.name ?? null) || (existing.sessionId ?? null) !== (partySession?.id ?? null) || existing.amountCents !== amountCents || existing.currency !== 'usd') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout retry does not match what it originally bought.' });
           if (existing.status === 'completed') throw new TRPCError({ code: 'CONFLICT', message: 'This ticket is already confirmed.' });
           if (existing.status === 'expired') throw new TRPCError({ code: 'CONFLICT', message: 'This Checkout expired. Start a new checkout.' });
           return existing;
@@ -1644,7 +1769,11 @@ export const partyTicketsRouter = router({
         const guest = await tx.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
         if (guest?.status === 'declined') throw new TRPCError({ code: 'FORBIDDEN', message: 'The host has declined this Party request.' });
         if (guest?.status === 'refund-required') throw new TRPCError({ code: 'CONFLICT', message: 'This checkout requires a host refund before another ticket can be requested.' });
-        if (guest?.accessGranted) throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
+        // Re-read under the lock, and on the same terms as the check above:
+        // a confirmed pass blocks a second door purchase, never a session.
+        if (input.ticketTierName && guest?.accessGranted) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
+        }
         await tx.partyCheckout.updateMany({
           where: { partyId: party.id, userId: ctx.user.userId, status: { in: ['creating', 'pending'] }, reservationExpiresAt: { lte: now } },
           data: { status: 'expired' },
@@ -1655,31 +1784,65 @@ export const partyTicketsRouter = router({
         });
         if (existingActiveCheckout) throw new TRPCError({ code: 'CONFLICT', message: 'An active checkout already exists for this Party.' });
 
-        const activeReservationWhere = {
-          partyId: party.id,
-          OR: [
-            { status: 'completed' },
-            { status: { in: ['creating', 'pending'] }, reservationExpiresAt: { gt: now } },
-          ],
-        };
-        const [activePartyReservations, activeTierReservations] = await Promise.all([
-          tx.partyCheckout.count({ where: activeReservationWhere }),
-          tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }),
-        ]);
-        if (activePartyReservations >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
-        if (activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
+        // Re-read the session inside the transaction. The check above was
+        // made before it began, so a seller retiring the floor between the
+        // two would have sold a table that no longer exists; reading it here
+        // puts both writers on the same row and lets serialization pick one.
+        if (partySession) {
+          const stillOnFloor = await tx.partySession.findFirst({
+            where: { id: partySession.id, partyId: party.id, withdrawnAt: null },
+            select: { id: true },
+          });
+          if (!stillOnFloor) throw new TRPCError({ code: 'NOT_FOUND', message: 'That session is no longer available.' });
+        }
 
+        const activeReservationWhere = liveClaimWhere(party.id, now);
+        const [activeGateReservations, activeTierReservations, activeSessionClaims] = await Promise.all([
+          // Only the door counts against the door, and only a checkout
+          // buying the door is measured against it. A guest already inside
+          // buying bottles takes no space they are not already occupying.
+          ticketTier ? tx.partyCheckout.count({ where: liveGateClaimWhere(party.id, now) }) : 0,
+          ticketTier ? tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }) : 0,
+          // Units already settled plus payments still in flight. Counting
+          // only the settled ones would sell the last session twice while
+          // the first guest was still on Stripe.
+          partySession ? tx.partyCheckout.count({ where: { ...activeReservationWhere, sessionId: partySession.id } }) : 0,
+        ]);
+        if (ticketTier && activeGateReservations >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+        if (ticketTier && activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
+        if (partySession && activeSessionClaims >= partySession.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That session is taken.' });
+
+        // Only a gate purchase may move the admission row. Writing
+        // `accessGranted: false` for a session purchase took the door away
+        // from a guest who had already paid it and was standing in the room.
+        // A guest buying bottles keeps whatever pass they walked in with.
         const partyGuest = guest
-          ? await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } })
-          : await tx.partyGuest.create({ data: { partyId: party.id, userId: ctx.user.userId, status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier.name } });
+          ? (input.ticketTierName
+            ? await tx.partyGuest.update({
+              where: { id: guest.id },
+              data: { status: 'checkout-pending', accessGranted: false, ticketTierName: ticketTier?.name ?? null },
+            })
+            : guest)
+          : await tx.partyGuest.create({
+            data: {
+              partyId: party.id,
+              userId: ctx.user.userId,
+              // A guest who has bought only bottles has not been admitted.
+              // The row exists to hang the checkout from, and says so.
+              status: input.ticketTierName ? 'checkout-pending' : 'pending',
+              accessGranted: false,
+              ticketTierName: ticketTier?.name ?? null,
+            },
+          });
         return tx.partyCheckout.create({
           data: {
             partyId: party.id, partyGuestId: partyGuest.id, userId: ctx.user.userId, idempotencyKey: input.idempotencyKey,
-            ticketTierName: ticketTier.name, amountCents: ticketTier.priceCents, currency: 'usd', status: 'creating',
+            ticketTierName: ticketTier?.name ?? null, sessionId: partySession?.id ?? null,
+            amountCents, sessionAmountCents, currency: 'usd', status: 'creating',
             reservationExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
           },
         });
-      }, 'Party ticket inventory changed. Please retry.');
+      }, 'Party ticket or table inventory changed. Please retry.');
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
       // The party's frozen rate, so a mid-sale rate change cannot alter what
@@ -1692,17 +1855,38 @@ export const partyTicketsRouter = router({
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
-        line_items: [{
-          price_data: {
-            currency: 'usd',
-            unit_amount: reservation.amountCents,
-            product_data: { name: `${party.title} · ${reservation.ticketTierName}`, description: party.tagline },
-          },
-          quantity: 1,
-        }],
+        // Itemised, so the guest sees the door and the table as the two
+        // separate things they are rather than one unexplained total.
+        line_items: [
+          ...(reservation.ticketTierName ? [{
+            price_data: {
+              currency: 'usd',
+              unit_amount: reservation.amountCents - reservation.sessionAmountCents,
+              product_data: { name: `${party.title} · ${reservation.ticketTierName}`, description: party.tagline },
+            },
+            quantity: 1,
+          }] : []),
+          ...(partySession ? [{
+            price_data: {
+              currency: 'usd',
+              unit_amount: reservation.sessionAmountCents,
+              product_data: {
+                name: `${party.title} · ${partySession.name}`,
+                // The line item says what the money buys. Under `minimum` it
+                // says so plainly, because the guest is about to pay a number
+                // that is not the whole bill.
+                description: partySession.bottleTerms === 'minimum'
+                  ? `Session · ${partySession.bottleCount}-bottle minimum, bottles charged separately`
+                  : `Session · ${partySession.bottleCount} bottles included`,
+              },
+            },
+            quantity: 1,
+          }] : []),
+        ],
         metadata: {
           kind: 'party-ticket', checkoutId: reservation.id, partyId: party.id, userId: ctx.user.userId,
-          ticketTierName: reservation.ticketTierName, idempotencyKey: input.idempotencyKey,
+          ticketTierName: reservation.ticketTierName ?? '', sessionId: reservation.sessionId ?? '',
+          idempotencyKey: input.idempotencyKey,
           platformFeeBps: String(ticketFeeBps), platformFeeCents: String(feeCents), hostNetCents: String(hostNetCents),
         },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -1720,3 +1904,67 @@ export const partyTicketsRouter = router({
       return { url: session.url };
     }),
 });
+const tableInput = z.object({
+  // Present means "this is the table I already have"; absent means a new
+  // one. Matching on name instead would make a rename look like a deletion
+  // and unseat everyone holding it.
+  id: z.string().min(1).max(128).optional(),
+  name: z.string().trim().min(1).max(80),
+  startsAt: z.string().datetime(),
+  endsAt: z.string().datetime(),
+  capacity: z.number().int().positive().max(100_000),
+  priceCents: z.number().int().min(0).max(1_000_000),
+  requiredMembershipTier: z.enum(tiers).nullish(),
+});
+
+/**
+ * Sessions attached to a Party, read-only from here.
+ *
+ * Authoring deliberately does not live on this router. A session is a
+ * vendor's inventory, and vendors authenticate on the vendor rail through
+ * `requireVendorSeat` rather than as a Party's host. A host selects supply;
+ * they do not create it, so a host-owned write here would contradict who owns
+ * the row.
+ */
+export const partySessionsRouter = router({
+  /**
+   * The sessions on this host's Party, in the order the floor was arranged.
+   * The host sees the unit counts a guest is not shown.
+   */
+  list: protectedProcedure
+    .input(z.object({ partyId: z.string().min(1).max(128) }))
+    .query(async ({ ctx, input }) => {
+      const party = await db.party.findFirst({
+        where: { id: input.partyId, hostUserId: ctx.user.userId },
+        select: { id: true },
+      });
+      if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party not found.' });
+
+      const now = new Date();
+      const sessions = await db.partySession.findMany({
+        where: { partyId: input.partyId, withdrawnAt: null },
+        orderBy: [{ position: 'asc' }],
+      });
+      return {
+        sessions: sessions.map((session) => ({
+          id: session.id,
+          name: session.name,
+          kind: session.kind,
+          startsAt: session.startsAt.toISOString(),
+          endsAt: session.endsAt.toISOString(),
+          venueName: session.venueName,
+          latitude: session.lat,
+          longitude: session.lng,
+          bottleCount: session.bottleCount,
+          bottleTerms: session.bottleTerms,
+          priceCents: session.priceCents,
+          quantity: session.quantity,
+          committed: session.committed,
+          remaining: Math.max(0, session.quantity - session.committed),
+          state: sessionState(session, Math.max(0, session.quantity - session.committed), now),
+          requiredMembershipTier: session.requiredMembershipTier,
+        })),
+      };
+    }),
+});
+

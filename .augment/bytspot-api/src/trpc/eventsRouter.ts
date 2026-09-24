@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
-import { discoverablePartyWhere, filterDiscoverableParties, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { discoverablePartyWhere, filterDiscoverableParties, partySessionPriceFloors, type DiscoverablePartyFacts } from '../services/primePathCandidates';
 import { capabilityForAccessMode } from '../services/bookableProjection';
 import { distanceMeters } from '../services/checkinProof';
 import { boundingBoxWhere } from '../services/geoBox';
@@ -20,7 +20,7 @@ function partyDistanceMiles(fromLat: number, fromLng: number, lat: number | null
   if (lat === null || lng === null) return null;
   return distanceMeters({ lat: fromLat, lng: fromLng }, { lat, lng }) / METERS_PER_MILE;
 }
-import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partyTicketsRouter } from './partyRouter';
+import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partySessionsRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { config } from '../config';
 
@@ -84,6 +84,7 @@ export const eventsRouter = router({
   hostDestinations: hostDestinationsRouter,
   media: partyMediaRouter,
   recap: partyRecapRouter,
+  sessions: partySessionsRouter,
   publish: partyPublish,
   invite: partyInvite,
   pass: partyPassRouter,
@@ -202,6 +203,7 @@ export const eventsRouter = router({
         ? await db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: answering.map((row) => row.party.id) }, accessGranted: true }, _count: { _all: true } })
         : [];
       const grantedMap = new Map(granted.map((row) => [row.partyId, row._count._all]));
+      const sessionFloors = await partySessionPriceFloors(answering.map((row) => row.party.id), new Date());
       const parties = answering
         .map(({ party, distanceMiles: distance }) => ({
           id: party.id,
@@ -220,6 +222,11 @@ export const eventsRouter = router({
           // not exist when it is simply full.
           capacity: party.capacity,
           spacesRemaining: Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
+          // A free door says nothing about what bottles cost, so the card
+          // carries the floor rather than letting the access mode imply it.
+          // The terms travel with the number: a `minimum` floor is not a
+          // price a guest can pay, and the card has to say bottles are extra.
+          sessionsFrom: sessionFloors.get(party.id) ?? null,
         }));
       return { parties };
     }),

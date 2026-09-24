@@ -59,6 +59,7 @@ model User {
   coffeeSpots           CoffeeSpot[]          @relation("coffeeSpotOwner")
   coffeeReservations    CoffeeReservation[]   @relation("coffeeReservationRequester")
   partyCheckouts        PartyCheckout[]
+  partySessionClaims    PartySessionClaim[]
   mobilityQuotes        MobilityQuote[]
   mobilityTrips         MobilityTrip[]
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
@@ -269,6 +270,7 @@ model Party {
   arrivalVenue    Venue?                @relation("partyArrivalVenue", fields: [arrivalVenueId], references: [id], onDelete: Restrict)
   media           PartyMedia[]
   guests          PartyGuest[]
+  sessions        PartySession[]
   checkouts       PartyCheckout[]
   planItems       PlanItem[]
   encounterOptIns PartyEncounterOptIn[]
@@ -295,6 +297,112 @@ model PlatformFeeSetting {
 
   @@index([scope, createdAt(sort: Desc)])
   @@map("platform_fee_settings")
+}
+
+/// A time-boxed seating inside a Party: a 7pm table and a 9pm table, each
+/// with its own door. Sessions are stored facts, not derived ones — unlike a
+/// vendor availability window, which recurs across a horizon and therefore has
+/// to materialise a row per instant before anything can be taken against it.
+/// Bottles and a stretch of time, sold as one unit.
+///
+/// This is supply, not part of a Party's floor plan. The vendor creates it;
+/// a host attaches it to a Party so the people already coming can buy it.
+/// Seats are deliberately absent: what varies between these is the bottle
+/// count and the hours, and a club sells a table by its bottles, never by how
+/// many bodies fit around it.
+model PartySession {
+  id       String @id @default(cuid())
+  /// The Party this is sold through — the audience, not a container. The
+  /// session's own hours and address govern it, so an after-hours session may
+  /// begin after the Party ends and sit at a different address entirely.
+  partyId  String @map("party_id")
+  /// The vendor who created it. Hosts select supply; they do not author it.
+  sellerId String @map("seller_id")
+  name     String
+
+  /// `table` is bottles at a table during the night. `after-hours` is the
+  /// session that follows it, commonly somewhere else.
+  kind String @default("table")
+
+  /// Its own window, fenced by nothing. A rule bounding this by the Party's
+  /// end would refuse every after-hours session by definition.
+  startsAt DateTime @map("starts_at")
+  endsAt   DateTime @map("ends_at")
+
+  /// Its own address. Null means the Party's, which is the common case for a
+  /// table and the wrong assumption for an after-hours session.
+  venueName String? @map("venue_name")
+  lat       Float?
+  lng       Float?
+
+  /// How many bottles the price speaks about.
+  bottleCount Int    @map("bottle_count")
+  /// `included` — priceCents is the whole number, bottles are in it.
+  /// `minimum`  — priceCents is the fee and the bottles are bought on top, so
+  /// the guest will pay more than this and must be told so.
+  bottleTerms String @map("bottle_terms")
+  /// Zero is free, not unpriced. Under `minimum` this is never what the guest
+  /// ends up paying.
+  priceCents  Int    @default(0) @map("price_cents")
+
+  /// Units of this exact session for sale, usually one. Not seats.
+  quantity  Int @default(1)
+  /// Units taken. Never exceeds quantity — the database refuses it, so a lost
+  /// race cannot oversell.
+  committed Int @default(0)
+
+  requiredMembershipTier String? @map("required_membership_tier")
+
+  /// The order the floor was arranged in, not the order rows were typed.
+  position Int
+
+  /// Set when the seller takes the session off the floor. Retired rather
+  /// than deleted, because a refunded claim and a settled checkout still
+  /// point at what they bought; deleting the row would either destroy that
+  /// record or be refused by it.
+  withdrawnAt DateTime? @map("withdrawn_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  party     Party               @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  seller    VendorSeller        @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  claims    PartySessionClaim[]
+  checkouts PartyCheckout[]
+
+  @@unique([partyId, position])
+  @@index([partyId, withdrawnAt])
+  @@index([partyId, startsAt])
+  @@index([sellerId, startsAt])
+  @@map("party_sessions")
+}
+
+/// One guest holding one session.
+///
+/// Separate from PartyGuest on purpose. Admission and bottles are two sales,
+/// made at different moments by different sellers: the door up front, the
+/// table from a promoter once the guest is already inside. Carrying the
+/// session on the admission row meant buying bottles rewrote the pass, which
+/// revoked the entry the guest had already paid for.
+model PartySessionClaim {
+  id        String @id @default(cuid())
+  sessionId String @map("session_id")
+  partyId   String @map("party_id")
+  userId    String @map("user_id")
+
+  /// `held` once paid for, `released` when refunded or expired. A released
+  /// claim is kept rather than deleted so a refunded night still has a record.
+  state String @default("held")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  session PartySession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([partyId, userId])
+  @@index([sessionId, state])
+  @@map("party_session_claims")
 }
 
 model PartyGuest {
@@ -327,8 +435,14 @@ model PartyCheckout {
   idempotencyKey       String    @map("idempotency_key")
   stripeSessionId      String?   @unique @map("stripe_session_id")
   checkoutUrl          String?   @map("checkout_url")
-  ticketTierName       String    @map("ticket_tier_name")
+  /// Null when this checkout buys a table and no gate ticket, which a
+  /// free-entry Party allows.
+  ticketTierName       String?   @map("ticket_tier_name")
+  sessionId            String?   @map("session_id")
   amountCents          Int       @map("amount_cents")
+  /// The table's share of the charge, recorded rather than derived from
+  /// today's prices. The gate's share is the remainder.
+  sessionAmountCents   Int       @default(0) @map("session_amount_cents")
   /// The split as it stood when this sale was made, recorded per checkout so a
   /// later rate change can never restate what a host already earned.
   platformFeeBps       Int?      @map("platform_fee_bps")
@@ -341,12 +455,14 @@ model PartyCheckout {
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  party Party      @relation(fields: [partyId], references: [id], onDelete: Cascade)
-  guest PartyGuest @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
-  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  party   Party         @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  guest   PartyGuest    @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session PartySession? @relation(fields: [sessionId], references: [id], onDelete: Restrict)
 
   @@unique([partyId, userId, idempotencyKey])
   @@index([partyId, ticketTierName, status, reservationExpiresAt])
+  @@index([sessionId, status, reservationExpiresAt])
   @@index([partyGuestId, updatedAt(sort: Desc)])
   @@map("party_checkouts")
 }
@@ -996,12 +1112,13 @@ model VendorSeller {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  seats     VendorSeat[]
-  locations VendorLocation[]
-  endpoints VendorWebhookEndpoint[]
-  windows   VendorAvailabilityWindow[]
-  offers    Offer[]
-  media     VendorMedia[]
+  seats         VendorSeat[]
+  locations     VendorLocation[]
+  endpoints     VendorWebhookEndpoint[]
+  windows       VendorAvailabilityWindow[]
+  partySessions PartySession[]
+  offers        Offer[]
+  media         VendorMedia[]
 
   @@index([state])
   @@map("vendor_sellers")

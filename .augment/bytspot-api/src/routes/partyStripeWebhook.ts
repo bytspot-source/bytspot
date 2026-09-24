@@ -46,8 +46,10 @@ function logIgnoredEvent(event: Stripe.Event, session: Stripe.Checkout.Session, 
 
 export class PartyCheckoutValidationError extends Error {}
 
-function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: string): unknown {
-  if (!Array.isArray(ticketTiers)) return null;
+// Null when the checkout bought no gate ticket, which requires nothing of the
+// guest's tier on the gate's behalf.
+function ticketRequiredMembershipTier(ticketTiers: unknown, ticketTierName: string | null): unknown {
+  if (!ticketTierName || !Array.isArray(ticketTiers)) return null;
   return ticketTiers.find((tier): tier is { name: unknown; requiredMembershipTier: unknown } => Boolean(tier) && typeof tier === 'object' && 'name' in tier && 'requiredMembershipTier' in tier && (tier as { name: unknown }).name === ticketTierName)?.requiredMembershipTier ?? null;
 }
 
@@ -55,7 +57,13 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
   const checkout = await db.partyCheckout.findUnique({ where: { id: checkoutId } });
   if (!checkout) throw new Error('Party Checkout reservation was not found.');
   const expectedTier = metadataValue(session.metadata, 'ticketTierName');
-  if (checkout.partyId !== partyId || checkout.userId !== userId || checkout.ticketTierName !== expectedTier || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
+  const expectedSession = metadataValue(session.metadata, 'sessionId');
+  // Absent metadata means the charge did not include that half at all, which
+  // is how a session-only or gate-only checkout states itself. Both sides
+  // normalise to null so a missing key and an empty one agree.
+  if (checkout.partyId !== partyId || checkout.userId !== userId
+    || (checkout.ticketTierName || null) !== expectedTier || (checkout.sessionId || null) !== expectedSession
+    || checkout.amountCents !== session.amount_total || checkout.currency !== session.currency?.toLowerCase()) {
     throw new PartyCheckoutValidationError('Party Checkout values did not match the reservation.');
   }
 
@@ -63,21 +71,29 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     const current = await tx.partyCheckout.findUnique({ where: { id: checkout.id } });
     if (!current || current.status === 'completed' || current.status === 'refund-required') return false;
     if (current.stripeSessionId && current.stripeSessionId !== session.id) throw new Error('Party Checkout session mismatch.');
-    const [guest, party, user] = await Promise.all([
+    const [guest, party, user, boughtSession] = await Promise.all([
       tx.partyGuest.findUnique({ where: { id: current.partyGuestId } }),
       tx.party.findUnique({ where: { id: current.partyId }, select: { requiredMembershipTier: true, ticketTiers: true, closedAt: true } }),
       tx.user.findUnique({ where: { id: current.userId }, select: { membershipTier: true } }),
+      // Re-read rather than trusted from checkout time: the ticket tier is
+      // re-checked here and a session gates on its own terms too.
+      current.sessionId
+        ? tx.partySession.findUnique({ where: { id: current.sessionId }, select: { requiredMembershipTier: true } })
+        : null,
     ]);
+    const sessionRequirement = boughtSession?.requiredMembershipTier ?? null;
     if (!guest) throw new Error('Party guest is not eligible for payment confirmation.');
     const ticketTierRequirement = ticketRequiredMembershipTier(party?.ticketTiers, current.ticketTierName);
     // `meetsRequiredMembershipTier` demands two real tiers, so asking it about
     // an absent requirement reads "not met" and refunds a payment nobody
     // objected to. A ticket tier naming no tier is not a tier nobody
-    // qualifies for. The Party's own requirement gets no such allowance: that
-    // column is NOT NULL, so a missing one is broken data rather than an
-    // absence, and it must keep failing closed.
+    // qualifies for, and neither is a session, which carries no tier of its
+    // own. The Party's own requirement gets no such allowance: that column is
+    // NOT NULL, so a missing one is broken data rather than an absence, and
+    // it must keep failing closed.
     const membershipEligible = meetsRequiredMembershipTier(user?.membershipTier, party?.requiredMembershipTier)
-      && (ticketTierRequirement == null || meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement));
+      && (ticketTierRequirement == null || meetsRequiredMembershipTier(user?.membershipTier, ticketTierRequirement))
+      && (sessionRequirement == null || meetsRequiredMembershipTier(user?.membershipTier, sessionRequirement));
     // A delayed webhook for a payment that happened before close still grants
     // the pass. A payment that completed after closedAt is a new arrival and
     // must not confirm — the host closed the room.
@@ -96,10 +112,49 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     });
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {
-      await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+      // Only a gate purchase may mark the admission row for refund. A session
+      // that has to be refunded is refunded on its own; taking the pass down
+      // with it would eject a guest whose door was paid separately and is
+      // not in question.
+      if (current.ticketTierName) {
+        await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+      }
       return false;
     }
-    await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName } });
+    // Taking the unit is guarded, so a session that filled while this payment
+    // was in flight refunds instead of overselling. The database refuses the
+    // oversell either way; this is the half that can still say why.
+    if (current.sessionId) {
+      const taken = await tx.partySession.updateMany({
+        where: { id: current.sessionId, committed: { lt: tx.partySession.fields.quantity } },
+        data: { committed: { increment: 1 } },
+      });
+      if (taken.count !== 1) {
+        await tx.partyCheckout.update({ where: { id: current.id }, data: { status: 'refund-required' } });
+        // A failed session purchase refunds the session. It does not touch
+        // admission, because the guest may have paid the door separately and
+        // be standing in the room already.
+        if (current.ticketTierName) {
+          await tx.partyGuest.update({ where: { id: guest.id }, data: { status: 'refund-required', accessGranted: false } });
+        }
+        return false;
+      }
+      // The claim is the guest's hold on the session, kept off the admission
+      // row so buying bottles cannot rewrite a pass.
+      await tx.partySessionClaim.create({
+        data: { sessionId: current.sessionId, partyId, userId, state: 'held' },
+      });
+    }
+    // Only a gate ticket grants admission. A guest who bought bottles from a
+    // promoter while already inside keeps the access they arrived with, and a
+    // guest who bought only bottles does not silently acquire a door they
+    // never paid for.
+    if (current.ticketTierName) {
+      await tx.partyGuest.update({
+        where: { id: guest.id },
+        data: { status: 'ticketed', accessGranted: true, ticketTierName: current.ticketTierName },
+      });
+    }
     return true;
   });
 

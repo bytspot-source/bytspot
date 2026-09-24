@@ -25,6 +25,7 @@ import { placesPhotoRouter } from './routes/placesPhoto';
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 import vendorAuthRouter from './routes/vendorAuth';
 import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-in (separate origin, cookie-based refresh)
+import vendorPartySessionsRouter from './routes/vendorPartySessions';
 import vendorDemandRouter from './routes/vendorDemand';
 import vendorMediaRouter from './routes/vendorMedia';
 import vendorWindowsRouter from './routes/vendorWindows';
@@ -91,6 +92,7 @@ app.use(diagnosticsRouter);
 app.use(vendorAuthRouter);
 app.use(vendorSetupRouter);
 app.use(vendorDemandRouter);
+app.use(vendorPartySessionsRouter);
 app.use(vendorMediaRouter);
 app.use(vendorWindowsRouter);
 

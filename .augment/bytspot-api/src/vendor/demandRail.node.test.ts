@@ -1293,6 +1293,12 @@ test('an offer paid in the app is booked only once the payment is confirmed', as
     const paying = (await guest().demand.mine()).find((item) => item.id === demandId);
     assert.deepEqual(paying?.offers[0].payment, { state: 'paying' });
 
+    // The hold lapses while the guest is on the payment page. The offer stays
+    // in view, and the payment still books it.
+    await db.offer.update({ where: { id: offer.id }, data: { holdExpiresAt: new Date(checkout.createdAt.getTime() + 1) } });
+    const lapsed = (await guest().demand.mine()).find((item) => item.id === demandId);
+    assert.equal(lapsed?.offers[0]?.id, offer.id);
+
     assert.equal(await settleOfferCheckout(paidSession(checkout), fake.stripe), 'completed');
     assert.equal((await db.demand.findUniqueOrThrow({ where: { id: demandId } })).state, 'BOOKED');
     assert.equal((await db.offer.findUniqueOrThrow({ where: { id: offer.id } })).state, 'ACCEPTED');

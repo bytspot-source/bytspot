@@ -385,7 +385,18 @@ export const demandRouter = router({
       include: {
         offers: {
           // An accepted offer is the answer; the rest are history once one wins.
-          where: { OR: [{ state: 'OFFERED', holdExpiresAt: { gt: now } }, { state: 'ACCEPTED' }] },
+          // One the guest is paying for stays in view past its hold, because
+          // the payment still books it.
+          where: {
+            OR: [
+              { state: 'OFFERED', holdExpiresAt: { gt: now } },
+              {
+                state: 'OFFERED',
+                checkouts: { some: { userId: ctx.user.userId, status: { in: ['creating', 'pending'] }, expiresAt: { gt: now } } },
+              },
+              { state: 'ACCEPTED' },
+            ],
+          },
           orderBy: { startsAt: 'asc' },
           include: {
             location: { select: { label: true } },

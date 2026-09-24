@@ -4,6 +4,9 @@
  * Falls back to curated static events when API key is not configured.
  */
 import { z } from 'zod';
+import { partyCommerceRouter } from './partyCommerceRouter';
+import { partyLineupRouter } from './partyLineupRouter';
+import { partySessionAuthoringRouter } from './partySessionAuthoringRouter';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { discoverablePartyWhere, filterDiscoverableParties, partySessionPriceFloors, type DiscoverablePartyFacts } from '../services/primePathCandidates';
@@ -85,6 +88,9 @@ export const eventsRouter = router({
   media: partyMediaRouter,
   recap: partyRecapRouter,
   sessions: partySessionsRouter,
+  sessionAuthoring: partySessionAuthoringRouter,
+  commerce: partyCommerceRouter,
+  lineup: partyLineupRouter,
   publish: partyPublish,
   invite: partyInvite,
   pass: partyPassRouter,

@@ -17,6 +17,14 @@ const anonymous: Context = { user: null, clientRateLimitKey: 'router-surface-aud
 type ProcedureInternals = { _def: { type: string; middlewares: unknown[] } };
 const procedures = appRouter._def.procedures as unknown as Record<string, ProcedureInternals>;
 
+test('Party commerce, performers and authoring are mounted without replacing legacy session reads', () => {
+  for (const path of [
+    'events.sessions.list', 'events.sessionAuthoring.access', 'events.sessionAuthoring.list',
+    'events.sessionAuthoring.upsert', 'events.sessionAuthoring.withdraw', 'events.commerce.mine',
+  ]) assert.ok(procedures[path], `Missing procedure: ${path}`);
+  assert.ok(Object.keys(procedures).some((path) => path.startsWith('events.lineup.')));
+});
+
 const mutations = Object.entries(procedures)
   .filter(([, procedure]) => procedure._def.type === 'mutation')
   .map(([path]) => path);

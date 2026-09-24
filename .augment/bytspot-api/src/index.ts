@@ -73,6 +73,12 @@ app.use(
 // ─── tRPC (primary API layer) ─────────────────────────
 app.use(
   '/trpc',
+  (_req, res, next) => {
+    // Account-scoped ledgers, pass credentials and revocable payment links
+    // must reach authorization again, never a shared or device cache.
+    res.setHeader('Cache-Control', 'private, no-store');
+    next();
+  },
   trpcExpress.createExpressMiddleware({
     router: appRouter,
     createContext,

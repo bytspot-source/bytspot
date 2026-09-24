@@ -110,6 +110,17 @@ export function effectiveCapabilities(role: SeatRole, state: SellerState): strin
   return roleCapabilities(role).filter((capability) => ceiling.has(capability));
 }
 
+/**
+ * Whether a seat may fill in the business itself: its profile, places and
+ * payout. DRAFT and PENDING withhold SELL until exactly these are supplied, so
+ * before a business is live the role decides; once it is, the state ceiling
+ * applies as usual and a suspended business still cannot edit its way back.
+ */
+export function canSetUpSeller(role: SeatRole, state: SellerState): boolean {
+  if (state === 'DRAFT' || state === 'PENDING') return roleCapabilities(role).includes('SELL');
+  return effectiveCapabilities(role, state).includes('SELL');
+}
+
 /* ── Locations ─────────────────────────────────────────────────────────── */
 
 export type LocationState = 'DRAFT' | 'ACTIVE' | 'PAUSED' | 'CLOSED';

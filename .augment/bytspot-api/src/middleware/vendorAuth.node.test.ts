@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../lib/db';
-import { requireCapability, requireVendorSeat, SELLER_HEADER } from './vendorAuth';
+import { requireCapability, requireSetupAccess, requireVendorSeat, SELLER_HEADER } from './vendorAuth';
 import { signVendorAccessToken } from '../vendor/accessToken';
 
 const seller = (over: Record<string, unknown> = {}) => ({
@@ -183,5 +183,32 @@ test('a request that never reached the seat middleware has no capabilities', () 
   // Fail closed: an unset context must not read as an unrestricted one.
   const { res, sent } = spyResponse();
   requireCapability('SELL')({} as Request, res, (() => assert.fail('must not pass')) as NextFunction);
+  assert.equal(sent.status, 403);
+});
+
+test('an owner can fill in a draft business, though the draft withholds selling', () => {
+  // A draft has only SCHEDULE, and setup is what lifts it out of draft.
+  const passes = (role: string, state: string): boolean => {
+    let passed = false;
+    const req = { vendor: { seat: { role }, seller: { state }, capabilities: [] } } as unknown as Request;
+    requireSetupAccess(req, spyResponse().res, (() => {
+      passed = true;
+    }) as NextFunction);
+    return passed;
+  };
+
+  for (const state of ['DRAFT', 'PENDING', 'ACTIVE']) {
+    assert.ok(passes('owner', state), `owner at ${state}`);
+    assert.ok(passes('manager', state), `manager at ${state}`);
+    assert.ok(!passes('staff', state), `staff at ${state}`);
+    assert.ok(!passes('door', state), `door at ${state}`);
+  }
+  assert.ok(!passes('owner', 'SUSPENDED'));
+  assert.ok(!passes('owner', 'CLOSED'));
+});
+
+test('setup access fails closed without a seat', () => {
+  const { res, sent } = spyResponse();
+  requireSetupAccess({} as Request, res, (() => assert.fail('must not pass')) as NextFunction);
   assert.equal(sent.status, 403);
 });

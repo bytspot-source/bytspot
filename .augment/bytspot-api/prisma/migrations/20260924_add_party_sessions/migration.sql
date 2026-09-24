@@ -90,8 +90,12 @@ CREATE TABLE "party_session_claims" (
   CONSTRAINT "party_session_claims_pkey" PRIMARY KEY ("id")
 );
 
+-- A claim is a guest holding bottles, so it refuses to be swept away with
+-- the session it holds. Cascading here would let a withdrawal delete the
+-- hold silently, which is the one outcome the withdrawal rule exists to
+-- prevent; the vendor has to release the guest first.
 ALTER TABLE "party_session_claims" ADD CONSTRAINT "party_session_claims_session_id_fkey"
-  FOREIGN KEY ("session_id") REFERENCES "party_sessions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  FOREIGN KEY ("session_id") REFERENCES "party_sessions"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 ALTER TABLE "party_session_claims" ADD CONSTRAINT "party_session_claims_user_id_fkey"
   FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;

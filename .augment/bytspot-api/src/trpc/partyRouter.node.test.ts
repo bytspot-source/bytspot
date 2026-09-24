@@ -1482,6 +1482,11 @@ const paidDoorParty = {
 };
 const frontTable = {
   id: 'session-1', partyId: 'party-1', name: 'Front Table', kind: 'table',
+  // A session being bought is one that has not started. The fixture carried
+  // no time at all, which is how a checkout for a session whose hour had
+  // gone went unnoticed.
+  startsAt: new Date(Date.now() + 6 * 60 * 60 * 1000),
+  endsAt: new Date(Date.now() + 10 * 60 * 60 * 1000),
   quantity: 1, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'included',
   requiredMembershipTier: null,
 };
@@ -1531,6 +1536,57 @@ test('A guest already inside can buy bottles from a promoter', async () => {
   await reserve(captured, { partyId: 'party-1', sessionId: 'session-1', idempotencyKey });
   assert.equal(captured.created.sessionId, 'session-1');
   assert.equal(captured.created.sessionAmountCents, 90000);
+});
+
+test('A sold-out door still sells bottles to the guest already inside', async () => {
+  // Party capacity counts people in the room, and a session checkout admits
+  // nobody. Counting every checkout against it meant the last guest through
+  // the door was refused the table for occupying a space they already held.
+  party.findFirst = async () => ({ ...paidDoorParty, capacity: 1 });
+  const admitted = { id: 'guest-1', status: 'ticketed', accessGranted: true, ticketTierName: 'First Drop' };
+  const captured = stubCheckout({ guest: admitted });
+  // The room is full; the table is not.
+  partyCheckout.count = async (input: any) => {
+    (captured.counts ??= []).push(input.where);
+    return input.where.sessionId ? 0 : 1;
+  };
+
+  await reserve(captured, { partyId: 'party-1', sessionId: 'session-1', idempotencyKey });
+  assert.equal(captured.created.sessionId, 'session-1');
+  // And the door was never measured, because this checkout does not buy it.
+  assert.equal(captured.counts.some((where: any) => where.ticketTierName?.not === null), false);
+});
+
+test('Bottles sold do not fill the room against the door', async () => {
+  // The inverse: completed session-only checkouts are still checkout rows.
+  // Counting them as arrivals let table sales report a Party sold out that
+  // nobody had walked into.
+  party.findFirst = async () => ({ ...paidDoorParty, capacity: 2 });
+  const captured = stubCheckout();
+  partyCheckout.count = async (input: any) => {
+    (captured.counts ??= []).push(input.where);
+    // Two session-only rows live on this Party; no gate row does.
+    return input.where.ticketTierName?.not === null ? 0 : 2;
+  };
+
+  await reserve(captured, { partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey });
+  assert.equal(captured.created.ticketTierName, 'First Drop');
+  // The door was measured, and measured only against gate rows.
+  assert.equal(captured.counts.some((where: any) => where.ticketTierName?.not === null), true);
+});
+
+test('A session whose hour has gone is no longer payable', async () => {
+  // The card stops offering a passed session, but a guest holding a usable
+  // link could post straight here and be sent to Stripe for a table that
+  // already started.
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ session: { ...frontTable, startsAt: new Date(Date.now() - 60 * 1000) } });
+
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'CONFLICT' },
+  );
+  assert.equal(captured.created, undefined);
 });
 
 test('Buying bottles never touches the door the guest already paid for', async () => {

@@ -136,6 +136,16 @@ BEGIN
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 
+  -- A held claim alone must block the session, before any checkout exists to
+  -- block it. The claim FK cascaded, so this deletion quietly succeeded and
+  -- took the guest's hold with it; the later assertion passed only because a
+  -- checkout was also present by then.
+  BEGIN
+    DELETE FROM "party_sessions" WHERE "id" = s_id;
+    RAISE EXCEPTION 'a session under a held claim must not be deletable';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+
   -- The guest still holds the pass they arrived with; the claim sits beside
   -- it rather than on it.
   SELECT COUNT(*) INTO got FROM "party_guests"

@@ -10,7 +10,7 @@ import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
 import { serializableTransaction } from '../lib/transactions';
-import { liveClaimWhere, liveRemaining, sessionState, validateSessions } from '../services/partySessions';
+import { liveClaimWhere, liveGateClaimWhere, liveRemaining, sessionState, validateSessions } from '../services/partySessions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -1725,6 +1725,13 @@ export const partyTicketsRouter = router({
         : null;
       if (input.sessionId && !partySession) throw new TRPCError({ code: 'NOT_FOUND', message: 'That session is no longer available.' });
       if (partySession && partySession.priceCents <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'That session is free and does not go through checkout.' });
+      // A session the pass already reads as `passed` must not still be
+      // payable. The card stops offering it, but a guest holding a usable
+      // link could post straight here and be sent to Stripe for a table
+      // whose hour has gone.
+      if (partySession && partySession.startsAt.getTime() <= Date.now()) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'That session has already started.' });
+      }
 
       const membershipTier = await membershipTierFor(ctx.user.userId);
       if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)
@@ -1778,15 +1785,18 @@ export const partyTicketsRouter = router({
         if (existingActiveCheckout) throw new TRPCError({ code: 'CONFLICT', message: 'An active checkout already exists for this Party.' });
 
         const activeReservationWhere = liveClaimWhere(party.id, now);
-        const [activePartyReservations, activeTierReservations, activeSessionClaims] = await Promise.all([
-          tx.partyCheckout.count({ where: activeReservationWhere }),
+        const [activeGateReservations, activeTierReservations, activeSessionClaims] = await Promise.all([
+          // Only the door counts against the door, and only a checkout
+          // buying the door is measured against it. A guest already inside
+          // buying bottles takes no space they are not already occupying.
+          ticketTier ? tx.partyCheckout.count({ where: liveGateClaimWhere(party.id, now) }) : 0,
           ticketTier ? tx.partyCheckout.count({ where: { ...activeReservationWhere, ticketTierName: ticketTier.name } }) : 0,
           // Units already settled plus payments still in flight. Counting
           // only the settled ones would sell the last session twice while
           // the first guest was still on Stripe.
           partySession ? tx.partyCheckout.count({ where: { ...activeReservationWhere, sessionId: partySession.id } }) : 0,
         ]);
-        if (activePartyReservations >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
+        if (ticketTier && activeGateReservations >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
         if (ticketTier && activeTierReservations >= ticketTier.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That ticket tier is sold out.' });
         if (partySession && activeSessionClaims >= partySession.quantity) throw new TRPCError({ code: 'CONFLICT', message: 'That session is taken.' });
 

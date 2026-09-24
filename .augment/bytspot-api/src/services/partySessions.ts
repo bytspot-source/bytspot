@@ -150,6 +150,20 @@ export function liveClaimWhere(partyId: string, now: Date) {
 }
 
 /**
+ * The same rule, narrowed to checkouts that buy the door.
+ *
+ * Party capacity counts people in the room, and a session checkout admits
+ * nobody: it is sold to a guest who is already inside. Counting every
+ * checkout meant bottles filled the room — enough table sales and the door
+ * reported itself sold out while nobody had walked through it, and the guest
+ * standing inside was refused the table for occupying a space they already
+ * held.
+ */
+export function liveGateClaimWhere(partyId: string, now: Date) {
+  return { ...liveClaimWhere(partyId, now), ticketTierName: { not: null } };
+}
+
+/**
  * Units left once payments in flight are counted.
  *
  * The two counts overlap rather than add: a settled checkout is both a

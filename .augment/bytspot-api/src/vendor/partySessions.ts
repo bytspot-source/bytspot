@@ -114,17 +114,19 @@ export function vendorSessionDto(row: {
  * cancelled one is not.
  */
 async function sellablePartyFor(sellerId: string, partyId: string) {
+  // Asked as one question rather than two. Checking the Party first and the
+  // seat only if it existed answered a missing Party in one read and an
+  // unauthorized one in two, which tells an authenticated vendor whose
+  // nights exist by how long the refusal takes.
   const party = await db.party.findFirst({
-    where: { id: partyId, status: { not: 'cancelled' } },
+    where: {
+      id: partyId,
+      status: { not: 'cancelled' },
+      host: { vendorSeats: { some: { sellerId, state: 'ACTIVE' } } },
+    },
     select: { id: true, hostUserId: true },
   });
   if (!party) throw new SessionPartyNotFound();
-
-  const hostSeat = await db.vendorSeat.findFirst({
-    where: { sellerId, userId: party.hostUserId, state: 'ACTIVE' },
-    select: { id: true },
-  });
-  if (!hostSeat) throw new SessionPartyNotFound();
   return party;
 }
 
@@ -185,36 +187,67 @@ export async function authorPartySession(
   }
   if (issues.length) throw new SessionRefused(issues);
 
-  const position = existing.reduce((highest, row) => Math.max(highest, row.position), -1) + 1;
-  const row = await db.partySession.create({
-    data: {
-      partyId,
-      sellerId,
-      name: draft.name.trim(),
-      kind: draft.kind,
-      startsAt: draft.startsAt,
-      endsAt: draft.endsAt,
-      venueName: draft.venueName,
-      lat: draft.lat,
-      lng: draft.lng,
-      bottleCount: draft.bottleCount,
-      bottleTerms: draft.bottleTerms,
-      priceCents: draft.priceCents,
-      quantity: draft.quantity,
-      requiredMembershipTier: draft.requiredMembershipTier,
-      position,
-    },
-  });
-  return vendorSessionDto(row);
+  const data = {
+    partyId,
+    sellerId,
+    name: draft.name.trim(),
+    kind: draft.kind,
+    startsAt: draft.startsAt,
+    endsAt: draft.endsAt,
+    venueName: draft.venueName,
+    lat: draft.lat,
+    lng: draft.lng,
+    bottleCount: draft.bottleCount,
+    bottleTerms: draft.bottleTerms,
+    priceCents: draft.priceCents,
+    quantity: draft.quantity,
+    requiredMembershipTier: draft.requiredMembershipTier,
+  };
+
+  // Position is read across the whole Party, so two sellers arranging one
+  // night can compute the same next slot. The unique index keeps the floor
+  // straight; the loser re-reads and takes the slot after. Retried rather
+  // than surfaced, because the vendor did nothing wrong and the second
+  // attempt is against a floor that has stopped moving.
+  let position = existing.reduce((highest, row) => Math.max(highest, row.position), -1) + 1;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return vendorSessionDto(await db.partySession.create({ data: { ...data, position } }));
+    } catch (err) {
+      if (!isPositionTaken(err) || attempt >= 4) throw err;
+      const highest = await db.partySession.findFirst({
+        where: { partyId },
+        orderBy: { position: 'desc' },
+        select: { position: true },
+      });
+      position = (highest?.position ?? -1) + 1;
+    }
+  }
+}
+
+function isPositionTaken(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null || (err as { code?: unknown }).code !== 'P2002') return false;
+  const target = (err as { meta?: { target?: unknown } }).meta?.target;
+  return Array.isArray(target) ? target.includes('position') : true;
 }
 
 /**
  * Withdrawing a session.
  *
  * Refused once a unit is spoken for, because a guest holding bottles must not
- * discover the session was withdrawn underneath them. The database refuses it
- * too, through the checkout's RESTRICT; this is the readable half of that
- * pair, and it also catches a unit committed without a checkout behind it.
+ * discover the session was withdrawn underneath them.
+ *
+ * Three things can speak for a unit and all three are checked: a committed
+ * count, a held claim, and a checkout still on Stripe. The last one is the
+ * easiest to miss — between paying and settling there is no claim and no
+ * committed unit yet, only a live checkout row — and missing it turned a
+ * refusal into a foreign-key crash.
+ *
+ * The database refuses all three too, through RESTRICT on both the claim and
+ * the checkout. That is the half that actually holds: this check races, and
+ * a claim written between the count and the delete would slip past it, so
+ * the constraint is what makes the rule true and this is what makes it
+ * readable. A violation is translated rather than surfaced as a 500.
  */
 export async function withdrawPartySession(sellerId: string, sessionId: string): Promise<void> {
   const session = await db.partySession.findFirst({
@@ -224,11 +257,28 @@ export async function withdrawPartySession(sellerId: string, sessionId: string):
   if (!session) throw new SessionPartyNotFound();
   await sellablePartyFor(sellerId, session.partyId);
 
-  const claims = await db.partySessionClaim.count({
-    where: { sessionId: session.id, state: { in: ['held', 'settled'] } },
-  });
-  if (session.committed > 0 || claims > 0) {
+  // `released` is a refunded or expired hold, which no longer speaks for a
+  // unit. `held` is the only state that does.
+  const [claims, checkouts] = await Promise.all([
+    db.partySessionClaim.count({ where: { sessionId: session.id, state: 'held' } }),
+    db.partyCheckout.count({ where: { sessionId: session.id, status: { in: ['creating', 'pending', 'completed'] } } }),
+  ]);
+  if (session.committed > 0 || claims > 0 || checkouts > 0) {
     throw new SessionInUse(['Someone is already holding this. Cancel their claim first.']);
   }
-  await db.partySession.delete({ where: { id: session.id } });
+
+  try {
+    await db.partySession.delete({ where: { id: session.id } });
+  } catch (err) {
+    // Lost the race: a claim or checkout landed after the counts. The
+    // constraint held, so report what it means.
+    if (isForeignKeyViolation(err)) {
+      throw new SessionInUse(['Someone took this while you were withdrawing it.']);
+    }
+    throw err;
+  }
+}
+
+function isForeignKeyViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2003';
 }

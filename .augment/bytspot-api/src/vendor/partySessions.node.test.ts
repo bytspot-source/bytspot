@@ -17,7 +17,7 @@ import {
  */
 
 const party = db.party as any;
-const vendorSeat = db.vendorSeat as any;
+const partyCheckout = db.partyCheckout as any;
 const partySession = db.partySession as any;
 const partySessionClaim = db.partySessionClaim as any;
 
@@ -37,7 +37,7 @@ let created: any;
 beforeEach(() => {
   created = undefined;
   party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-1' });
-  vendorSeat.findFirst = async () => ({ id: 'seat-1' });
+  partyCheckout.count = async () => 0;
   partySession.findMany = async () => [];
   partySession.findFirst = async () => null;
   partySession.create = async (input: any) => { created = input.data; return { id: 'session-1', committed: 0, ...input.data }; };
@@ -47,27 +47,31 @@ beforeEach(() => {
 
 test('A business may only sell into a Party its own host runs', async () => {
   // The host holds no seat here, so this business has no standing to hang a
-  // table on their night.
-  vendorSeat.findFirst = async () => null;
+  // table on their night. The seat is a condition of the Party query, so an
+  // unheld one simply does not match.
+  let query: any;
+  party.findFirst = async (input: any) => { query = input; return null; };
   await assert.rejects(() => authorPartySession('seller-1', 'party-1', draft()), SessionPartyNotFound);
+  assert.deepEqual(query.where.host, { vendorSeats: { some: { sellerId: 'seller-1', state: 'ACTIVE' } } });
 });
 
 test('A Party a business cannot sell into is not found, not forbidden', async () => {
   // Forbidden would confirm the id names a real Party, which is how a caller
-  // maps out other people's nights by probing.
-  vendorSeat.findFirst = async () => null;
-  await assert.rejects(() => listPartySessions('seller-1', 'party-1'), SessionPartyNotFound);
+  // maps out other people's nights by probing. Both cases are one query, so
+  // they cost the same and cannot be told apart by timing either.
+  let reads = 0;
+  party.findFirst = async () => { reads += 1; return null; };
 
-  party.findFirst = async () => null;
-  vendorSeat.findFirst = async () => ({ id: 'seat-1' });
+  await assert.rejects(() => listPartySessions('seller-1', 'party-1'), SessionPartyNotFound);
   await assert.rejects(() => listPartySessions('seller-1', 'no-such-party'), SessionPartyNotFound);
+  assert.equal(reads, 2);
 });
 
 test('A seat that is only invited is not yet a seat', async () => {
-  let seatQuery: any;
-  vendorSeat.findFirst = async (input: any) => { seatQuery = input; return null; };
+  let query: any;
+  party.findFirst = async (input: any) => { query = input; return null; };
   await assert.rejects(() => authorPartySession('seller-1', 'party-1', draft()), SessionPartyNotFound);
-  assert.equal(seatQuery.where.state, 'ACTIVE');
+  assert.equal(query.where.host.vendorSeats.some.state, 'ACTIVE');
 });
 
 test('Supply is arranged before the night is announced, but not after it is called off', async () => {
@@ -141,6 +145,47 @@ test('Withdrawing a session is refused once somebody is holding it', async () =>
   partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
   partySessionClaim.count = async () => 1;
   await assert.rejects(() => withdrawPartySession('seller-1', 'session-1'), SessionInUse);
+
+  // And for a guest still on Stripe: between paying and settling there is no
+  // claim and no committed unit, only a live checkout row.
+  partySessionClaim.count = async () => 0;
+  partyCheckout.count = async () => 1;
+  await assert.rejects(() => withdrawPartySession('seller-1', 'session-1'), SessionInUse);
+});
+
+test('A released claim no longer speaks for a unit', async () => {
+  // `released` is a refunded or expired hold. Counting it would strand a
+  // session nobody holds, unwithdrawable forever.
+  let claimQuery: any;
+  partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
+  partySessionClaim.count = async (input: any) => { claimQuery = input; return 0; };
+  await withdrawPartySession('seller-1', 'session-1');
+  assert.equal(claimQuery.where.state, 'held');
+});
+
+test('Losing the race to a claim is a refusal, not a crash', async () => {
+  // The counts race the delete, so the constraint is what makes the rule
+  // true. A violation has to read as "someone took this", not a 500.
+  partySession.findFirst = async () => ({ id: 'session-1', partyId: 'party-1', committed: 0 });
+  partySession.delete = async () => { throw Object.assign(new Error('FK'), { code: 'P2003' }); };
+  await assert.rejects(() => withdrawPartySession('seller-1', 'session-1'), SessionInUse);
+});
+
+test('A position taken mid-write is retried rather than refused', async () => {
+  // Two sellers arranging one night compute the same next slot. The loser
+  // re-reads and takes the one after; the vendor did nothing wrong.
+  partySession.findMany = async () => [{ name: 'Front Table', position: 0 }];
+  partySession.findFirst = async () => ({ position: 7 });
+  let attempts = 0;
+  partySession.create = async (input: any) => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('unique'), { code: 'P2002', meta: { target: ['party_id', 'position'] } });
+    return { id: 'session-2', committed: 0, ...input.data };
+  };
+
+  const created = await authorPartySession('seller-1', 'party-1', draft({ name: 'Balcony' }));
+  assert.equal(attempts, 2);
+  assert.equal(created.position, 8);
 });
 
 test('A session nobody has touched can be withdrawn', async () => {

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import express from 'express';
 import type Stripe from 'stripe';
-import { locationBlockers, normalizePhone, normalizeWebsite } from './vendorSetup';
+import vendorSetupRouter, { locationBlockers, normalizePhone, normalizeWebsite } from './vendorSetup';
+import { db } from '../lib/db';
+import { signVendorAccessToken } from '../vendor/accessToken';
 import { LOCATION_DEFAULTS, locationOperation } from '../vendor/contract';
 import { statusFrom, storedPayout } from '../vendor/payout';
 
@@ -123,4 +126,61 @@ test('a website is an absolute http(s) URL; a bare domain gets https', () => {
   assert.deepEqual(locationBlockers(place({ website: 'not a site' })), ['That website does not look right']);
   // Both are optional.
   assert.deepEqual(locationBlockers(place({ phone: '', website: '' })), []);
+});
+
+test('a new place is created under our id, even when the console sends a placeholder', async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stub = (model: unknown) => model as any;
+  const seller = {
+    id: 'sel_1', state: 'DRAFT', legalName: 'Fulzip Inc', contactEmail: 'owner@fulzip.example',
+    businessMode: 'standard', payoutReference: null, payoutStatus: null, payoutLast4: null, payoutDetail: null,
+  };
+  const created: Record<string, unknown>[] = [];
+  const updatedWhere: unknown[] = [];
+  stub(db.vendorSeat).findMany = async () => [
+    { id: 'seat_1', sellerId: 'sel_1', userId: 'usr_1', role: 'owner', state: 'ACTIVE', locationIds: [], bookableIds: [], seller: { ...seller, locations: [] } },
+  ];
+  stub(db.vendorLocation).updateMany = async (args: { where: unknown }) => {
+    updatedWhere.push(args.where);
+    return { count: 0 };
+  };
+  stub(db.vendorLocation).create = async (args: { data: Record<string, unknown> }) => {
+    created.push(args.data);
+    return args.data;
+  };
+  stub(db.vendorLocation).findMany = async () => [];
+  stub(db.vendorSeller).findUnique = async () => ({ ...seller, locations: [] });
+  stub(db.vendorSeller).update = async (args: { data: Record<string, unknown> }) => ({ ...seller, ...args.data });
+
+  const app = express();
+  app.use(express.json());
+  app.use(vendorSetupRouter);
+  const server = app.listen(0);
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  const save = (body: Record<string, unknown>) =>
+    fetch(`http://127.0.0.1:${port}/vendor/locations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${signVendorAccessToken({ userId: 'usr_1', email: 'owner@fulzip.example' })}`,
+      },
+      body: JSON.stringify({ ...place(), timezone: 'America/New_York', ...body }),
+    });
+  try {
+    const live = await save({ id: 'loc_1790000000000', state: 'ACTIVE' });
+    assert.equal(live.status, 200);
+    // Tried as an edit first, scoped to this business, then created.
+    assert.deepEqual(updatedWhere, [{ id: 'loc_1790000000000', sellerId: 'sel_1' }]);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].id, undefined, 'the console placeholder is never stored as the id');
+    assert.equal(created[0].sellerId, 'sel_1');
+    assert.equal(created[0].state, 'ACTIVE');
+
+    // Only ACTIVE is honoured; anything else starts as a draft.
+    assert.equal((await save({ state: 'PAUSED' })).status, 200);
+    assert.equal(created[1].state, 'DRAFT');
+  } finally {
+    server.close();
+  }
 });

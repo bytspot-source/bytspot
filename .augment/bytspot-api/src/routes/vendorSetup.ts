@@ -141,6 +141,7 @@ const locationWrite = z.object({
   timezone: z.string().trim().max(64).optional(),
   phone: z.string().trim().max(40).optional(),
   website: z.string().trim().max(200).optional(),
+  state: z.string().trim().max(16).optional(),
 });
 
 /** "+" and digits, or undefined when it cannot be a dialable number. */
@@ -240,19 +241,17 @@ router.post('/vendor/locations', requireVendorSeat, requireSetupAccess, async (r
       website: normalizeWebsite(parsed.data.website) ?? null,
     };
 
-    if (parsed.data.id) {
-      // Scoped by seller as well as id, so an id belonging to another business
-      // updates nothing rather than updating theirs.
-      const updated = await db.vendorLocation.updateMany({
-        where: { id: parsed.data.id, sellerId },
-        data: fields,
-      });
-      if (updated.count === 0) {
-        res.status(404).json({ error: 'No such place' });
-        return;
-      }
-    } else {
-      await db.vendorLocation.create({ data: { ...fields, sellerId, state: 'DRAFT' } });
+    // Scoped by seller as well as id, so an id belonging to another business
+    // updates nothing rather than updating theirs.
+    const updated = parsed.data.id
+      ? await db.vendorLocation.updateMany({ where: { id: parsed.data.id, sellerId }, data: fields })
+      : { count: 0 };
+    if (updated.count === 0) {
+      // Places are closed, never deleted, so an id we do not hold is the
+      // console's placeholder for a new place, never a stale edit. The id is
+      // ours to assign; a new place may start live since DRAFT → ACTIVE is legal.
+      const state = parsed.data.state === 'ACTIVE' ? 'ACTIVE' : 'DRAFT';
+      await db.vendorLocation.create({ data: { ...fields, sellerId, state } });
     }
 
     await respondWithProfile(res, sellerId);

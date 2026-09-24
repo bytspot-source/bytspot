@@ -49,6 +49,10 @@ services:
     # traffic instead of serving errors until someone notices.
     healthCheckPath: /health
     pullRequestPreviewsEnabled: false
+    # Same site as vendor.bytspot.app, so the console's SameSite=Strict refresh
+    # cookie is stored and sent. bytspot-api.onrender.com keeps serving the apps.
+    domains:
+      - api.bytspot.app
     buildFilter:
       paths:
         - "**"

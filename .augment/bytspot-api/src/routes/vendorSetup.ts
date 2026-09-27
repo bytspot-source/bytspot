@@ -1,9 +1,10 @@
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import type { VendorLocation, VendorSeller } from '@prisma/client';
 import { db } from '../lib/db';
 import { normalizeEmail } from '../lib/contactHash';
 import { captureError } from '../lib/observability';
+import { sendVendorVerifiedEmail } from '../lib/email';
 import { requireSetupAccess, requireVendorSeat } from '../middleware/vendorAuth';
 import { config } from '../config';
 import {
@@ -18,7 +19,7 @@ import {
 import { candidateBlockers, geocode, geocodeIsConfigured, knownTimezone, timezoneAt } from '../vendor/geocode';
 import { onboardingLink, payoutIsConfigured, refreshPayout, storedPayout } from '../vendor/payout';
 import { coverUrlFor } from '../vendor/media';
-import { advanceSeller } from '../vendor/sellerState';
+import { advanceSeller, markVerified } from '../vendor/sellerState';
 
 const router = Router();
 
@@ -32,6 +33,8 @@ const router = Router();
 interface ProfileBody {
   legalName?: string;
   contactEmail?: string;
+  state: string;
+  verifiedAt?: string;
   locations: unknown[];
   payout?: unknown;
 }
@@ -64,13 +67,20 @@ async function profileFor(seller: VendorSeller): Promise<ProfileBody> {
   return {
     legalName: seller.legalName ?? undefined,
     contactEmail: seller.contactEmail ?? undefined,
+    state: seller.state,
+    verifiedAt: seller.verifiedAt?.toISOString(),
     locations: locations.map((location) => locationDto(location, coverUrlFor(location.media))),
     payout: storedPayout(seller),
   };
 }
 
+/** The console's own origin, so a link lands in the console rather than on the API's host. */
+function consoleOrigin(req: Request): string {
+  return config.corsOrigins.find((entry) => req.headers.origin === entry) ?? config.corsOrigins[0];
+}
+
 /** Re-reads the business, moves its lifecycle if it now qualifies, and answers. */
-async function respondWithProfile(res: Response, sellerId: string): Promise<void> {
+async function respondWithProfile(req: Request, res: Response, sellerId: string): Promise<void> {
   const seller = await db.vendorSeller.findUnique({
     where: { id: sellerId },
     include: { locations: true },
@@ -82,12 +92,19 @@ async function respondWithProfile(res: Response, sellerId: string): Promise<void
   // Advanced on write rather than by a job: the vendor is looking at the screen
   // that told them what was missing, and it has to stop saying so.
   const moved = await advanceSeller(seller, seller.locations);
-  res.status(200).json(await profileFor(moved));
+  const verified = await markVerified(moved);
+  if (verified.first && moved.contactEmail) {
+    void sendVendorVerifiedEmail(moved.contactEmail, {
+      legalName: moved.legalName ?? 'Your business',
+      consoleUrl: consoleOrigin(req),
+    });
+  }
+  res.status(200).json(await profileFor(verified.seller));
 }
 
 router.get('/vendor/profile', requireVendorSeat, async (req, res) => {
   try {
-    await respondWithProfile(res, req.vendor!.seller.id);
+    await respondWithProfile(req, res, req.vendor!.seller.id);
   } catch (err) {
     captureError(err, { route: 'vendor/profile:get' });
     res.status(500).json({ error: 'Internal error' });
@@ -123,7 +140,7 @@ router.post('/vendor/profile', requireVendorSeat, requireSetupAccess, async (req
     }
 
     await db.vendorSeller.update({ where: { id: req.vendor!.seller.id }, data });
-    await respondWithProfile(res, req.vendor!.seller.id);
+    await respondWithProfile(req, res, req.vendor!.seller.id);
   } catch (err) {
     captureError(err, { route: 'vendor/profile:post' });
     res.status(500).json({ error: 'Internal error' });
@@ -254,7 +271,7 @@ router.post('/vendor/locations', requireVendorSeat, requireSetupAccess, async (r
       await db.vendorLocation.create({ data: { ...fields, sellerId, state } });
     }
 
-    await respondWithProfile(res, sellerId);
+    await respondWithProfile(req, res, sellerId);
   } catch (err) {
     captureError(err, { route: 'vendor/locations' });
     res.status(500).json({ error: 'Internal error' });
@@ -313,7 +330,7 @@ router.post('/vendor/locations/:id/state', requireVendorSeat, requireSetupAccess
     }
 
     await db.vendorLocation.update({ where: { id: location.id }, data: { state: operation.to } });
-    await respondWithProfile(res, sellerId);
+    await respondWithProfile(req, res, sellerId);
   } catch (err) {
     captureError(err, { route: 'vendor/locations/state' });
     res.status(500).json({ error: 'Internal error' });
@@ -373,10 +390,7 @@ router.post('/vendor/payout/onboarding', requireVendorSeat, requireSetupAccess, 
   }
 
   try {
-    // The console's own origin, so the vendor returns to the console rather
-    // than to whichever host the API happens to answer on.
-    const origin = config.corsOrigins.find((entry) => req.headers.origin === entry) ?? config.corsOrigins[0];
-    const handoff = await onboardingLink(req.vendor!.seller, origin);
+    const handoff = await onboardingLink(req.vendor!.seller, consoleOrigin(req));
     if (!handoff) {
       res.status(502).json({ error: 'Payout setup failed', blockers: ['Payout setup is down'] });
       return;

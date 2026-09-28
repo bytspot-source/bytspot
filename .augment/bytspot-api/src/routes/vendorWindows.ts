@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { captureError } from '../lib/observability';
 import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
-import { roleScope, type SeatRole, type SellerState } from '../vendor/contract';
+import { allowedBookableTypes, roleScope, type SeatRole, type SellerState } from '../vendor/contract';
 import { NotFound } from '../vendor/demandFeed';
 import { seatCanSeeBookable, seatCanSeeLocation } from '../vendor/media';
 import { WindowRefused, createWindow, createWindowInput, listWindows, setWindowPublished } from '../vendor/windows';
@@ -37,7 +37,8 @@ router.post('/vendor/windows', requireVendorSeat, requireCapability('SCHEDULE'),
   }
 
   try {
-    res.status(201).json(await createWindow(seller.id, locations, parsed.data));
+    const allowed = allowedBookableTypes(seller.businessKind, seller.extraBookableTypes);
+    res.status(201).json(await createWindow(seller.id, locations, parsed.data, allowed));
   } catch (err) {
     if (err instanceof WindowRefused) {
       res.status(422).json({ error: 'Window refused', blockers: err.blockers });

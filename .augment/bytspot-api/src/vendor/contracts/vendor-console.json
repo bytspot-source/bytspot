@@ -1,6 +1,6 @@
 {
   "id": "bytspot.vendor-console",
-  "version": 4,
+  "version": 5,
   "$comment": "Console UX only. The ontology lives in bookable-templates.json and is shared with Swift and Kotlin; this file is read by the vendor web console alone, so navigation and wizard copy never force the native clients to model vendor screens.",
   "$modelComment": "A Bookable is a SKU printer, not a listing and not a SKU. The vendor configures one Bookable; availability prints the SKUs that carry the state machine. The word SKU is never shown to a vendor.",
   "model": {
@@ -236,6 +236,109 @@
   ],
   "$unsupportedComment": "Named so a gap is visible instead of silently mapped onto the wrong domain. Each would need a new variant on an existing domain, never a new core noun. Class now lands on fitness.class and events.class, and Space on coffee.workspace, so the list is empty; it stays here because the next gap should be recorded rather than faked.",
   "unsupportedTypes": [],
+  "$businessKindsComment": "The one answer a business gives about itself during onboarding. It narrows Bookables to the types that fit, so a valet is not shown hotel rooms. The first bookable type is the one the console opens on. A business keeps one main kind and may add any other bookable type later; a business with no kind yet sees every type, so nothing already selling is hidden.",
+  "businessKinds": [
+    {
+      "id": "restaurant",
+      "label": "Restaurant or bar",
+      "icon": "fork.knife",
+      "bookableTypes": [
+        "table",
+        "events",
+        "experience"
+      ]
+    },
+    {
+      "id": "valet",
+      "label": "Valet or parking",
+      "icon": "car.fill",
+      "bookableTypes": [
+        "parking",
+        "ride"
+      ]
+    },
+    {
+      "id": "hotel",
+      "label": "Hotel or rental",
+      "icon": "bed.double.fill",
+      "bookableTypes": [
+        "stay",
+        "parking"
+      ]
+    },
+    {
+      "id": "nightlife",
+      "label": "Nightclub or lounge",
+      "icon": "music.note",
+      "bookableTypes": [
+        "experience",
+        "ticket",
+        "table"
+      ]
+    },
+    {
+      "id": "wellness",
+      "label": "Spa, salon or wellness",
+      "icon": "sparkles",
+      "bookableTypes": [
+        "service",
+        "fitness"
+      ]
+    },
+    {
+      "id": "cafe",
+      "label": "Café",
+      "icon": "cup.and.saucer.fill",
+      "bookableTypes": [
+        "coffee",
+        "table"
+      ]
+    },
+    {
+      "id": "fitness",
+      "label": "Gym or studio",
+      "icon": "figure.run",
+      "bookableTypes": [
+        "fitness",
+        "events"
+      ]
+    },
+    {
+      "id": "retail",
+      "label": "Shop or boutique",
+      "icon": "bag.fill",
+      "bookableTypes": [
+        "shopping",
+        "service"
+      ]
+    },
+    {
+      "id": "transport",
+      "label": "Transportation",
+      "icon": "car.side.fill",
+      "bookableTypes": [
+        "ride"
+      ]
+    },
+    {
+      "id": "home",
+      "label": "Home or cottage seller",
+      "icon": "leaf.fill",
+      "bookableTypes": [
+        "local"
+      ]
+    },
+    {
+      "id": "organizer",
+      "label": "Event organizer",
+      "icon": "ticket.fill",
+      "bookableTypes": [
+        "events",
+        "ticket",
+        "experience"
+      ]
+    }
+  ],
   "$navComment": "Primary tabs are identical for every business: a home baker deserves the same demand feed as a hotel. Cottage mode collapses the secondary menu instead, which matches guidanceForRole in providerDashboardAccess.ts. Every item names the capability that unlocks it, so navigation is derived from the same staff roles the ontology enforces rather than a second copy of the rules.",
   "navigation": {
     "primary": [

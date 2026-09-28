@@ -6,7 +6,7 @@ import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemDestination, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
@@ -1657,4 +1657,23 @@ test('plans.feasibility asks for no supply when the Plan holds none', async () =
   bookable.findMany = async () => { throw new Error('must not query bookables for an empty Plan'); };
   coffeeSpot.findMany = async () => { throw new Error('must not query coffee spots for an empty Plan'); };
   assert.equal((await caller().plans.feasibility({ planId: 'plan-1' })).verdict, 'unknown');
+});
+
+test('an item says where it is only when that place may be shared', () => {
+  const venue = { name: 'The Basement', address: '1 Peachtree St NE', lat: 33.78, lng: -84.38 };
+  const offer = { location: { label: 'Peach Table', address: null, lat: 33.77, lng: -84.39 } };
+  assert.deepEqual(itemDestination({ offer }), { name: 'Peach Table', address: null, lat: 33.77, lng: -84.39 });
+  assert.deepEqual(
+    itemDestination({ coffeeSpot: { name: 'Highland Bakery', latitude: 33.76, longitude: -84.38 } }),
+    { name: 'Highland Bakery', address: null, lat: 33.76, lng: -84.38 },
+  );
+  // A spot with no point is not a destination.
+  assert.equal(itemDestination({ coffeeSpot: { name: 'Highland Bakery', latitude: null, longitude: null } }), null);
+  assert.deepEqual(itemDestination({ party: { venueName: 'x', locationDisclosure: 'public', arrivalVenue: venue } }), venue);
+  // A room that hides its place does not give it away through a Plan.
+  for (const locationDisclosure of ['after-approval', 'withheld']) {
+    assert.equal(itemDestination({ party: { venueName: 'x', locationDisclosure, arrivalVenue: venue } }), null);
+  }
+  assert.equal(itemDestination({ party: { venueName: 'x', locationDisclosure: 'public', arrivalVenue: null } }), null);
+  assert.equal(itemDestination({}), null);
 });

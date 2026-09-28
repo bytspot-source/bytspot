@@ -138,6 +138,42 @@ export function planReadiness(participants: ParticipantRecord[]) {
   };
 }
 
+const destinationSpotSelect = { name: true, latitude: true, longitude: true } as const;
+
+export type PlanItemDestination = { name: string; address: string | null; lat: number; lng: number };
+
+type DestinationSources = {
+  offer?: { location: { label: string; address: string | null; lat: number; lng: number } } | null;
+  coffeeSpot?: { name: string; latitude: number | null; longitude: number | null } | null;
+  coffeeReservation?: { spot?: { name: string; latitude: number | null; longitude: number | null } | null } | null;
+  party?: {
+    venueName: string;
+    locationDisclosure: string;
+    arrivalVenue: { name: string; address: string; lat: number; lng: number } | null;
+  } | null;
+};
+
+/**
+ * The point a ride app is sent to, or null when the item has none it may
+ * share. A Party gives one only under the rule its share link obeys: the host
+ * published the venue and attached a real one, so an after-approval or
+ * withheld room never leaks its place through a Plan.
+ */
+export function itemDestination(item: DestinationSources): PlanItemDestination | null {
+  const location = item.offer?.location;
+  if (location) return { name: location.label, address: location.address, lat: location.lat, lng: location.lng };
+  const spot = item.coffeeReservation?.spot ?? item.coffeeSpot;
+  if (spot && spot.latitude != null && spot.longitude != null) {
+    return { name: spot.name, address: null, lat: spot.latitude, lng: spot.longitude };
+  }
+  const party = item.party;
+  if (party?.locationDisclosure === 'public' && party.arrivalVenue) {
+    const venue = party.arrivalVenue;
+    return { name: venue.name, address: venue.address, lat: venue.lat, lng: venue.lng };
+  }
+  return null;
+}
+
 const planInclude = {
   participants: { orderBy: { createdAt: 'asc' } },
   // Items include the reservation summary they point at so the client can
@@ -154,7 +190,21 @@ const planInclude = {
     // sorts on the same three keys so feasibility judges the sequence the
     // guest is actually looking at.
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    include: { coffeeReservation: { select: { holdExpiresAt: true, status: true, coffeeSpotId: true } } },
+    include: {
+      coffeeReservation: {
+        select: { holdExpiresAt: true, status: true, coffeeSpotId: true, spot: { select: destinationSpotSelect } },
+      },
+      // Where each item is, for "Get there". Only a point and a label.
+      coffeeSpot: { select: destinationSpotSelect },
+      offer: { select: { location: { select: { label: true, address: true, lat: true, lng: true } } } },
+      party: {
+        select: {
+          venueName: true,
+          locationDisclosure: true,
+          arrivalVenue: { select: { name: true, address: true, lat: true, lng: true } },
+        },
+      },
+    },
   },
 } satisfies Prisma.PlanInclude;
 
@@ -260,6 +310,7 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
       reservation: item.coffeeReservation
         ? { holdExpiresAt: item.coffeeReservation.holdExpiresAt, status: item.coffeeReservation.status }
         : null,
+      destination: itemDestination(item),
     })),
   };
 }

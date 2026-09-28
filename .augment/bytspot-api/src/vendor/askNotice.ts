@@ -2,7 +2,7 @@ import { db } from '../lib/db';
 import { sendVendorAskEmail, sendVendorBookedEmail } from '../lib/email';
 import { deliverPushNotification } from '../services/notificationDelivery';
 import { priceLabel } from '../services/offerNotifications';
-import { skuTemplate } from './windows';
+import { windowTemplate } from './windows';
 
 /** The seller's contact address if it set one; otherwise every live owner and manager. */
 export function askNoticeRecipients(
@@ -47,6 +47,7 @@ export async function notifyAskSeller(
       where: { id: windowId },
       select: {
         skuTemplateId: true,
+        title: true,
         location: { select: { label: true, timezone: true } },
         seller: {
           select: {
@@ -61,7 +62,7 @@ export async function notifyAskSeller(
       window.seller.contactEmail,
       window.seller.seats.map((seat) => ({ role: seat.role, state: seat.state, email: seat.user.email })),
     );
-    const title = skuTemplate(window.skuTemplateId)?.title ?? 'Your listing';
+    const title = windowTemplate(window)?.title ?? 'Your listing';
     const when = formatAskWhen(ask.startsAt, window.location.timezone);
     const guests = `${ask.partySize} ${ask.partySize === 1 ? 'guest' : 'guests'}`;
     await Promise.all([
@@ -92,7 +93,7 @@ export async function notifyOfferAcceptedSeller(offerId: string, paid?: { seller
         priceCents: true,
         demand: { select: { partySize: true } },
         location: { select: { label: true, timezone: true } },
-        window: { select: { skuTemplateId: true } },
+        window: { select: { skuTemplateId: true, title: true } },
         seller: {
           select: {
             contactEmail: true,
@@ -106,7 +107,7 @@ export async function notifyOfferAcceptedSeller(offerId: string, paid?: { seller
       offer.seller.contactEmail,
       offer.seller.seats.map((seat) => ({ role: seat.role, state: seat.state, email: seat.user.email })),
     );
-    const title = (offer.window && skuTemplate(offer.window.skuTemplateId)?.title) || 'Your listing';
+    const title = (offer.window && windowTemplate(offer.window)?.title) || 'Your listing';
     const when = formatAskWhen(offer.startsAt, offer.location.timezone);
     const price = paid
       ? `${priceLabel(offer.priceCents)} paid, you receive ${priceLabel(paid.sellerNetCents)}`

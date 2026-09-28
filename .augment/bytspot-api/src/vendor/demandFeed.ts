@@ -24,6 +24,7 @@ import {
 } from './demand';
 import { coverUrlFor } from './media';
 import { NotPayable, PayoutNotReady } from './acceptOffer';
+import { windowTemplate } from './windows';
 
 /** Two seats answered at once, or the slot went between reading and writing. */
 export class DemandMoved extends Error {}
@@ -164,7 +165,7 @@ export async function supplyFor(sellerId: string, now: Date): Promise<SupplySnap
       }),
     });
     detail.set(window.id, {
-      title: window.skuTemplateId,
+      title: windowTemplate(window)?.title ?? window.skuTemplateId,
       locationId: window.locationId,
       location: locationDto(window.location),
       coverUrl: coverUrlFor(window.media),

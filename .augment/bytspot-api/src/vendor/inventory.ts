@@ -3,7 +3,7 @@ import { db } from '../lib/db';
 import { deriveSlots, sellableSlots, type Commitment } from './availability';
 import { distanceMiles } from './demand';
 import { mediaUrl } from './media';
-import { skuTemplate } from './windows';
+import { windowTemplate } from './windows';
 
 /**
  * Live vendor inventory as a guest sees it.
@@ -108,7 +108,7 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
 
   const cards: InventoryCard[] = [];
   for (const window of windows) {
-    const template = skuTemplate(window.skuTemplateId);
+    const template = windowTemplate(window);
     if (!template) continue;
 
     const distance = distanceMiles(

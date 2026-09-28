@@ -36,6 +36,58 @@ export function skuTemplate(id: string): SkuTemplate | undefined {
   return TEMPLATES.find((template) => template.id === id);
 }
 
+const CUSTOM_PREFIX = 'custom.';
+const DOMAINS = BOOKABLE_TEMPLATES.domains as { id: string; label: string; variants: string[] }[];
+
+/** `custom.<domain>.<variant>`: a variant the catalog names but prints no preset for. */
+export function isCustomTemplateId(id: string): boolean {
+  return id.startsWith(CUSTOM_PREFIX);
+}
+
+/**
+ * The stand-in template for a blank window. Only a domain and variant the
+ * catalog already lists resolve, so a blank adds a name and a price, never a
+ * noun. Category, rail and party size are borrowed from the domain's first
+ * printed preset, so a blank lands on the same Discover rail as its siblings.
+ */
+export function customTemplate(id: string): SkuTemplate | undefined {
+  if (!isCustomTemplateId(id)) return undefined;
+  const [domainId, variant, ...rest] = id.slice(CUSTOM_PREFIX.length).split('.');
+  if (rest.length || !domainId || !variant) return undefined;
+  const domain = DOMAINS.find((entry) => entry.id === domainId);
+  if (!domain?.variants.includes(variant)) return undefined;
+  const sibling = TEMPLATES.find((template) => template.domain === domainId);
+  return {
+    id,
+    domain: domainId,
+    title: variant.replace(/-/g, ' ').replace(/^./, (char) => char.toUpperCase()),
+    category: sibling?.category ?? domain.label,
+    discoverType: sibling?.discoverType ?? domainId,
+    priceCents: 0,
+    maxGuests: sibling?.maxGuests ?? 2,
+    durationMins: availabilityDefaultsFor(domainId).slotMinutes,
+    capabilities: sibling?.capabilities ?? ['BOOK', 'CANCEL'],
+  };
+}
+
+/** A catalog preset or a blank; anything else is not something Bytspot sells. */
+export function resolveTemplate(id: string): SkuTemplate | undefined {
+  return skuTemplate(id) ?? customTemplate(id);
+}
+
+/** What a window is called and how long it runs: the seller's words first, then the template's. */
+export function windowTemplate(
+  window: Pick<VendorAvailabilityWindow, 'skuTemplateId'> & { title?: string | null; durationMins?: number | null },
+): SkuTemplate | undefined {
+  const template = resolveTemplate(window.skuTemplateId);
+  if (!template) return undefined;
+  return {
+    ...template,
+    title: window.title?.trim() || template.title,
+    durationMins: window.durationMins ?? template.durationMins,
+  };
+}
+
 export const createWindowInput = z.object({
   skuTemplateId: z.string().min(1).max(120),
   locationId: z.string().min(1).max(64),
@@ -46,6 +98,8 @@ export const createWindowInput = z.object({
   quantity: z.number().int().min(1).max(MAX_QUANTITY),
   priceCents: z.number().int().min(0).max(10_000_000).optional(),
   maxGuests: z.number().int().min(1).max(500).optional(),
+  title: z.string().trim().max(80).optional(),
+  durationMins: z.number().int().min(5).max(MINUTES_PER_DAY).optional(),
 });
 export type CreateWindowInput = z.infer<typeof createWindowInput>;
 
@@ -57,6 +111,11 @@ export function windowBlockers(
 ): string[] {
   const blockers: string[] = [];
   if (!template) blockers.push('That is not something Bytspot sells yet');
+  else if (isCustomTemplateId(template.id)) {
+    // A blank has no preset to borrow a name or a price from.
+    if (!input.title?.trim()) blockers.push('Give it a name guests will see');
+    if (input.priceCents === undefined) blockers.push('Set a price');
+  }
   if (!location) blockers.push('Choose one of your places');
   else if (location.state === 'CLOSED') blockers.push('That place is closed');
   if (input.closeMins <= input.openMins) blockers.push('Closing has to come after opening');
@@ -84,7 +143,7 @@ export function publishBlockers(input: {
   if (!locationCanPublish(input.locationState)) blockers.push('Activate this place first');
   // Without a zone no slot can be derived, so a published window would sell nothing.
   if (!input.timezone) blockers.push('This place needs a time zone');
-  if (!skuTemplate(input.skuTemplateId)) blockers.push('That is not something Bytspot sells yet');
+  if (!resolveTemplate(input.skuTemplateId)) blockers.push('That is not something Bytspot sells yet');
   return blockers;
 }
 
@@ -100,6 +159,7 @@ export interface WindowDto {
   quantity: number;
   priceCents: number;
   maxGuests: number;
+  durationMins: number;
   intent: string;
   published: boolean;
   coverUrl?: string;
@@ -111,7 +171,7 @@ export function windowDto(
   return {
     id: window.id,
     skuTemplateId: window.skuTemplateId,
-    title: skuTemplate(window.skuTemplateId)?.title ?? window.skuTemplateId,
+    title: windowTemplate(window)?.title ?? window.skuTemplateId,
     domain: window.domain,
     locationId: window.locationId,
     weekdays: window.weekdays,
@@ -120,6 +180,7 @@ export function windowDto(
     quantity: window.quantity,
     priceCents: window.priceCents,
     maxGuests: window.maxGuests,
+    durationMins: windowTemplate(window)?.durationMins ?? window.slotMinutes,
     intent: window.intent,
     published: window.active,
     coverUrl: coverUrlFor(window.media ?? []),
@@ -141,13 +202,16 @@ export async function listWindows(sellerId: string, bookableIds?: string[]): Pro
   return rows.map(windowDto);
 }
 
-/** Always a draft. Price and party size fall back to the template, never to zero. */
+/**
+ * Always a draft. Price, party size, name and length fall back to the template,
+ * never to zero; a blank has no template price, so windowBlockers requires one.
+ */
 export async function createWindow(
   sellerId: string,
   locations: Pick<VendorLocation, 'id' | 'state'>[],
   input: CreateWindowInput,
 ): Promise<WindowDto> {
-  const template = skuTemplate(input.skuTemplateId);
+  const template = resolveTemplate(input.skuTemplateId);
   const location = locations.find((entry) => entry.id === input.locationId);
   const blockers = windowBlockers(input, template, location);
   if (blockers.length || !template) throw new WindowRefused(blockers);
@@ -169,6 +233,8 @@ export async function createWindow(
       quantity: input.quantity,
       priceCents: input.priceCents ?? template.priceCents,
       maxGuests: input.maxGuests ?? template.maxGuests,
+      title: input.title?.trim() || null,
+      durationMins: input.durationMins ?? null,
       active: false,
     },
   });

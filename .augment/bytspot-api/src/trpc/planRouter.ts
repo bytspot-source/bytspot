@@ -12,6 +12,7 @@ import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, fi
 import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
+import { tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -311,6 +312,12 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
         ? { holdExpiresAt: item.coffeeReservation.holdExpiresAt, status: item.coffeeReservation.status }
         : null,
       destination: itemDestination(item),
+      // A listed OpenTable or Resy handoff for a reference item, joined on read
+      // so a pulled link leaves every Plan at once.
+      tableBooking: tableBookingLinkFor(item.placeId),
+      // The guest's own word that they booked it there. Deliberately apart from
+      // `booked`, which only ever reflects supply Bytspot settled.
+      guestBooking: item.guestBookedAt ? { reportedAt: item.guestBookedAt, bookedFor: item.guestBookedFor } : null,
     })),
   };
 }
@@ -1240,6 +1247,9 @@ export const planRouter = router({
             coffeeReservationId: z.string().min(1).optional(),
           })
           .optional(),
+        // The Google place a reference points at. Not supply: it grants no
+        // capability, it only lets a listed booking link follow the item.
+        placeId: z.string().regex(/^[A-Za-z0-9_-]{1,255}$/).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => serializableTransactionWithRetry(async (tx) => {
@@ -1250,6 +1260,9 @@ export const planRouter = router({
       }
       const partyId = input.supplyRef?.partyId ?? input.partyId ?? null;
       const coffeeReservationId = input.supplyRef?.coffeeReservationId ?? null;
+      if (input.placeId && (partyId || coffeeReservationId)) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'A place can only be named on an item with no supply.' });
+      }
       // Revalidate ownership, live reservation and supply on every attempt.
       const supply = await resolveSupply(ctx.user.userId, { partyId, coffeeReservationId, title: input.title }, tx);
       if (supply.attachedItem && supply.attachedItem.planId !== plan.id) {
@@ -1298,6 +1311,7 @@ export const planRouter = router({
         planId: plan.id, needKind: input.needKind, title: supply.title,
         capability: supply.capability, partyId, coffeeReservationId,
         selectionKey, bookableId: supply.snapshot?.id ?? null,
+        placeId: input.placeId ?? null,
         position: attachSequence.position,
       } });
       return { id: item.id, capability: item.capability, status: item.status };
@@ -1404,6 +1418,36 @@ export const planRouter = router({
         }
         throw error;
       }
+    }),
+
+  /**
+   * "I booked it": the guest's record that they booked a listed place with
+   * OpenTable or Resy. Bytspot cannot see that booking, so this never touches
+   * `status` or `booked`, never counts toward a booked Plan and issues no
+   * Pass. `booked: false` clears the record.
+   */
+  reportTableBooking: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-report-table-booking' }))
+    .input(z.object({
+      planId: z.string().min(1),
+      itemId: z.string().min(1),
+      booked: z.boolean(),
+      bookedFor: z.coerce.date().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+      const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
+      assertPlanMutable(plan, now);
+      const item = plan.items.find((candidate) => candidate.id === input.itemId);
+      if (!item || item.status === 'cancelled') throw new TRPCError({ code: 'NOT_FOUND', message: 'That item is not on this Plan.' });
+      if (!tableBookingLinkFor(item.placeId)) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only a place booked through OpenTable or Resy can be marked booked here.' });
+      }
+      const data = input.booked
+        ? { guestBookedAt: now, guestBookedFor: input.bookedFor ?? null }
+        : { guestBookedAt: null, guestBookedFor: null };
+      await db.planItem.update({ where: { id: item.id }, data });
+      return { guestBooking: data.guestBookedAt ? { reportedAt: data.guestBookedAt, bookedFor: data.guestBookedFor } : null };
     }),
 
   /** Detach cancels the item; Plan history is never rewritten. */

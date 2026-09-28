@@ -11,6 +11,7 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
+import { tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
 
@@ -40,6 +41,16 @@ export interface MappedPlace {
   rating: number | null; ratingCount: number; priceLevel: string | null;
   types: string[]; primaryType: string | null; photoUrls: string[];
   isOpen: boolean | null; websiteUri: string | null;
+  /** A hand-checked OpenTable or Resy link, added after the cache. */
+  booking?: TableBookingLink | null;
+}
+
+/**
+ * Joined on every read rather than cached with Google's answer, so adding or
+ * pulling a link takes effect on the next request, not a cache lifetime later.
+ */
+export function withTableBooking<T extends { placeId: string }>(place: T): T & { booking: TableBookingLink | null } {
+  return { ...place, booking: tableBookingLinkFor(place.placeId) };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -221,7 +232,7 @@ export async function textSearchCore(
       const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
       return (data.places ?? []).map(mapPlace);
     });
-    return { places, source: stale ? 'google-stale' : 'google' };
+    return { places: places.map(withTableBooking), source: stale ? 'google-stale' : 'google' };
   } catch (err) {
     captureError(err, { provider: 'google-places', operation: 'textSearch' });
     return { places: [], source: 'unavailable' };
@@ -255,7 +266,7 @@ export const placesRouter = router({
           const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
           return (data.places ?? []).map(mapPlace);
         });
-        return { places, source: stale ? ('google-stale' as const) : ('google' as const) };
+        return { places: places.map(withTableBooking), source: stale ? ('google-stale' as const) : ('google' as const) };
       } catch (err) {
         // Google being unreachable is not this server malfunctioning, and an
         // empty list is not the same claim as "there is nothing here".
@@ -335,7 +346,7 @@ export const placesRouter = router({
           })),
         };
       });
-      return { place };
+      return { place: place ? withTableBooking(place) : null };
     }),
 
   photoUrl: publicProcedure

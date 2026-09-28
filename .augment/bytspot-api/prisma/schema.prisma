@@ -989,6 +989,13 @@ model PlanItem {
   bookableId          String?  @unique @map("bookable_id")
   capability          String   @default("details")
   status              String   @default("available")
+  /// The Google place a reference item points at. Never supply: it only lets
+  /// a hand-checked OpenTable or Resy link follow the item onto the Plan.
+  placeId             String?  @map("place_id")
+  /// When the guest said they booked this place with the provider, and for
+  /// when. Their word only: it never makes the item booked or issues a Pass.
+  guestBookedAt       DateTime? @map("guest_booked_at")
+  guestBookedFor      DateTime? @map("guest_booked_for")
   /// Where this item sits in the Plan's sequence, zero-based and per plan.
   /// Deliberately not unique: a racing attach may briefly duplicate a position,
   /// which is a smaller harm than refusing the write. Readers break ties on

@@ -43,7 +43,7 @@ import {
   windowBlockers,
   windowTemplate,
 } from './windows';
-import { boundingBox, pickImagery } from './inventory';
+import { boundingBox, pickImagery, pickMenus } from './inventory';
 
 const draft = {
   skuTemplateId: 'automotive.private-transfer',
@@ -175,4 +175,18 @@ test('a business drafts only inside the categories it chose', () => {
   assert.deepEqual(windowBlockers(facial, resolveTemplate(facial.skuTemplateId), { state: 'ACTIVE' }, ['service']), []);
   // No kind yet: everything stays open.
   assert.deepEqual(windowBlockers(facial, resolveTemplate(facial.skuTemplateId), { state: 'ACTIVE' }, undefined), []);
+});
+
+test('a place shows its menus in the seller order, and says which are PDFs', () => {
+  const place = [
+    { id: 'm_2', kind: 'menu', position: 1, mimeType: 'image/jpeg' },
+    { id: 'p_cov', kind: 'cover', position: 0, mimeType: 'image/jpeg' },
+    { id: 'm_1', kind: 'menu', position: 0, mimeType: 'application/pdf' },
+  ];
+  const menus = pickMenus(place);
+  assert.deepEqual(menus.map((menu) => menu.format), ['pdf', 'image']);
+  assert.match(menus[0].url, /\/media\/vendor\/m_1$/);
+  // A menu is never imagery, so it cannot become a card's cover.
+  assert.equal(pickImagery([], place).galleryUrls.length, 0);
+  assert.deepEqual(pickMenus([]), []);
 });

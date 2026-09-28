@@ -41,9 +41,16 @@ export interface InventoryCard {
   distanceMiles: number;
   coverUrl: string | null;
   galleryUrls: string[];
+  /** The place's menu files in the seller's order. Display only: nothing on a menu is sold. */
+  menus: InventoryMenu[];
   nextSlot: { startsAt: string; remaining: number };
   /** The times a guest can ask for, soonest first. */
   upcomingSlots: { startsAt: string; remaining: number }[];
+}
+
+export interface InventoryMenu {
+  url: string;
+  format: 'pdf' | 'image';
 }
 
 const UPCOMING_SLOTS = 6;
@@ -52,6 +59,7 @@ interface MediaRow {
   id: string;
   kind: string;
   position: number;
+  mimeType?: string;
 }
 
 /** Window imagery first, then the place's. Positions keep the seller's order. */
@@ -65,6 +73,14 @@ export function pickImagery(windowMedia: MediaRow[], placeMedia: MediaRow[]): { 
   return { coverUrl: cover ? mediaUrl(cover.id) : null, galleryUrls: gallery.slice(0, 6).map((row) => mediaUrl(row.id)) };
 }
 
+/** Menus hang off the place only, so a window's own media is never read here. */
+export function pickMenus(placeMedia: MediaRow[]): InventoryMenu[] {
+  return placeMedia
+    .filter((row) => row.kind === 'menu')
+    .sort((a, b) => a.position - b.position)
+    .map((row) => ({ url: mediaUrl(row.id), format: row.mimeType === 'application/pdf' ? 'pdf' : 'image' }));
+}
+
 /** A rough box so the database can use an index; exact distance is applied after. */
 export function boundingBox(lat: number, lng: number, radiusMiles: number) {
   const latDelta = radiusMiles / 69;
@@ -74,7 +90,7 @@ export function boundingBox(lat: number, lng: number, radiusMiles: number) {
 
 export async function liveInventory(input: InventoryInput, now: Date = new Date()): Promise<InventoryCard[]> {
   const box = boundingBox(input.lat, input.lng, input.radiusMiles);
-  const mediaSelect = { select: { id: true, kind: true, position: true } } as const;
+  const mediaSelect = { select: { id: true, kind: true, position: true, mimeType: true } } as const;
 
   const windows = await db.vendorAvailabilityWindow.findMany({
     where: {
@@ -89,7 +105,7 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
     },
     include: {
       seller: { select: { id: true, legalName: true } },
-      location: { include: { media: { where: { kind: { in: ['cover', 'gallery'] } }, ...mediaSelect } } },
+      location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu'] } }, ...mediaSelect } } },
       media: { where: { kind: { in: ['cover', 'gallery'] } }, ...mediaSelect },
     },
     take: 200,
@@ -151,6 +167,7 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
       },
       distanceMiles: Math.round(distance * 10) / 10,
       ...pickImagery(window.media, window.location.media),
+      menus: pickMenus(window.location.media),
       nextSlot: { startsAt: next.startsAt.toISOString(), remaining: next.remaining },
       upcomingSlots: open
         .slice(0, UPCOMING_SLOTS)

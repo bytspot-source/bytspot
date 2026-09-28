@@ -1422,6 +1422,11 @@ model VendorAvailabilityWindow {
   priceCents Int @map("price_cents")
   maxGuests  Int @map("max_guests")
 
+  /// The seller's own name and length for what they sell. Required for a
+  /// blank (`custom.*`) window, which has no catalog template to fall back on.
+  title        String?
+  durationMins Int?    @map("duration_mins")
+
   /// What the seller says this window is for, not what we infer from the shape
   /// of their data. Only `request` exists today, because only the ask → offer
   /// → accept rail is built; a word is added when the rail behind it is.

@@ -34,7 +34,15 @@ test('words whose rail does not exist are refused at the door', () => {
 
 /* ── Authoring and publishing a window ─────────────────────────────────── */
 
-import { createWindowInput, publishBlockers, skuTemplate, windowBlockers } from './windows';
+import {
+  createWindowInput,
+  customTemplate,
+  publishBlockers,
+  resolveTemplate,
+  skuTemplate,
+  windowBlockers,
+  windowTemplate,
+} from './windows';
 import { boundingBox, pickImagery } from './inventory';
 
 const draft = {
@@ -111,4 +119,45 @@ test('the search box contains the radius it stands in for', () => {
   assert.ok(box.maxLat - 33.75 >= 15 / 69 - 1e-9);
   // Longitude degrees shrink away from the equator, so the box widens.
   assert.ok(box.maxLng - -84.39 > box.maxLat - 33.75);
+});
+
+test('a blank resolves only to a domain and variant the catalog already lists', () => {
+  const blank = customTemplate('custom.wellness.facial');
+  assert.equal(blank?.domain, 'wellness');
+  assert.equal(blank?.title, 'Facial');
+  // Borrowed from the domain's printed preset, so it lands on the same rail.
+  assert.equal(blank?.discoverType, skuTemplate('wellness.massage-60')?.discoverType ?? blank?.discoverType);
+  assert.ok(resolveTemplate('custom.coffee.tasting'));
+
+  for (const id of ['custom.wellness.tattoo', 'custom.pets.walk', 'custom.wellness', 'custom.wellness.facial.extra', 'wellness.facial']) {
+    assert.equal(resolveTemplate(id), undefined, id);
+  }
+});
+
+test('a blank has to be named and priced before it is saved', () => {
+  const blank = { ...draft, skuTemplateId: 'custom.wellness.facial' };
+  const template = resolveTemplate(blank.skuTemplateId);
+  assert.deepEqual(windowBlockers(blank, template, { state: 'ACTIVE' }), ['Give it a name guests will see', 'Set a price']);
+  assert.deepEqual(windowBlockers({ ...blank, title: '  ', priceCents: 0 }, template, { state: 'ACTIVE' }), [
+    'Give it a name guests will see',
+  ]);
+  assert.deepEqual(windowBlockers({ ...blank, title: 'Hydrafacial', priceCents: 9500 }, template, { state: 'ACTIVE' }), []);
+  // A preset needs neither: it has the catalog's.
+  assert.deepEqual(windowBlockers(draft, skuTemplate(draft.skuTemplateId), { state: 'ACTIVE' }), []);
+
+  assert.equal(createWindowInput.safeParse({ ...blank, durationMins: 2 }).success, false);
+  assert.equal(createWindowInput.safeParse({ ...blank, title: 'x'.repeat(81) }).success, false);
+  assert.equal(
+    publishBlockers({ sellerState: 'ACTIVE', locationState: 'ACTIVE', timezone: 'America/New_York', skuTemplateId: blank.skuTemplateId }).length,
+    0,
+  );
+});
+
+test('the seller\'s name and length win over the template\'s', () => {
+  const preset = skuTemplate(draft.skuTemplateId)!;
+  assert.equal(windowTemplate({ skuTemplateId: preset.id })?.title, preset.title);
+  const named = windowTemplate({ skuTemplateId: preset.id, title: 'Airport run', durationMins: 90 });
+  assert.equal(named?.title, 'Airport run');
+  assert.equal(named?.durationMins, 90);
+  assert.equal(windowTemplate({ skuTemplateId: preset.id, title: '   ' })?.title, preset.title);
 });

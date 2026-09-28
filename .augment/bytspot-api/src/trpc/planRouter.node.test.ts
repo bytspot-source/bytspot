@@ -8,6 +8,7 @@ import { db } from '../lib/db';
 import type { Context } from './context';
 import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemDestination, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
+import { useTableBookingLinksForTest } from '../services/tableBookingLinks';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
 const createCaller = createCallerFactory(appRouter);
@@ -688,6 +689,61 @@ test('Detach cancels the item and refuses to strand a booking', async () => {
   planItem.updateMany = async (args: any) => { where = args.where; return { count: 0 }; };
   await assert.rejects(() => caller().plans.detach({ planId: 'plan-1', itemId: 'item-1' }), { code: 'CONFLICT' });
   assert.deepEqual(where, { id: 'item-1', status: { not: 'booked' } });
+});
+
+test('A reference names its place only when it has no supply', async () => {
+  plan.findUnique = async () => planFixture();
+  let seeded: any = null;
+  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Example Grill', placeId: 'ChIJ_listed' });
+  assert.equal(seeded.placeId, 'ChIJ_listed');
+  assert.equal(seeded.capability, 'details');
+  await assert.rejects(
+    () => caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' }, placeId: 'ChIJ_listed' }),
+    { code: 'BAD_REQUEST' },
+  );
+  await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'x', placeId: 'places/../x' }), { code: 'BAD_REQUEST' });
+});
+
+test('"I booked it" is the guest\u2019s word, kept apart from what Bytspot booked', async () => {
+  const restore = useTableBookingLinksForTest([
+    { placeId: 'ChIJ_listed', name: 'Example Grill', provider: 'resy', url: 'https://resy.com/cities/atl/example-grill', checkedAt: '2026-09-28' },
+  ]);
+  try {
+    const listed = { id: 'item-1', needKind: 'dining', title: 'Example Grill', capability: 'details', status: 'available', placeId: 'ChIJ_listed', guestBookedAt: null, guestBookedFor: null };
+    const unlisted = { ...listed, id: 'item-2', placeId: 'ChIJ_unlisted' };
+    plan.findUnique = async () => planFixture({ lifecycle: 'confirmed', expiresAt: null, items: [listed, unlisted] });
+    let written: any = null;
+    planItem.update = async (args: any) => { written = args; return { id: args.where.id }; };
+
+    const bookedFor = new Date('2026-10-02T23:30:00Z');
+    await assert.rejects(() => guest().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-1', booked: true }), { code: 'NOT_FOUND' });
+    const reported = await caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-1', booked: true, bookedFor });
+    assert.deepEqual(written.where, { id: 'item-1' });
+    assert.equal(written.data.guestBookedFor.toISOString(), bookedFor.toISOString());
+    assert.ok(reported.guestBooking?.reportedAt instanceof Date);
+    // Nothing about the report touches the booking state Bytspot derives.
+    assert.equal('status' in written.data, false);
+
+    assert.deepEqual((await caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-1', booked: false })).guestBooking, null);
+    assert.deepEqual(written.data, { guestBookedAt: null, guestBookedFor: null });
+
+    // Only a listed place can be reported, and only by the creator.
+    await assert.rejects(() => caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-2', booked: true }), { code: 'BAD_REQUEST' });
+    await assert.rejects(() => caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'missing', booked: true }), { code: 'NOT_FOUND' });
+
+    // The read model carries the link and the report, and the item stays unbooked.
+    const reportedAt = new Date('2026-09-28T12:00:00Z');
+    plan.findUnique = async () => planFixture({ lifecycle: 'confirmed', expiresAt: null, items: [{ ...listed, guestBookedAt: reportedAt, guestBookedFor: bookedFor }] });
+    const got = await caller().plans.get({ planId: 'plan-1' });
+    const item = got.items[0];
+    assert.deepEqual(item.tableBooking, { provider: 'resy', label: 'Resy', url: 'https://resy.com/cities/atl/example-grill' });
+    assert.deepEqual(item.guestBooking, { reportedAt, bookedFor });
+    assert.equal(item.booked, false);
+    assert.equal(got.state, 'confirmed');
+  } finally {
+    restore();
+  }
 });
 
 // ─── Read model ───────────────────────────────────────────────────────────────

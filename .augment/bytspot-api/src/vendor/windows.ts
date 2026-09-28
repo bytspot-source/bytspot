@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { VendorAvailabilityWindow, VendorLocation } from '@prisma/client';
 import { db } from '../lib/db';
 import { availabilityDefaultsFor } from './availability';
-import { BOOKABLE_TEMPLATES, locationCanPublish, type LocationState, type SellerState } from './contract';
+import { BOOKABLE_TEMPLATES, bookableTypeFor, locationCanPublish, type LocationState, type SellerState } from './contract';
 import { coverUrlFor } from './media';
 import { timezoneAt } from './geocode';
 import { NotFound } from './demandFeed';
@@ -26,6 +26,8 @@ export interface SkuTemplate {
   maxGuests: number;
   durationMins: number;
   capabilities: string[];
+  /** The domain variant a catalog preset prints. */
+  schema?: string;
 }
 
 const TEMPLATES = BOOKABLE_TEMPLATES.templates as SkuTemplate[];
@@ -60,6 +62,7 @@ export function customTemplate(id: string): SkuTemplate | undefined {
   return {
     id,
     domain: domainId,
+    schema: variant,
     title: variant.replace(/-/g, ' ').replace(/^./, (char) => char.toUpperCase()),
     category: sibling?.category ?? domain.label,
     discoverType: sibling?.discoverType ?? domainId,
@@ -104,17 +107,25 @@ export const createWindowInput = z.object({
 export type CreateWindowInput = z.infer<typeof createWindowInput>;
 
 /** What is wrong with a window before it is written. Empty means it may be saved. */
+/** `allowed` is the business's bookable types; undefined leaves every type open. */
 export function windowBlockers(
   input: CreateWindowInput,
   template: SkuTemplate | undefined,
   location: Pick<VendorLocation, 'state'> | undefined,
+  allowed?: string[],
 ): string[] {
   const blockers: string[] = [];
   if (!template) blockers.push('That is not something Bytspot sells yet');
-  else if (isCustomTemplateId(template.id)) {
-    // A blank has no preset to borrow a name or a price from.
-    if (!input.title?.trim()) blockers.push('Give it a name guests will see');
-    if (input.priceCents === undefined) blockers.push('Set a price');
+  else {
+    if (isCustomTemplateId(template.id)) {
+      // A blank has no preset to borrow a name or a price from.
+      if (!input.title?.trim()) blockers.push('Give it a name guests will see');
+      if (input.priceCents === undefined) blockers.push('Set a price');
+    }
+    const type = template.schema ? bookableTypeFor(template.domain, template.schema) : undefined;
+    if (allowed && !(type && allowed.includes(type))) {
+      blockers.push('That is outside what your business sells. Add the category first');
+    }
   }
   if (!location) blockers.push('Choose one of your places');
   else if (location.state === 'CLOSED') blockers.push('That place is closed');
@@ -210,10 +221,11 @@ export async function createWindow(
   sellerId: string,
   locations: Pick<VendorLocation, 'id' | 'state'>[],
   input: CreateWindowInput,
+  allowed?: string[],
 ): Promise<WindowDto> {
   const template = resolveTemplate(input.skuTemplateId);
   const location = locations.find((entry) => entry.id === input.locationId);
-  const blockers = windowBlockers(input, template, location);
+  const blockers = windowBlockers(input, template, location, allowed);
   if (blockers.length || !template) throw new WindowRefused(blockers);
 
   const defaults = availabilityDefaultsFor(template.domain);

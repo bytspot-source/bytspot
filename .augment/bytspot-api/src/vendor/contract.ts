@@ -121,6 +121,46 @@ export function canSetUpSeller(role: SeatRole, state: SellerState): boolean {
   return effectiveCapabilities(role, state).includes('SELL');
 }
 
+/* ── Business kinds ───────────────────────────────────────────────────── */
+
+interface BookableType {
+  id: string;
+  domain: string;
+  variants: string[];
+}
+
+const bookableTypes = vendorConsole.bookableTypes as BookableType[];
+const businessKinds = (vendorConsole as unknown as { businessKinds: { id: string; label: string; bookableTypes: string[] }[] })
+  .businessKinds;
+
+export function businessKind(id: string) {
+  return businessKinds.find((kind) => kind.id === id);
+}
+
+export function isBookableType(id: string): boolean {
+  return bookableTypes.some((type) => type.id === id);
+}
+
+/**
+ * The bookable types a business may draft: its kind's, then the ones it added.
+ * Undefined when it has not said what it is, which leaves every type open so a
+ * business that sold before the question existed is not narrowed by surprise.
+ */
+export function allowedBookableTypes(kind: string | null | undefined, extras: string[] = []): string[] | undefined {
+  const main = kind ? businessKind(kind) : undefined;
+  if (!main) return undefined;
+  return [...new Set([...main.bookableTypes, ...extras.filter(isBookableType)])];
+}
+
+/**
+ * The bookable type a template or blank belongs to, found by its domain and
+ * variant. Nightlife and automotive each split across two types, so the domain
+ * alone would not do.
+ */
+export function bookableTypeFor(domain: string, variant: string): string | undefined {
+  return bookableTypes.find((type) => type.domain === domain && type.variants.includes(variant))?.id;
+}
+
 /* ── Locations ─────────────────────────────────────────────────────────── */
 
 export type LocationState = 'DRAFT' | 'ACTIVE' | 'PAUSED' | 'CLOSED';

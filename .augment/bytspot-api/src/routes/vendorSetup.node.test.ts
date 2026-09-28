@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import express from 'express';
 import type Stripe from 'stripe';
-import vendorSetupRouter, { locationBlockers, normalizePhone, normalizeWebsite } from './vendorSetup';
+import vendorSetupRouter, { businessBlockers, locationBlockers, normalizePhone, normalizeWebsite } from './vendorSetup';
 import { db } from '../lib/db';
 import { signVendorAccessToken } from '../vendor/accessToken';
 import { LOCATION_DEFAULTS, locationOperation } from '../vendor/contract';
@@ -187,4 +187,11 @@ test('a new place is created under our id, even when the console sends a placeho
   } finally {
     server.close();
   }
+});
+
+test('a business kind and added categories must be ones the contract lists', () => {
+  assert.deepEqual(businessBlockers({ businessKind: 'valet', extraBookableTypes: ['stay'] }), []);
+  assert.deepEqual(businessBlockers({ businessKind: 'spaceport' }), ['Pick one of the kinds listed']);
+  assert.deepEqual(businessBlockers({ extraBookableTypes: ['parking', 'yachts'] }), ['That category does not exist']);
+  assert.deepEqual(businessBlockers({}), []);
 });

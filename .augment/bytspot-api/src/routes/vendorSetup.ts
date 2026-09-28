@@ -9,6 +9,8 @@ import { requireSetupAccess, requireVendorSeat } from '../middleware/vendorAuth'
 import { config } from '../config';
 import {
   LOCATION_DEFAULTS,
+  businessKind,
+  isBookableType,
   locationCanPublish,
   locationKind,
   locationOperation,
@@ -33,6 +35,8 @@ const router = Router();
 interface ProfileBody {
   legalName?: string;
   contactEmail?: string;
+  businessKind?: string;
+  extraBookableTypes: string[];
   state: string;
   verifiedAt?: string;
   locations: unknown[];
@@ -67,6 +71,8 @@ async function profileFor(seller: VendorSeller): Promise<ProfileBody> {
   return {
     legalName: seller.legalName ?? undefined,
     contactEmail: seller.contactEmail ?? undefined,
+    businessKind: seller.businessKind ?? undefined,
+    extraBookableTypes: seller.extraBookableTypes,
     state: seller.state,
     verifiedAt: seller.verifiedAt?.toISOString(),
     locations: locations.map((location) => locationDto(location, coverUrlFor(location.media))),
@@ -115,10 +121,20 @@ const profileWrite = z
   .object({
     legalName: z.string().trim().min(1).max(200).optional(),
     contactEmail: z.string().trim().max(320).optional(),
+    businessKind: z.string().trim().max(40).optional(),
+    extraBookableTypes: z.array(z.string().trim().max(40)).max(20).optional(),
   })
-  .refine((body) => body.legalName !== undefined || body.contactEmail !== undefined, {
+  .refine((body) => Object.values(body).some((value) => value !== undefined), {
     message: 'Nothing to save',
   });
+
+/** Only kinds and types the console contract lists; an unknown one would narrow Bookables to nothing. */
+export function businessBlockers(body: { businessKind?: string; extraBookableTypes?: string[] }): string[] {
+  const blockers: string[] = [];
+  if (body.businessKind !== undefined && !businessKind(body.businessKind)) blockers.push('Pick one of the kinds listed');
+  if (body.extraBookableTypes?.some((id) => !isBookableType(id))) blockers.push('That category does not exist');
+  return blockers;
+}
 
 router.post('/vendor/profile', requireVendorSeat, requireSetupAccess, async (req, res) => {
   const parsed = profileWrite.safeParse(req.body);
@@ -128,8 +144,16 @@ router.post('/vendor/profile', requireVendorSeat, requireSetupAccess, async (req
   }
 
   try {
-    const data: { legalName?: string; contactEmail?: string } = {};
+    const refused = businessBlockers(parsed.data);
+    if (refused.length) {
+      res.status(400).json({ error: 'Invalid profile', blockers: refused });
+      return;
+    }
+
+    const data: { legalName?: string; contactEmail?: string; businessKind?: string; extraBookableTypes?: string[] } = {};
     if (parsed.data.legalName !== undefined) data.legalName = parsed.data.legalName;
+    if (parsed.data.businessKind !== undefined) data.businessKind = parsed.data.businessKind;
+    if (parsed.data.extraBookableTypes !== undefined) data.extraBookableTypes = [...new Set(parsed.data.extraBookableTypes)];
     if (parsed.data.contactEmail !== undefined) {
       const email = normalizeEmail(parsed.data.contactEmail);
       if (!email) {

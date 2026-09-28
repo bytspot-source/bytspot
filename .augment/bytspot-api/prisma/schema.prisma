@@ -1131,6 +1131,12 @@ model VendorSeller {
   state        VendorSellerState  @default(DRAFT)
   businessMode VendorBusinessMode @default(standard) @map("business_mode")
 
+  /// What the business said it is at onboarding (`businessKinds` in
+  /// vendor-console.json), and the bookable types it added on top. Null kind
+  /// means not asked yet: every type stays open.
+  businessKind       String?  @map("business_kind")
+  extraBookableTypes String[] @default([]) @map("extra_bookable_types")
+
   /// The processor's account reference and the status it decided. Never written
   /// by us and never a bank detail: the hosted flow collects those. `last4` is
   /// display text the processor handed back, not a fragment we derived.

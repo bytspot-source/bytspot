@@ -161,3 +161,18 @@ test('the seller\'s name and length win over the template\'s', () => {
   assert.equal(named?.durationMins, 90);
   assert.equal(windowTemplate({ skuTemplateId: preset.id, title: '   ' })?.title, preset.title);
 });
+
+test('a business drafts only inside the categories it chose', () => {
+  const valetOnly = ['parking', 'ride'];
+  const transfer = skuTemplate(draft.skuTemplateId);
+  assert.deepEqual(windowBlockers(draft, transfer, { state: 'ACTIVE' }, valetOnly), []);
+  assert.deepEqual(windowBlockers(draft, transfer, { state: 'ACTIVE' }, ['table']), [
+    'That is outside what your business sells. Add the category first',
+  ]);
+  // A blank is held to the same line.
+  const facial = { ...draft, skuTemplateId: 'custom.wellness.facial', title: 'Hydrafacial', priceCents: 9500 };
+  assert.equal(windowBlockers(facial, resolveTemplate(facial.skuTemplateId), { state: 'ACTIVE' }, valetOnly).length, 1);
+  assert.deepEqual(windowBlockers(facial, resolveTemplate(facial.skuTemplateId), { state: 'ACTIVE' }, ['service']), []);
+  // No kind yet: everything stays open.
+  assert.deepEqual(windowBlockers(facial, resolveTemplate(facial.skuTemplateId), { state: 'ACTIVE' }, undefined), []);
+});

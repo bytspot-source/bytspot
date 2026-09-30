@@ -459,6 +459,9 @@ export const demandRouter = router({
         accepted: offer.state === 'ACCEPTED',
         payAt: offer.payAt,
         payment: paymentState(offer.checkouts[0], now),
+        // Shown at the door. Only the guest who holds the booking reads it.
+        pass: offer.state === 'ACCEPTED' ? (offer.passCode ?? undefined) : undefined,
+        checkedIn: offer.state === 'ACCEPTED' && offer.checkedInAt ? true : undefined,
       })),
     }));
   }),

@@ -450,6 +450,11 @@ test('accepting commits the slot the seller actually has', async (t) => {
   assert.equal(demand.state, 'BOOKED');
   const accepted = await db.offer.findUniqueOrThrow({ where: { id: offer.id } });
   assert.equal(accepted.state, 'ACCEPTED');
+  assert.match(accepted.passCode ?? '', /^[A-Z0-9]{8}$/, 'an accepted booking carries a pass for the door');
+
+  const mine = await guest().demand.mine();
+  const held = mine.flatMap((row) => row.offers).find((row) => row.id === offer.id);
+  assert.equal(held?.pass, accepted.passCode, 'the guest who holds the booking can show its pass');
 
   // The ledger has to be able to answer "who took what, and for how much".
   const events = await db.demandEvent.findMany({ where: { demandId, kind: 'ACCEPTED' } });

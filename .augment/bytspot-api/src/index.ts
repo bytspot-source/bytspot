@@ -31,6 +31,7 @@ import vendorMediaRouter from './routes/vendorMedia';
 import vendorWindowsRouter from './routes/vendorWindows';
 import vendorTeamRouter from './routes/vendorTeam';
 import vendorInsightsRouter from './routes/vendorInsights';
+import vendorBookingsRouter from './routes/vendorBookings';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -105,6 +106,7 @@ app.use(vendorMediaRouter);
 app.use(vendorWindowsRouter);
 app.use(vendorTeamRouter);
 app.use(vendorInsightsRouter);
+app.use(vendorBookingsRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

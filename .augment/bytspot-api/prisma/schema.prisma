@@ -1591,6 +1591,12 @@ model Offer {
   createdBySeatId String  @map("created_by_seat_id")
   bookableId      String? @unique @map("bookable_id")
 
+  /// What the guest shows at the door. Issued on acceptance, never before.
+  passCode          String?   @unique @map("pass_code")
+  checkedInAt       DateTime? @map("checked_in_at")
+  checkedInBySeatId String?   @map("checked_in_by_seat_id")
+  noShowAt          DateTime? @map("no_show_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

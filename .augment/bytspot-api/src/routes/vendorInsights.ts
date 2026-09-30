@@ -1,13 +1,13 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { captureError } from '../lib/observability';
 import { requireVendorSeat } from '../middleware/vendorAuth';
-import { analyticsRange, loadAnalytics, payoutDashboardLink, payoutLines, payoutTotals } from '../vendor/insights';
+import { analyticsRange, loadAnalytics, loadEarnings, payoutDashboardLink, payoutLines, payoutTotals } from '../vendor/insights';
 import { refreshPayout } from '../vendor/payout';
 
 const router = Router();
 
 /**
- * Analytics and Payouts. Money is the owner's and manager's to read, and only
+ * Analytics, Earnings and Payouts. Money is the owner's and manager's to read, and only
  * the owner's to manage, matching `requiresFinancials` and `requiresPayouts`
  * in the console's navigation.
  */
@@ -27,6 +27,15 @@ router.get('/vendor/analytics', requireVendorSeat, requireRoles('owner', 'manage
     res.status(200).json(await loadAnalytics(req.vendor!.seller.id, analyticsRange(req.query.days)));
   } catch (err) {
     captureError(err, { route: 'vendor/analytics' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+router.get('/vendor/earnings', requireVendorSeat, requireRoles('owner', 'manager'), async (req, res) => {
+  try {
+    res.status(200).json(await loadEarnings(req.vendor!.seller.id, analyticsRange(req.query.days)));
+  } catch (err) {
+    captureError(err, { route: 'vendor/earnings' });
     res.status(500).json({ error: 'Internal error' });
   }
 });

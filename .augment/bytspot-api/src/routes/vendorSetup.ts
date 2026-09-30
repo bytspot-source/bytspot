@@ -81,7 +81,7 @@ async function profileFor(seller: VendorSeller): Promise<ProfileBody> {
 }
 
 /** The console's own origin, so a link lands in the console rather than on the API's host. */
-function consoleOrigin(req: Request): string {
+export function consoleOrigin(req: Request): string {
   return config.corsOrigins.find((entry) => req.headers.origin === entry) ?? config.corsOrigins[0];
 }
 

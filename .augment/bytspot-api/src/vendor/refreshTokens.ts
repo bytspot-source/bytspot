@@ -12,16 +12,19 @@ import { AUTH } from './contract';
 
 const TOKEN_PREFIX = 'vendor:refresh:';
 const FAMILY_PREFIX = 'vendor:refresh:family:';
+const CUTOFF_PREFIX = 'vendor:refresh:cutoff:';
 
 export interface RefreshRecord {
   userId: string;
   /** The sign-in this token descends from. Revoked as a unit on replay. */
   familyId: string;
+  /** Epoch ms. Absent on tokens minted before sign-out-everywhere existed. */
+  issuedAt?: number;
 }
 
 export type RefreshVerdict =
   | { ok: true; userId: string; familyId: string }
-  | { ok: false; reason: 'unknown' | 'replayed' };
+  | { ok: false; reason: 'unknown' | 'replayed' | 'revoked' };
 
 function digest(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -40,7 +43,7 @@ export async function rotateRefreshToken(userId: string, familyId: string): Prom
 async function mintInFamily(userId: string, familyId: string): Promise<string> {
   const redis = requireRedis();
   const token = randomBytes(32).toString('base64url');
-  const record: RefreshRecord = { userId, familyId };
+  const record: RefreshRecord = { userId, familyId, issuedAt: Date.now() };
   await redis.set(`${TOKEN_PREFIX}${digest(token)}`, JSON.stringify(record), 'EX', AUTH.token.refreshTtlSecs);
   return token;
 }
@@ -70,6 +73,8 @@ export async function spendRefreshToken(token: string): Promise<RefreshVerdict> 
 
   const record = JSON.parse(raw) as RefreshRecord;
   if (await familyIsRevoked(record.familyId)) return { ok: false, reason: 'replayed' };
+  const cutoff = Number(await redis.get(`${CUTOFF_PREFIX}${record.userId}`)) || 0;
+  if ((record.issuedAt ?? 0) < cutoff) return { ok: false, reason: 'revoked' };
 
   // Remembered for exactly as long as the token could have lived, so a replay
   // inside its own lifetime is recognised as one rather than as a stranger.
@@ -99,4 +104,14 @@ export async function signOutToken(token: string): Promise<void> {
   if (!raw) return;
   const record = JSON.parse(raw) as RefreshRecord;
   await revokeFamily(record.familyId);
+}
+
+/**
+ * Ends every sign-in this person has, on every device. Tokens are not indexed
+ * by person, so this records a cutoff instead: anything minted before it is
+ * refused when spent. Kept for as long as such a token could still live.
+ */
+export async function signOutEverywhere(userId: string, now: number = Date.now()): Promise<void> {
+  const redis = requireRedis();
+  await redis.set(`${CUTOFF_PREFIX}${userId}`, String(now), 'EX', AUTH.token.refreshTtlSecs);
 }

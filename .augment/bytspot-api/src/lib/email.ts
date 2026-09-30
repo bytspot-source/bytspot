@@ -292,6 +292,44 @@ export async function sendVendorVerifiedEmail(to: string, verified: VendorVerifi
   }
 }
 
+export interface VendorInviteNotice {
+  legalName: string;
+  roleLabel: string;
+  consoleUrl: string;
+  expiresInDays: number;
+}
+
+/**
+ * Someone was given a seat at a business. Logged, not thrown: the seat exists
+ * whether or not this lands, and the owner can tell the person directly.
+ */
+export async function sendVendorInviteEmail(to: string, invite: VendorInviteNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `You were added to ${invite.legalName} on Bytspot`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">You were added to a team</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            ${escapeHtml(invite.legalName)} added you as ${escapeHtml(invite.roleLabel)}.
+          </p>
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 24px;">
+            Sign in with this email address within ${invite.expiresInDays} days. We will email you a code; signing in accepts the invite.
+          </p>
+          <a href="${escapeHtml(invite.consoleUrl)}" style="display: inline-block; background: #fff; color: #0d0d0d; font-weight: 600; text-decoration: none; padding: 12px 20px; border-radius: 10px;">Open the console</a>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorInviteEmail failed:', err?.message);
+  }
+}
+
 export interface GuestOfferNotice {
   where: string;
   when: string;

@@ -707,7 +707,7 @@ test('A reference names its place only when it has no supply', async () => {
 
 test('"I booked it" is the guest\u2019s word, kept apart from what Bytspot booked', async () => {
   const restore = useTableBookingLinksForTest([
-    { placeId: 'ChIJ_listed', name: 'Example Grill', provider: 'resy', url: 'https://resy.com/cities/atl/example-grill', checkedAt: '2026-09-28' },
+    { placeId: 'ChIJ_listed', provider: 'resy', url: 'https://resy.com/cities/atl/example-grill' },
   ]);
   try {
     const listed = { id: 'item-1', needKind: 'dining', title: 'Example Grill', capability: 'details', status: 'available', placeId: 'ChIJ_listed', guestBookedAt: null, guestBookedFor: null };

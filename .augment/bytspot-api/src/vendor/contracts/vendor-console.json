@@ -636,18 +636,18 @@
         "managedIn": "payouts"
       }
     ],
-    "$statesComment": "What the gate says in each state a console can be open in. Verification is automatic: a business goes live the moment every requirement is met, so PENDING keeps the checklist of what is still owed.",
+    "$statesComment": "What the gate says in each state a console can be open in. A business goes live once every requirement is met and a Bytspot admin has approved it, so PENDING keeps the checklist of what is still owed, and awaitingApproval is what it says when only the approval is left.",
     "states": [
       {
         "state": "DRAFT",
         "title": "Finish setting up",
-        "body": "You can build bookables now. Once everything below is done we verify the business automatically and you can sell.",
+        "body": "You can build bookables now. Once everything below is done, Bytspot reviews the business and you can sell.",
         "checklist": true
       },
       {
         "state": "PENDING",
         "title": "Verifying your business",
-        "body": "Your name and email check out. Add a live location and a payout account and we verify you automatically. No one needs to review it, and we email you the moment it is done.",
+        "body": "Your name and email check out. Add a live location and a payout account, then Bytspot reviews the business. We email you the moment you are approved.",
         "checklist": true
       },
       {
@@ -662,6 +662,10 @@
         "body": "You can still admit guests who already paid. Reach out to lift this.",
         "checklist": false
       }
-    ]
+    ],
+    "awaitingApproval": {
+      "title": "Waiting for Bytspot to approve",
+      "body": "Everything is in. Bytspot reviews each new business before guests can see it, and we email you the moment you are approved. You can keep building bookables meanwhile."
+    }
   }
 }

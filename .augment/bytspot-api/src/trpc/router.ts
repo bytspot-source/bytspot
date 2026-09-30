@@ -15,6 +15,7 @@ import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
+import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { currentPlatformFeeBps, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE } from '../services/platformFee';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { claimPackedAlert, entersPacked } from '../services/crowdTransition';
@@ -36,6 +37,8 @@ import { planRouter } from './planRouter';
 import { coffeeRouter } from './coffeeRouter';
 import { demandRouter } from './demandRouter';
 import { inventoryRouter } from './inventoryRouter';
+import { adminPlacesRouter } from './adminPlacesRouter';
+import { adminVendorsRouter } from './adminVendorsRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -279,6 +282,10 @@ const venuesRouter = router({
           id: v.id, name: v.name, slug: v.slug, address: v.address,
           lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
           ...projectVenuePhoto(v),
+          // The exact Google place, so a client can add it to a Plan by place
+          // and name its admin-listed OpenTable or Resy link.
+          googlePlaceId: v.googlePlaceId,
+          booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
           entryType: (v.entryType ?? 'free') as 'free' | 'paid',
           entryPrice: v.entryPrice ?? null,
           ticketUrl: v.ticketUrl ?? null,
@@ -345,6 +352,8 @@ const venuesRouter = router({
         id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
         ...projectVenuePhoto(venue),
+        googlePlaceId: venue.googlePlaceId,
+        booking: tableBookingLinkFrom(venue.bookingProvider, venue.bookingUrl),
         entryType: (venue.entryType ?? 'free') as 'free' | 'paid',
         entryPrice: venue.entryPrice ?? null,
         ticketUrl: venue.ticketUrl ?? null,
@@ -1012,6 +1021,8 @@ const providersRouter = router({
  * ── Admin sub-router ────────────────────────────────────
  */
 const adminRouter = router({
+  places: adminPlacesRouter,
+  vendors: adminVendorsRouter,
   /** admin.platformFee query — the live rate plus recent changes. */
   platformFee: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-platform-fee' }))

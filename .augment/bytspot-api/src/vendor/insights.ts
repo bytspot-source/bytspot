@@ -128,6 +128,142 @@ export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now:
   });
 }
 
+export interface EarningsCheckout {
+  at: Date;
+  status: string;
+  amountCents: number;
+  feeCents: number;
+  netCents: number;
+  timezone?: string | null;
+}
+
+export interface EarningsVenueBooking {
+  at: Date;
+  priceCents: number;
+  timezone?: string | null;
+}
+
+export interface EarningsDay {
+  date: string;
+  appNetCents: number;
+  venueCents: number;
+  bookings: number;
+}
+
+export interface EarningsSummary {
+  days: number;
+  totals: {
+    appGrossCents: number;
+    feeCents: number;
+    appNetCents: number;
+    refundedCents: number;
+    venueCents: number;
+    bookings: number;
+  };
+  /** Days with anything on them, newest first, in the place's own calendar. */
+  daily: EarningsDay[];
+  /** Booked to be paid at the venue and not yet happened. */
+  upcomingVenueCents: number;
+}
+
+export function localDate(at: Date, timezone?: string | null): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
+  } catch {
+    return at.toISOString().slice(0, 10);
+  }
+}
+
+/**
+ * Money in the app counts on the day it was paid; money at the venue on the
+ * day of the visit. A no-show's venue value is never counted.
+ */
+export function summarizeEarnings(input: {
+  days: number;
+  checkouts: EarningsCheckout[];
+  venue: EarningsVenueBooking[];
+  upcomingVenueCents: number;
+}): EarningsSummary {
+  const daily = new Map<string, EarningsDay>();
+  const day = (at: Date, timezone?: string | null) => {
+    const date = localDate(at, timezone);
+    const row = daily.get(date) ?? { date, appNetCents: 0, venueCents: 0, bookings: 0 };
+    daily.set(date, row);
+    return row;
+  };
+  const totals = { appGrossCents: 0, feeCents: 0, appNetCents: 0, refundedCents: 0, venueCents: 0, bookings: 0 };
+
+  for (const checkout of input.checkouts) {
+    if (checkout.status === 'refunded') {
+      totals.refundedCents += checkout.amountCents;
+      continue;
+    }
+    if (checkout.status !== 'completed') continue;
+    totals.appGrossCents += checkout.amountCents;
+    totals.feeCents += checkout.feeCents;
+    totals.appNetCents += checkout.netCents;
+    totals.bookings += 1;
+    const row = day(checkout.at, checkout.timezone);
+    row.appNetCents += checkout.netCents;
+    row.bookings += 1;
+  }
+  for (const booking of input.venue) {
+    totals.venueCents += booking.priceCents;
+    totals.bookings += 1;
+    const row = day(booking.at, booking.timezone);
+    row.venueCents += booking.priceCents;
+    row.bookings += 1;
+  }
+
+  return {
+    days: input.days,
+    totals,
+    daily: [...daily.values()].sort((a, b) => b.date.localeCompare(a.date)),
+    upcomingVenueCents: input.upcomingVenueCents,
+  };
+}
+
+export async function loadEarnings(sellerId: string, days: AnalyticsRange, now: Date = new Date()): Promise<EarningsSummary> {
+  const since = new Date(now.getTime() - days * 86_400_000);
+  const venueOffer = { sellerId, state: 'ACCEPTED', payAt: 'venue', noShowAt: null };
+  const [checkouts, venue, upcoming] = await Promise.all([
+    db.offerCheckout.findMany({
+      where: {
+        sellerId,
+        status: { in: ['completed', 'refunded'] },
+        OR: [{ completedAt: { gte: since, lte: now } }, { completedAt: null, createdAt: { gte: since, lte: now } }],
+      },
+      select: {
+        status: true,
+        amountCents: true,
+        platformFeeCents: true,
+        sellerNetCents: true,
+        completedAt: true,
+        createdAt: true,
+        offer: { select: { location: { select: { timezone: true } } } },
+      },
+    }),
+    db.offer.findMany({
+      where: { ...venueOffer, startsAt: { gte: since, lte: now } },
+      select: { startsAt: true, priceCents: true, location: { select: { timezone: true } } },
+    }),
+    db.offer.aggregate({ where: { ...venueOffer, startsAt: { gt: now } }, _sum: { priceCents: true } }),
+  ]);
+  return summarizeEarnings({
+    days,
+    checkouts: checkouts.map((row) => ({
+      at: row.completedAt ?? row.createdAt,
+      status: row.status,
+      amountCents: row.amountCents,
+      feeCents: row.platformFeeCents,
+      netCents: row.sellerNetCents,
+      timezone: row.offer.location.timezone,
+    })),
+    venue: venue.map((row) => ({ at: row.startsAt, priceCents: row.priceCents, timezone: row.location.timezone })),
+    upcomingVenueCents: upcoming._sum.priceCents ?? 0,
+  });
+}
+
 export interface PayoutLineDto {
   id: string;
   title: string;

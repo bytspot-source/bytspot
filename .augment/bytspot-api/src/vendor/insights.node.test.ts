@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { analyticsRange, payoutTotals, summarizeAnalytics } from './insights';
+import { analyticsRange, localDate, payoutTotals, summarizeAnalytics, summarizeEarnings } from './insights';
 import { commitmentFlags, scheduleBlockers, slotOperationAllowed } from './slots';
 
 test('analytics counts what the demand rail recorded and ranks what sold', () => {
@@ -74,4 +74,35 @@ test('a schedule cannot drop below what is already booked', () => {
   assert.deepEqual(scheduleBlockers(schedule, 'dining', 2), []);
   assert.deepEqual(scheduleBlockers(schedule, 'dining', 3), ['3 already booked in one slot, so keep at least 3']);
   assert.deepEqual(scheduleBlockers({ ...schedule, closeMins: 17 * 60 }, 'dining', 0), ['Closing has to come after opening']);
+});
+
+test('earnings count app money on the day paid and venue money on the day of the visit', () => {
+  const summary = summarizeEarnings({
+    days: 7,
+    checkouts: [
+      { at: new Date('2026-10-02T03:30:00Z'), status: 'completed', amountCents: 5000, feeCents: 500, netCents: 4500, timezone: 'America/New_York' },
+      { at: new Date('2026-10-02T15:00:00Z'), status: 'refunded', amountCents: 3000, feeCents: 300, netCents: 2700, timezone: 'America/New_York' },
+    ],
+    venue: [{ at: new Date('2026-10-02T23:00:00Z'), priceCents: 4000, timezone: 'America/New_York' }],
+    upcomingVenueCents: 8000,
+  });
+  assert.deepEqual(summary.totals, {
+    appGrossCents: 5000,
+    feeCents: 500,
+    appNetCents: 4500,
+    refundedCents: 3000,
+    venueCents: 4000,
+    bookings: 2,
+  });
+  // 03:30 UTC on the 2nd is still the evening of the 1st in New York.
+  assert.deepEqual(summary.daily, [
+    { date: '2026-10-02', appNetCents: 0, venueCents: 4000, bookings: 1 },
+    { date: '2026-10-01', appNetCents: 4500, venueCents: 0, bookings: 1 },
+  ]);
+  assert.equal(summary.upcomingVenueCents, 8000);
+});
+
+test('a place with no time zone, or a bad one, is dated in UTC', () => {
+  assert.equal(localDate(new Date('2026-10-02T03:30:00Z')), '2026-10-02');
+  assert.equal(localDate(new Date('2026-10-02T03:30:00Z'), 'Not/AZone'), '2026-10-02');
 });

@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
 import { deriveSlots, sellableSlots, type Commitment } from './availability';
@@ -88,28 +89,28 @@ export function boundingBox(lat: number, lng: number, radiusMiles: number) {
   return { minLat: lat - latDelta, maxLat: lat + latDelta, minLng: lng - lngDelta, maxLng: lng + lngDelta };
 }
 
-export async function liveInventory(input: InventoryInput, now: Date = new Date()): Promise<InventoryCard[]> {
-  const box = boundingBox(input.lat, input.lng, input.radiusMiles);
-  const mediaSelect = { select: { id: true, kind: true, position: true, mimeType: true } } as const;
+const MEDIA_SELECT = { select: { id: true, kind: true, position: true, mimeType: true } } satisfies Prisma.VendorMediaFindManyArgs;
 
-  const windows = await db.vendorAvailabilityWindow.findMany({
-    where: {
-      active: true,
-      ...(input.domain ? { domain: input.domain } : {}),
-      seller: { state: 'ACTIVE' },
-      location: {
-        state: 'ACTIVE',
-        lat: { gte: box.minLat, lte: box.maxLat },
-        lng: { gte: box.minLng, lte: box.maxLng },
-      },
-    },
-    include: {
-      seller: { select: { id: true, legalName: true } },
-      location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu'] } }, ...mediaSelect } } },
-      media: { where: { kind: { in: ['cover', 'gallery'] } }, ...mediaSelect },
-    },
-    take: 200,
-  });
+const CARD_INCLUDE = {
+  seller: { select: { id: true, legalName: true } },
+  location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu'] } }, ...MEDIA_SELECT } } },
+  media: { where: { kind: { in: ['cover', 'gallery'] } }, ...MEDIA_SELECT },
+} satisfies Prisma.VendorAvailabilityWindowInclude;
+
+/** Only what a guest may see: published, at an ACTIVE place, of an ACTIVE business. */
+const LIVE_WINDOW = {
+  active: true,
+  seller: { state: 'ACTIVE' },
+  location: { state: 'ACTIVE' },
+} satisfies Prisma.VendorAvailabilityWindowWhereInput;
+
+type CardWindow = Prisma.VendorAvailabilityWindowGetPayload<{ include: typeof CARD_INCLUDE }>;
+
+/**
+ * Windows with a sellable slot, as cards. Distance is from `origin` when there
+ * is one; a card opened from a patch has no origin and reads as 0 miles away.
+ */
+async function toCards(windows: CardWindow[], now: Date, origin?: { lat: number; lng: number }): Promise<InventoryCard[]> {
   if (!windows.length) return [];
 
   const commitments = await db.vendorSlotCommitment.findMany({
@@ -127,11 +128,12 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
     const template = windowTemplate(window);
     if (!template) continue;
 
-    const distance = distanceMiles(
-      { latitude: input.lat, longitude: input.lng },
-      { latitude: window.location.lat, longitude: window.location.lng },
-    );
-    if (distance > input.radiusMiles) continue;
+    const distance = origin
+      ? distanceMiles(
+          { latitude: origin.lat, longitude: origin.lng },
+          { latitude: window.location.lat, longitude: window.location.lng },
+        )
+      : 0;
 
     const slots = deriveSlots({
       window,
@@ -174,8 +176,40 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
         .map((slot) => ({ startsAt: slot.startsAt.toISOString(), remaining: slot.remaining })),
     });
   }
+  return cards;
+}
 
+export async function liveInventory(input: InventoryInput, now: Date = new Date()): Promise<InventoryCard[]> {
+  const box = boundingBox(input.lat, input.lng, input.radiusMiles);
+
+  const windows = await db.vendorAvailabilityWindow.findMany({
+    where: {
+      ...LIVE_WINDOW,
+      ...(input.domain ? { domain: input.domain } : {}),
+      location: {
+        state: 'ACTIVE',
+        lat: { gte: box.minLat, lte: box.maxLat },
+        lng: { gte: box.minLng, lte: box.maxLng },
+      },
+    },
+    include: CARD_INCLUDE,
+    take: 200,
+  });
+
+  const cards = await toCards(windows, now, { lat: input.lat, lng: input.lng });
   return cards
+    .filter((card) => card.distanceMiles <= input.radiusMiles)
     .sort((a, b) => a.distanceMiles - b.distanceMiles || a.nextSlot.startsAt.localeCompare(b.nextSlot.startsAt))
     .slice(0, input.limit);
+}
+
+/** Every sellable card at one place, soonest first. */
+export async function liveCardsAt(locationId: string, now: Date = new Date()): Promise<InventoryCard[]> {
+  const windows = await db.vendorAvailabilityWindow.findMany({
+    where: { ...LIVE_WINDOW, locationId },
+    include: CARD_INCLUDE,
+    take: 50,
+  });
+  const cards = await toCards(windows, now);
+  return cards.sort((a, b) => a.nextSlot.startsAt.localeCompare(b.nextSlot.startsAt));
 }

@@ -10,6 +10,7 @@ import { openNeeds } from './planRouter';
 import { acceptOffer, NotYours, OfferExpired, OfferGone, PaymentRequired, SlotTaken } from '../vendor/acceptOffer';
 import { notifyAskSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
 import { NotPayable, PaymentsUnavailable, PayoutNotReady, startOfferCheckout } from '../vendor/offerCheckout';
+import { patchForAsk } from '../vendor/patches';
 
 /**
  * Demand — intent published before supply is known.
@@ -74,6 +75,7 @@ async function raiseDemand(
     budgetCents?: number;
     note?: string | null;
     targetWindowId?: string;
+    viaPatchId?: string;
   },
   now: Date,
 ) {
@@ -107,6 +109,7 @@ async function raiseDemand(
       budgetCents: extras.budgetCents ?? null,
       note: extras.note || null,
       targetWindowId: extras.targetWindowId ?? null,
+      viaPatchId: extras.viaPatchId ?? null,
       expiresAt,
     },
   });
@@ -214,6 +217,8 @@ export const demandRouter = router({
         partySize: z.number().int().min(1).max(DEMAND_DEFAULTS.maxPartySize),
         startsAt: z.coerce.date(),
         note: z.string().trim().max(280).optional(),
+        /** The patch code the guest scanned to get here, credited if it is this seller's. */
+        viaPatch: z.string().trim().max(40).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -267,7 +272,7 @@ export const demandRouter = router({
           latitude: window.location.lat,
           longitude: window.location.lng,
         },
-        { note: input.note, targetWindowId: window.id },
+        { note: input.note, targetWindowId: window.id, viaPatchId: await patchForAsk(input.viaPatch, window.sellerId) },
         now,
       );
       // Not awaited: the ask is already in the seller's feed; the email only says so.

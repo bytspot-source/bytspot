@@ -1195,6 +1195,7 @@ model VendorSeller {
   partySessions PartySession[]
   offers        Offer[]
   media         VendorMedia[]
+  patches       VendorPatch[]
 
   @@index([state])
   @@map("vendor_sellers")
@@ -1259,6 +1260,7 @@ model VendorLocation {
   windows VendorAvailabilityWindow[]
   offers  Offer[]
   media   VendorMedia[]
+  patches VendorPatch[]
 
   /// Every profile read filters a seller's places by state.
   @@index([sellerId, state])
@@ -1423,17 +1425,51 @@ model Demand {
 
   /// An ask from one Discover card: only that window's seller sees it.
   targetWindowId String? @map("target_window_id")
+  /// The printed patch or partner link the guest arrived through, if any.
+  viaPatchId     String? @map("via_patch_id")
 
   plan         Plan?                     @relation(fields: [planId], references: [id], onDelete: SetNull)
   targetWindow VendorAvailabilityWindow? @relation(fields: [targetWindowId], references: [id], onDelete: Cascade)
+  viaPatch     VendorPatch?              @relation(fields: [viaPatchId], references: [id], onDelete: SetNull)
   offers       Offer[]
 
   @@index([state, expiresAt])
   @@index([category, state, latitude, longitude])
   @@index([planId])
   @@index([targetWindowId])
+  @@index([viaPatchId])
   @@index([raisedByUserId, raisedAt(sort: Desc)])
   @@map("demands")
+}
+
+/// A QR code or NFC tag that opens one place (or one service there) in
+/// Bytspot. A `partner` patch is the same link handed to another business that
+/// sends guests; Bytspot counts what arrives through it and moves no money.
+model VendorPatch {
+  id          String  @id @default(cuid())
+  sellerId    String  @map("seller_id")
+  locationId  String  @map("location_id")
+  windowId    String? @map("window_id")
+  /// What the guest's link carries: 8 characters, no 0/O/1/I.
+  code        String  @unique
+  kind        String  @default("patch")
+  /// Where it is placed, in the seller's words ("Front door", "Table 4").
+  label       String
+  partnerName String? @map("partner_name")
+
+  scans           Int       @default(0)
+  lastScannedAt   DateTime? @map("last_scanned_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBySeatId String?   @map("created_by_seat_id")
+  archivedAt      DateTime? @map("archived_at")
+
+  seller   VendorSeller              @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location VendorLocation            @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  window   VendorAvailabilityWindow? @relation(fields: [windowId], references: [id], onDelete: SetNull)
+  asks     Demand[]
+
+  @@index([sellerId, kind])
+  @@map("vendor_patches")
 }
 
 /// A seller's answer to "when?", before it is multiplied into slots. Slots are
@@ -1485,6 +1521,7 @@ model VendorAvailabilityWindow {
   offers      Offer[]
   media       VendorMedia[]
   asks        Demand[]
+  patches     VendorPatch[]
 
   @@index([sellerId, active])
   /// The demand feed reads only windows a vendor actually wants offers from.

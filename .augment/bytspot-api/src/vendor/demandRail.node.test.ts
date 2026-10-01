@@ -11,6 +11,7 @@ import type { Context } from '../trpc/context';
 import { buildDemandSnapshot, respondToDemand, NoCapacity, NotFound } from './demandFeed';
 import { DEMAND_DEFAULTS } from './demand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
+import { archivePatch, createPatch, listPatches } from './patches';
 
 /**
  * The rail, end to end, against a real database.
@@ -1457,5 +1458,85 @@ test('the shared Stripe endpoint hands on events that are not offer payments, an
     const expired = { type: 'checkout.session.expired', data: { object: paidSession(checkout, { payment_status: 'unpaid' }) } };
     assert.equal(await applyOfferCheckoutEvent(expired as never), true);
     assert.equal((await db.offerCheckout.findUniqueOrThrow({ where: { id: checkout.id } })).status, 'expired');
+  });
+});
+
+/** Guest cards only show windows on a printed preset, which the shared fixture's template is not. */
+async function onPrintedPreset<T>(run: () => Promise<T>): Promise<T> {
+  const { skuTemplateId } = await db.vendorAvailabilityWindow.findUniqueOrThrow({ where: { id: ids.window } });
+  await db.vendorAvailabilityWindow.update({ where: { id: ids.window }, data: { skuTemplateId: 'dining.table-for-4' } });
+  try {
+    return await run();
+  } finally {
+    await db.vendorAvailabilityWindow.update({ where: { id: ids.window }, data: { skuTemplateId } });
+  }
+}
+
+test('a scanned patch opens its place, and a request sent from it is credited to it', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  await onPrintedPreset(async () => {
+    const patch = await createPatch(ids.seller, ids.seat, {
+      kind: 'partner',
+      locationId: ids.location,
+      windowId: ids.window,
+      label: 'Front desk',
+      partnerName: 'Hotel Rail',
+    });
+    try {
+      assert.match(patch.url, new RegExp(`/at/${patch.code}$`));
+
+      const opened = await guest().inventory.openPatch({ code: patch.code.toLowerCase() });
+      assert.equal(opened.sellerName, 'Rail Kitchen');
+      assert.equal(opened.cards[0]?.windowId, ids.window, 'the service the patch names comes first');
+
+      const slot = opened.cards[0].upcomingSlots[0];
+      await guest().demand.ask({ windowId: ids.window, partySize: 2, startsAt: new Date(slot.startsAt), viaPatch: patch.code });
+
+      const [listed] = await listPatches(ids.seller, 'partner');
+      assert.equal(listed.scans, 1);
+      assert.equal(listed.asks, 1);
+      assert.equal(listed.bookings, 0);
+      assert.deepEqual(await listPatches(ids.seller, 'patch'), [], 'partner links are kept apart from printed patches');
+
+      assert.equal(await archivePatch(ids.seller, patch.id, 'patch'), false, 'a partner link is not retired as a patch');
+      assert.equal(await archivePatch(ids.seller, patch.id, 'partner'), true);
+      await assert.rejects(() => guest().inventory.openPatch({ code: patch.code }), /not in use/);
+    } finally {
+      await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+      await db.vendorPatch.deleteMany({ where: { sellerId: ids.seller } });
+    }
+  });
+});
+
+test('a patch code from another business earns that business nothing', async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  await onPrintedPreset(async () => {
+    const otherSeller = `${ids.seller}-patch-other`;
+    const otherLocation = `${ids.location}-other`;
+    await db.vendorSeller.create({ data: { id: otherSeller, legalName: 'Elsewhere', state: 'ACTIVE' } });
+    await db.vendorLocation.create({
+      data: { id: otherLocation, sellerId: otherSeller, label: 'Elsewhere', kind: 'fixed', state: 'ACTIVE', lat: MIDTOWN.lat, lng: MIDTOWN.lng },
+    });
+    try {
+      const foreign = await createPatch(otherSeller, ids.seat, { kind: 'patch', locationId: otherLocation, label: 'Door' });
+      const own = await createPatch(ids.seller, ids.seat, { kind: 'patch', locationId: ids.location, label: 'Door' });
+      const opened = await guest().inventory.openPatch({ code: own.code });
+      const slot = opened.cards[0].upcomingSlots[0];
+      const asked = await guest().demand.ask({
+        windowId: ids.window,
+        partySize: 2,
+        startsAt: new Date(slot.startsAt),
+        viaPatch: foreign.code,
+      });
+      const row = await db.demand.findUniqueOrThrow({ where: { id: asked.id } });
+      assert.equal(row.viaPatchId, null);
+    } finally {
+      await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+      await db.vendorPatch.deleteMany({ where: { sellerId: { in: [ids.seller, otherSeller] } } });
+      await db.vendorLocation.deleteMany({ where: { sellerId: otherSeller } });
+      await db.vendorSeller.deleteMany({ where: { id: otherSeller } });
+    }
   });
 });

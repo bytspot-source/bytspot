@@ -36,6 +36,8 @@ const PUBLIC_MUTATIONS = new Set([
   'admin.validateInvite',
   // A count of taps on a listed place's booking link; anonymous taps count too.
   'places.bookingTap',
+  // Opening a scanned QR / NFC patch; a guest scans before signing in. Counted on the patch.
+  'inventory.openPatch',
   // Guarded by the cron secret rather than a session; see routes/cron.ts.
   'cron.crowdAlerts', 'cron.crowdSim',
 ]);

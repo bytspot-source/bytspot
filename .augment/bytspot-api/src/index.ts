@@ -32,6 +32,7 @@ import vendorWindowsRouter from './routes/vendorWindows';
 import vendorTeamRouter from './routes/vendorTeam';
 import vendorInsightsRouter from './routes/vendorInsights';
 import vendorBookingsRouter from './routes/vendorBookings';
+import vendorPatchesRouter from './routes/vendorPatches';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -107,6 +108,7 @@ app.use(vendorWindowsRouter);
 app.use(vendorTeamRouter);
 app.use(vendorInsightsRouter);
 app.use(vendorBookingsRouter);
+app.use(vendorPatchesRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

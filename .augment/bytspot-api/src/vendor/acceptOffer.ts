@@ -5,6 +5,7 @@ import { stateAfterOperation } from './demand';
 import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 import { sequenceForAppend } from '../services/planLegs';
+import { newPassCode } from './bookings';
 
 /**
  * Taking an offer.
@@ -197,7 +198,7 @@ export async function acceptOffer(input: {
     // the transaction.
     const claimed = await tx.offer.updateMany({
       where: { id: offer.id, state: 'OFFERED', holdExpiresAt: { gt: now } },
-      data: { state: 'ACCEPTED', bookableId: snapshot.id },
+      data: { state: 'ACCEPTED', bookableId: snapshot.id, passCode: newPassCode() },
     });
     if (claimed.count === 0) throw new OfferGone();
 

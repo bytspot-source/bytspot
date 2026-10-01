@@ -129,6 +129,10 @@ export function toSeatDto(seat: VendorSeat): SeatDto {
  * requirement is what makes a business live, so this runs on write, while the
  * vendor is still looking at the screen that told them what was missing.
  *
+ * ACTIVE also needs a Bytspot admin's approval (`approvedAt`). Until then a
+ * business that has filled everything in waits at PENDING, and approval given
+ * early simply lets it go live the moment it finishes.
+ *
  * Only ever forward, and only through DRAFT → PENDING → ACTIVE. Falling back
  * because a place was paused is deliberately not done here: a live business
  * that loses a requirement keeps its state and shows the gap as outstanding,
@@ -145,11 +149,18 @@ export async function advanceSeller(
   const met = new Set(satisfiedRequirements(seller, locations));
   const reaches = (state: SellerState) => requirementsForState(state).every((id) => met.has(id));
 
-  const target: SellerState = reaches('ACTIVE') ? 'ACTIVE' : reaches('PENDING') ? 'PENDING' : 'DRAFT';
+  const target: SellerState = reaches('ACTIVE') && seller.approvedAt ? 'ACTIVE' : reaches('PENDING') ? 'PENDING' : 'DRAFT';
   if (target === seller.state) return seller;
   if (!sellerCanTransition(seller.state as SellerState, target)) return seller;
 
   return db.vendorSeller.update({ where: { id: seller.id }, data: { state: target } });
+}
+
+/** Everything is filled in and only Bytspot's approval is missing. */
+export function awaitingApproval(seller: VendorSeller, locations: VendorLocation[]): boolean {
+  if (seller.approvedAt || (seller.state !== 'DRAFT' && seller.state !== 'PENDING')) return false;
+  const met = new Set(satisfiedRequirements(seller, locations));
+  return requirementsForState('ACTIVE').every((id) => met.has(id));
 }
 
 /**

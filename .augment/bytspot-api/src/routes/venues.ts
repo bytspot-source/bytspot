@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached } from '../lib/redis';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
+import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 
 const router = Router();
 
@@ -35,6 +36,8 @@ router.get('/venues', async (_req, res) => {
       category: v.category,
       imageUrl: v.imageUrl,
       ...projectVenuePhoto(v),
+      googlePlaceId: v.googlePlaceId,
+      booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
       crowd: v.crowdLevels[0]
         ? {
             level: v.crowdLevels[0].level,

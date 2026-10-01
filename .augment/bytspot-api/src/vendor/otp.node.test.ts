@@ -3,7 +3,7 @@ import { beforeEach, test } from 'node:test';
 import { redisHandle, type RedisLike } from './redisHandle';
 import { AUTH } from './contract';
 import { createChallenge, generateCode, recordSend, sendCooldownSecs, verifyChallenge } from './otp';
-import { issueRefreshToken, rotateRefreshToken, signOutToken, spendRefreshToken } from './refreshTokens';
+import { issueRefreshToken, rotateRefreshToken, signOutEverywhere, signOutToken, spendRefreshToken } from './refreshTokens';
 
 /** A Redis with real expiry semantics on a clock the test controls. */
 function fakeRedis(): RedisLike & {
@@ -186,6 +186,20 @@ test('a refresh token is single-use and rotates', async () => {
   const second = spent.ok ? await rotateRefreshToken(spent.userId, spent.familyId) : '';
   assert.notEqual(second, first);
   assert.equal((await spendRefreshToken(second)).ok, true);
+});
+
+test('signing out everywhere refuses every earlier token for that person, and only that person', async () => {
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 3));
+  const mine = await issueRefreshToken('usr_1');
+  const theirs = await issueRefreshToken('usr_2');
+  await pause();
+  await signOutEverywhere('usr_1');
+  await pause();
+  const later = await issueRefreshToken('usr_1');
+
+  assert.deepEqual(await spendRefreshToken(mine), { ok: false, reason: 'revoked' });
+  assert.equal((await spendRefreshToken(theirs)).ok, true);
+  assert.equal((await spendRefreshToken(later)).ok, true);
 });
 
 test('replaying a spent token is treated as theft and kills the whole family', async () => {

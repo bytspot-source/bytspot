@@ -34,6 +34,8 @@ const PUBLIC_MUTATIONS = new Set([
   'auth.signup', 'auth.login', 'auth.appleSignIn', 'auth.googleSignIn',
   'betaSignup.signup',
   'admin.validateInvite',
+  // A count of taps on a listed place's booking link; anonymous taps count too.
+  'places.bookingTap',
   // Guarded by the cron secret rather than a session; see routes/cron.ts.
   'cron.crowdAlerts', 'cron.crowdSim',
 ]);

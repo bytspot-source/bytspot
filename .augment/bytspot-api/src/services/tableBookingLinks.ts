@@ -1,75 +1,99 @@
-import bookingLinks from './contracts/table-booking-links.json';
+import { db } from '../lib/db';
+import { captureError } from '../lib/observability';
 
 /**
  * Hand-checked OpenTable and Resy links for places Bytspot does not sell.
  *
  * A link is a handoff, never a booking: the guest books with the provider,
- * Bytspot is not told the outcome, and nothing here issues a Pass. The list is
- * checked in and edited by hand, so each change is reviewed in a PR and every
- * entry names the date someone last opened it.
+ * Bytspot is not told the outcome, and nothing here issues a Pass. A Bytspot
+ * admin sets each link on the place's venue after opening it, so the venue's
+ * row names the date someone last checked it.
  */
 
 export type TableBookingProvider = 'opentable' | 'resy';
 
 export type TableBookingLink = { provider: TableBookingProvider; label: string; url: string };
 
-type LinkEntry = { placeId: string; name: string; provider: string; url: string; checkedAt: string };
-
 const PROVIDERS: Record<TableBookingProvider, { label: string; hosts: string[] }> = {
   opentable: { label: 'OpenTable', hosts: ['opentable.com', 'www.opentable.com'] },
   resy: { label: 'Resy', hosts: ['resy.com'] },
 };
 
-const PLACE_ID = /^[A-Za-z0-9_-]+$/;
-const CHECKED_AT = /^\d{4}-\d{2}-\d{2}$/;
+export const TABLE_BOOKING_PROVIDERS = Object.keys(PROVIDERS) as TableBookingProvider[];
 
-/** Every reason the list is unfit to serve. Empty means it is fit. */
-export function tableBookingLinkErrors(links: readonly LinkEntry[]): string[] {
-  const errors: string[] = [];
-  const seen = new Set<string>();
-  links.forEach((link, index) => {
-    const at = `links[${index}]${link?.name ? ` (${link.name})` : ''}`;
-    if (!link || typeof link !== 'object') { errors.push(`${at}: not an object`); return; }
-    if (typeof link.placeId !== 'string' || !PLACE_ID.test(link.placeId)) errors.push(`${at}: placeId is missing or malformed`);
-    else if (seen.has(link.placeId)) errors.push(`${at}: placeId is listed twice`);
-    else seen.add(link.placeId);
-    if (typeof link.name !== 'string' || !link.name.trim()) errors.push(`${at}: name is missing`);
-    if (typeof link.checkedAt !== 'string' || !CHECKED_AT.test(link.checkedAt) || Number.isNaN(Date.parse(link.checkedAt))) {
-      errors.push(`${at}: checkedAt must be a YYYY-MM-DD date`);
-    }
-    const provider = PROVIDERS[link.provider as TableBookingProvider];
-    if (!provider) { errors.push(`${at}: provider must be opentable or resy`); return; }
-    let url: URL | null = null;
-    try { url = new URL(link.url); } catch { /* reported below */ }
-    if (!url || url.protocol !== 'https:') errors.push(`${at}: url must be an https link`);
-    else if (!provider.hosts.includes(url.hostname)) errors.push(`${at}: url must be on ${provider.hosts[0]}`);
+/** Why a link would put a broken or foreign button on a card, or null when it is fit. */
+export function tableBookingUrlError(provider: string, url: string): string | null {
+  const rule = PROVIDERS[provider as TableBookingProvider];
+  if (!rule) return 'Pick OpenTable or Resy.';
+  let parsed: URL | null = null;
+  try { parsed = new URL(url.trim()); } catch { /* reported below */ }
+  if (!parsed || parsed.protocol !== 'https:') return 'Paste the full https:// link.';
+  if (!rule.hosts.includes(parsed.hostname)) return `That link is not on ${rule.hosts[0]}.`;
+  return null;
+}
+
+/** The link as guests see it, or null when it fails the same checks an admin's input does. */
+export function tableBookingLinkFrom(provider: string | null | undefined, url: string | null | undefined): TableBookingLink | null {
+  if (!provider || !url || tableBookingUrlError(provider, url)) return null;
+  const known = provider as TableBookingProvider;
+  return { provider: known, label: PROVIDERS[known].label, url: url.trim() };
+}
+
+/**
+ * Read synchronously by every serializer that names a place, so it is kept in
+ * memory and refreshed from the venues table. Admin writes refresh it at once;
+ * another instance catches up within FRESH_MS.
+ */
+const FRESH_MS = 30_000;
+let index = new Map<string, TableBookingLink>();
+let loadedAt = 0;
+let loading: Promise<void> | null = null;
+let pinned = false;
+
+export async function refreshTableBookingLinks(): Promise<void> {
+  const rows = await db.venue.findMany({
+    where: { discoverable: true, googlePlaceId: { not: null }, bookingUrl: { not: null } },
+    select: { googlePlaceId: true, bookingProvider: true, bookingUrl: true },
   });
-  return errors;
+  const next = new Map<string, TableBookingLink>();
+  for (const row of rows) {
+    const link = tableBookingLinkFrom(row.bookingProvider, row.bookingUrl);
+    if (row.googlePlaceId && link) next.set(row.googlePlaceId, link);
+  }
+  if (!pinned) index = next;
+  loadedAt = Date.now();
 }
 
-function buildIndex(links: readonly LinkEntry[]): Map<string, TableBookingLink> {
-  const errors = tableBookingLinkErrors(links);
-  // A bad entry would put a broken or foreign button on a card, so the list
-  // refuses to load at all; the test suite trips on it before a deploy does.
-  if (errors.length > 0) throw new Error(`table-booking-links.json is invalid:\n${errors.join('\n')}`);
-  return new Map(links.map((link) => {
-    const provider = link.provider as TableBookingProvider;
-    return [link.placeId, { provider, label: PROVIDERS[provider].label, url: link.url }];
-  }));
+/**
+ * Awaited before a read that names places. A failed refresh keeps the last
+ * good list rather than dropping every link, and waits FRESH_MS to retry.
+ */
+export async function ensureTableBookingLinks(now = Date.now()): Promise<void> {
+  if (pinned || now - loadedAt < FRESH_MS) return;
+  loading ??= refreshTableBookingLinks()
+    .catch((err) => {
+      loadedAt = Date.now();
+      captureError(err, { operation: 'refreshTableBookingLinks' });
+    })
+    .finally(() => { loading = null; });
+  await loading;
 }
 
-let index = buildIndex(bookingLinks.links as LinkEntry[]);
-
-/** Tests only: serve `links` instead of the checked-in list until restored. */
-export function useTableBookingLinksForTest(links: LinkEntry[]): () => void {
-  const previous = index;
-  index = buildIndex(links);
-  return () => { index = previous; };
+/** Tests only: serve `links` instead of the venues table until restored. */
+export function useTableBookingLinksForTest(links: Array<{ placeId: string; provider: string; url: string }>): () => void {
+  const previous = { index, pinned };
+  const next = new Map<string, TableBookingLink>();
+  for (const entry of links) {
+    const link = tableBookingLinkFrom(entry.provider, entry.url);
+    if (!link) throw new Error(`invalid test booking link for ${entry.placeId}`);
+    next.set(entry.placeId, link);
+  }
+  index = next;
+  pinned = true;
+  return () => { index = previous.index; pinned = previous.pinned; };
 }
 
-export const TABLE_BOOKING_LINKS_VERSION = bookingLinks.version;
-
-/** The listed link for a Google place, or null when the place is not on the list. */
+/** The listed link for a Google place, or null when the place is not listed. */
 export function tableBookingLinkFor(placeId: string | null | undefined): TableBookingLink | null {
   if (!placeId) return null;
   return index.get(placeId.replace(/^places\//, '')) ?? null;

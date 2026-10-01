@@ -4,14 +4,14 @@
  * with Redis caching to stay within free-tier limits.
  */
 import { z } from 'zod';
-import { router, publicProcedure } from './trpc';
+import { router, publicProcedure, rateLimitMiddleware } from './trpc';
 import { cached, getRedis } from '../lib/redis';
 import { captureError } from '../lib/observability';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
-import { tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
+import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
 
@@ -41,7 +41,7 @@ export interface MappedPlace {
   rating: number | null; ratingCount: number; priceLevel: string | null;
   types: string[]; primaryType: string | null; photoUrls: string[];
   isOpen: boolean | null; websiteUri: string | null;
-  /** A hand-checked OpenTable or Resy link, added after the cache. */
+  /** An admin-listed OpenTable or Resy link, added after the cache. */
   booking?: TableBookingLink | null;
 }
 
@@ -232,6 +232,7 @@ export async function textSearchCore(
       const data = await gpPost<{ places?: unknown[] }>('/places:searchText', body, SEARCH_FIELDS);
       return (data.places ?? []).map(mapPlace);
     });
+    await ensureTableBookingLinks();
     return { places: places.map(withTableBooking), source: stale ? 'google-stale' : 'google' };
   } catch (err) {
     captureError(err, { provider: 'google-places', operation: 'textSearch' });
@@ -266,6 +267,7 @@ export const placesRouter = router({
           const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
           return (data.places ?? []).map(mapPlace);
         });
+        await ensureTableBookingLinks();
         return { places: places.map(withTableBooking), source: stale ? ('google-stale' as const) : ('google' as const) };
       } catch (err) {
         // Google being unreachable is not this server malfunctioning, and an
@@ -346,7 +348,29 @@ export const placesRouter = router({
           })),
         };
       });
+      await ensureTableBookingLinks();
       return { place: place ? withTableBooking(place) : null };
+    }),
+
+  /**
+   * Counts a tap on a listed place's OpenTable or Resy link, for the numbers
+   * an admin shows the restaurant. Anonymous taps count too; a place that is
+   * not listed records nothing and says so without an error.
+   */
+  bookingTap: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'places-booking-tap' }))
+    .input(z.object({
+      placeId: z.string().trim().regex(/^(places\/)?[A-Za-z0-9_-]{1,255}$/),
+      surface: z.enum(['venue', 'plan']),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const venue = await db.venue.findFirst({
+        where: { googlePlaceId: input.placeId.replace(/^places\//, ''), discoverable: true, bookingUrl: { not: null } },
+        select: { id: true },
+      });
+      if (!venue) return { counted: false };
+      await db.bookingLinkTap.create({ data: { venueId: venue.id, userId: ctx.user?.userId ?? null, surface: input.surface } });
+      return { counted: true };
     }),
 
   photoUrl: publicProcedure

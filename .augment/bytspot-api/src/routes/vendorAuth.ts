@@ -19,10 +19,13 @@ import {
 import {
   issueRefreshToken,
   rotateRefreshToken,
+  signOutEverywhere,
   signOutToken,
   spendRefreshToken,
 } from '../vendor/refreshTokens';
 import { toSeatDto, toSellerDto, type MembershipDto } from '../vendor/sellerState';
+import { acceptInvites } from '../vendor/team';
+import { requireVendorSeat } from '../middleware/vendorAuth';
 
 const router = Router();
 
@@ -205,6 +208,8 @@ router.post('/vendor/auth/session', async (req, res) => {
       return;
     }
 
+    // The code went to the invited address, so signing in is the acceptance.
+    await acceptInvites(user.id);
     const memberships = await membershipsFor(user.id);
     // A verified person with nothing to open is told so plainly. This is 403
     // rather than 200-with-an-empty-list because the console has a screen for
@@ -289,6 +294,22 @@ router.post('/vendor/auth/sign-out', async (req, res) => {
     if (presented) await signOutToken(presented);
   } catch (err) {
     captureError(err, { route: 'vendor/auth/sign-out' });
+  }
+  clearRefreshCookie(res);
+  res.status(204).end();
+});
+
+/**
+ * Ends every sign-in this person has, this one included. Needs the access
+ * token, so a stolen refresh cookie on its own cannot sign the owner out.
+ */
+router.post('/vendor/auth/sign-out-everywhere', requireVendorSeat, async (req, res) => {
+  try {
+    await signOutEverywhere(req.vendor!.userId);
+  } catch (err) {
+    captureError(err, { route: 'vendor/auth/sign-out-everywhere' });
+    res.status(500).json({ error: 'Internal error' });
+    return;
   }
   clearRefreshCookie(res);
   res.status(204).end();

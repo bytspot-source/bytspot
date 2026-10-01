@@ -70,7 +70,8 @@ model User {
   ownedCircles          SocialCircle[]
   circleMemberships     SocialCircleMember[]
   partyEncounterOptIns  PartyEncounterOptIn[]
-  confirmedPartyCredits PartyPerformer[] @relation("performerConfirmation")
+  confirmedPartyCredits PartyPerformer[]      @relation("performerConfirmation")
+  bookingLinkTaps       BookingLinkTap[]
 
   @@map("users")
 }
@@ -121,25 +122,33 @@ model ProviderIdentity {
 
 // ─── Venues ──────────────────────────────────────────
 model Venue {
-  id               String   @id @default(cuid())
+  id               String    @id @default(cuid())
   name             String
-  slug             String   @unique
-  googlePlaceId    String?  @unique @map("google_place_id")
-  discoverable     Boolean  @default(true)
+  slug             String    @unique
+  googlePlaceId    String?   @unique @map("google_place_id")
+  discoverable     Boolean   @default(true)
   address          String
   lat              Float
   lng              Float
   category         String // "bar", "restaurant", "club", "park", "market"
-  imageUrl         String?  @map("image_url")
+  imageUrl         String?   @map("image_url")
   // A photograph is an endorsement: only "bytspot_owned" or "party_media"
   // earns a map pin. "borrowed" is the fail-closed default and stays a dot.
   // Pin eligibility is derived in venuePhotoProvenance.ts, never stored.
-  photoProvenance  String   @default("borrowed") @map("photo_provenance")
-  photoAttribution String?  @map("photo_attribution")
-  entryType        String   @default("free") @map("entry_type") // "free" or "paid"
-  entryPrice       String?  @map("entry_price") // e.g. "$15", "$25–$50"
-  ticketUrl        String?  @map("ticket_url") // external purchase link
-  createdAt        DateTime @default(now()) @map("created_at")
+  photoProvenance  String    @default("borrowed") @map("photo_provenance")
+  photoAttribution String?   @map("photo_attribution")
+  entryType        String    @default("free") @map("entry_type") // "free" or "paid"
+  entryPrice       String?   @map("entry_price") // e.g. "$15", "$25–$50"
+  ticketUrl        String?   @map("ticket_url") // external purchase link
+  /// A hand-checked OpenTable or Resy link, set by a Bytspot admin. Provider,
+  /// URL and the check date travel together (venues_booking_link_shape).
+  bookingProvider  String?   @map("booking_provider")
+  bookingUrl       String?   @map("booking_url")
+  bookingCheckedAt DateTime? @map("booking_checked_at")
+  /// Set when a Bytspot admin listed the place, which also makes it a lead.
+  listedAt         DateTime? @map("listed_at")
+  listedByUserId   String?   @map("listed_by_user_id")
+  createdAt        DateTime  @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng
   // Managed via raw SQL; Prisma can't model geometry natively
@@ -154,9 +163,27 @@ model Venue {
   savedBy        SavedSpot[]
   reviews        Review[]
   mobilityQuotes MobilityQuote[]
-  arrivalParties Party[]         @relation("partyArrivalVenue")
+  arrivalParties Party[]          @relation("partyArrivalVenue")
+  bookingTaps    BookingLinkTap[]
 
   @@map("venues")
+}
+
+/// One tap on a listed place's OpenTable or Resy link. Counted for pitching;
+/// never a booking.
+model BookingLinkTap {
+  id        String   @id @default(cuid())
+  venueId   String   @map("venue_id")
+  userId    String?  @map("user_id")
+  /// "venue" (the venue screen) or "plan" (a Plan item).
+  surface   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([venueId, createdAt])
+  @@map("booking_link_taps")
 }
 
 // ─── Crowd Levels (time-series) ──────────────────────
@@ -303,7 +330,7 @@ model PartyPerformer {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  party     Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  party         Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
   confirmedUser User? @relation("performerConfirmation", fields: [confirmedUserId], references: [id], onDelete: Cascade)
 
   @@index([partyId, status])
@@ -965,33 +992,33 @@ model PlanParticipant {
 /// listing plug at attach time: a `details` item is a reference, not a booking,
 /// and can never reach `booked`.
 model PlanItem {
-  id                  String   @id @default(cuid())
-  planId              String   @map("plan_id")
-  needKind            String   @map("need_kind")
+  id                  String    @id @default(cuid())
+  planId              String    @map("plan_id")
+  needKind            String    @map("need_kind")
   title               String
-  partyId             String?  @map("party_id")
+  partyId             String?   @map("party_id")
   /// Second real bookable. A PlanItem links to at most one supply row; the
   /// CHECK constraint `plan_items_single_supply_check` enforces that at the DB.
-  coffeeReservationId String?  @unique @map("coffee_reservation_id")
+  coffeeReservationId String?   @unique @map("coffee_reservation_id")
   /// Unreserved coffee selection with a request-capable Bookable snapshot.
   /// Cleared when explicit attach upgrades this item to a reservation.
-  coffeeSpotId        String?  @map("coffee_spot_id")
+  coffeeSpotId        String?   @map("coffee_spot_id")
   /// Third real bookable: a table won on the demand rail. Restricted rather
   /// than set-null on delete, so a booking can never be hollowed out into an
   /// item that promises a table with no supply behind it.
-  offerId             String?  @unique @map("offer_id")
+  offerId             String?   @unique @map("offer_id")
   /// Stable sourceKind:sourceId within a Plan, retained through fulfillment.
   /// Legacy attach may leave null; retries also reconcile actual supply ids.
-  selectionKey        String?  @map("selection_key")
+  selectionKey        String?   @map("selection_key")
   /// The projection handle snapshotted from this item's supply at attach time.
   /// A pure denormalized pointer — it does not participate in the single-supply
   /// XOR and never carries a promise the item's own `capability` does not.
-  bookableId          String?  @unique @map("bookable_id")
-  capability          String   @default("details")
-  status              String   @default("available")
+  bookableId          String?   @unique @map("bookable_id")
+  capability          String    @default("details")
+  status              String    @default("available")
   /// The Google place a reference item points at. Never supply: it only lets
   /// a hand-checked OpenTable or Resy link follow the item onto the Plan.
-  placeId             String?  @map("place_id")
+  placeId             String?   @map("place_id")
   /// When the guest said they booked this place with the provider, and for
   /// when. Their word only: it never makes the item booked or issues a Pass.
   guestBookedAt       DateTime? @map("guest_booked_at")
@@ -1006,8 +1033,8 @@ model PlanItem {
   /// claiming slot 0. Readers sort those last, which is where an appended item
   /// belongs. Every current writer sets it.
   position            Int?
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
   plan              Plan               @relation(fields: [planId], references: [id], onDelete: Cascade)
   party             Party?             @relation(fields: [partyId], references: [id], onDelete: SetNull)
@@ -1153,7 +1180,10 @@ model VendorSeller {
   payoutDetail    String?             @map("payout_detail")
 
   /// When the business first met every requirement for going live. Set once.
-  verifiedAt DateTime? @map("verified_at")
+  verifiedAt       DateTime? @map("verified_at")
+  /// When a Bytspot admin approved the business. It cannot go live without it.
+  approvedAt       DateTime? @map("approved_at")
+  approvedByUserId String?   @map("approved_by_user_id")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

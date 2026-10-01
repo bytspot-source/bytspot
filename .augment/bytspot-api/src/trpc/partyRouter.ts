@@ -931,7 +931,7 @@ function normalizedVenueName(value: string): string {
 // A Venue slug is unique, so a place-derived slug carries the place id's tail
 // to keep two same-named venues (e.g. two "Rooftop") apart. googlePlaceId is
 // the real dedupe key; this only has to avoid a slug collision on first insert.
-function placeVenueSlug(name: string, placeId: string): string {
+export function placeVenueSlug(name: string, placeId: string): string {
   const base = name.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'venue';
   const suffix = placeId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(-8) || randomBytes(4).toString('hex');
   return `${base}-${suffix}`;

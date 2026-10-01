@@ -12,7 +12,7 @@ import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, fi
 import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
-import { tableBookingLinkFor } from '../services/tableBookingLinks';
+import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
 /**
@@ -315,6 +315,7 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
       // A listed OpenTable or Resy handoff for a reference item, joined on read
       // so a pulled link leaves every Plan at once.
       tableBooking: tableBookingLinkFor(item.placeId),
+      placeId: item.placeId ?? null,
       // The guest's own word that they booked it there. Deliberately apart from
       // `booked`, which only ever reflects supply Bytspot settled.
       guestBooking: item.guestBookedAt ? { reportedAt: item.guestBookedAt, bookedFor: item.guestBookedFor } : null,
@@ -745,6 +746,7 @@ export const planRouter = router({
     .input(z.object({ planId: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
+      await ensureTableBookingLinks();
       return serializePlan(plan, new Date(), ctx.user.userId, await partyBookingFacts([plan]));
     }),
 
@@ -974,6 +976,7 @@ export const planRouter = router({
     });
     const visible = plans.filter((plan) => !plan.deletedAt);
     const facts = await partyBookingFacts(visible);
+    await ensureTableBookingLinks();
     return { plans: visible.map((plan) => serializePlan(plan, now, ctx.user.userId, facts)) };
   }),
 
@@ -989,6 +992,7 @@ export const planRouter = router({
     .input(z.object({ token: z.string().min(1).max(200) }))
     .mutation(async ({ ctx, input }) => {
       const now = new Date();
+      await ensureTableBookingLinks();
       // Reading the cap and then writing against it has to say Serializable out
       // loud, exactly as invite does: concurrent joins could each pass a stale
       // cap check and push the Plan past MAX_PLAN_PARTICIPANTS.
@@ -1440,6 +1444,7 @@ export const planRouter = router({
       assertPlanMutable(plan, now);
       const item = plan.items.find((candidate) => candidate.id === input.itemId);
       if (!item || item.status === 'cancelled') throw new TRPCError({ code: 'NOT_FOUND', message: 'That item is not on this Plan.' });
+      await ensureTableBookingLinks();
       if (!tableBookingLinkFor(item.placeId)) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only a place booked through OpenTable or Resy can be marked booked here.' });
       }

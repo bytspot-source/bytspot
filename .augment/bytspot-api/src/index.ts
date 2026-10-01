@@ -29,6 +29,8 @@ import vendorPartySessionsRouter from './routes/vendorPartySessions';
 import vendorDemandRouter from './routes/vendorDemand';
 import vendorMediaRouter from './routes/vendorMedia';
 import vendorWindowsRouter from './routes/vendorWindows';
+import vendorTeamRouter from './routes/vendorTeam';
+import vendorInsightsRouter from './routes/vendorInsights';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -101,6 +103,8 @@ app.use(vendorDemandRouter);
 app.use(vendorPartySessionsRouter);
 app.use(vendorMediaRouter);
 app.use(vendorWindowsRouter);
+app.use(vendorTeamRouter);
+app.use(vendorInsightsRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

@@ -5,6 +5,7 @@ import { allowedBookableTypes, roleScope, type SeatRole, type SellerState } from
 import { NotFound } from '../vendor/demandFeed';
 import { seatCanSeeBookable, seatCanSeeLocation } from '../vendor/media';
 import { WindowRefused, createWindow, createWindowInput, listWindows, setWindowPublished } from '../vendor/windows';
+import { moveSlot, scheduleWrite, slotWrite, updateSchedule, windowSlots, type SlotOperationId } from '../vendor/slots';
 
 const router = Router();
 
@@ -84,5 +85,91 @@ function publishHandler(published: boolean) {
 
 router.post('/vendor/windows/:id/publish', requireVendorSeat, requireCapability('PUBLISH'), publishHandler(true));
 router.post('/vendor/windows/:id/unpublish', requireVendorSeat, requireCapability('PUBLISH'), publishHandler(false));
+
+/** A bookable's derived slots for its horizon, with what is already taken. */
+router.get('/vendor/windows/:id/slots', requireVendorSeat, async (req, res) => {
+  const windowId = String(req.params.id ?? '');
+  const { seller, seat } = req.vendor!;
+  if (!seatCanSeeBookable(seat.role as SeatRole, seat.bookableIds, windowId)) {
+    res.status(404).json({ error: 'No such offering' });
+    return;
+  }
+  try {
+    res.status(200).json(await windowSlots(seller.id, windowId));
+  } catch (err) {
+    if (err instanceof NotFound) {
+      res.status(404).json({ error: 'No such offering' });
+      return;
+    }
+    captureError(err, { route: 'vendor/windows:slots' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/** Opens, closes or blocks one slot. Bookings already taken in it stand. */
+router.post('/vendor/windows/:id/slots', requireVendorSeat, requireCapability('SCHEDULE'), async (req, res) => {
+  const parsed = slotWrite.safeParse(req.body);
+  const windowId = String(req.params.id ?? '');
+  const { seller, seat } = req.vendor!;
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid slot', blockers: ['Pick a slot first'] });
+    return;
+  }
+  if (!seatCanSeeBookable(seat.role as SeatRole, seat.bookableIds, windowId)) {
+    res.status(404).json({ error: 'No such offering' });
+    return;
+  }
+  try {
+    res.status(200).json(
+      await moveSlot({
+        sellerId: seller.id,
+        windowId,
+        startsAt: new Date(parsed.data.startsAt),
+        operation: parsed.data.operation as SlotOperationId,
+        reason: parsed.data.reason,
+      }),
+    );
+  } catch (err) {
+    if (err instanceof NotFound) {
+      res.status(404).json({ error: 'No such offering' });
+      return;
+    }
+    if (err instanceof WindowRefused) {
+      res.status(409).json({ error: 'Slot refused', blockers: err.blockers });
+      return;
+    }
+    captureError(err, { route: 'vendor/windows:slot' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/** Changes the weekly days, hours and how many per slot. */
+router.post('/vendor/windows/:id/schedule', requireVendorSeat, requireCapability('SCHEDULE'), async (req, res) => {
+  const parsed = scheduleWrite.safeParse(req.body);
+  const windowId = String(req.params.id ?? '');
+  const { seller, seat } = req.vendor!;
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid schedule', blockers: ['Pick days, hours and how many'] });
+    return;
+  }
+  if (!seatCanSeeBookable(seat.role as SeatRole, seat.bookableIds, windowId)) {
+    res.status(404).json({ error: 'No such offering' });
+    return;
+  }
+  try {
+    res.status(200).json(await updateSchedule({ sellerId: seller.id, windowId, schedule: parsed.data }));
+  } catch (err) {
+    if (err instanceof NotFound) {
+      res.status(404).json({ error: 'No such offering' });
+      return;
+    }
+    if (err instanceof WindowRefused) {
+      res.status(422).json({ error: 'Schedule refused', blockers: err.blockers });
+      return;
+    }
+    captureError(err, { route: 'vendor/windows:schedule' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
 
 export default router;

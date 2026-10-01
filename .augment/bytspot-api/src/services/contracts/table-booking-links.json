@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "area": "Midtown Atlanta",
-  "note": "Hand-checked table booking links, keyed by Google placeId. Add a venue only after opening its link and seeing the booking page for that venue. Update checkedAt whenever a link is re-checked.",
-  "links": []
-}

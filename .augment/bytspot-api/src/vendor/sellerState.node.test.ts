@@ -5,6 +5,7 @@ import { requirementsForState, effectiveCapabilities, sellerCanTransition } from
 import * as dbModule from '../lib/db';
 import {
   advanceSeller,
+  awaitingApproval,
   markVerified,
   outstandingRequirements,
   satisfiedRequirements,
@@ -23,6 +24,7 @@ const seller = (over: Partial<VendorSeller> = {}): VendorSeller =>
     payoutStatus: 'active',
     payoutLast4: '4242',
     payoutDetail: null,
+    approvedAt: new Date('2026-09-30T12:00:00Z'),
     createdAt: new Date(),
     updatedAt: new Date(),
     ...over,
@@ -196,6 +198,23 @@ test('the last missing requirement is what makes a business live', async () => {
   assert.equal((await advanceSeller(waiting, [location({ state: 'PAUSED' })])).state, 'PENDING');
   // Activating it is the edit that carries the business over.
   assert.equal((await advanceSeller(waiting, [location()])).state, 'ACTIVE');
+});
+
+test('a finished business waits for Bytspot to approve it, then goes live', async () => {
+  captureUpdates();
+  const finished = seller({ state: 'PENDING', approvedAt: null });
+  assert.equal(awaitingApproval(finished, [location()]), true);
+  assert.equal((await advanceSeller(finished, [location()])).state, 'PENDING');
+  // A draft that finishes everything in one go still stops at review.
+  assert.equal((await advanceSeller(seller({ state: 'DRAFT', approvedAt: null }), [location()])).state, 'PENDING');
+
+  const approved = seller({ state: 'PENDING' });
+  assert.equal(awaitingApproval(approved, [location()]), false);
+  assert.equal((await advanceSeller(approved, [location()])).state, 'ACTIVE');
+
+  // Not waiting on Bytspot while something is still missing, or once live.
+  assert.equal(awaitingApproval(seller({ state: 'PENDING', approvedAt: null }), [location({ state: 'PAUSED' })]), false);
+  assert.equal(awaitingApproval(seller({ state: 'ACTIVE', approvedAt: null }), [location()]), false);
 });
 
 test('a live business that loses a requirement is not silently un-published', async () => {

@@ -39,6 +39,13 @@ router.post('/cron/schema-diagnostic', async (req, res) => {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
+  if (req.body?.action === 'resolve-failed-party-session-migration') {
+    const resolved = await db.$executeRawUnsafe(
+      `UPDATE _prisma_migrations SET rolled_back_at = NOW() WHERE migration_name IN ('20261004_repair_party_session_shape', '20261004_add_party_session_withdrawal') AND finished_at IS NULL AND rolled_back_at IS NULL`,
+    );
+    res.json({ ok: true, resolved });
+    return;
+  }
   const names = ['party_sessions', 'party_tables', 'party_session_claims', 'party_checkouts', 'party_guests'];
   const tables = await db.$queryRawUnsafe<Array<{ name: string }>>(
     `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname = ANY($1::text[]) ORDER BY 1`,

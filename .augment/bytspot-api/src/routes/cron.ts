@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'crypto';
 import { Router } from 'express';
 import { config } from '../config';
+import { db } from '../lib/db';
 import { captureError } from '../lib/observability';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
@@ -33,6 +34,26 @@ export function verifyCronSecret(req: { headers: Record<string, unknown> }): boo
  * POST /cron/crowd-alerts
  * Manual trigger / external cron endpoint.
  */
+router.post('/cron/schema-diagnostic', async (req, res) => {
+  if (!verifyCronSecret(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  const names = ['party_sessions', 'party_tables', 'party_session_claims', 'party_checkouts', 'party_guests'];
+  const tables = await db.$queryRawUnsafe<Array<{ name: string }>>(
+    `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname = ANY($1::text[]) ORDER BY 1`,
+    names,
+  );
+  const columns = await db.$queryRawUnsafe<Array<{ table_name: string; column_name: string }>>(
+    `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ANY($1::text[]) ORDER BY table_name, ordinal_position`,
+    names,
+  );
+  const migrations = await db.$queryRawUnsafe<Array<{ migration_name: string; finished: boolean; rolled_back: boolean }>>(
+    `SELECT migration_name, finished_at IS NOT NULL AS finished, rolled_back_at IS NOT NULL AS rolled_back FROM _prisma_migrations WHERE migration_name ILIKE '%party%' OR migration_name ILIKE '%session%' OR migration_name ILIKE '%table%' ORDER BY started_at`,
+  );
+  res.json({ tables, columns, migrations });
+});
+
 router.post('/cron/crowd-alerts', async (req, res) => {
   if (!verifyCronSecret(req)) {
     res.status(401).json({ error: 'Unauthorized' });

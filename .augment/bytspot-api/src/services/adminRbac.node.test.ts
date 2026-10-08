@@ -136,6 +136,9 @@ test('only an admin reaches Admin Places and Vendors', async () => {
     await assert.rejects(() => guestCaller().admin.places.venues(), { code: 'FORBIDDEN' });
     await assert.rejects(() => guestCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: true }), { code: 'FORBIDDEN' });
     await assert.rejects(() => guestCaller().admin.places.linkGoogle({ venueId: 'ven_1', placeId: 'ChIJ_x' }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.mediaQueue(), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.reviewMedia({ mediaId: 'med_1', approve: true }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: true }), { code: 'FORBIDDEN' });
   });
 });
 
@@ -207,6 +210,34 @@ test('the Bytspot team approves a venue as controlled and can return it to liste
       await assert.rejects(() => adminCaller().admin.places.setControlled({ venueId: 'ven_gone', controlled: true }), { code: 'NOT_FOUND' });
     } finally {
       missing();
+    }
+  });
+});
+
+test('an admin approves or rejects vendor media and switches paid video hosting', async () => {
+  await withAdmin(async () => {
+    const media: any[] = [];
+    const sellers: any[] = [];
+    const restores = [
+      stub(db.vendorMedia, 'updateMany', async (args: any) => { media.push(args); return { count: args.where.id === 'gone' ? 0 : 1 }; }),
+      stub(db.vendorSeller, 'findUnique', async ({ where }: any) => ({ id: where.id })),
+      stub(db.vendorSeller, 'update', async (args: any) => { sellers.push(args); return { id: args.where.id }; }),
+    ];
+    try {
+      assert.deepEqual(await adminCaller().admin.vendors.reviewMedia({ mediaId: 'med_1', approve: true, note: 'ignored' }), { reviewStatus: 'approved' });
+      assert.equal(media[0].data.reviewStatus, 'approved');
+      assert.equal(media[0].data.reviewNote, null);
+      assert.equal(media[0].data.reviewedByUserId, 'usr_admin');
+      await adminCaller().admin.vendors.reviewMedia({ mediaId: 'med_2', approve: false, note: 'Blurry' });
+      assert.deepEqual([media[1].data.reviewStatus, media[1].data.reviewNote], ['rejected', 'Blurry']);
+      await assert.rejects(() => adminCaller().admin.vendors.reviewMedia({ mediaId: 'gone', approve: true }), { code: 'NOT_FOUND' });
+
+      await adminCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: true });
+      assert.ok(sellers[0].data.videoHostingAt instanceof Date);
+      await adminCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: false });
+      assert.deepEqual(sellers[1].data, { videoHostingAt: null, videoHostingByUserId: null });
+    } finally {
+      restores.reverse().forEach((restore) => restore());
     }
   });
 });

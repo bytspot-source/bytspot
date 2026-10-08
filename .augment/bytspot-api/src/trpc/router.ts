@@ -16,6 +16,7 @@ import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
+import { curatedVenueMedia } from '../services/venueMedia';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { currentPlatformFeeBps, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE } from '../services/platformFee';
 import { runCrowdAlerts } from '../services/crowdAlerts';
@@ -276,29 +277,34 @@ const venuesRouter = router({
           include: {
             crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 },
             parking: true,
+            media: { where: { venue: { controlledAt: { not: null } } }, select: { id: true, kind: true, position: true } },
           },
           orderBy: { name: 'asc' },
         });
-        return rows.map((v) => ({
-          id: v.id, name: v.name, slug: v.slug, address: v.address,
-          lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
-          ...projectVenuePhoto(v),
-          control: venueControl(v),
-          // The exact Google place, so a client can add it to a Plan by place
-          // and name its admin-listed OpenTable or Resy link.
-          googlePlaceId: v.googlePlaceId,
-          booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
-          entryType: (v.entryType ?? 'free') as 'free' | 'paid',
-          entryPrice: v.entryPrice ?? null,
-          ticketUrl: v.ticketUrl ?? null,
-          crowd: v.crowdLevels[0]
-            ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, source: v.crowdLevels[0].source, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
-            : null,
-          parking: {
-            totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
-            spots: v.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
-          },
-        }));
+        return rows.map((v) => {
+          const curated = curatedVenueMedia(v, v.media);
+          return {
+            id: v.id, name: v.name, slug: v.slug, address: v.address,
+            lat: v.lat, lng: v.lng, category: v.category, imageUrl: curated?.imageUrl ?? v.imageUrl,
+            ...projectVenuePhoto(curated ?? v),
+            ...(curated ? { photoUrls: curated.photoUrls, vibeVideoUrl: curated.vibeVideoUrl } : {}),
+            control: venueControl(v),
+            // The exact Google place, so a client can add it to a Plan by place
+            // and name its admin-listed OpenTable or Resy link.
+            googlePlaceId: v.googlePlaceId,
+            booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
+            entryType: (v.entryType ?? 'free') as 'free' | 'paid',
+            entryPrice: v.entryPrice ?? null,
+            ticketUrl: v.ticketUrl ?? null,
+            crowd: v.crowdLevels[0]
+              ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, source: v.crowdLevels[0].source, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
+              : null,
+            parking: {
+              totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
+              spots: v.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
+            },
+          };
+        });
       });
       return { venues };
     }),

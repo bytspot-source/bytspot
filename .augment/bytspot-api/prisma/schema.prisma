@@ -169,6 +169,7 @@ model Venue {
   mobilityQuotes MobilityQuote[]
   arrivalParties Party[]          @relation("partyArrivalVenue")
   bookingTaps    BookingLinkTap[]
+  media          VenueMedia[]
 
   @@map("venues")
 }
@@ -1188,6 +1189,10 @@ model VendorSeller {
   /// When a Bytspot admin approved the business. It cannot go live without it.
   approvedAt       DateTime? @map("approved_at")
   approvedByUserId String?   @map("approved_by_user_id")
+  /// Paid video hosting, switched on by a Bytspot admin once the business has
+  /// paid. Without it the business cannot upload video and none is shown.
+  videoHostingAt       DateTime? @map("video_hosting_at")
+  videoHostingByUserId String?   @map("video_hosting_by_user_id")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1535,6 +1540,30 @@ model VendorAvailabilityWindow {
   @@map("vendor_availability_windows")
 }
 
+/// Bytspot-curated cover, gallery photo or video on a venue, uploaded by the
+/// Bytspot team. Guests see it only while the venue is Bytspot-controlled.
+/// Stored like VendorMedia: Postgres `bytes` until object storage is set up.
+model VenueMedia {
+  id               String          @id @default(cuid())
+  venueId          String          @map("venue_id")
+  kind             VendorMediaKind
+  position         Int             @default(0)
+  mimeType         String          @map("mime_type")
+  bytes            Bytes?
+  byteSize         Int             @map("byte_size")
+  storageKey       String?         @unique @map("storage_key")
+  uploadedByUserId String          @map("uploaded_by_user_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@unique([venueId, kind, position])
+  @@index([venueId])
+  @@map("venue_media")
+}
+
 /// A photo, menu file, or (later) short clip hanging off a PIN or a window.
 /// Exactly one parent: a dump folder on the seller would mix two places.
 /// The console still calls a seller's offering a bookable; that id is the
@@ -1554,6 +1583,12 @@ model VendorMedia {
   bytes      Bytes?
   byteSize   Int             @map("byte_size")
   storageKey String?         @map("storage_key")
+  /// Guests see a file only once the Bytspot team approved it: "pending",
+  /// "approved" or "rejected". Every new or replaced file starts pending.
+  reviewStatus     String    @default("pending") @map("review_status")
+  reviewedAt       DateTime? @map("reviewed_at")
+  reviewedByUserId String?   @map("reviewed_by_user_id")
+  reviewNote       String?   @map("review_note")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1568,6 +1603,7 @@ model VendorMedia {
   @@index([sellerId])
   @@index([locationId])
   @@index([bookableId])
+  @@index([reviewStatus, createdAt])
   @@map("vendor_media")
 }
 

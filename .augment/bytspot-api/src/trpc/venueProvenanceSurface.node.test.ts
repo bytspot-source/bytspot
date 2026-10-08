@@ -81,3 +81,30 @@ test('Every venue read says whether it is Bytspot-controlled, and defaults to li
   assert.equal(((await caller.venues.nearby({ lat: 33.79, lng: -84.38 })).venues[0] as any).control, 'bytspot');
   assert.equal(((await caller.venues.getBySlug({ slug: 'broni-approved' })) as any).control, 'bytspot');
 });
+
+test('A Bytspot-controlled venue shows its curated cover, gallery and video; a listed one never does', async () => {
+  const caller = createCaller(anonymous);
+  const media = [
+    { id: 'vm_video', kind: 'video', position: 0 },
+    { id: 'vm_g1', kind: 'gallery', position: 1 },
+    { id: 'vm_g0', kind: 'gallery', position: 0 },
+    { id: 'vm_cover', kind: 'cover', position: 0 },
+  ];
+  venue.findMany = async () => [{ ...row, photoProvenance: 'borrowed', controlledAt: new Date('2026-10-01T12:00:00Z'), media }];
+  const curated = (await caller.venues.list({ entryType: 'paid' })).venues[0] as any;
+  assert.match(curated.imageUrl, /\/media\/venue\/vm_cover$/);
+  assert.equal(curated.photoProvenance, 'bytspot_owned');
+  assert.equal(curated.mapPresentation, 'pin');
+  assert.deepEqual(curated.photoUrls.map((u: string) => u.split('/').pop()), ['vm_cover', 'vm_g0', 'vm_g1']);
+  assert.match(curated.vibeVideoUrl, /\/media\/venue\/vm_video$/);
+
+  venue.findMany = async () => [{ ...row, controlledAt: null, media }];
+  const listed = (await caller.venues.list({ entryType: 'free' })).venues[0] as any;
+  assert.equal(listed.imageUrl, row.imageUrl);
+  assert.equal(listed.photoUrls, undefined);
+  assert.equal(listed.vibeVideoUrl, undefined);
+
+  // A video alone is not a cover.
+  venue.findMany = async () => [{ ...row, controlledAt: new Date('2026-10-01T12:00:00Z'), media: [media[0]] }];
+  assert.equal(((await caller.venues.list()).venues[0] as any).vibeVideoUrl, undefined);
+});

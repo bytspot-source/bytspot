@@ -2,7 +2,11 @@ import type { Request } from 'express';
 import { Router, type Response } from 'express';
 import { z } from 'zod';
 import type { VendorAvailabilityWindow, VendorLocation, VendorMedia } from '@prisma/client';
+import jwt from 'jsonwebtoken';
+import { config } from '../config';
 import { db } from '../lib/db';
+import type { AuthPayload } from '../middleware/auth';
+import { adminGroupFor } from '../services/adminRbac';
 import { captureError } from '../lib/observability';
 import { requireVendorSeat, type VendorContext } from '../middleware/vendorAuth';
 import { verifyVendorAccessToken } from '../vendor/accessToken';
@@ -18,6 +22,7 @@ import {
   seatCanSeeBookable,
   seatCanSeeLocation,
   vendorCanEditMedia,
+  guestCanSeeMedia,
   type MediaKind,
   type MediaParent,
 } from '../vendor/media';
@@ -83,13 +88,21 @@ function listWhere(parent: MediaParent, id: string) {
   return parent === 'location' ? { locationId: id } : { bookableId: id };
 }
 
-async function listMedia(parent: MediaParent, id: string) {
+/** Video needs the object store and the business's paid video hosting. */
+function videoAvailableFor(vendor: VendorContext): boolean {
+  return objectStoreConfigured() && Boolean(vendor.seller.videoHostingAt);
+}
+
+/** Every new or replaced file waits for the Bytspot team before guests see it. */
+const AWAITING_REVIEW = { reviewStatus: 'pending', reviewedAt: null, reviewedByUserId: null, reviewNote: null } as const;
+
+async function listMedia(vendor: VendorContext, parent: MediaParent, id: string) {
   const rows = await db.vendorMedia.findMany({
     where: listWhere(parent, id),
     orderBy: [{ kind: 'asc' }, { position: 'asc' }],
-    select: { id: true, kind: true, position: true, mimeType: true, byteSize: true },
+    select: { id: true, kind: true, position: true, mimeType: true, byteSize: true, reviewStatus: true, reviewNote: true },
   });
-  return { media: rows.map(mediaDto), videoAvailable: objectStoreConfigured() };
+  return { media: rows.map(mediaDto), videoAvailable: videoAvailableFor(vendor) };
 }
 
 async function compactKind(parent: MediaParent, parentId: string, kind: MediaKind): Promise<void> {
@@ -189,6 +202,7 @@ async function saveUpload(
     bytes: storageKey ? null : Uint8Array.from(payload.bytes),
     byteSize: payload.bytes.length,
     storageKey,
+    ...AWAITING_REVIEW,
   };
 
   try {
@@ -200,6 +214,7 @@ async function saveUpload(
             bytes: data.bytes,
             byteSize: data.byteSize,
             storageKey: data.storageKey,
+            ...AWAITING_REVIEW,
           },
         })
       : await db.vendorMedia.create({ data });
@@ -230,6 +245,10 @@ async function startVideoUpload(req: Request, res: Response, vendor: VendorConte
   }
   if (!objectStoreConfigured()) {
     refuse(res, 'video-unavailable');
+    return;
+  }
+  if (!vendor.seller.videoHostingAt) {
+    refuse(res, 'video-needs-hosting');
     return;
   }
 
@@ -304,6 +323,10 @@ async function completeVideoUpload(
     refuse(res, 'video-unavailable');
     return;
   }
+  if (!vendor.seller.videoHostingAt) {
+    refuse(res, 'video-needs-hosting');
+    return;
+  }
 
   const parsed = videoIntentBody.safeParse(req.body);
   if (!parsed.success) {
@@ -373,6 +396,7 @@ async function completeVideoUpload(
     bytes: null,
     byteSize: object.byteSize,
     storageKey,
+    ...AWAITING_REVIEW,
   };
 
   try {
@@ -384,6 +408,7 @@ async function completeVideoUpload(
             bytes: null,
             byteSize: data.byteSize,
             storageKey,
+            ...AWAITING_REVIEW,
           },
         })
       : await db.vendorMedia.create({ data });
@@ -409,7 +434,7 @@ router.get('/vendor/locations/:id/media', requireVendorSeat, async (req, res) =>
       notFound(res);
       return;
     }
-    res.json(await listMedia('location', location.id));
+    res.json(await listMedia(req.vendor!, 'location', location.id));
   } catch (err) {
     captureError(err, { route: 'vendor/locations/:id/media:get' });
     res.status(500).json({ error: 'Internal error' });
@@ -482,7 +507,7 @@ router.delete('/vendor/locations/:id/media/:mediaId', requireVendorSeat, async (
     if (existing.kind === 'gallery' || existing.kind === 'menu') {
       await compactKind('location', location.id, existing.kind);
     }
-    res.json(await listMedia('location', location.id));
+    res.json(await listMedia(req.vendor!, 'location', location.id));
   } catch (err) {
     captureError(err, { route: 'vendor/locations/:id/media:delete' });
     res.status(500).json({ error: 'Internal error' });
@@ -496,7 +521,7 @@ router.get('/vendor/bookables/:id/media', requireVendorSeat, async (req, res) =>
       notFound(res);
       return;
     }
-    res.json(await listMedia('bookable', window.id));
+    res.json(await listMedia(req.vendor!, 'bookable', window.id));
   } catch (err) {
     captureError(err, { route: 'vendor/bookables/:id/media:get' });
     res.status(500).json({ error: 'Internal error' });
@@ -541,7 +566,7 @@ router.delete('/vendor/bookables/:id/media/:mediaId', requireVendorSeat, async (
     if (existing.kind === 'gallery') {
       await compactKind('bookable', window.id, existing.kind);
     }
-    res.json(await listMedia('bookable', window.id));
+    res.json(await listMedia(req.vendor!, 'bookable', window.id));
   } catch (err) {
     captureError(err, { route: 'vendor/bookables/:id/media:delete' });
     res.status(500).json({ error: 'Internal error' });
@@ -569,6 +594,16 @@ function requestVendorUserId(authorization: string | undefined): string | null {
   return claims?.userId ?? null;
 }
 
+function requestIsAdmin(authorization: string | undefined): boolean {
+  if (!authorization?.startsWith('Bearer ')) return false;
+  try {
+    const payload = jwt.verify(authorization.slice('Bearer '.length).trim(), config.jwtSecret) as AuthPayload;
+    return adminGroupFor(payload.userId) !== null;
+  } catch {
+    return false;
+  }
+}
+
 function parentIsPublic(
   media: VendorMedia & {
     location: VendorLocation | null;
@@ -584,12 +619,13 @@ router.get('/media/vendor/:mediaId', async (req, res) => {
   try {
     const media = await db.vendorMedia.findUnique({
       where: { id: String(req.params.mediaId) },
-      include: { location: true, bookable: { include: { location: true } } },
+      include: { location: true, bookable: { include: { location: true } }, seller: { select: { videoHostingAt: true } } },
     });
     if (!media) return notFound(res);
 
-    const published = parentIsPublic(media);
-    if (!published) {
+    const published = parentIsPublic(media) && guestCanSeeMedia(media, media.seller);
+    // The Bytspot team previews files waiting for review.
+    if (!published && !requestIsAdmin(req.headers.authorization)) {
       const userId = requestVendorUserId(req.headers.authorization);
       if (!userId) return notFound(res);
       const seat = await db.vendorSeat.findFirst({

@@ -36,7 +36,10 @@ export type MediaRefusal =
   | 'bad-payload'
   | 'too-large'
   | 'at-capacity'
-  | 'cover-has-no-index';
+  | 'cover-has-no-index'
+  | 'video-needs-hosting';
+
+export type MediaReviewStatus = 'pending' | 'approved' | 'rejected';
 
 export interface MediaDto {
   id: string;
@@ -45,6 +48,22 @@ export interface MediaDto {
   mimeType: string;
   byteSize: number;
   url: string;
+  reviewStatus?: MediaReviewStatus;
+  reviewNote?: string | null;
+}
+
+/** Fails closed: anything the team has not approved reads as pending. */
+export function readReviewStatus(value: unknown): MediaReviewStatus {
+  return value === 'approved' || value === 'rejected' ? value : 'pending';
+}
+
+/**
+ * Guests see a vendor file only once the Bytspot team approved it, and a
+ * video only while the business pays for video hosting.
+ */
+export function guestCanSeeMedia(media: { kind: string; reviewStatus: unknown }, seller: { videoHostingAt?: Date | null }): boolean {
+  if (readReviewStatus(media.reviewStatus) !== 'approved') return false;
+  return media.kind !== 'video' || Boolean(seller.videoHostingAt);
 }
 
 export function mediaUrl(id: string): string {
@@ -57,6 +76,8 @@ export function mediaDto(row: {
   position: number;
   mimeType: string;
   byteSize: number;
+  reviewStatus?: string;
+  reviewNote?: string | null;
 }): MediaDto {
   return {
     id: row.id,
@@ -65,6 +86,7 @@ export function mediaDto(row: {
     mimeType: row.mimeType,
     byteSize: row.byteSize,
     url: mediaUrl(row.id),
+    ...(row.reviewStatus !== undefined ? { reviewStatus: readReviewStatus(row.reviewStatus), reviewNote: row.reviewNote ?? null } : {}),
   };
 }
 
@@ -278,9 +300,11 @@ export const MEDIA_REFUSALS: Record<MediaRefusal, string> = {
   'too-large': 'That file is too large',
   'at-capacity': 'This already has as many files as it can hold',
   'cover-has-no-index': 'A cover cannot specify a slot',
+  'video-needs-hosting': 'Video hosting is a paid Bytspot plan. Ask Bytspot to switch it on.',
 };
 
-export function mediaHttpStatus(reason: MediaRefusal): 400 | 403 | 409 | 413 {
+export function mediaHttpStatus(reason: MediaRefusal): 400 | 402 | 403 | 409 | 413 {
+  if (reason === 'video-needs-hosting') return 402;
   if (reason === 'forbidden') return 403;
   if (reason === 'at-capacity') return 409;
   if (reason === 'too-large' || reason === 'video-unavailable') return 413;

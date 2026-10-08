@@ -242,14 +242,14 @@ export const adminPlacesRouter = router({
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.venues' });
       const venues = await db.venue.findMany({
         where: { discoverable: true },
-        select: { id: true, name: true, address: true, category: true, controlledAt: true },
+        select: { id: true, name: true, address: true, category: true, controlledAt: true, googlePlaceId: true },
         orderBy: [{ controlledAt: { sort: 'desc', nulls: 'last' } }, { name: 'asc' }],
         take: 500,
       });
       return {
         venues: venues.map((v) => ({
           venueId: v.id, name: v.name, address: v.address, category: v.category,
-          control: venueControl(v), controlledAt: v.controlledAt,
+          control: venueControl(v), controlledAt: v.controlledAt, placeId: v.googlePlaceId,
         })),
       };
     }),
@@ -276,6 +276,45 @@ export const adminPlacesRouter = router({
       });
       await forgetVenueLists();
       return { control: input.controlled ? 'bytspot' as const : 'listed' as const };
+    }),
+
+  /**
+   * Links a venue to the Google place the admin confirmed, so guests see its
+   * Google photos and details, or unlinks it with null. The venue keeps its
+   * own name, address and pin.
+   */
+  linkGoogle: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-link-google' }))
+    .input(z.object({ venueId: z.string().min(1).max(64), placeId: z.string().trim().regex(PLACE_ID).nullable() }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const venue = await db.venue.findUnique({ where: { id: input.venueId }, select: { id: true } });
+      if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'That venue does not exist.' });
+      let placeId: string | null = null;
+      if (input.placeId) {
+        const place = await resolvePlaceCore(input.placeId);
+        if (!place) throw new TRPCError({ code: 'NOT_FOUND', message: 'Google could not find that place. Search again.' });
+        // Google may canonicalize the id; link what it actually returned.
+        placeId = place.placeId;
+        const other = await db.venue.findUnique({ where: { googlePlaceId: placeId }, select: { id: true, name: true } });
+        if (other && other.id !== venue.id) {
+          throw new TRPCError({ code: 'CONFLICT', message: `That Google place is already linked to ${other.name}.` });
+        }
+      }
+      try {
+        await db.venue.update({ where: { id: venue.id }, data: { googlePlaceId: placeId } });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          throw new TRPCError({ code: 'CONFLICT', message: 'That Google place is already linked to another venue.' });
+        }
+        throw err;
+      }
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.linkGoogle',
+        detail: { venueId: venue.id, placeId: placeId ?? 'unlinked' },
+      });
+      await Promise.all([refreshTableBookingLinks(), forgetVenueLists()]);
+      return { placeId };
     }),
 
   /** Hides a listed place from guests, or shows it again. Its numbers are kept. */

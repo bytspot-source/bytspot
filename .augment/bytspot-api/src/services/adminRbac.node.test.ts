@@ -135,6 +135,7 @@ test('only an admin reaches Admin Places and Vendors', async () => {
     await assert.rejects(() => guestCaller().admin.vendors.approve({ sellerId: 'sel_1' }), { code: 'FORBIDDEN' });
     await assert.rejects(() => guestCaller().admin.places.venues(), { code: 'FORBIDDEN' });
     await assert.rejects(() => guestCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: true }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.places.linkGoogle({ venueId: 'ven_1', placeId: 'ChIJ_x' }), { code: 'FORBIDDEN' });
   });
 });
 
@@ -206,6 +207,36 @@ test('the Bytspot team approves a venue as controlled and can return it to liste
       await assert.rejects(() => adminCaller().admin.places.setControlled({ venueId: 'ven_gone', controlled: true }), { code: 'NOT_FOUND' });
     } finally {
       missing();
+    }
+  });
+});
+
+test('an admin links a venue to the Google place they confirmed, once per place', async () => {
+  await withAdmin(async () => {
+    const updates: any[] = [];
+    let owner: any = null;
+    const restores = [
+      stub(db.venue, 'findUnique', async ({ where }: any) => (where.id ? { id: where.id } : owner)),
+      stub(db.venue, 'update', async (args: any) => { updates.push(args); return { id: args.where.id }; }),
+      stub(db.venue, 'findMany', async () => []),
+      stub(config, 'googlePlacesApiKey', 'test-key'),
+      stub(globalThis, 'fetch', async () => new Response(JSON.stringify({
+        id: 'ChIJ_krog', displayName: { text: 'Krog Street Market' }, formattedAddress: '99 Krog St NE',
+        location: { latitude: 33.757, longitude: -84.364 },
+      }), { status: 200 })),
+    ];
+    try {
+      assert.deepEqual(await adminCaller().admin.places.linkGoogle({ venueId: 'ven_krog', placeId: 'ChIJ_krog' }), { placeId: 'ChIJ_krog' });
+      assert.deepEqual(updates[0], { where: { id: 'ven_krog' }, data: { googlePlaceId: 'ChIJ_krog' } });
+
+      owner = { id: 'ven_other', name: 'Other Venue' };
+      await assert.rejects(() => adminCaller().admin.places.linkGoogle({ venueId: 'ven_krog', placeId: 'ChIJ_krog' }), { code: 'CONFLICT' });
+      assert.equal(updates.length, 1);
+
+      assert.deepEqual(await adminCaller().admin.places.linkGoogle({ venueId: 'ven_krog', placeId: null }), { placeId: null });
+      assert.deepEqual(updates[1].data, { googlePlaceId: null });
+    } finally {
+      restores.reverse().forEach((restore) => restore());
     }
   });
 });

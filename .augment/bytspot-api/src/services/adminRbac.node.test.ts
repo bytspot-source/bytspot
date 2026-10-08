@@ -133,6 +133,8 @@ test('only an admin reaches Admin Places and Vendors', async () => {
       { code: 'FORBIDDEN' },
     );
     await assert.rejects(() => guestCaller().admin.vendors.approve({ sellerId: 'sel_1' }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.places.venues(), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: true }), { code: 'FORBIDDEN' });
   });
 });
 
@@ -182,6 +184,28 @@ test('a place no one has listed cannot be hidden', async () => {
       await assert.rejects(() => adminCaller().admin.places.setHidden({ venueId: 'ven_host', hidden: true }), { code: 'NOT_FOUND' });
     } finally {
       restore();
+    }
+  });
+});
+
+test('the Bytspot team approves a venue as controlled and can return it to listed', async () => {
+  await withAdmin(async () => {
+    const writes: any[] = [];
+    const restore = stub(db.venue, 'updateMany', async (args: any) => { writes.push(args); return { count: 1 }; });
+    try {
+      assert.deepEqual(await adminCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: true }), { control: 'bytspot' });
+      assert.ok(writes[0].data.controlledAt instanceof Date);
+      assert.equal(writes[0].data.controlledByUserId, 'usr_admin');
+      assert.deepEqual(await adminCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: false }), { control: 'listed' });
+      assert.deepEqual(writes[1].data, { controlledAt: null, controlledByUserId: null });
+    } finally {
+      restore();
+    }
+    const missing = stub(db.venue, 'updateMany', async () => ({ count: 0 }));
+    try {
+      await assert.rejects(() => adminCaller().admin.places.setControlled({ venueId: 'ven_gone', controlled: true }), { code: 'NOT_FOUND' });
+    } finally {
+      missing();
     }
   });
 });

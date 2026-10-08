@@ -15,6 +15,7 @@ import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
+import { venueControl } from '../services/venueControl';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { currentPlatformFeeBps, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE } from '../services/platformFee';
 import { runCrowdAlerts } from '../services/crowdAlerts';
@@ -282,6 +283,7 @@ const venuesRouter = router({
           id: v.id, name: v.name, slug: v.slug, address: v.address,
           lat: v.lat, lng: v.lng, category: v.category, imageUrl: v.imageUrl,
           ...projectVenuePhoto(v),
+          control: venueControl(v),
           // The exact Google place, so a client can add it to a Plan by place
           // and name its admin-listed OpenTable or Resy link.
           googlePlaceId: v.googlePlaceId,
@@ -309,9 +311,9 @@ const venuesRouter = router({
       const cacheKey = `venues:nearby:${lat.toFixed(4)}:${lng.toFixed(4)}:${radius}`;
       const venues = await cached(cacheKey, 30, async () => {
         const rows = await db.$queryRawUnsafe<
-          Array<{ id: string; name: string; slug: string; address: string; lat: number; lng: number; category: string; image_url: string | null; photo_provenance: string; photo_attribution: string | null; distance: number }>
+          Array<{ id: string; name: string; slug: string; address: string; lat: number; lng: number; category: string; image_url: string | null; photo_provenance: string; photo_attribution: string | null; controlled_at: Date | null; distance: number }>
         >(
-          `SELECT id, name, slug, address, lat, lng, category, image_url, photo_provenance, photo_attribution,
+          `SELECT id, name, slug, address, lat, lng, category, image_url, photo_provenance, photo_attribution, controlled_at,
                   ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
            FROM venues
            WHERE location IS NOT NULL
@@ -328,6 +330,7 @@ const venuesRouter = router({
             photoAttribution: r.photo_attribution,
             imageUrl: r.image_url,
           }),
+          control: venueControl({ controlledAt: r.controlled_at }),
           distanceMeters: Math.round(r.distance),
         }));
       });
@@ -352,6 +355,7 @@ const venuesRouter = router({
         id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
         ...projectVenuePhoto(venue),
+        control: venueControl(venue),
         googlePlaceId: venue.googlePlaceId,
         booking: tableBookingLinkFrom(venue.bookingProvider, venue.bookingUrl),
         entryType: (venue.entryType ?? 'free') as 'free' | 'paid',

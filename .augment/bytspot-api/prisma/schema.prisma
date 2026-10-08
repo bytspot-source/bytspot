@@ -122,33 +122,37 @@ model ProviderIdentity {
 
 // ─── Venues ──────────────────────────────────────────
 model Venue {
-  id               String    @id @default(cuid())
-  name             String
-  slug             String    @unique
-  googlePlaceId    String?   @unique @map("google_place_id")
-  discoverable     Boolean   @default(true)
-  address          String
-  lat              Float
-  lng              Float
-  category         String // "bar", "restaurant", "club", "park", "market"
-  imageUrl         String?   @map("image_url")
+  id                 String    @id @default(cuid())
+  name               String
+  slug               String    @unique
+  googlePlaceId      String?   @unique @map("google_place_id")
+  discoverable       Boolean   @default(true)
+  address            String
+  lat                Float
+  lng                Float
+  category           String // "bar", "restaurant", "club", "park", "market"
+  imageUrl           String?   @map("image_url")
   // A photograph is an endorsement: only "bytspot_owned" or "party_media"
   // earns a map pin. "borrowed" is the fail-closed default and stays a dot.
   // Pin eligibility is derived in venuePhotoProvenance.ts, never stored.
-  photoProvenance  String    @default("borrowed") @map("photo_provenance")
-  photoAttribution String?   @map("photo_attribution")
-  entryType        String    @default("free") @map("entry_type") // "free" or "paid"
-  entryPrice       String?   @map("entry_price") // e.g. "$15", "$25–$50"
-  ticketUrl        String?   @map("ticket_url") // external purchase link
+  photoProvenance    String    @default("borrowed") @map("photo_provenance")
+  photoAttribution   String?   @map("photo_attribution")
+  entryType          String    @default("free") @map("entry_type") // "free" or "paid"
+  entryPrice         String?   @map("entry_price") // e.g. "$15", "$25–$50"
+  ticketUrl          String?   @map("ticket_url") // external purchase link
   /// A hand-checked OpenTable or Resy link, set by a Bytspot admin. Provider,
   /// URL and the check date travel together (venues_booking_link_shape).
-  bookingProvider  String?   @map("booking_provider")
-  bookingUrl       String?   @map("booking_url")
-  bookingCheckedAt DateTime? @map("booking_checked_at")
+  bookingProvider    String?   @map("booking_provider")
+  bookingUrl         String?   @map("booking_url")
+  bookingCheckedAt   DateTime? @map("booking_checked_at")
   /// Set when a Bytspot admin listed the place, which also makes it a lead.
-  listedAt         DateTime? @map("listed_at")
-  listedByUserId   String?   @map("listed_by_user_id")
-  createdAt        DateTime  @default(now()) @map("created_at")
+  listedAt           DateTime? @map("listed_at")
+  listedByUserId     String?   @map("listed_by_user_id")
+  /// Set when the Bytspot team approved the venue as Bytspot-controlled. Null
+  /// means listed: Google details and photos, never the Bytspot display.
+  controlledAt       DateTime? @map("controlled_at")
+  controlledByUserId String?   @map("controlled_by_user_id")
+  createdAt          DateTime  @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng
   // Managed via raw SQL; Prisma can't model geometry natively

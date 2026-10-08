@@ -20,6 +20,7 @@ import {
 } from '../services/tableBookingLinks';
 import { resolvePlaceCore, textSearchCore } from './placesRouter';
 import { placeVenueSlug } from './partyRouter';
+import { venueControl } from '../services/venueControl';
 
 /** What a listed place is filed under. Each one maps to a Discover rail on web and iOS. */
 export const LISTED_CATEGORIES = ['restaurant', 'bar', 'club', 'cafe'] as const;
@@ -231,6 +232,50 @@ export const adminPlacesRouter = router({
       });
       await Promise.all([refreshTableBookingLinks(), forgetVenueLists()]);
       return { venueId: venue.id };
+    }),
+
+  /** Every venue guests can see, each marked Bytspot-controlled or listed. */
+  venues: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-venues' }))
+    .query(async ({ ctx }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.venues' });
+      const venues = await db.venue.findMany({
+        where: { discoverable: true },
+        select: { id: true, name: true, address: true, category: true, controlledAt: true },
+        orderBy: [{ controlledAt: { sort: 'desc', nulls: 'last' } }, { name: 'asc' }],
+        take: 500,
+      });
+      return {
+        venues: venues.map((v) => ({
+          venueId: v.id, name: v.name, address: v.address, category: v.category,
+          control: venueControl(v), controlledAt: v.controlledAt,
+        })),
+      };
+    }),
+
+  /**
+   * The Bytspot team approves a venue as Bytspot-controlled, or returns it to
+   * listed. Only a controlled venue gets the Bytspot display and curated media.
+   */
+  setControlled: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-control' }))
+    .input(z.object({ venueId: z.string().min(1).max(64), controlled: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const updated = await db.venue.updateMany({
+        where: { id: input.venueId },
+        data: input.controlled
+          ? { controlledAt: new Date(), controlledByUserId: ctx.user.userId }
+          : { controlledAt: null, controlledByUserId: null },
+      });
+      if (updated.count === 0) throw new TRPCError({ code: 'NOT_FOUND', message: 'That venue does not exist.' });
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.setControlled',
+        detail: { venueId: input.venueId, controlled: input.controlled },
+      });
+      await forgetVenueLists();
+      return { control: input.controlled ? 'bytspot' as const : 'listed' as const };
     }),
 
   /** Hides a listed place from guests, or shows it again. Its numbers are kept. */

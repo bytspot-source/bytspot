@@ -61,3 +61,23 @@ test('Borrowed and unrecognised provenance never earn a pin photo', async () => 
     assert.equal(listed.imageUrl, row.imageUrl);
   }
 });
+
+test('Every venue read says whether it is Bytspot-controlled, and defaults to listed', async () => {
+  const caller = createCaller(anonymous);
+
+  assert.equal(((await caller.venues.list()).venues[0] as any).control, 'listed');
+  assert.equal(((await caller.venues.nearby({ lat: 33.78, lng: -84.38 })).venues[0] as any).control, 'listed');
+  assert.equal(((await caller.venues.getBySlug({ slug: 'broni' })) as any).control, 'listed');
+
+  const approved = new Date('2026-10-01T12:00:00Z');
+  venue.findMany = async () => [{ ...row, controlledAt: approved }];
+  venue.findFirst = async () => ({ ...row, controlledAt: approved });
+  prisma.$queryRawUnsafe = async () => [{
+    id: row.id, name: row.name, slug: row.slug, address: row.address,
+    lat: row.lat, lng: row.lng, category: row.category, image_url: row.imageUrl,
+    photo_provenance: 'bytspot_owned', photo_attribution: null, controlled_at: approved, distance: 120,
+  }];
+  assert.equal(((await caller.venues.list({ entryType: 'free' })).venues[0] as any).control, 'bytspot');
+  assert.equal(((await caller.venues.nearby({ lat: 33.79, lng: -84.38 })).venues[0] as any).control, 'bytspot');
+  assert.equal(((await caller.venues.getBySlug({ slug: 'broni-approved' })) as any).control, 'bytspot');
+});

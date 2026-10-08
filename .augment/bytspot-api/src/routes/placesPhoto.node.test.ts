@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { clampWidth, isAllowedRedirect, isPhotoName, photoProxyUrl } from './placesPhoto';
-import { nearbySearchCacheKey, placesRouter } from '../trpc/placesRouter';
+import { mapPlace, nearbySearchCacheKey, placesRouter } from '../trpc/placesRouter';
 import { config } from '../config';
 
 /**
@@ -108,8 +108,21 @@ test('Entries cached while photo URLs carried the key cannot be served', () => {
   const key = nearbySearchCacheKey(33.7844, -84.3862, 2000, ['cafe', 'coffee_shop'], 10);
   // The vulnerable build wrote gp:nearby:*; nothing may read that prefix now.
   assert.equal(key.startsWith('gp:nearby:'), false, 'still reading the leaking namespace');
-  assert.ok(key.startsWith('gp:v2:nearby:'));
+  assert.ok(key.startsWith('gp:v3:nearby:'));
   // The stale copy derives from the same key, so it moves with it. A 7-day
   // stale entry from the old build was the longest-lived exposure.
-  assert.equal(`${key}:stale`.includes(':v2:'), true);
+  assert.equal(`${key}:stale`.includes(':v3:'), true);
+});
+
+test('Each photo carries its photographer credit, in the same order', () => {
+  const place = mapPlace({
+    id: 'ChIJtest',
+    photos: [
+      { name: 'places/ChIJtest/photos/A1', authorAttributions: [{ displayName: ' Ada L. ' }, { displayName: 'Sam K.' }] },
+      { name: 'not a photo name', authorAttributions: [{ displayName: 'Dropped' }] },
+      { name: 'places/ChIJtest/photos/A2' },
+    ],
+  });
+  assert.equal(place.photoUrls.length, 2);
+  assert.deepEqual(place.photoAttributions, ['Ada L., Sam K.', '']);
 });

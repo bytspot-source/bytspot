@@ -19,9 +19,10 @@ const GP_BASE = 'https://places.googleapis.com/v1';
  * Bumped when the cached shape changes in a way that must not be served from
  * before the bump. v2 abandons every entry written while photo URLs carried
  * the API key: those objects are still readable for their TTL, and the stale
- * copies for a week, so changing the mapper alone would keep leaking.
+ * copies for a week, so changing the mapper alone would keep leaking. v3 adds
+ * photo author attributions, which Google requires wherever a photo is shown.
  */
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 
 export const SEARCH_FIELDS = [
   'places.id', 'places.displayName', 'places.formattedAddress', 'places.location',
@@ -40,6 +41,8 @@ export interface MappedPlace {
   placeId: string; name: string; address: string; lat: number; lng: number;
   rating: number | null; ratingCount: number; priceLevel: string | null;
   types: string[]; primaryType: string | null; photoUrls: string[];
+  /** The photographer credit for each entry in photoUrls, same order. */
+  photoAttributions: string[];
   isOpen: boolean | null; websiteUri: string | null;
   /** An admin-listed OpenTable or Resy link, added after the cache. */
   booking?: TableBookingLink | null;
@@ -58,17 +61,22 @@ export function mapPlace(p: any): MappedPlace {
   // Proxied, never signed. Google's media endpoint takes the API key only as
   // a query parameter, so a directly-fetchable URL would ship the key to every
   // caller of this public procedure.
-  const photos: string[] = (p.photos ?? [])
+  const shown = (p.photos ?? [])
     .slice(0, 4)
-    .filter((ph: any) => isPhotoName(ph?.name))
-    .map((ph: any) => photoProxyUrl(ph.name));
+    .filter((ph: any) => isPhotoName(ph?.name));
+  const photos: string[] = shown.map((ph: any) => photoProxyUrl(ph.name));
+  const photoAttributions: string[] = shown.map((ph: any) =>
+    (ph.authorAttributions ?? [])
+      .map((a: any) => (typeof a?.displayName === 'string' ? a.displayName.trim() : ''))
+      .filter(Boolean)
+      .join(', '));
   return {
     placeId: p.id ?? '', name: p.displayName?.text ?? '',
     address: p.formattedAddress ?? '',
     lat: p.location?.latitude ?? 0, lng: p.location?.longitude ?? 0,
     rating: p.rating ?? null, ratingCount: p.userRatingCount ?? 0,
     priceLevel: p.priceLevel ?? null, types: p.types ?? [],
-    primaryType: p.primaryType ?? null, photoUrls: photos,
+    primaryType: p.primaryType ?? null, photoUrls: photos, photoAttributions,
     isOpen: p.currentOpeningHours?.openNow ?? null, websiteUri: p.websiteUri ?? null,
   };
 }

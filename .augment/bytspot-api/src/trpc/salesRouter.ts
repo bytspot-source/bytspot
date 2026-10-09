@@ -5,13 +5,13 @@ import { db } from '../lib/db';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 import {
   MAX_BUYERS_PER_SALE,
-  MAX_OPEN_SALES,
   PAYMENT_PROVIDERS,
   SALE_UNAVAILABLE,
   handleUrl,
   meetWindowProblem,
   normalizeHandle,
   paymentReminder,
+  saleLimits,
   saleState,
   snapMeetPoint,
   type PaymentProvider,
@@ -54,6 +54,11 @@ async function ownRequest(sellerId: string, id: string, now = new Date()) {
   });
   if (!request) throw unavailable();
   return request;
+}
+
+async function limitsFor(userId: string) {
+  const user = await db.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
+  return saleLimits(user?.membershipTier);
 }
 
 function firstName(name: string | null | undefined): string {
@@ -147,9 +152,15 @@ export const salesRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Save a payment handle for each provider first.' });
       }
 
-      const open = await db.privateSale.count({ where: { sellerId: ctx.user.userId, status: 'open', windowEnd: { gt: now } } });
-      if (open >= MAX_OPEN_SALES) {
-        throw new TRPCError({ code: 'CONFLICT', message: `You can have ${MAX_OPEN_SALES} open sales at a time.` });
+      const limits = await limitsFor(ctx.user.userId);
+      if (input.buyerLimit > limits.buyersPerSale) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: `Your membership allows up to ${limits.buyersPerSale} buyer${limits.buyersPerSale === 1 ? '' : 's'} per sale.` });
+      }
+      if (limits.openSales !== null) {
+        const open = await db.privateSale.count({ where: { sellerId: ctx.user.userId, status: 'open', windowEnd: { gt: now } } });
+        if (open >= limits.openSales) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: `Your membership allows ${limits.openSales} open sale${limits.openSales === 1 ? '' : 's'} at a time.` });
+        }
       }
 
       const point = snapMeetPoint(input.meetPoint.lat, input.meetPoint.lng);
@@ -195,11 +206,12 @@ export const salesRouter = router({
       return { saleId: sale.id, state: input.outcome };
     }),
 
-  /** The seller's sales, newest first, with who asked for the meet point. */
+  /** The seller's sales, newest first, with who asked for the meet point and their membership limits. */
   mine: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'sales-mine' }))
     .query(async ({ ctx }) => {
       const now = new Date();
+      const limits = await limitsFor(ctx.user.userId);
       const sales = await db.privateSale.findMany({
         where: { sellerId: ctx.user.userId },
         orderBy: { createdAt: 'desc' },
@@ -207,6 +219,7 @@ export const salesRouter = router({
         include: { requests: { orderBy: { createdAt: 'asc' }, include: { buyer: { select: { name: true } } } } },
       });
       return {
+        limits,
         sales: sales.map((sale) => ({
           saleId: sale.id,
           title: sale.title,

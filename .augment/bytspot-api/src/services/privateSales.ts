@@ -1,4 +1,5 @@
 import { db } from '../lib/db';
+import { isMembershipTier, type MembershipTier } from '../lib/membershipTier';
 
 /**
  * Private sales: a seller shares an item with chosen buyers, an expiring meet
@@ -9,8 +10,19 @@ import { db } from '../lib/db';
 export const PAYMENT_PROVIDERS = ['paypal', 'cashapp', 'venmo'] as const;
 export type PaymentProvider = (typeof PAYMENT_PROVIDERS)[number];
 
-export const MAX_OPEN_SALES = 5;
 export const MAX_BUYERS_PER_SALE = 5;
+
+/** Per membership. `openSales: null` is unlimited. */
+export const SALE_LIMITS: Record<MembershipTier, { openSales: number | null; buyersPerSale: number }> = {
+  green: { openSales: 1, buyersPerSale: 1 },
+  platinum: { openSales: 5, buyersPerSale: 3 },
+  black: { openSales: null, buyersPerSale: MAX_BUYERS_PER_SALE },
+};
+
+export function saleLimits(membershipTier: unknown) {
+  const tier: MembershipTier = isMembershipTier(membershipTier) ? membershipTier : 'green';
+  return { tier, ...SALE_LIMITS[tier] };
+}
 export const MAX_WINDOW_MS = 4 * 60 * 60 * 1000;
 export const MAX_WINDOW_LEAD_MS = 7 * 24 * 60 * 60 * 1000;
 /** A meet point outlives its sale by this long, then is cleared. */

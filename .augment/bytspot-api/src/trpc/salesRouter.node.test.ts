@@ -9,6 +9,7 @@ const createCaller = createCallerFactory(appRouter);
 const sale = db.privateSale as any;
 const request = db.privateSaleRequest as any;
 const handle = db.sellerPaymentHandle as any;
+const user = db.user as any;
 
 const as = (userId: string | null): Context => ({
   user: userId ? { userId, email: `${userId}@bytspot.com` } : null,
@@ -27,7 +28,10 @@ const openSale = () => ({
 });
 
 let saleWhere: any;
+let tier = 'green';
 beforeEach(() => {
+  tier = 'green';
+  user.findUnique = async () => ({ membershipTier: tier });
   resetLocalRateLimitForTests();
   saleWhere = null;
   sale.findFirst = async ({ where }: any) => { saleWhere = where; return openSale(); };
@@ -68,8 +72,35 @@ test('a sale needs a saved handle per provider, a valid window and room under th
 
   await assert.rejects(() => seller().sales.create({ ...input, providers: ['venmo', 'paypal'] }), { code: 'PRECONDITION_FAILED' });
   await assert.rejects(() => seller().sales.create({ ...input, windowEnd: new Date(Date.now() + 6 * hour) }), { code: 'BAD_REQUEST' });
-  sale.count = async () => 5;
-  await assert.rejects(() => seller().sales.create(input), { code: 'CONFLICT' });
+});
+
+test('membership sets how many sales stay open and how many buyers each allows', async () => {
+  const input = {
+    title: 'Jordan 4 Retro, size 10', priceCents: 22_000,
+    meetPoint: { lat: 33.787861, lng: -84.383191, placeName: 'Colony Square plaza' },
+    windowStart: new Date(Date.now() + hour), windowEnd: new Date(Date.now() + 3 * hour), providers: ['venmo' as const],
+  };
+  let open = 1;
+  sale.count = async () => open;
+  await assert.rejects(() => seller().sales.create(input), { code: 'FORBIDDEN', message: /1 open sale at a time/ });
+  open = 0;
+  await assert.rejects(() => seller().sales.create({ ...input, buyerLimit: 2 }), { code: 'FORBIDDEN', message: /1 buyer per sale/ });
+
+  tier = 'platinum';
+  open = 4;
+  assert.ok(await seller().sales.create({ ...input, buyerLimit: 3 }));
+  await assert.rejects(() => seller().sales.create({ ...input, buyerLimit: 4 }), { code: 'FORBIDDEN' });
+  open = 5;
+  await assert.rejects(() => seller().sales.create(input), { code: 'FORBIDDEN', message: /5 open sales/ });
+
+  tier = 'black';
+  open = 500;
+  assert.ok(await seller().sales.create({ ...input, buyerLimit: 5 }));
+
+  sale.findMany = async () => [];
+  assert.deepEqual((await seller().sales.mine()).limits, { tier: 'black', openSales: null, buyersPerSale: 5 });
+  tier = 'unknown';
+  assert.deepEqual((await seller().sales.mine()).limits, { tier: 'green', openSales: 1, buyersPerSale: 1 });
 });
 
 test('a share link never shows the meet point, and shows the area only when signed in', async () => {

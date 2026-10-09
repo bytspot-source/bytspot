@@ -72,6 +72,9 @@ model User {
   partyEncounterOptIns  PartyEncounterOptIn[]
   confirmedPartyCredits PartyPerformer[]      @relation("performerConfirmation")
   bookingLinkTaps       BookingLinkTap[]
+  paymentHandles        SellerPaymentHandle[]
+  privateSales          PrivateSale[]         @relation("privateSaleSeller")
+  privateSaleRequests   PrivateSaleRequest[]  @relation("privateSaleBuyer")
 
   @@map("users")
 }
@@ -1746,4 +1749,82 @@ model DemandEvent {
   @@index([demandId, occurredAt])
   @@index([sellerId, kind, occurredAt])
   @@map("demand_events")
+}
+
+// ─── Private sales ───────────────────────────────────
+//
+// A seller shares an item with chosen buyers, an expiring meet point and their
+// own PayPal, Cash App or Venmo handle. Bytspot never holds or moves money.
+
+/// One handle per provider. Ownership is confirmed by the seller, not the
+/// provider, so clients label it "Seller-confirmed".
+model SellerPaymentHandle {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  /// paypal | cashapp | venmo
+  provider    String
+  /// Normalised: PayPal.Me name, cashtag without $, Venmo username without @.
+  handle      String
+  /// The name the seller saw on their own handle page when confirming it.
+  displayName String    @map("display_name")
+  confirmedAt DateTime  @map("confirmed_at")
+  removedAt   DateTime? @map("removed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@map("seller_payment_handles")
+}
+
+model PrivateSale {
+  id             String    @id @default(cuid())
+  sellerId       String    @map("seller_id")
+  title          String
+  /// Display only. USD.
+  priceCents     Int       @map("price_cents")
+  /// Which of the seller's handles the buyer may pay with.
+  providers      String[]
+  /// A public place, snapped to about 30 m. Cleared 7 days after the sale closes.
+  meetPlaceName  String?   @map("meet_place_name")
+  meetLat        Float?    @map("meet_lat")
+  meetLng        Float?    @map("meet_lng")
+  /// Neighborhood name an unapproved buyer may see instead of the meet point.
+  meetAreaLabel  String?   @map("meet_area_label")
+  windowStart    DateTime  @map("window_start")
+  windowEnd      DateTime  @map("window_end")
+  buyerLimit     Int       @default(1) @map("buyer_limit")
+  /// open | sold | cancelled. An open sale whose window has passed is ended.
+  status         String    @default("open")
+  closedAt       DateTime? @map("closed_at")
+  meetScrubbedAt DateTime? @map("meet_scrubbed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  seller   User                 @relation("privateSaleSeller", fields: [sellerId], references: [id], onDelete: Cascade)
+  requests PrivateSaleRequest[]
+
+  @@index([sellerId, status])
+  @@index([status, windowEnd])
+  @@map("private_sales")
+}
+
+model PrivateSaleRequest {
+  id        String    @id @default(cuid())
+  saleId    String    @map("sale_id")
+  buyerId   String    @map("buyer_id")
+  /// pending | approved | declined
+  status    String    @default("pending")
+  decidedAt DateTime? @map("decided_at")
+  arrivedAt DateTime? @map("arrived_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  sale  PrivateSale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  buyer User        @relation("privateSaleBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
+
+  @@unique([saleId, buyerId])
+  @@index([buyerId])
+  @@map("private_sale_requests")
 }

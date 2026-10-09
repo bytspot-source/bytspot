@@ -149,3 +149,22 @@ services:
       - key: SENTRY_DSN
         sync: false
 
+  # ─── Private sales: a meet point outlives its sale by 7 days, then is cleared ─
+  - type: cron
+    name: bytspot-scrub-private-sales
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    schedule: "53 7 * * *"
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: node dist/scripts/scrubPrivateSales.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BYTSPOT_RUNTIME
+        value: job
+      - key: DATABASE_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+

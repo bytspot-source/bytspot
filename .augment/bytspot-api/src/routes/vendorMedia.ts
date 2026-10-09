@@ -88,7 +88,7 @@ function listWhere(parent: MediaParent, id: string) {
   return parent === 'location' ? { locationId: id } : { bookableId: id };
 }
 
-/** Video needs the object store and the business's paid video hosting. */
+/** Video needs the object store and the business's premium video hosting. */
 function videoAvailableFor(vendor: VendorContext): boolean {
   return objectStoreConfigured() && Boolean(vendor.seller.videoHostingAt);
 }

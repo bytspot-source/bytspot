@@ -300,7 +300,7 @@ export const MEDIA_REFUSALS: Record<MediaRefusal, string> = {
   'too-large': 'That file is too large',
   'at-capacity': 'This already has as many files as it can hold',
   'cover-has-no-index': 'A cover cannot specify a slot',
-  'video-needs-hosting': 'Video hosting is a paid Bytspot plan. Ask Bytspot to switch it on.',
+  'video-needs-hosting': 'Video hosting is a premium Bytspot service. Ask Bytspot to switch it on.',
 };
 
 export function mediaHttpStatus(reason: MediaRefusal): 400 | 402 | 403 | 409 | 413 {

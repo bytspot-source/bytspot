@@ -139,7 +139,7 @@ export const adminVendorsRouter = router({
     }),
 
   /**
-   * Paid video hosting. On: the business can upload a video and guests see
+   * Premium video hosting, granted free by the team. On: the business can upload a video and guests see
    * it once approved. Off: uploads stop and guests stop seeing video; the
    * stored clip is kept so switching back on restores it.
    */

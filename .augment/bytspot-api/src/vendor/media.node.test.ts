@@ -139,7 +139,7 @@ test('object keys nest seller, parent, kind, and id — never a public URL', () 
   );
 });
 
-test('guests see a vendor file only after team approval, and video only with paid hosting', () => {
+test('guests see a vendor file only after team approval, and video only with premium hosting', () => {
   const hosting = { videoHostingAt: new Date('2026-10-01T00:00:00Z') };
   assert.equal(guestCanSeeMedia({ kind: 'cover', reviewStatus: 'approved' }, {}), true);
   assert.equal(guestCanSeeMedia({ kind: 'cover', reviewStatus: 'pending' }, hosting), false);

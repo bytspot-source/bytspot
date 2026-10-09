@@ -28,6 +28,7 @@ import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-i
 import vendorPartySessionsRouter from './routes/vendorPartySessions';
 import vendorDemandRouter from './routes/vendorDemand';
 import vendorMediaRouter from './routes/vendorMedia';
+import adminVenueMediaRouter from './routes/adminVenueMedia';
 import vendorWindowsRouter from './routes/vendorWindows';
 import vendorTeamRouter from './routes/vendorTeam';
 import vendorInsightsRouter from './routes/vendorInsights';
@@ -60,6 +61,7 @@ app.use(
 app.use(partyStripeWebhookRouter);
 app.use('/vendor/locations', express.json({ limit: '4mb' }));
 app.use('/vendor/bookables', express.json({ limit: '4mb' }));
+app.use('/admin/venues', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // Global rate limiting: 300 requests per 15 min per IP
@@ -104,6 +106,7 @@ app.use(vendorSetupRouter);
 app.use(vendorDemandRouter);
 app.use(vendorPartySessionsRouter);
 app.use(vendorMediaRouter);
+app.use(adminVenueMediaRouter);
 app.use(vendorWindowsRouter);
 app.use(vendorTeamRouter);
 app.use(vendorInsightsRouter);

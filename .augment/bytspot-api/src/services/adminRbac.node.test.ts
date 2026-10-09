@@ -133,6 +133,12 @@ test('only an admin reaches Admin Places and Vendors', async () => {
       { code: 'FORBIDDEN' },
     );
     await assert.rejects(() => guestCaller().admin.vendors.approve({ sellerId: 'sel_1' }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.places.venues(), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: true }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.places.linkGoogle({ venueId: 'ven_1', placeId: 'ChIJ_x' }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.mediaQueue(), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.reviewMedia({ mediaId: 'med_1', approve: true }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: true }), { code: 'FORBIDDEN' });
   });
 });
 
@@ -182,6 +188,86 @@ test('a place no one has listed cannot be hidden', async () => {
       await assert.rejects(() => adminCaller().admin.places.setHidden({ venueId: 'ven_host', hidden: true }), { code: 'NOT_FOUND' });
     } finally {
       restore();
+    }
+  });
+});
+
+test('the Bytspot team approves a venue as controlled and can return it to listed', async () => {
+  await withAdmin(async () => {
+    const writes: any[] = [];
+    const restore = stub(db.venue, 'updateMany', async (args: any) => { writes.push(args); return { count: 1 }; });
+    try {
+      assert.deepEqual(await adminCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: true }), { control: 'bytspot' });
+      assert.ok(writes[0].data.controlledAt instanceof Date);
+      assert.equal(writes[0].data.controlledByUserId, 'usr_admin');
+      assert.deepEqual(await adminCaller().admin.places.setControlled({ venueId: 'ven_1', controlled: false }), { control: 'listed' });
+      assert.deepEqual(writes[1].data, { controlledAt: null, controlledByUserId: null });
+    } finally {
+      restore();
+    }
+    const missing = stub(db.venue, 'updateMany', async () => ({ count: 0 }));
+    try {
+      await assert.rejects(() => adminCaller().admin.places.setControlled({ venueId: 'ven_gone', controlled: true }), { code: 'NOT_FOUND' });
+    } finally {
+      missing();
+    }
+  });
+});
+
+test('an admin approves or rejects vendor media and switches paid video hosting', async () => {
+  await withAdmin(async () => {
+    const media: any[] = [];
+    const sellers: any[] = [];
+    const restores = [
+      stub(db.vendorMedia, 'updateMany', async (args: any) => { media.push(args); return { count: args.where.id === 'gone' ? 0 : 1 }; }),
+      stub(db.vendorSeller, 'findUnique', async ({ where }: any) => ({ id: where.id })),
+      stub(db.vendorSeller, 'update', async (args: any) => { sellers.push(args); return { id: args.where.id }; }),
+    ];
+    try {
+      assert.deepEqual(await adminCaller().admin.vendors.reviewMedia({ mediaId: 'med_1', approve: true, note: 'ignored' }), { reviewStatus: 'approved' });
+      assert.equal(media[0].data.reviewStatus, 'approved');
+      assert.equal(media[0].data.reviewNote, null);
+      assert.equal(media[0].data.reviewedByUserId, 'usr_admin');
+      await adminCaller().admin.vendors.reviewMedia({ mediaId: 'med_2', approve: false, note: 'Blurry' });
+      assert.deepEqual([media[1].data.reviewStatus, media[1].data.reviewNote], ['rejected', 'Blurry']);
+      await assert.rejects(() => adminCaller().admin.vendors.reviewMedia({ mediaId: 'gone', approve: true }), { code: 'NOT_FOUND' });
+
+      await adminCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: true });
+      assert.ok(sellers[0].data.videoHostingAt instanceof Date);
+      await adminCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: false });
+      assert.deepEqual(sellers[1].data, { videoHostingAt: null, videoHostingByUserId: null });
+    } finally {
+      restores.reverse().forEach((restore) => restore());
+    }
+  });
+});
+
+test('an admin links a venue to the Google place they confirmed, once per place', async () => {
+  await withAdmin(async () => {
+    const updates: any[] = [];
+    let owner: any = null;
+    const restores = [
+      stub(db.venue, 'findUnique', async ({ where }: any) => (where.id ? { id: where.id } : owner)),
+      stub(db.venue, 'update', async (args: any) => { updates.push(args); return { id: args.where.id }; }),
+      stub(db.venue, 'findMany', async () => []),
+      stub(config, 'googlePlacesApiKey', 'test-key'),
+      stub(globalThis, 'fetch', async () => new Response(JSON.stringify({
+        id: 'ChIJ_krog', displayName: { text: 'Krog Street Market' }, formattedAddress: '99 Krog St NE',
+        location: { latitude: 33.757, longitude: -84.364 },
+      }), { status: 200 })),
+    ];
+    try {
+      assert.deepEqual(await adminCaller().admin.places.linkGoogle({ venueId: 'ven_krog', placeId: 'ChIJ_krog' }), { placeId: 'ChIJ_krog' });
+      assert.deepEqual(updates[0], { where: { id: 'ven_krog' }, data: { googlePlaceId: 'ChIJ_krog' } });
+
+      owner = { id: 'ven_other', name: 'Other Venue' };
+      await assert.rejects(() => adminCaller().admin.places.linkGoogle({ venueId: 'ven_krog', placeId: 'ChIJ_krog' }), { code: 'CONFLICT' });
+      assert.equal(updates.length, 1);
+
+      assert.deepEqual(await adminCaller().admin.places.linkGoogle({ venueId: 'ven_krog', placeId: null }), { placeId: null });
+      assert.deepEqual(updates[1].data, { googlePlaceId: null });
+    } finally {
+      restores.reverse().forEach((restore) => restore());
     }
   });
 });

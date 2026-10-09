@@ -93,8 +93,8 @@ const MEDIA_SELECT = { select: { id: true, kind: true, position: true, mimeType:
 
 const CARD_INCLUDE = {
   seller: { select: { id: true, legalName: true } },
-  location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu'] } }, ...MEDIA_SELECT } } },
-  media: { where: { kind: { in: ['cover', 'gallery'] } }, ...MEDIA_SELECT },
+  location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu'] }, reviewStatus: 'approved' }, ...MEDIA_SELECT } } },
+  media: { where: { kind: { in: ['cover', 'gallery'] }, reviewStatus: 'approved' }, ...MEDIA_SELECT },
 } satisfies Prisma.VendorAvailabilityWindowInclude;
 
 /** Only what a guest may see: published, at an ACTIVE place, of an ACTIVE business. */

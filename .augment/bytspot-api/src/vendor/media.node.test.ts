@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  guestCanSeeMedia,
+  readReviewStatus,
   MEDIA_CAPS,
   MEDIA_REFUSALS,
   mediaHttpStatus,
@@ -135,4 +137,16 @@ test('object keys nest seller, parent, kind, and id — never a public URL', () 
     }),
     'vendor/sel_1/location/loc_1/cover/med_1',
   );
+});
+
+test('guests see a vendor file only after team approval, and video only with paid hosting', () => {
+  const hosting = { videoHostingAt: new Date('2026-10-01T00:00:00Z') };
+  assert.equal(guestCanSeeMedia({ kind: 'cover', reviewStatus: 'approved' }, {}), true);
+  assert.equal(guestCanSeeMedia({ kind: 'cover', reviewStatus: 'pending' }, hosting), false);
+  assert.equal(guestCanSeeMedia({ kind: 'gallery', reviewStatus: 'rejected' }, hosting), false);
+  assert.equal(guestCanSeeMedia({ kind: 'video', reviewStatus: 'approved' }, { videoHostingAt: null }), false);
+  assert.equal(guestCanSeeMedia({ kind: 'video', reviewStatus: 'approved' }, hosting), true);
+  assert.equal(readReviewStatus('APPROVED'), 'pending');
+  assert.equal(readReviewStatus(undefined), 'pending');
+  assert.equal(mediaHttpStatus('video-needs-hosting'), 402);
 });

@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { db } from '../lib/db';
 import { cached } from '../lib/redis';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
+import { venueControl } from '../services/venueControl';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 
 const router = Router();
@@ -36,6 +37,7 @@ router.get('/venues', async (_req, res) => {
       category: v.category,
       imageUrl: v.imageUrl,
       ...projectVenuePhoto(v),
+      control: venueControl(v),
       googlePlaceId: v.googlePlaceId,
       booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
       crowd: v.crowdLevels[0]
@@ -91,11 +93,12 @@ router.get('/venues/nearby', async (req, res) => {
         image_url: string | null;
         photo_provenance: string;
         photo_attribution: string | null;
+        controlled_at: Date | null;
         distance: number;
       }>
     >(
       `SELECT id, name, slug, address, lat, lng, category, image_url,
-              photo_provenance, photo_attribution,
+              photo_provenance, photo_attribution, controlled_at,
               ST_Distance(location::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as distance
        FROM venues
        WHERE location IS NOT NULL
@@ -121,6 +124,7 @@ router.get('/venues/nearby', async (req, res) => {
         photoAttribution: r.photo_attribution,
         imageUrl: r.image_url,
       }),
+      control: venueControl({ controlledAt: r.controlled_at }),
       distanceMeters: Math.round(r.distance),
     }));
   });
@@ -203,6 +207,7 @@ router.get('/venues/:slug', async (req, res) => {
     category: venue.category,
     imageUrl: venue.imageUrl,
     ...projectVenuePhoto(venue),
+    control: venueControl(venue),
     crowd: {
       current: venue.crowdLevels[0] || null,
       history: venue.crowdLevels,

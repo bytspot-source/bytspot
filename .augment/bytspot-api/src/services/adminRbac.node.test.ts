@@ -214,7 +214,7 @@ test('the Bytspot team approves a venue as controlled and can return it to liste
   });
 });
 
-test('an admin approves or rejects vendor media and switches paid video hosting', async () => {
+test('an admin approves or rejects vendor media and switches premium video hosting', async () => {
   await withAdmin(async () => {
     const media: any[] = [];
     const sellers: any[] = [];

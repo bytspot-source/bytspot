@@ -1189,8 +1189,8 @@ model VendorSeller {
   /// When a Bytspot admin approved the business. It cannot go live without it.
   approvedAt       DateTime? @map("approved_at")
   approvedByUserId String?   @map("approved_by_user_id")
-  /// Paid video hosting, switched on by a Bytspot admin once the business has
-  /// paid. Without it the business cannot upload video and none is shown.
+  /// Premium video hosting, granted free by a Bytspot admin. Without it the
+  /// business cannot upload video and none is shown.
   videoHostingAt       DateTime? @map("video_hosting_at")
   videoHostingByUserId String?   @map("video_hosting_by_user_id")
 

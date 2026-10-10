@@ -34,6 +34,8 @@ const PUBLIC_MUTATIONS = new Set([
   'auth.signup', 'auth.login', 'auth.appleSignIn', 'auth.googleSignIn',
   // "Forgot password": the member cannot sign in, which is why they are here.
   'auth.requestPasswordReset', 'auth.resetPassword',
+  // The refresh token is the credential; the access token may already have lapsed.
+  'auth.refresh', 'auth.signOut',
   'betaSignup.signup',
   'admin.validateInvite',
   // A count of taps on a listed place's booking link; anonymous taps count too.

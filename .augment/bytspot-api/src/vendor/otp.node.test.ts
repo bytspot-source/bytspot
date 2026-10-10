@@ -210,6 +210,19 @@ test('the hourly send cap cannot be waited out one cooldown at a time', async ()
   assert.ok((await sendCooldownSecs(email)) > 0);
 });
 
+test('a member refresh token cannot be spent as a vendor one, nor the reverse', async () => {
+  const member = await issueRefreshToken('usr_1', 'member');
+  const vendor = await issueRefreshToken('usr_1');
+  assert.deepEqual(await spendRefreshToken(member), { ok: false, reason: 'unknown' });
+  assert.deepEqual(await spendRefreshToken(vendor, 'member'), { ok: false, reason: 'unknown' });
+  assert.equal((await spendRefreshToken(member, 'member')).ok, true);
+
+  // Signing out everywhere in the app leaves the console signed in.
+  const consoleToken = await issueRefreshToken('usr_1');
+  await signOutEverywhere('usr_1', Date.now() + 1, 'member');
+  assert.equal((await spendRefreshToken(consoleToken)).ok, true);
+});
+
 test('a refresh token is single-use and rotates', async () => {
   const first = await issueRefreshToken('usr_1');
   const spent = await spendRefreshToken(first);

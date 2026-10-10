@@ -202,6 +202,62 @@ export async function sendEmailVerificationCode(to: string, code: string, ttlMin
   });
 }
 
+/**
+ * A "Forgot password" code. Unlike the codes above, the caller does not await
+ * this: auth.requestPasswordReset must answer in the same time whether or not
+ * the address has an account, so a send failure is reported, not returned.
+ */
+export async function sendPasswordResetCode(to: string, code: string, ttlMins: number): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a password reset code');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `${code} is your Bytspot password reset code`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Reset your password</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+          Enter this code in Bytspot, then choose a new password. It expires in ${ttlMins} minutes.
+        </p>
+        <div style="font-size: 34px; font-weight: 700; letter-spacing: 8px; padding: 18px 0; text-align: center; background: #161616; border-radius: 12px;">
+          ${code}
+        </div>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If you did not ask to reset your password, you can ignore this email. Your password has not changed.
+        </p>
+      </div>
+    `,
+  });
+}
+
+/**
+ * Sent instead of a code when the account signs in with Apple or Google and has
+ * no password to reset, so the member is not left waiting for a code.
+ */
+export async function sendPasswordResetProviderNotice(to: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a password reset notice');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: 'Signing in to Bytspot',
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Your account has no password</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0;">
+          Someone asked to reset the Bytspot password for this email. This account signs in with Apple or Google, so there is no password to reset. Use Continue with Apple or Continue with Google in the app.
+        </p>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If you did not ask for this, you can ignore this email.
+        </p>
+      </div>
+    `,
+  });
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 }

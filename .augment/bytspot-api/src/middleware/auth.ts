@@ -5,6 +5,8 @@ import { config } from '../config';
 export interface AuthPayload {
   userId: string;
   email: string;
+  /** Issued-at, in seconds. Set by jsonwebtoken on every token it signs. */
+  iat?: number;
 }
 
 declare global {

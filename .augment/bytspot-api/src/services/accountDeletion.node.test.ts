@@ -4,10 +4,12 @@ import { db } from '../lib/db';
 import {
   DELETION_GRACE_DAYS,
   isSessionRevoked,
+  isTokenSignedOut,
   isWithinGracePeriod,
   purgeDateFrom,
   purgeExpiredAccounts,
   revokeSessions,
+  signOutSessionsIssuedBefore,
 } from './accountDeletion';
 
 // Prisma delegates are lazy proxies; node:test mock.method cannot inspect
@@ -22,6 +24,7 @@ function fakeRedis(store = new Map<string, string>()) {
   return {
     store,
     async set(key: string, value: string) { store.set(key, value); return 'OK'; },
+    async get(key: string) { return store.get(key) ?? null; },
     async del(key: string) { return store.delete(key) ? 1 : 0; },
     async exists(key: string) { return store.has(key) ? 1 : 0; },
   } as any;
@@ -112,6 +115,19 @@ test('revocation without Redis does not lock anyone out', async () => {
   // blocks sign-in and the purge job still runs.
   await revokeSessions('usr_gone', null);
   assert.equal(await isSessionRevoked('usr_gone', null), false);
+});
+
+test('a password reset signs out older tokens of that member only', async () => {
+  const redis = fakeRedis();
+  const resetAt = new Date('2026-10-10T12:00:00Z');
+  const resetSecs = resetAt.getTime() / 1000;
+  await signOutSessionsIssuedBefore('usr_reset', resetAt, redis);
+  assert.equal(await isTokenSignedOut('usr_reset', resetSecs - 60, redis), true);
+  assert.equal(await isTokenSignedOut('usr_reset', undefined, redis), true);
+  // The token issued by the reset itself stays valid.
+  assert.equal(await isTokenSignedOut('usr_reset', resetSecs, redis), false);
+  assert.equal(await isTokenSignedOut('usr_other', resetSecs - 60, redis), false);
+  assert.equal(await isTokenSignedOut('usr_reset', resetSecs - 60, null), false);
 });
 
 test('a failing Redis fails open rather than denying every request', async () => {

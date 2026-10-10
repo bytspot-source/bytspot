@@ -84,6 +84,37 @@ export async function isSessionRevoked(userId: string, redis: Redis | null = get
   }
 }
 
+/** Redis key holding, per user, the time before which access tokens are void. */
+const SIGNED_OUT_BEFORE_KEY = 'account:signed-out-before';
+/** Longer than any access token lives, so the cutoff never lapses before the tokens it voids. */
+const SIGNED_OUT_BEFORE_TTL_SECS = 90 * 24 * 60 * 60;
+
+/**
+ * Voids every access token issued before now. A password reset calls this so
+ * whoever knew the old password is signed out, not only locked out of the next
+ * sign-in. Tokens issued from this second on stay valid.
+ */
+export async function signOutSessionsIssuedBefore(userId: string, now = new Date(), redis: Redis | null = getRedis()): Promise<void> {
+  if (!redis) return;
+  try {
+    await redis.set(`${SIGNED_OUT_BEFORE_KEY}:${userId}`, String(Math.floor(now.getTime() / 1000)), 'EX', SIGNED_OUT_BEFORE_TTL_SECS);
+  } catch {
+    /* see revokeSessions */
+  }
+}
+
+export async function isTokenSignedOut(userId: string, issuedAt: number | undefined, redis: Redis | null = getRedis()): Promise<boolean> {
+  if (!redis) return false;
+  try {
+    const cutoff = await redis.get(`${SIGNED_OUT_BEFORE_KEY}:${userId}`);
+    if (!cutoff) return false;
+    return (issuedAt ?? 0) < Number(cutoff);
+  } catch {
+    /* see isSessionRevoked */
+    return false;
+  }
+}
+
 /**
  * Irreversibly remove accounts whose grace period has elapsed. Returns the
  * number of rows purged so the cron response is observable.

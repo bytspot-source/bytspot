@@ -1,7 +1,7 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import type Redis from 'ioredis';
 import { getRedis } from '../lib/redis';
-import { isSessionRevoked } from '../services/accountDeletion';
+import { isSessionRevoked, isTokenSignedOut } from '../services/accountDeletion';
 import type { Context } from './context';
 
 /**
@@ -30,6 +30,9 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   // must lose its live sessions rather than stay usable until the JWT expires.
   if (await isSessionRevoked(ctx.user.userId)) {
     throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is pending deletion' });
+  }
+  if (await isTokenSignedOut(ctx.user.userId, ctx.user.iat)) {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Your password was changed. Sign in again.' });
   }
   return next({ ctx: { ...ctx, user: ctx.user } });
 });

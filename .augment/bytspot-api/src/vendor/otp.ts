@@ -17,12 +17,12 @@ import { AUTH } from './contract';
  */
 
 /**
- * Which code flow a key belongs to. Vendor console sign-in and member email
- * verification share this store but never each other's challenges or limits:
- * a member code must not open the console, and verifying an email must not
- * spend a vendor's send allowance.
+ * Which code flow a key belongs to. Vendor console sign-in, member email
+ * verification and password reset share this store but never each other's
+ * challenges or limits: a member code must not open the console or set a
+ * password, and verifying an email must not spend a vendor's send allowance.
  */
-export type OtpScope = 'vendor' | 'member';
+export type OtpScope = 'vendor' | 'member' | 'reset';
 
 const challengePrefix = (scope: OtpScope) => `${scope}:otp:`;
 const sendEmailPrefix = (scope: OtpScope) => `${scope}:otp:send:email:`;

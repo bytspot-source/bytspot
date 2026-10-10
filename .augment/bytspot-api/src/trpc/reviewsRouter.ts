@@ -6,18 +6,26 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
+import { blockedUserIds } from '../services/safety';
 
 export const reviewsRouter = router({
-  /** List reviews for a venue (public) */
+  /** List reviews for a venue (public). Leaves out reviews hidden by reports,
+   *  by suspended accounts, and by anyone the viewer blocked or was blocked by. */
   list: publicProcedure
     .input(z.object({
       venueId: z.string(),
       limit: z.number().min(1).max(50).optional().default(20),
       cursor: z.string().optional(),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
+      const blocked = ctx.user ? [...await blockedUserIds(ctx.user.userId)] : [];
       const rows = await db.review.findMany({
-        where: { venueId: input.venueId },
+        where: {
+          venueId: input.venueId,
+          moderationHiddenAt: null,
+          user: { suspendedAt: null },
+          ...(blocked.length > 0 ? { userId: { notIn: blocked } } : {}),
+        },
         include: { user: { select: { id: true, name: true } } },
         orderBy: { createdAt: 'desc' },
         take: input.limit + 1,
@@ -45,7 +53,7 @@ export const reviewsRouter = router({
     .input(z.object({ venueId: z.string() }))
     .query(async ({ input }) => {
       const agg = await db.review.aggregate({
-        where: { venueId: input.venueId },
+        where: { venueId: input.venueId, moderationHiddenAt: null, user: { suspendedAt: null } },
         _avg: { stars: true, vibe: true },
         _count: true,
       });

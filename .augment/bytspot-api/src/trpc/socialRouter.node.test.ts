@@ -7,6 +7,9 @@ import { hashEmail, hashPhone, normalizeEmail, normalizePhone } from '../lib/con
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
+// Nobody has blocked anybody unless a test says so.
+(db.userBlock as any).findMany = async () => [];
+(db.userBlock as any).findFirst = async () => null;
 const authenticatedContext: Context = { user: { userId: 'me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-social-client' };
 const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
@@ -222,6 +225,29 @@ test('Suggestions surface mutual hash overlaps, never raw contacts, and skip dec
   assert.equal(items.length, 1);
   assert.deepEqual(items[0], { userId: 'friend', name: 'Friend', relationshipStatus: 'invite_received', circleIds: ['circle-1'] });
   for (const item of items) assert.deepEqual(Object.keys(item), ['userId', 'name', 'relationshipStatus', 'circleIds']);
+});
+
+test('A block either way hides the member from suggestions and refuses invites and follows', async () => {
+  contactHash.findMany = async ({ where }: any) => where.userId === 'me'
+    ? [{ hashedContact: hashA }]
+    : [{ userId: 'friend' }, { userId: 'blocked-user' }];
+  let asked: string[] = [];
+  user.findMany = async ({ where }: any) => {
+    asked = where.id.in;
+    assert.equal(where.suspendedAt, null, 'suspended accounts are never suggested');
+    return [{ id: 'friend', name: 'Friend' }];
+  };
+  (db.userBlock as any).findMany = async () => [{ blockerId: 'blocked-user', blockedId: 'me' }];
+  (db.userBlock as any).findFirst = async () => ({ id: 'block-1' });
+  try {
+    await caller().social.suggestions();
+    assert.deepEqual(asked, ['friend']);
+    await assert.rejects(() => caller().social.invites.create({ targetType: 'user', targetValue: 'blocked-user' }), { code: 'NOT_FOUND' });
+    await assert.rejects(() => caller().social.follow({ userId: 'blocked-user' }), { code: 'NOT_FOUND' });
+  } finally {
+    (db.userBlock as any).findMany = async () => [];
+    (db.userBlock as any).findFirst = async () => null;
+  }
 });
 
 test('Suggestions surface identity matches without the other member syncing', async () => {

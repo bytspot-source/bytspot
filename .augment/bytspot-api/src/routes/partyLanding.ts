@@ -230,7 +230,8 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
   let party;
   try {
     party = await db.party.findFirst({
-      where: { id: partyId, status: 'published' },
+      // Hidden by reports, or hosted by a suspended account, reads as gone.
+      where: { id: partyId, status: 'published', moderationHiddenAt: null, host: { suspendedAt: null } },
       // Only the media id is needed to build the cover URL. Selecting the row
       // wholesale would stream the image binary out of Postgres on every open.
       include: { host: { select: { name: true } }, media: { where: { kind: 'cover' }, take: 1, select: { id: true } } },

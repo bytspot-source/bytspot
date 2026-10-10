@@ -16,6 +16,7 @@ import {
   snapMeetPoint,
   type PaymentProvider,
 } from '../services/privateSales';
+import { isBlockedBetween } from '../services/safety';
 
 /**
  * Private sales. The meet point leaves this router only for the seller and
@@ -30,13 +31,18 @@ const requestId = z.object({ requestId: z.string().min(1).max(64) });
 
 const unavailable = () => new TRPCError({ code: 'NOT_FOUND', message: SALE_UNAVAILABLE });
 
-/** An open sale whose seller still has an account, or NOT_FOUND. */
-async function liveSale(id: string, now = new Date()) {
+/**
+ * An open sale whose seller still has an account, or NOT_FOUND. Hidden by
+ * reports, sold by a suspended account, or between two members where either
+ * blocked the other also reads as NOT_FOUND.
+ */
+async function liveSale(id: string, viewerId?: string | null, now = new Date()) {
   const sale = await db.privateSale.findFirst({
-    where: { id, status: 'open', windowEnd: { gt: now }, seller: { deletedAt: null } },
+    where: { id, status: 'open', windowEnd: { gt: now }, moderationHiddenAt: null, seller: { deletedAt: null, suspendedAt: null } },
     include: { seller: { select: { name: true } } },
   });
   if (!sale) throw unavailable();
+  if (viewerId && await isBlockedBetween(viewerId, sale.sellerId)) throw unavailable();
   return sale;
 }
 
@@ -252,7 +258,7 @@ export const salesRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'sales-view' }))
     .input(saleId)
     .query(async ({ ctx, input }) => {
-      const sale = await liveSale(input.saleId);
+      const sale = await liveSale(input.saleId, ctx.user?.userId);
       const isSeller = ctx.user?.userId === sale.sellerId;
       const request = ctx.user && !isSeller
         ? await db.privateSaleRequest.findUnique({
@@ -277,7 +283,7 @@ export const salesRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'sales-request' }))
     .input(saleId)
     .mutation(async ({ ctx, input }) => {
-      const sale = await liveSale(input.saleId);
+      const sale = await liveSale(input.saleId, ctx.user.userId);
       if (sale.sellerId === ctx.user.userId) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This is your own sale.' });
       const key = { saleId_buyerId: { saleId: sale.id, buyerId: ctx.user.userId } };
       const existing = await db.privateSaleRequest.findUnique({ where: key, select: { status: true } });
@@ -323,7 +329,7 @@ export const salesRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'sales-buyer-card' }))
     .input(saleId)
     .query(async ({ ctx, input }) => {
-      const sale = await liveSale(input.saleId);
+      const sale = await liveSale(input.saleId, ctx.user.userId);
       const request = await db.privateSaleRequest.findUnique({
         where: { saleId_buyerId: { saleId: sale.id, buyerId: ctx.user.userId } },
         select: { status: true, arrivedAt: true },
@@ -355,7 +361,7 @@ export const salesRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'sales-arrived' }))
     .input(saleId)
     .mutation(async ({ ctx, input }) => {
-      const sale = await liveSale(input.saleId);
+      const sale = await liveSale(input.saleId, ctx.user.userId);
       const { count } = await db.privateSaleRequest.updateMany({
         where: { saleId: sale.id, buyerId: ctx.user.userId, status: 'approved' },
         data: { arrivedAt: new Date() },

@@ -6,6 +6,9 @@ import { db } from '../lib/db';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
+// Nobody has blocked anybody unless a test says so.
+(db.userBlock as any).findMany = async () => [];
+(db.userBlock as any).findFirst = async () => null;
 const hostContext: Context = { user: { userId: 'host-user', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-control-host' };
 const guestContext: Context = { user: { userId: 'guest-user', email: 'guest@bytspot.com' }, clientRateLimitKey: 'test-control-guest' };
 const credential = 'A'.repeat(43);

@@ -140,11 +140,15 @@ const DISCOVERABLE_ACCESS_MODES = ['free-rsvp', 'paid-ticket'];
  * actually decides, and a caller that forgets one is still refused by the
  * other. Audience circles are deliberately absent — callers differ on whether
  * a circle-scoped party is in scope, and that is the one honest difference
- * between them.
+ * between them. A party hidden by reports, hosted by a suspended account, or
+ * hosted by someone the caller blocked or was blocked by is never offered.
  */
-export function discoverablePartyWhere(now: Date) {
+export function discoverablePartyWhere(now: Date, excludedHostIds: readonly string[] = []) {
   return {
     status: 'published',
+    moderationHiddenAt: null,
+    host: { suspendedAt: null },
+    ...(excludedHostIds.length > 0 ? { hostUserId: { notIn: [...excludedHostIds] } } : {}),
     closedAt: null,
     admissionPaused: false,
     accessMode: { in: DISCOVERABLE_ACCESS_MODES },

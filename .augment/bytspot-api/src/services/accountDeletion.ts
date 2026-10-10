@@ -1,6 +1,8 @@
 import type Redis from 'ioredis';
+import { TRPCError } from '@trpc/server';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
+import { SUSPENDED_MESSAGE } from './safety';
 
 /**
  * Grace period between a deletion request and irreversible purge. Long enough
@@ -33,9 +35,12 @@ export type SignInDeletionOutcome = 'none' | 'restored' | 'purge-pending';
  *
  * Returns 'purge-pending' when the grace period has elapsed; the caller must
  * then refuse the sign-in, because the row is awaiting irreversible purge.
+ * A suspended account is refused here for every credential, before a pending
+ * deletion could be cancelled by it.
  */
 export async function applyDeletionPolicyOnSignIn(userId: string, now = new Date()): Promise<SignInDeletionOutcome> {
-  const user = await db.user.findUnique({ where: { id: userId }, select: { deletedAt: true, purgeAfter: true } });
+  const user = await db.user.findUnique({ where: { id: userId }, select: { deletedAt: true, purgeAfter: true, suspendedAt: true } });
+  if (user?.suspendedAt) throw new TRPCError({ code: 'FORBIDDEN', message: SUSPENDED_MESSAGE });
   if (!user?.deletedAt) return 'none';
   if (!isWithinGracePeriod(user.purgeAfter, now)) return 'purge-pending';
 

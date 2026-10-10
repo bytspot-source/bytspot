@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, publicProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
+import { blockedUserIds, isBlockedBetween } from '../services/safety';
 
 const surfaceInput = z.string().max(40).optional();
 // Clients send only salted SHA-256 hex digests of normalized contact
@@ -62,7 +63,10 @@ const socialInvitesRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'You cannot invite yourself.' });
       }
       const target = await db.user.findUnique({ where: { id: input.targetValue }, select: { id: true, name: true } });
-      if (!target) throw new TRPCError({ code: 'NOT_FOUND', message: 'That member was not found.' });
+      // Someone either of them blocked reads exactly like nobody.
+      if (!target || await isBlockedBetween(ctx.user.userId, target.id)) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'That member was not found.' });
+      }
       // A supplied circle must belong to the caller; it is echoed for the
       // client but never grants the recipient access to the circle.
       let circle: { id: string; name: string } | null = null;
@@ -132,8 +136,12 @@ const socialInvitesRouter = router({
   list: protectedProcedure
     .input(z.object({ surface: surfaceInput }).optional())
     .query(async ({ ctx }) => {
+      const blocked = [...await blockedUserIds(ctx.user.userId)];
       const rows = await db.socialInvitation.findMany({
-        where: { OR: [{ fromUserId: ctx.user.userId }, { toUserId: ctx.user.userId }] },
+        where: {
+          OR: [{ fromUserId: ctx.user.userId }, { toUserId: ctx.user.userId }],
+          ...(blocked.length > 0 ? { NOT: [{ fromUserId: { in: blocked } }, { toUserId: { in: blocked } }] } : {}),
+        },
         include: {
           fromUser: { select: { id: true, name: true } },
           toUser: { select: { id: true, name: true } },
@@ -251,7 +259,9 @@ const socialGroupsRouter = router({
         const circle = await db.socialCircle.findFirst({ where: { id: input.groupId, ownerId: ctx.user.userId }, select: { id: true } });
         if (!circle) throw new TRPCError({ code: 'NOT_FOUND', message: 'That circle was not found.' });
         const member = await db.user.findUnique({ where: { id: input.userId }, select: { id: true } });
-        if (!member) throw new TRPCError({ code: 'NOT_FOUND', message: 'That member was not found.' });
+        if (!member || await isBlockedBetween(ctx.user.userId, member.id)) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'That member was not found.' });
+        }
         await db.socialCircleMember.upsert({
           where: { circleId_userId: { circleId: circle.id, userId: member.id } },
           create: { circleId: circle.id, userId: member.id },
@@ -339,8 +349,9 @@ const socialPeopleMetRouter = router({
       if (myGuest.status !== 'checked-in') {
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'People You Met is only available to guests who checked in at the door.' });
       }
+      const blocked = [...await blockedUserIds(ctx.user.userId)];
       const optIns = await db.partyEncounterOptIn.findMany({
-        where: { partyId: party.id, userId: { not: ctx.user.userId } },
+        where: { partyId: party.id, userId: { notIn: [ctx.user.userId, ...blocked] } },
         select: { userId: true },
         take: 200,
       });
@@ -414,10 +425,13 @@ export const socialRouter = router({
         select: { userId: true },
       }),
     ]);
-    const candidateIds = [...new Set([...identityMatches.map((row) => row.userId), ...overlaps.map((row) => row.userId)])].slice(0, 50);
+    const blocked = await blockedUserIds(ctx.user.userId);
+    const candidateIds = [...new Set([...identityMatches.map((row) => row.userId), ...overlaps.map((row) => row.userId)])]
+      .filter((id) => !blocked.has(id))
+      .slice(0, 50);
     if (candidateIds.length === 0) return { items: [] };
     const [users, invites, circleMemberships] = await Promise.all([
-      db.user.findMany({ where: { id: { in: candidateIds } }, select: { id: true, name: true } }),
+      db.user.findMany({ where: { id: { in: candidateIds }, suspendedAt: null }, select: { id: true, name: true } }),
       db.socialInvitation.findMany({
         where: {
           OR: [
@@ -494,7 +508,7 @@ export const socialRouter = router({
       }
       // Verify target user exists
       const target = await db.user.findUnique({ where: { id: input.userId } });
-      if (!target) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+      if (!target || await isBlockedBetween(ctx.user.userId, target.id)) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
 
       await db.follow.upsert({
         where: { followerId_followingId: { followerId: ctx.user.userId, followingId: input.userId } },

@@ -65,6 +65,8 @@ import { demandRouter } from './demandRouter';
 import { inventoryRouter } from './inventoryRouter';
 import { adminPlacesRouter } from './adminPlacesRouter';
 import { adminVendorsRouter } from './adminVendorsRouter';
+import { adminSafetyRouter } from './adminSafetyRouter';
+import { safetyRouter } from './safetyRouter';
 import { salesRouter } from './salesRouter';
 
 function signToken(userId: string, email: string): string {
@@ -499,9 +501,10 @@ const authRouter = router({
       const verdict = await spendRefreshToken(input.refreshToken, 'member');
       if (!verdict.ok) throw ended();
 
-      const user = await db.user.findUnique({ where: { id: verdict.userId }, select: { id: true, email: true, deletedAt: true } });
+      const user = await db.user.findUnique({ where: { id: verdict.userId }, select: { id: true, email: true, deletedAt: true, suspendedAt: true } });
       // A pending deletion ends sessions; signing in again is what restores it.
-      if (!user || user.deletedAt) {
+      // A suspension ends them until an admin reinstates the account.
+      if (!user || user.deletedAt || user.suspendedAt) {
         await revokeFamily(verdict.familyId, 'member');
         throw ended();
       }
@@ -1378,6 +1381,7 @@ const providersRouter = router({
 const adminRouter = router({
   places: adminPlacesRouter,
   vendors: adminVendorsRouter,
+  safety: adminSafetyRouter,
   /** admin.platformFee query — the live rate plus recent changes. */
   platformFee: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-platform-fee' }))
@@ -1673,6 +1677,7 @@ export const appRouter = router({
   demand: demandRouter,
   inventory: inventoryRouter,
   sales: salesRouter,
+  safety: safetyRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

@@ -287,6 +287,42 @@ export async function sendSignInMethodAddedEmail(to: string, providerTitle: stri
   });
 }
 
+export interface SafetyReportNotice {
+  kind: string;
+  reason: string;
+  note?: string | null;
+  summary: string;
+  openReports: number;
+  hidden: boolean;
+}
+
+/**
+ * A member reported something. A notification: the report is already in the
+ * admin Reports queue, so the caller logs a failure rather than failing.
+ * Member-typed text is escaped before it reaches HTML.
+ */
+export async function sendSafetyReportAlert(to: string, report: SafetyReportNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a safety report alert');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `New report: ${report.kind} (${report.reason})`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">A member reported a ${escapeHtml(report.kind)}</h1>
+        <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">${escapeHtml(report.summary)}</p>
+        <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 0 0 8px;">Reason: ${escapeHtml(report.reason)} · Open reports on it: ${report.openReports}${report.hidden ? ' · Hidden until reviewed' : ''}</p>
+        ${report.note ? `<p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 0 0 8px;">“${escapeHtml(report.note)}”</p>` : ''}
+        <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 0;">
+          Review it in the admin console under Reports within 24 hours.
+        </p>
+      </div>
+    `,
+  });
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 }

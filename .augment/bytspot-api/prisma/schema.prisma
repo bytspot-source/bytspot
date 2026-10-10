@@ -30,6 +30,9 @@ model User {
   deletedAt      DateTime? @map("deleted_at")
   purgeAfter     DateTime? @map("purge_after")
   deletionReason String?   @map("deletion_reason")
+  // Set by an admin acting on reports. A suspended account can't sign in and
+  // what it hosts or sells is hidden. Cleared to reinstate it.
+  suspendedAt    DateTime? @map("suspended_at")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -77,6 +80,9 @@ model User {
   paymentHandles        SellerPaymentHandle[]
   privateSales          PrivateSale[]         @relation("privateSaleSeller")
   privateSaleRequests   PrivateSaleRequest[]  @relation("privateSaleBuyer")
+  blocks                UserBlock[]           @relation("userBlocker")
+  blockedBy             UserBlock[]           @relation("userBlocked")
+  contentReports        ContentReport[]       @relation("contentReporter")
 
   @@map("users")
 }
@@ -302,6 +308,9 @@ model Party {
   /// Set when the host publishes the recap album. While null the recap is
   /// staged and host-only, and must stay indistinguishable from no recap.
   recapPublishedAt       DateTime? @map("recap_published_at")
+  /// Set while reports hold it for review, and kept when an admin removes it.
+  /// Hidden from everyone who doesn't already hold access.
+  moderationHiddenAt     DateTime? @map("moderation_hidden_at")
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
@@ -916,6 +925,8 @@ model Review {
   stars     Int // 1-5
   vibe      Int // 1-10
   comment   String   @default("")
+  /// Hidden by reports awaiting review, or removed by an admin.
+  moderationHiddenAt DateTime? @map("moderation_hidden_at")
   createdAt DateTime @default(now()) @map("created_at")
 
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1801,6 +1812,8 @@ model PrivateSale {
   status         String    @default("open")
   closedAt       DateTime? @map("closed_at")
   meetScrubbedAt DateTime? @map("meet_scrubbed_at")
+  /// Hidden by reports awaiting review, or removed by an admin.
+  moderationHiddenAt DateTime? @map("moderation_hidden_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 
@@ -1829,4 +1842,49 @@ model PrivateSaleRequest {
   @@unique([saleId, buyerId])
   @@index([buyerId])
   @@map("private_sale_requests")
+}
+
+/// One member no longer seeing or reaching another. Read in both directions:
+/// a block hides each from the other.
+model UserBlock {
+  id        String   @id @default(cuid())
+  blockerId String   @map("blocker_id")
+  blockedId String   @map("blocked_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  blocker User @relation("userBlocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("userBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("user_blocks")
+}
+
+/// A member's report of a person, party, review or private sale. One per
+/// reporter per item. The snapshot is the item as reported, so editing it
+/// afterwards doesn't change what an admin reviews.
+model ContentReport {
+  id          String    @id @default(cuid())
+  reporterId  String    @map("reporter_id")
+  /// user | party | review | sale
+  targetKind  String    @map("target_kind")
+  targetId    String    @map("target_id")
+  /// The member who made the item (the person, for a user report).
+  ownerId     String    @map("owner_id")
+  reason      String
+  note        String?
+  snapshot    Json
+  /// open | dismissed | removed | suspended
+  status      String    @default("open")
+  decidedById String?   @map("decided_by_id")
+  decidedAt   DateTime? @map("decided_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  reporter User @relation("contentReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@unique([reporterId, targetKind, targetId])
+  @@index([status, createdAt])
+  @@index([targetKind, targetId])
+  @@index([ownerId])
+  @@map("content_reports")
 }

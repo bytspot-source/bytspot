@@ -13,6 +13,7 @@
     "db:migrate": "prisma migrate deploy",
     "admin:resolve": "tsx scripts/resolve-admin-ids.ts",
     "seed:demand": "tsx src/scripts/seedDemandFixture.ts",
+    "places:find": "tsx src/scripts/findPlaceIds.ts",
     "test": "tsx --test src/**/*.node.test.ts",
     "audit:gate": "node scripts/audit-gate.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit"

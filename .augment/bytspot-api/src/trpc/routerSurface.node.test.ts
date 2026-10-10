@@ -32,6 +32,8 @@ const mutations = Object.entries(procedures)
 /** Mutations that are unauthenticated by design. Anything else must reject. */
 const PUBLIC_MUTATIONS = new Set([
   'auth.signup', 'auth.login', 'auth.appleSignIn', 'auth.googleSignIn',
+  // "Forgot password": the member cannot sign in, which is why they are here.
+  'auth.requestPasswordReset', 'auth.resetPassword',
   'betaSignup.signup',
   'admin.validateInvite',
   // A count of taps on a listed place's booking link; anonymous taps count too.

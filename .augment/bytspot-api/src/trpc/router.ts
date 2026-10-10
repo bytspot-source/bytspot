@@ -10,9 +10,19 @@ import { db } from '../lib/db';
 import { serializableTransactionWithRetry } from '../lib/transactions';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
-import { sendWelcomeEmail, sendBetaLeadEmail, mailerIsConfigured, sendEmailVerificationCode } from '../lib/email';
+import { sendWelcomeEmail, sendBetaLeadEmail, mailerIsConfigured, sendEmailVerificationCode, sendPasswordResetCode, sendPasswordResetProviderNotice } from '../lib/email';
+import { captureError } from '../lib/observability';
 import { AUTH } from '../vendor/contract';
-import { createChallenge, recordSend, sendCooldownSecs, verifyChallenge } from '../vendor/otp';
+import {
+  createChallenge,
+  ipSendCooldownSecs,
+  ipSubmitCooldownSecs,
+  recordIpSend,
+  recordIpSubmit,
+  recordSend,
+  sendCooldownSecs,
+  verifyChallenge,
+} from '../vendor/otp';
 import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
@@ -30,7 +40,7 @@ import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
 import { resolveProviderIdentity } from '../services/providerIdentityAuth';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
-import { applyDeletionPolicyOnSignIn } from '../services/accountDeletion';
+import { applyDeletionPolicyOnSignIn, signOutSessionsIssuedBefore } from '../services/accountDeletion';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -324,6 +334,108 @@ const authRouter = router({
       });
       void refreshUserIdentityHashes(user.id, { email: user.email });
       return { emailVerified: true as const };
+    }),
+
+  /**
+   * Starts "Forgot password". The reply is identical whether the address has a
+   * password account, an Apple/Google account, or none: every request gets a
+   * live challenge, and only a password account's challenge is bound to a
+   * user. A wrong code therefore reads the same everywhere, and only the
+   * mailbox owner learns which case applied.
+   */
+  requestPasswordReset: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'auth:password-reset' }))
+    .input(z.object({ email: z.string().email().max(255) }))
+    .mutation(async ({ ctx, input }) => {
+      const { email } = input;
+      if (!mailerIsConfigured()) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Password reset is temporarily unavailable' });
+      }
+      if (await ipSendCooldownSecs(ctx.clientRateLimitKey, 'reset') > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again later.' });
+      }
+      // Counted per address whether or not it has an account, so the cooldown
+      // itself does not reveal which addresses are registered.
+      const cooldown = await sendCooldownSecs(email, 'reset');
+      if (cooldown > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: `Wait ${cooldown} seconds before asking for another code` });
+      }
+
+      const user = await db.user.findUnique({
+        where: { email },
+        select: { id: true, email: true, _count: { select: { providerIdentities: true } } },
+      });
+      // Apple and Google accounts have a generated password nobody knows;
+      // setting one here would link a password to them, which is a separate,
+      // explicit flow.
+      const resettable = user !== null && user._count.providerIdentities === 0;
+      const challenge = await createChallenge(email, resettable ? user.id : '', 'reset');
+      await Promise.all([recordSend(email, 'reset'), recordIpSend(ctx.clientRateLimitKey, 'reset')]);
+
+      // Not awaited: waiting on the mailer only when an account exists would
+      // make the response time an account oracle.
+      const ttlMins = Math.round(AUTH.code.ttlSecs / 60);
+      if (resettable) {
+        sendPasswordResetCode(user.email, challenge.code, ttlMins).catch((error) => captureError(error, { flow: 'password-reset' }));
+      } else if (user) {
+        sendPasswordResetProviderNotice(user.email).catch((error) => captureError(error, { flow: 'password-reset' }));
+      }
+
+      return {
+        challengeId: challenge.id,
+        expiresInSecs: AUTH.code.ttlSecs,
+        resendInSecs: AUTH.code.resendCooldownSecs,
+      };
+    }),
+
+  /**
+   * Finishes "Forgot password": the emailed code sets a new password and signs
+   * the member in. Every older session is signed out. The code also proves the
+   * member owns the address, so an unconfirmed email becomes confirmed.
+   */
+  resetPassword: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:password-reset-submit' }))
+    .input(z.object({
+      challengeId: z.string().min(1).max(100),
+      code: z.string().regex(/^\d+$/, 'Enter the code from the email').length(AUTH.code.length, 'Enter the code from the email'),
+      password: z.string().min(8, 'Password must be at least 8 characters').max(128),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      if (await ipSubmitCooldownSecs(ctx.clientRateLimitKey, 'reset') > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again later.' });
+      }
+      await recordIpSubmit(ctx.clientRateLimitKey, 'reset');
+
+      const expired = () => new TRPCError({ code: 'BAD_REQUEST', message: 'This code has expired. Send a new one.' });
+      const verdict = await verifyChallenge(input.challengeId, input.code, 'reset');
+      if (!verdict.ok) {
+        if (verdict.reason === 'mismatch') {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: "That code isn't right. Check the email and try again." });
+        }
+        throw expired();
+      }
+
+      const existing = await db.user.findUnique({ where: { id: verdict.userId }, select: { emailVerifiedAt: true } });
+      if (!existing) throw expired();
+      const deletion = await applyDeletionPolicyOnSignIn(verdict.userId);
+      if (deletion === 'purge-pending') throw expired();
+
+      const hashed = await bcrypt.hash(input.password, 12);
+      const user = await db.user.update({
+        where: { id: verdict.userId },
+        data: { password: hashed, ...(existing.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }) },
+        select: { id: true, email: true, name: true },
+      });
+      if (!existing.emailVerifiedAt || deletion === 'restored') void refreshUserIdentityHashes(user.id, { email: user.email });
+
+      await signOutSessionsIssuedBefore(user.id);
+      const token = signToken(user.id, user.email);
+      return {
+        token,
+        user: { id: user.id, email: user.email, name: user.name },
+        emailVerified: true as const,
+        deletionCancelled: deletion === 'restored',
+      };
     }),
 });
 

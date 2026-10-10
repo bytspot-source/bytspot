@@ -105,6 +105,22 @@ test('a member email code cannot be spent as a vendor sign-in, nor the reverse',
   assert.deepEqual(await verifyChallenge(member.id, member.code, 'member'), { ok: true, userId: 'usr_1' });
 });
 
+test('a password reset code is spendable only as a password reset', async () => {
+  const reset = await createChallenge('person@midtown.example', 'usr_1', 'reset');
+  assert.deepEqual(await verifyChallenge(reset.id, reset.code, 'member'), { ok: false, reason: 'unknown' });
+  assert.deepEqual(await verifyChallenge(reset.id, reset.code), { ok: false, reason: 'unknown' });
+  assert.deepEqual(await verifyChallenge(reset.id, reset.code, 'reset'), { ok: true, userId: 'usr_1' });
+});
+
+test('a reset challenge with no account behind it reads like a real one and never verifies', async () => {
+  // auth.requestPasswordReset issues these for unknown addresses so a wrong
+  // code cannot tell a caller whether the address is registered.
+  const decoy = await createChallenge('nobody@midtown.example', '', 'reset');
+  const wrong = decoy.code === '000000' ? '111111' : '000000';
+  assert.deepEqual(await verifyChallenge(decoy.id, wrong, 'reset'), { ok: false, reason: 'mismatch' });
+  assert.deepEqual(await verifyChallenge(decoy.id, decoy.code, 'reset'), { ok: false, reason: 'unknown' });
+});
+
 test('member and vendor send limits are counted separately', async () => {
   await recordSend('person@midtown.example', 'member');
   assert.ok((await sendCooldownSecs('person@midtown.example', 'member')) > 0);

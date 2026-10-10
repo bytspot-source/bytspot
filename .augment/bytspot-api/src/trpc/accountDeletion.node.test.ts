@@ -5,6 +5,8 @@ import { appRouter } from './router';
 import { db } from '../lib/db';
 import type { Context } from './context';
 import { applyDeletionPolicyOnSignIn } from '../services/accountDeletion';
+import { redisHandle, type RedisLike } from '../vendor/redisHandle';
+import { createChallenge } from '../vendor/otp';
 
 const createCaller = createCallerFactory(appRouter);
 const authenticated: Context = { user: { userId: 'usr_me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-deletion-client' };
@@ -122,6 +124,81 @@ test('signing in without a pending deletion changes nothing', async () => {
 
   assert.equal(await applyDeletionPolicyOnSignIn('usr_me'), 'none');
   assert.equal(updated, false);
+});
+
+// "Forgot password" signs the member in, so it follows the same deletion policy.
+function codeStore(): RedisLike {
+  const store = new Map<string, string>();
+  return {
+    get: async (key) => store.get(key) ?? null,
+    set: async (key, value) => { store.set(key, value); return 'OK'; },
+    del: async (...keys) => keys.filter((key) => store.delete(key)).length,
+    ttl: async (key) => (store.has(key) ? 600 : -2),
+    incr: async (key) => { const next = Number(store.get(key) ?? 0) + 1; store.set(key, String(next)); return next; },
+    expire: async () => 1,
+    getdel: async (key) => { const value = store.get(key) ?? null; store.delete(key); return value; },
+  };
+}
+
+function resetCaller(key: string) {
+  return createCaller({ user: null, clientRateLimitKey: key });
+}
+
+test('a password reset with the emailed code sets the password, confirms the email and signs in', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const { id, code } = await createChallenge('ama@bytspot.com', 'usr_reset', 'reset');
+  user.findUnique = async (args: any) => (args.select?.emailVerifiedAt ? { emailVerifiedAt: null } : { deletedAt: null, purgeAfter: null });
+  let written: any = null;
+  user.update = async (args: any) => { written = args.data; return { id: 'usr_reset', email: 'ama@bytspot.com', name: 'Ama' }; };
+
+  const result = await resetCaller('test-reset-ok').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' });
+
+  assert.equal(typeof result.token, 'string');
+  assert.deepEqual(result.user, { id: 'usr_reset', email: 'ama@bytspot.com', name: 'Ama' });
+  assert.equal(result.emailVerified, true);
+  assert.equal(result.deletionCancelled, false);
+  assert.notEqual(written.password, 'a-new-password', 'only the hash is stored');
+  assert.ok(written.emailVerifiedAt instanceof Date, 'the code proves the member owns the address');
+  // Single use.
+  await assert.rejects(() => resetCaller('test-reset-ok').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' }), { code: 'BAD_REQUEST' });
+});
+
+test('a wrong reset code changes nothing and says so', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const { id, code } = await createChallenge('ama@bytspot.com', 'usr_reset', 'reset');
+  user.update = async () => { assert.fail('a wrong code must not change the password'); };
+
+  await assert.rejects(
+    () => resetCaller('test-reset-wrong').auth.resetPassword({ challengeId: id, code: code === '000000' ? '111111' : '000000', password: 'a-new-password' }),
+    { code: 'BAD_REQUEST', message: "That code isn't right. Check the email and try again." },
+  );
+});
+
+test('a reset code for an address with no password account never sets a password', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const { id, code } = await createChallenge('nobody@bytspot.com', '', 'reset');
+  user.update = async () => { assert.fail('no account may be changed'); };
+
+  await assert.rejects(
+    () => resetCaller('test-reset-decoy').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' }),
+    { code: 'BAD_REQUEST', message: 'This code has expired. Send a new one.' },
+  );
+});
+
+test('a password reset restores a pending deletion like any other sign-in', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const { id, code } = await createChallenge('ama@bytspot.com', 'usr_reset', 'reset');
+  user.findUnique = async (args: any) => (args.select?.emailVerifiedAt
+    ? { emailVerifiedAt: new Date() }
+    : { deletedAt: new Date(), purgeAfter: new Date(Date.now() + DAY_MS) });
+  user.update = async () => ({ id: 'usr_reset', email: 'ama@bytspot.com', name: 'Ama' });
+
+  const result = await resetCaller('test-reset-restore').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' });
+  assert.equal(result.deletionCancelled, true);
 });
 
 test('an older client saving preferences does not switch party alerts back on', async () => {

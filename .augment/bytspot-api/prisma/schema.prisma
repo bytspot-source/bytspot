@@ -48,6 +48,7 @@ model User {
   savedVehicles         Vehicle[]
   iosPushDevices        IOSPushDevice[]
   providerIdentities    ProviderIdentity[]
+  extraEmails           UserEmail[]
   vendorSeats           VendorSeat[]
   collections           SpotCollection[]
   pointTxns             PointTransaction[]
@@ -129,6 +130,22 @@ model ProviderIdentity {
   @@unique([provider, subject])
   @@index([userId])
   @@map("provider_identities")
+}
+
+// A confirmed email a member added next to their account email (`User.email`).
+// A row exists only once its emailed code was entered. Stored in lowercase.
+// An address belongs to one account, as an account email or an extra email;
+// the app checks both tables before adding one (services/accountEmails.ts).
+model UserEmail {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  email     String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_emails")
 }
 
 // ─── Venues ──────────────────────────────────────────

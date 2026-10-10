@@ -4,6 +4,7 @@ import { TRPCError } from '@trpc/server';
 import { db } from '../lib/db';
 import { VerifiedProviderIdentity } from './providerIdTokenVerifier';
 import { refreshUserIdentityHashes } from './userIdentityHashes';
+import { extraEmailOwnerId, normalizeEmail } from './accountEmails';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
@@ -15,7 +16,7 @@ export type ProviderResolution =
   | { user: ProviderUser; isNewUser: boolean }
   | { linkTo: { id: string; email: string } };
 
-export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user' | 'userIdentityHash'>;
+export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user' | 'userIdentityHash' | 'userEmail'>;
 
 /**
  * Resolves a verified provider subject to exactly one user. An existing
@@ -42,6 +43,9 @@ export async function resolveProviderIdentity(
 
   const emailOwner = await database.user.findUnique({ where: { email: identity.email }, select: { id: true, email: true } });
   if (emailOwner) return { linkTo: emailOwner };
+  // An extra email is proven the same way, by a code sent to that address.
+  const extraOwner = await extraEmailOwnerId(identity.email, database);
+  if (extraOwner) return { linkTo: { id: extraOwner, email: normalizeEmail(identity.email) } };
 
   // A provider-only account cannot use password login until a future explicit
   // password-setting flow is completed. Never persist the generated secret.

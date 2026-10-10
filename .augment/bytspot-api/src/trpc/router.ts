@@ -10,7 +10,19 @@ import { db } from '../lib/db';
 import { serializableTransactionWithRetry } from '../lib/transactions';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
-import { sendWelcomeEmail, sendBetaLeadEmail, mailerIsConfigured, sendEmailVerificationCode, sendPasswordResetCode, sendProviderLinkCode, sendSignInMethodAddedEmail } from '../lib/email';
+import {
+  sendWelcomeEmail,
+  sendBetaLeadEmail,
+  mailerIsConfigured,
+  sendEmailVerificationCode,
+  sendPasswordResetCode,
+  sendProviderLinkCode,
+  sendSignInMethodAddedEmail,
+  sendAddEmailCode,
+  sendEmailAlreadyInUseNotice,
+  sendEmailAddedNotice,
+  sendAccountEmailChangedNotice,
+} from '../lib/email';
 import { captureError } from '../lib/observability';
 import { AUTH } from '../vendor/contract';
 import {
@@ -50,6 +62,17 @@ import {
   takePendingLink,
 } from '../services/providerLink';
 import type { VerifiedProviderIdentity } from '../services/providerIdTokenVerifier';
+import {
+  accountEmails,
+  addExtraEmail,
+  extraEmailOwnerId,
+  extraEmailRefusal,
+  holdPendingEmail,
+  makeAccountEmail,
+  normalizeEmail,
+  removeExtraEmail,
+  takePendingEmail,
+} from '../services/accountEmails';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { applyDeletionPolicyOnSignIn, signOutSessionsIssuedBefore } from '../services/accountDeletion';
 import { issueRefreshToken, revokeFamily, rotateRefreshToken, signOutEverywhere, signOutToken, spendRefreshToken } from '../vendor/refreshTokens';
@@ -210,7 +233,7 @@ const authRouter = router({
     .mutation(async ({ input }) => {
       const { email, password, name, ref } = input;
 
-      const existing = await db.user.findUnique({ where: { email } });
+      const existing = await db.user.findUnique({ where: { email } }) ?? await extraEmailOwnerId(email);
       if (existing) {
         // A soft-deleted row still owns the address for the grace period, so
         // the reply must not differ from an active account: doing otherwise
@@ -246,7 +269,11 @@ const authRouter = router({
     }))
     .mutation(async ({ input }) => {
       const { email, password } = input;
-      const user = await db.user.findUnique({ where: { email } });
+      const extraOwner = async () => {
+        const id = await extraEmailOwnerId(email);
+        return id ? db.user.findUnique({ where: { id } }) : null;
+      };
+      const user = await db.user.findUnique({ where: { email } }) ?? await extraOwner();
       if (!user) {
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
       }
@@ -417,15 +444,17 @@ const authRouter = router({
         throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: `Wait ${cooldown} seconds before asking for another code` });
       }
 
-      const user = await db.user.findUnique({ where: { email }, select: { id: true, email: true } });
-      const challenge = await createChallenge(email, user?.id ?? '', 'reset');
+      // Any confirmed email of the account works; the code goes to the one typed.
+      const accountOwner = await db.user.findUnique({ where: { email }, select: { id: true } });
+      const ownerId = accountOwner?.id ?? await extraEmailOwnerId(email);
+      const challenge = await createChallenge(email, ownerId ?? '', 'reset');
       await Promise.all([recordSend(email, 'reset'), recordIpSend(ctx.clientRateLimitKey, 'reset')]);
 
       // Not awaited: waiting on the mailer only when an account exists would
       // make the response time an account oracle.
       const ttlMins = Math.round(AUTH.code.ttlSecs / 60);
-      if (user) {
-        sendPasswordResetCode(user.email, challenge.code, ttlMins).catch((error) => captureError(error, { flow: 'password-reset' }));
+      if (ownerId) {
+        sendPasswordResetCode(accountOwner ? email : normalizeEmail(email), challenge.code, ttlMins).catch((error) => captureError(error, { flow: 'password-reset' }));
       }
 
       return {
@@ -607,7 +636,118 @@ const authRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'auth:unlink-provider' }))
     .input(z.object({ provider: z.enum(['apple', 'google']) }))
     .mutation(async ({ ctx, input }) => detachProviderIdentity(ctx.user.userId, input.provider)),
+
+  /** The account email and the confirmed extra emails. */
+  emails: protectedProcedure.query(async ({ ctx }) => accountEmails(ctx.user.userId)),
+
+  /**
+   * Starts adding an extra email: a code goes to that address. When another
+   * account already has it, the reply is the same and that address is told it
+   * is in use instead, so only the mailbox owner learns which case applied.
+   */
+  addEmail: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'auth:add-email' }))
+    .input(z.object({ email: z.string().email().max(255), makeAccountEmail: z.boolean().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const email = normalizeEmail(input.email);
+      const verdict = await extraEmailRefusal(ctx.user.userId, email);
+      if (verdict && 'refusal' in verdict) throw verdict.refusal;
+
+      if (!mailerIsConfigured()) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Email codes are temporarily unavailable' });
+      }
+      if (await ipSendCooldownSecs(ctx.clientRateLimitKey, 'email') > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again later.' });
+      }
+      const cooldown = await sendCooldownSecs(email, 'email');
+      if (cooldown > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: `Wait ${cooldown} seconds before asking for another code` });
+      }
+
+      const inUse = verdict !== null;
+      const challenge = await createChallenge(email, inUse ? '' : ctx.user.userId, 'email');
+      if (inUse) {
+        await sendEmailAlreadyInUseNotice(email);
+      } else {
+        await holdPendingEmail(challenge.id, { email, makeAccountEmail: input.makeAccountEmail === true });
+        await sendAddEmailCode(email, challenge.code, Math.round(AUTH.code.ttlSecs / 60));
+      }
+      await Promise.all([recordSend(email, 'email'), recordIpSend(ctx.clientRateLimitKey, 'email')]);
+      return {
+        challengeId: challenge.id,
+        maskedEmail: maskEmail(email),
+        expiresInSecs: AUTH.code.ttlSecs,
+        resendInSecs: AUTH.code.resendCooldownSecs,
+      };
+    }),
+
+  /** Confirms the code from auth.addEmail; the email is added and joins contact discovery. */
+  confirmAddEmail: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:add-email-confirm' }))
+    .input(z.object({
+      challengeId: z.string().min(1).max(100),
+      code: z.string().regex(/^\d+$/, 'Enter the code from the email').length(AUTH.code.length, 'Enter the code from the email'),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const expired = () => new TRPCError({ code: 'BAD_REQUEST', message: 'This code has expired. Send a new one.' });
+      const verdict = await verifyChallenge(input.challengeId, input.code, 'email');
+      if (!verdict.ok || verdict.userId !== ctx.user.userId) {
+        if (!verdict.ok && verdict.reason === 'mismatch') {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: "That code isn't right. Check the email and try again." });
+        }
+        throw expired();
+      }
+      const pending = await takePendingEmail(input.challengeId);
+      if (!pending) throw expired();
+
+      await addExtraEmail(ctx.user.userId, pending.email);
+      if (pending.makeAccountEmail) {
+        const change = await makeAccountEmail(ctx.user.userId, pending.email);
+        notifyAccountEmailChanged(change);
+        void refreshUserIdentityHashes(ctx.user.userId, { email: change.current });
+      } else {
+        const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { email: true } });
+        if (user) {
+          sendEmailAddedNotice(user.email, maskEmail(pending.email)).catch((error) => captureError(error, { flow: 'add-email' }));
+          void refreshUserIdentityHashes(ctx.user.userId, { email: user.email });
+        }
+      }
+      return accountEmails(ctx.user.userId);
+    }),
+
+  /**
+   * Makes a confirmed extra email the account email. The session and the
+   * earlier confirmation are the proof; both addresses are told.
+   */
+  makeAccountEmail: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'auth:make-account-email' }))
+    .input(z.object({ email: z.string().email().max(255) }))
+    .mutation(async ({ ctx, input }) => {
+      const change = await makeAccountEmail(ctx.user.userId, input.email);
+      if (change.previous !== change.current) {
+        notifyAccountEmailChanged(change);
+        void refreshUserIdentityHashes(ctx.user.userId, { email: change.current });
+      }
+      return accountEmails(ctx.user.userId);
+    }),
+
+  /** Removes an extra email; it leaves contact discovery at once. */
+  removeEmail: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:remove-email' }))
+    .input(z.object({ email: z.string().email().max(255) }))
+    .mutation(async ({ ctx, input }) => {
+      await removeExtraEmail(ctx.user.userId, input.email);
+      const emails = await accountEmails(ctx.user.userId);
+      await refreshUserIdentityHashes(ctx.user.userId, { email: emails.accountEmail.confirmed ? emails.accountEmail.email : null });
+      return emails;
+    }),
 });
+
+function notifyAccountEmailChanged(change: { previous: string; current: string }): void {
+  for (const to of [change.previous, change.current]) {
+    sendAccountEmailChangedNotice(to, maskEmail(change.current)).catch((error) => captureError(error, { flow: 'account-email-change' }));
+  }
+}
 
 /**
  * ── Venues sub-router ───────────────────────────────────

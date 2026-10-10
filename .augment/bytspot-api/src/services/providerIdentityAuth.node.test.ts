@@ -10,9 +10,10 @@ const linkedUser = { id: 'linked-user', email: 'person@example.test', name: 'Per
 
 type FakeDatabase = ProviderIdentityDatabase & { emailLookups: () => number; identityHashRows: () => unknown[]; createdUsers: () => any[] };
 
-function database({ existing = null, emailOwner = null, transactionError = null, concurrent = null }: {
+function database({ existing = null, emailOwner = null, extraEmailOwner = null, transactionError = null, concurrent = null }: {
   existing?: unknown;
   emailOwner?: unknown;
+  extraEmailOwner?: unknown;
   transactionError?: Error | null;
   concurrent?: unknown;
 } = {}): FakeDatabase {
@@ -31,6 +32,10 @@ function database({ existing = null, emailOwner = null, transactionError = null,
     user: {
       findUnique: async () => { emailLookups += 1; return emailOwner; },
       create: async ({ data }: { data: unknown }) => { createdUsers.push(data); return linkedUser; },
+    },
+    userEmail: {
+      findUnique: async () => extraEmailOwner,
+      findMany: async () => [],
     },
     userIdentityHash: {
       deleteMany: async () => ({ count: 0 }),
@@ -64,6 +69,14 @@ test('A matching email does not auto-link an existing password account', async (
   // owner is returned so the caller can ask them to prove it; nothing is created.
   const db = database({ emailOwner: { id: 'password-user', email: 'person@example.test' } });
   assert.deepEqual(await resolveProviderIdentity(identity, db), { linkTo: { id: 'password-user', email: 'person@example.test' } });
+  assert.deepEqual(db.createdUsers(), []);
+});
+
+test('An extra email on an existing account is proven like its account email', async () => {
+  // The code goes to the matched address, so an extra email links only after
+  // its owner enters it, never on the provider's word alone.
+  const db = database({ extraEmailOwner: { userId: 'extra-user' } });
+  assert.deepEqual(await resolveProviderIdentity({ ...identity, email: 'Person@Example.test' }, db), { linkTo: { id: 'extra-user', email: 'person@example.test' } });
   assert.deepEqual(db.createdUsers(), []);
 });
 

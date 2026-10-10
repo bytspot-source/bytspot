@@ -7,9 +7,10 @@ import { hashEmail } from '../lib/contactHash';
  * Bytspot?" without the other member syncing their own address book first.
  * Only salted SHA-256 digests are stored — never the raw identifiers.
  *
- * Only the account email is hashed, and only once it is verified (an email
- * code or an Apple/Google sign-in). Callers must not pass an unverified
- * email: password signup alone does not prove ownership. The profile phone is deliberately
+ * The account email is hashed only once it is verified (an email code or an
+ * Apple/Google sign-in). Callers must not pass an unverified email: password
+ * signup alone does not prove ownership. Every extra email (`UserEmail`) is
+ * hashed too: a row exists only once its code was entered. The profile phone is deliberately
  * excluded — it is free-form user input, and hashing an unverified number
  * would let a member claim someone else's number and impersonate them in
  * contact discovery. Add `kind: 'phone'` only once a phone-verification
@@ -18,7 +19,7 @@ import { hashEmail } from '../lib/contactHash';
  * Best-effort by design: identity hashes are a discovery optimization, so
  * failures must never break signup/profile flows. Callers fire-and-forget.
  */
-export type IdentityHashDatabase = Pick<typeof db, '$transaction' | 'userIdentityHash'>;
+export type IdentityHashDatabase = Pick<typeof db, '$transaction' | 'userIdentityHash' | 'userEmail'>;
 
 export async function refreshUserIdentityHashes(
   userId: string,
@@ -27,8 +28,11 @@ export async function refreshUserIdentityHashes(
 ): Promise<void> {
   try {
     const rows: { hashedIdentity: string; kind: string }[] = [];
-    const emailHash = hashEmail(identifiers.email);
-    if (emailHash) rows.push({ hashedIdentity: emailHash, kind: 'email' });
+    const extras = await database.userEmail.findMany({ where: { userId }, select: { email: true } });
+    for (const email of [identifiers.email, ...extras.map((extra) => extra.email)]) {
+      const emailHash = hashEmail(email);
+      if (emailHash && !rows.some((row) => row.hashedIdentity === emailHash)) rows.push({ hashedIdentity: emailHash, kind: 'email' });
+    }
 
     await database.$transaction([
       database.userIdentityHash.deleteMany({

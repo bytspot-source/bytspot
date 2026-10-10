@@ -10,11 +10,15 @@ import { createChallenge } from '../vendor/otp';
 import { issueRefreshToken } from '../vendor/refreshTokens';
 import { TRPCError } from '@trpc/server';
 import { ProviderLinkRequired, holdPendingLink } from '../services/providerLink';
+import { holdPendingEmail } from '../services/accountEmails';
+import { hashEmail } from '../lib/contactHash';
+import bcrypt from 'bcryptjs';
 
 const createCaller = createCallerFactory(appRouter);
 const authenticated: Context = { user: { userId: 'usr_me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-deletion-client' };
 const user = db.user as any;
 const userIdentityHash = db.userIdentityHash as any;
+const userEmail = db.userEmail as any;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -26,6 +30,8 @@ beforeEach(() => {
   user.findUnique = async () => ({ deletedAt: null, purgeAfter: null });
   user.update = async () => ({});
   userIdentityHash.deleteMany = async () => ({ count: 0 });
+  userEmail.findMany = async () => [];
+  userEmail.findUnique = async () => null;
 });
 
 test('requesting deletion schedules a purge 30 days out', async () => {
@@ -464,4 +470,136 @@ test('reading preferences rebuilds a malformed stored record', async () => {
   user.findUnique = async () => ({ notificationPrefs: { push: { party: false } } });
   const optedOut: any = await caller().user.notifications.getPrefs();
   assert.equal(optedOut.push.party, false, 'what the member chose is what they are shown');
+});
+
+// ── Extra emails ──
+function emailsAccount({ confirmed = true, extras = [] as string[] } = {}) {
+  const rows = extras.map((email) => ({ id: `ue_${email}`, email, createdAt: new Date('2026-10-01T00:00:00Z') }));
+  user.findUnique = async () => ({ email: 'Me@bytspot.com', emailVerifiedAt: confirmed ? new Date() : null });
+  user.findFirst = async () => null;
+  userEmail.findMany = async () => rows.map(({ email, createdAt }) => ({ email, createdAt }));
+  userEmail.findFirst = async (args: any) => rows.find((row) => row.email === args.where.email) ?? null;
+  userEmail.create = async (args: any) => { rows.push({ id: `ue_${args.data.email}`, email: args.data.email, createdAt: new Date() }); return {}; };
+  return rows;
+}
+
+function hashWrites() {
+  const written: any[] = [];
+  const realTransaction = (db as any).$transaction;
+  (db as any).$transaction = async (ops: unknown[]) => Promise.all(ops);
+  userIdentityHash.createMany = async ({ data }: any) => { written.push(...data); return { count: data.length }; };
+  return { written, restore: () => { (db as any).$transaction = realTransaction; } };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+test('an email already on the account, an unconfirmed account email or a full list refuses a new email', async () => {
+  emailsAccount();
+  await assert.rejects(() => caller().auth.addEmail({ email: 'me@BYTSPOT.com' }), { code: 'BAD_REQUEST', message: 'This email is already on your account.' });
+
+  // Whoever signed up with an unconfirmed address may not own it; an extra
+  // email would keep them a way in after the real owner claims it.
+  emailsAccount({ confirmed: false });
+  await assert.rejects(() => caller().auth.addEmail({ email: 'ama@gmail.com' }), { code: 'PRECONDITION_FAILED', message: 'Confirm your account email first.' });
+
+  emailsAccount({ extras: ['a@x.com', 'b@x.com', 'c@x.com', 'd@x.com', 'e@x.com'] });
+  await assert.rejects(() => caller().auth.addEmail({ email: 'ama@gmail.com' }), { code: 'PRECONDITION_FAILED' });
+});
+
+test('the emailed code adds the email, and it joins contact discovery', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const rows = emailsAccount();
+  const hashes = hashWrites();
+  try {
+    const { id, code } = await createChallenge('ama@gmail.com', 'usr_me', 'email');
+    await holdPendingEmail(id, { email: 'ama@gmail.com', makeAccountEmail: false });
+
+    const result = await caller().auth.confirmAddEmail({ challengeId: id, code });
+    await settle();
+
+    assert.deepEqual(rows.map((row) => row.email), ['ama@gmail.com']);
+    assert.deepEqual(result.accountEmail, { email: 'Me@bytspot.com', confirmed: true });
+    assert.deepEqual(result.extraEmails.map((extra) => extra.email), ['ama@gmail.com']);
+    assert.equal(result.maxExtraEmails, 5);
+    assert.deepEqual(hashes.written.map((row) => row.hashedIdentity).sort(), [hashEmail('Me@bytspot.com'), hashEmail('ama@gmail.com')].sort());
+    // Single use.
+    await assert.rejects(() => caller().auth.confirmAddEmail({ challengeId: id, code }), { code: 'BAD_REQUEST' });
+  } finally {
+    hashes.restore();
+  }
+});
+
+test("another member's code, or an address another account took meanwhile, adds nothing", async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const rows = emailsAccount();
+
+  const theirs = await createChallenge('ama@gmail.com', 'usr_someone_else', 'email');
+  await holdPendingEmail(theirs.id, { email: 'ama@gmail.com', makeAccountEmail: false });
+  await assert.rejects(() => caller().auth.confirmAddEmail({ challengeId: theirs.id, code: theirs.code }), { code: 'BAD_REQUEST', message: 'This code has expired. Send a new one.' });
+
+  // The code reached the mailbox, so saying the address is taken reveals nothing new.
+  user.findFirst = async () => ({ id: 'usr_other' });
+  const mine = await createChallenge('ama@gmail.com', 'usr_me', 'email');
+  await holdPendingEmail(mine.id, { email: 'ama@gmail.com', makeAccountEmail: false });
+  await assert.rejects(() => caller().auth.confirmAddEmail({ challengeId: mine.id, code: mine.code }), { code: 'CONFLICT' });
+  assert.deepEqual(rows, []);
+});
+
+test('making an extra email the account email keeps the old one as an extra email', async () => {
+  emailsAccount({ extras: ['ama@gmail.com'] });
+  const realTransaction = (db as any).$transaction;
+  (db as any).$transaction = async (ops: unknown[]) => Promise.all(ops);
+  const writes: Record<string, unknown> = {};
+  userEmail.delete = async (args: any) => { writes.deleted = args.where; return {}; };
+  user.update = async (args: any) => { writes.account = args.data; return {}; };
+  userEmail.create = async (args: any) => { writes.demoted = args.data; return {}; };
+  try {
+    await caller().auth.makeAccountEmail({ email: 'Ama@Gmail.com' });
+    assert.deepEqual(writes, {
+      deleted: { id: 'ue_ama@gmail.com' },
+      account: { email: 'ama@gmail.com' },
+      demoted: { userId: 'usr_me', email: 'me@bytspot.com' },
+    });
+    await assert.rejects(() => caller().auth.makeAccountEmail({ email: 'nobody@gmail.com' }), { code: 'NOT_FOUND' });
+  } finally {
+    (db as any).$transaction = realTransaction;
+  }
+});
+
+test('an extra email can be removed and leaves contact discovery; the account email cannot', async () => {
+  emailsAccount({ extras: ['ama@gmail.com'] });
+  userEmail.deleteMany = async () => assert.fail('the account email must stay');
+  await assert.rejects(() => caller().auth.removeEmail({ email: 'ME@bytspot.com' }), { code: 'BAD_REQUEST', message: 'Make another email your account email first.' });
+
+  const rows = emailsAccount({ extras: ['ama@gmail.com'] });
+  const hashes = hashWrites();
+  let removed: any = null;
+  userEmail.deleteMany = async (args: any) => { removed = args.where; rows.length = 0; return { count: 1 }; };
+  try {
+    const result = await caller().auth.removeEmail({ email: 'ama@gmail.com' });
+    assert.deepEqual(removed, { userId: 'usr_me', email: 'ama@gmail.com' });
+    assert.deepEqual(result.extraEmails, []);
+    assert.deepEqual(hashes.written.map((row) => row.hashedIdentity), [hashEmail('Me@bytspot.com')]);
+  } finally {
+    hashes.restore();
+  }
+});
+
+test('an extra email signs in with the password and cannot be used to sign up again', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const password = await bcrypt.hash('a-good-password', 4);
+  user.findUnique = async (args: any) => (args.where.email
+    ? null
+    : { id: 'usr_me', email: 'Me@bytspot.com', name: 'Me', password, emailVerifiedAt: new Date(), deletedAt: null, purgeAfter: null });
+  userEmail.findUnique = async (args: any) => (args.where.email === 'ama@gmail.com' ? { userId: 'usr_me' } : null);
+
+  const session = await resetCaller('test-extra-login').auth.login({ email: 'Ama@Gmail.com', password: 'a-good-password' });
+  assert.deepEqual(session.user, { id: 'usr_me', email: 'Me@bytspot.com', name: 'Me' });
+  await assert.rejects(() => resetCaller('test-extra-login').auth.login({ email: 'ama@gmail.com', password: 'wrong-password' }), { code: 'UNAUTHORIZED' });
+
+  user.create = async () => assert.fail('an address on another account must not sign up');
+  await assert.rejects(() => resetCaller('test-extra-signup').auth.signup({ email: 'ama@gmail.com', password: 'a-good-password' }), { code: 'CONFLICT', message: 'Email already registered' });
 });

@@ -287,6 +287,114 @@ export async function sendSignInMethodAddedEmail(to: string, providerTitle: stri
   });
 }
 
+/**
+ * The code that adds an extra email to a member's account. Thrown on failure:
+ * the app is waiting for this email.
+ */
+export async function sendAddEmailCode(to: string, code: string, ttlMins: number): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send an add-email code');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `${code} is your Bytspot code`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Add this email to Bytspot</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+          Enter this code in Bytspot to add this email to your account. It expires in ${ttlMins} minutes.
+        </p>
+        <div style="font-size: 34px; font-weight: 700; letter-spacing: 8px; padding: 18px 0; text-align: center; background: #161616; border-radius: 12px;">
+          ${code}
+        </div>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If this wasn't you, you can ignore this email. Nothing changes without the code.
+        </p>
+      </div>
+    `,
+  });
+}
+
+/**
+ * Sent instead of an add-email code when the address already belongs to
+ * another account, so the app's reply never reveals which addresses have one.
+ * Thrown on failure, like the code it replaces.
+ */
+export async function sendEmailAlreadyInUseNotice(to: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send an email-in-use notice');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: 'This email is already on a Bytspot account',
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">This email is already in use</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0;">
+          Someone tried to add this email to a Bytspot account, but it already belongs to another one. An email can be on one account only. To use it here, remove it from the other account first.
+        </p>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If this wasn't you, you can ignore this email. Nothing has changed.
+        </p>
+      </div>
+    `,
+  });
+}
+
+/**
+ * Sent to the account email when an extra email is added, so a member learns
+ * of one they did not add. A notification: the caller logs a failure.
+ */
+export async function sendEmailAddedNotice(to: string, maskedAddedEmail: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send an email-added notice');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: 'A new email was added to your Bytspot account',
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">New email added</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0;">
+          ${escapeHtml(maskedAddedEmail)} was added to your Bytspot account. You can remove it in the app under Profile › Personal Information › Emails.
+        </p>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If this wasn't you, contact safety@bytspot.com.
+        </p>
+      </div>
+    `,
+  });
+}
+
+/**
+ * Sent to both the old and the new account email after a change. A
+ * notification: the caller logs a failure rather than failing.
+ */
+export async function sendAccountEmailChangedNotice(to: string, maskedNewEmail: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send an account-email notice');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: 'Your Bytspot account email was changed',
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Account email changed</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0;">
+          Your Bytspot account email was changed to ${escapeHtml(maskedNewEmail)}. The previous one is still on your account and you can remove it in the app under Profile › Personal Information › Emails.
+        </p>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If this wasn't you, contact safety@bytspot.com.
+        </p>
+      </div>
+    `,
+  });
+}
+
 export interface SafetyReportNotice {
   kind: string;
   reason: string;

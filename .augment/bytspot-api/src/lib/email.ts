@@ -277,7 +277,7 @@ export async function sendSignInMethodAddedEmail(to: string, providerTitle: stri
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
         <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">${escapeHtml(providerTitle)} sign-in added</h1>
         <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0;">
-          You can now sign in to Bytspot with ${escapeHtml(providerTitle)}. You can remove it in Settings, under Sign-in methods.
+          You can now sign in to Bytspot with ${escapeHtml(providerTitle)}. You can remove it in the app under Profile › Personal Information › Sign-in methods.
         </p>
         <p style="color: #555; font-size: 13px; margin-top: 32px;">
           If this wasn't you, reset your password in the app straight away.

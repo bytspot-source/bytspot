@@ -7,8 +7,9 @@ import { hashEmail } from '../lib/contactHash';
  * Bytspot?" without the other member syncing their own address book first.
  * Only salted SHA-256 digests are stored — never the raw identifiers.
  *
- * Only the account email is hashed: it is proven by the auth flow (password
- * signup or Apple/Google provider). The profile phone is deliberately
+ * Only the account email is hashed, and only once it is verified (an email
+ * code or an Apple/Google sign-in). Callers must not pass an unverified
+ * email: password signup alone does not prove ownership. The profile phone is deliberately
  * excluded — it is free-form user input, and hashing an unverified number
  * would let a member claim someone else's number and impersonate them in
  * contact discovery. Add `kind: 'phone'` only once a phone-verification
@@ -61,7 +62,7 @@ export async function backfillUserIdentityHashes(batchSize = 500): Promise<void>
   try {
     for (;;) {
       const users = await db.user.findMany({
-        where: { identityHashes: { none: {} } },
+        where: { identityHashes: { none: {} }, emailVerifiedAt: { not: null } },
         select: { id: true, email: true },
         orderBy: { id: 'asc' },
         take: batchSize,

@@ -25,6 +25,7 @@ import {
 } from '../vendor/refreshTokens';
 import { toSeatDto, toSellerDto, type MembershipDto } from '../vendor/sellerState';
 import { acceptInvites } from '../vendor/team';
+import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { requireVendorSeat } from '../middleware/vendorAuth';
 
 const router = Router();
@@ -206,6 +207,12 @@ router.post('/vendor/auth/session', async (req, res) => {
     if (!user) {
       res.status(403).json({ error: 'No seats for this account' });
       return;
+    }
+
+    // The code went to this address, so it is now proven.
+    if (!user.emailVerifiedAt) {
+      await db.user.update({ where: { id: user.id }, data: { emailVerifiedAt: new Date() } });
+      void refreshUserIdentityHashes(user.id, { email: user.email });
     }
 
     // The code went to the invited address, so signing in is the acceptance.

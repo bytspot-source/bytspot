@@ -172,6 +172,36 @@ export async function sendVendorSignInCode(to: string, code: string, ttlMins: nu
   });
 }
 
+/**
+ * A member email verification code. Thrown on failure for the same reason as
+ * the vendor code: the app is waiting for this email, so a swallowed failure
+ * would leave the member typing a code that never arrives.
+ */
+export async function sendEmailVerificationCode(to: string, code: string, ttlMins: number): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send an email verification code');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `${code} is your Bytspot code`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Confirm your email</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+          Enter this code in Bytspot. It expires in ${ttlMins} minutes.
+        </p>
+        <div style="font-size: 34px; font-weight: 700; letter-spacing: 8px; padding: 18px 0; text-align: center; background: #161616; border-radius: 12px;">
+          ${code}
+        </div>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If you did not create a Bytspot account, you can ignore this email.
+        </p>
+      </div>
+    `,
+  });
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 }

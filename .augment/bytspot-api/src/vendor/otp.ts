@@ -16,10 +16,18 @@ import { AUTH } from './contract';
  * about how many attempts a code has had. Sign-in fails closed instead.
  */
 
-const CHALLENGE_PREFIX = 'vendor:otp:';
-const SEND_EMAIL_PREFIX = 'vendor:otp:send:email:';
-const SEND_IP_PREFIX = 'vendor:otp:send:ip:';
-const SUBMIT_IP_PREFIX = 'vendor:otp:submit:ip:';
+/**
+ * Which code flow a key belongs to. Vendor console sign-in and member email
+ * verification share this store but never each other's challenges or limits:
+ * a member code must not open the console, and verifying an email must not
+ * spend a vendor's send allowance.
+ */
+export type OtpScope = 'vendor' | 'member';
+
+const challengePrefix = (scope: OtpScope) => `${scope}:otp:`;
+const sendEmailPrefix = (scope: OtpScope) => `${scope}:otp:send:email:`;
+const sendIpPrefix = (scope: OtpScope) => `${scope}:otp:send:ip:`;
+const submitIpPrefix = (scope: OtpScope) => `${scope}:otp:submit:ip:`;
 
 const SENDS_PER_EMAIL_HOUR = 5;
 const SENDS_PER_IP_HOUR = 10;
@@ -70,9 +78,9 @@ export function generateCode(): string {
  * sixty times. Counted against the address rather than the challenge, because
  * a fresh challenge per send would defeat a per-challenge limit.
  */
-export async function sendCooldownSecs(email: string): Promise<number> {
+export async function sendCooldownSecs(email: string, scope: OtpScope = 'vendor'): Promise<number> {
   const redis = requireRedis();
-  const key = `${SEND_EMAIL_PREFIX}${hashEmailForChallenge(email)}`;
+  const key = `${sendEmailPrefix(scope)}${hashEmailForChallenge(email)}`;
   const [cooldown, hourly] = await Promise.all([
     redis.ttl(`${key}:cool`),
     redis.get(`${key}:hour`),
@@ -85,9 +93,9 @@ export async function sendCooldownSecs(email: string): Promise<number> {
   return 0;
 }
 
-export async function recordSend(email: string): Promise<void> {
+export async function recordSend(email: string, scope: OtpScope = 'vendor'): Promise<void> {
   const redis = requireRedis();
-  const key = `${SEND_EMAIL_PREFIX}${hashEmailForChallenge(email)}`;
+  const key = `${sendEmailPrefix(scope)}${hashEmailForChallenge(email)}`;
   await redis.set(`${key}:cool`, '1', 'EX', AUTH.code.resendCooldownSecs);
   const count = await redis.incr(`${key}:hour`);
   if (count === 1) await redis.expire(`${key}:hour`, HOUR_SECS);
@@ -98,20 +106,20 @@ export async function recordSend(email: string): Promise<void> {
  * 200 on /code hides whether an address exists, but only if a sweep cannot run
  * thousands of addresses through it.
  */
-export async function ipSendCooldownSecs(ip: string): Promise<number> {
-  return ipLimitCooldown(`${SEND_IP_PREFIX}${ip}`, SENDS_PER_IP_HOUR);
+export async function ipSendCooldownSecs(ip: string, scope: OtpScope = 'vendor'): Promise<number> {
+  return ipLimitCooldown(`${sendIpPrefix(scope)}${ip}`, SENDS_PER_IP_HOUR);
 }
 
-export async function recordIpSend(ip: string): Promise<void> {
-  await bumpIpLimit(`${SEND_IP_PREFIX}${ip}`);
+export async function recordIpSend(ip: string, scope: OtpScope = 'vendor'): Promise<void> {
+  await bumpIpLimit(`${sendIpPrefix(scope)}${ip}`);
 }
 
-export async function ipSubmitCooldownSecs(ip: string): Promise<number> {
-  return ipLimitCooldown(`${SUBMIT_IP_PREFIX}${ip}`, SUBMITS_PER_IP_HOUR);
+export async function ipSubmitCooldownSecs(ip: string, scope: OtpScope = 'vendor'): Promise<number> {
+  return ipLimitCooldown(`${submitIpPrefix(scope)}${ip}`, SUBMITS_PER_IP_HOUR);
 }
 
-export async function recordIpSubmit(ip: string): Promise<void> {
-  await bumpIpLimit(`${SUBMIT_IP_PREFIX}${ip}`);
+export async function recordIpSubmit(ip: string, scope: OtpScope = 'vendor'): Promise<void> {
+  await bumpIpLimit(`${submitIpPrefix(scope)}${ip}`);
 }
 
 async function ipLimitCooldown(key: string, limit: number): Promise<number> {
@@ -134,16 +142,16 @@ async function bumpIpLimit(key: string): Promise<void> {
  * a dump of this store yields no addresses at all and verification needs no
  * second lookup.
  */
-export async function createChallenge(email: string, userId: string): Promise<{ id: string; code: string }> {
+export async function createChallenge(email: string, userId: string, scope: OtpScope = 'vendor'): Promise<{ id: string; code: string }> {
   const redis = requireRedis();
   const id = `chal_${randomBytes(16).toString('hex')}`;
   const code = generateCode();
   const challenge: Challenge = { id, codeHash: hashCode(id, code), attempts: 0 };
-  await redis.set(`${CHALLENGE_PREFIX}${id}`, JSON.stringify(challenge), 'EX', AUTH.code.ttlSecs);
+  await redis.set(`${challengePrefix(scope)}${id}`, JSON.stringify(challenge), 'EX', AUTH.code.ttlSecs);
   // Bound at creation so the client cannot substitute another account's id at
   // submit time. The challenge decides who it is for; the caller only proves
   // they hold the code.
-  await redis.set(`${CHALLENGE_PREFIX}${id}:user`, userId, 'EX', AUTH.code.ttlSecs);
+  await redis.set(`${challengePrefix(scope)}${id}:user`, userId, 'EX', AUTH.code.ttlSecs);
   return { id, code };
 }
 
@@ -151,9 +159,9 @@ export async function createChallenge(email: string, userId: string): Promise<{ 
  * One attempt. Consumes the challenge on success and on exhaustion, so a code
  * is single-use and a locked challenge cannot be retried by reconnecting.
  */
-export async function verifyChallenge(challengeId: string, code: string): Promise<ChallengeVerdict> {
+export async function verifyChallenge(challengeId: string, code: string, scope: OtpScope = 'vendor'): Promise<ChallengeVerdict> {
   const redis = requireRedis();
-  const key = `${CHALLENGE_PREFIX}${challengeId}`;
+  const key = `${challengePrefix(scope)}${challengeId}`;
   const raw = await redis.get(key);
   // Redis has already evicted an expired challenge, so absent and expired are
   // the same observation. Both are reported as unknown: distinguishing them

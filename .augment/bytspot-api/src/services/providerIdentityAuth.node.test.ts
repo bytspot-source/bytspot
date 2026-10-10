@@ -7,7 +7,7 @@ import { resolveProviderIdentity, type ProviderIdentityDatabase } from './provid
 const identity = { provider: 'google' as const, subject: 'google-subject', email: 'person@example.test', name: 'Person' };
 const linkedUser = { id: 'linked-user', email: 'person@example.test', name: 'Person' };
 
-type FakeDatabase = ProviderIdentityDatabase & { emailLookups: () => number; identityHashRows: () => unknown[] };
+type FakeDatabase = ProviderIdentityDatabase & { emailLookups: () => number; identityHashRows: () => unknown[]; createdUsers: () => any[] };
 
 function database({ existing = null, emailOwner = null, transactionError = null, concurrent = null }: {
   existing?: unknown;
@@ -18,6 +18,7 @@ function database({ existing = null, emailOwner = null, transactionError = null,
   let subjectLookups = 0;
   let emailLookups = 0;
   const identityHashRows: unknown[] = [];
+  const createdUsers: any[] = [];
   const db = {
     providerIdentity: {
       findUnique: async () => {
@@ -28,7 +29,7 @@ function database({ existing = null, emailOwner = null, transactionError = null,
     },
     user: {
       findUnique: async () => { emailLookups += 1; return emailOwner; },
-      create: async () => linkedUser,
+      create: async ({ data }: { data: unknown }) => { createdUsers.push(data); return linkedUser; },
     },
     userIdentityHash: {
       deleteMany: async () => ({ count: 0 }),
@@ -44,6 +45,7 @@ function database({ existing = null, emailOwner = null, transactionError = null,
   return Object.assign(db as unknown as ProviderIdentityDatabase, {
     emailLookups: () => emailLookups,
     identityHashRows: () => identityHashRows,
+    createdUsers: () => createdUsers,
   }) as FakeDatabase;
 }
 
@@ -71,6 +73,9 @@ test('A new Apple identity without a token-derived email is refused', async () =
 test('A provider mapping is created from verified token claims only', async () => {
   const db = database();
   assert.deepEqual(await resolveProviderIdentity(identity, db), { user: linkedUser, isNewUser: true });
+  // The provider verified the email, so the account starts verified and its
+  // email may join contact discovery straight away.
+  assert.ok(db.createdUsers()[0].emailVerifiedAt instanceof Date);
 
   // The hash refresh is fire-and-forget, so let it land. It runs against the
   // caller's database rather than the module client: untested, it reached real

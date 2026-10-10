@@ -233,25 +233,54 @@ export async function sendPasswordResetCode(to: string, code: string, ttlMins: n
 }
 
 /**
- * Sent instead of a code when the account signs in with Apple or Google and has
- * no password to reset, so the member is not left waiting for a code.
+ * The code that adds an Apple or Google sign-in to the account that already
+ * owns this email. Thrown on failure: the app is waiting for this email.
  */
-export async function sendPasswordResetProviderNotice(to: string): Promise<void> {
+export async function sendProviderLinkCode(to: string, code: string, ttlMins: number, providerTitle: string): Promise<void> {
   const resend = getResend();
-  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a password reset notice');
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a sign-in link code');
 
   await resend.emails.send({
     from: FROM,
     to,
-    subject: 'Signing in to Bytspot',
+    subject: `${code} is your Bytspot code`,
     html: `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
-        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Your account has no password</h1>
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Add ${escapeHtml(providerTitle)} sign-in</h1>
+        <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+          Someone signed in to Bytspot with ${escapeHtml(providerTitle)} using this email. Enter this code in Bytspot to add ${escapeHtml(providerTitle)} sign-in to your account. It expires in ${ttlMins} minutes.
+        </p>
+        <div style="font-size: 34px; font-weight: 700; letter-spacing: 8px; padding: 18px 0; text-align: center; background: #161616; border-radius: 12px;">
+          ${code}
+        </div>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">
+          If this wasn't you, you can ignore this email. Nothing changes without the code.
+        </p>
+      </div>
+    `,
+  });
+}
+
+/**
+ * Sent whenever a sign-in method is added, so a member learns of a link they
+ * did not make. A notification: the caller logs a failure rather than failing.
+ */
+export async function sendSignInMethodAddedEmail(to: string, providerTitle: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a sign-in method notice');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `${providerTitle} sign-in was added to your Bytspot account`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">${escapeHtml(providerTitle)} sign-in added</h1>
         <p style="color: #aaa; font-size: 16px; line-height: 1.5; margin: 0;">
-          Someone asked to reset the Bytspot password for this email. This account signs in with Apple or Google, so there is no password to reset. Use Continue with Apple or Continue with Google in the app.
+          You can now sign in to Bytspot with ${escapeHtml(providerTitle)}. You can remove it in Settings, under Sign-in methods.
         </p>
         <p style="color: #555; font-size: 13px; margin-top: 32px;">
-          If you did not ask for this, you can ignore this email.
+          If this wasn't you, reset your password in the app straight away.
         </p>
       </div>
     `,

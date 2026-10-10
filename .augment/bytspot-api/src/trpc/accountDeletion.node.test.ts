@@ -8,6 +8,8 @@ import { applyDeletionPolicyOnSignIn } from '../services/accountDeletion';
 import { redisHandle, type RedisLike } from '../vendor/redisHandle';
 import { createChallenge } from '../vendor/otp';
 import { issueRefreshToken } from '../vendor/refreshTokens';
+import { TRPCError } from '@trpc/server';
+import { ProviderLinkRequired, holdPendingLink } from '../services/providerLink';
 
 const createCaller = createCallerFactory(appRouter);
 const authenticated: Context = { user: { userId: 'usr_me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-deletion-client' };
@@ -162,6 +164,7 @@ test('a password reset with the emailed code sets the password, confirms the ema
   assert.equal(result.deletionCancelled, false);
   assert.notEqual(written.password, 'a-new-password', 'only the hash is stored');
   assert.ok(written.emailVerifiedAt instanceof Date, 'the code proves the member owns the address');
+  assert.ok(written.passwordSetAt instanceof Date, 'an Apple or Google account now also has email sign-in');
   // Single use.
   await assert.rejects(() => resetCaller('test-reset-ok').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' }), { code: 'BAD_REQUEST' });
 });
@@ -252,6 +255,119 @@ test('signing out ends that refresh token', async () => {
   const token = await issueRefreshToken('usr_me', 'member');
   assert.deepEqual(await resetCaller('test-sign-out').auth.signOut({ refreshToken: token }), { signedOut: true });
   await assert.rejects(() => resetCaller('test-sign-out').auth.refresh({ refreshToken: token }), { code: 'UNAUTHORIZED' });
+});
+
+function linkAccount(emailVerifiedAt: Date | null) {
+  user.findUnique = async (args: any) => (args.select?.name
+    ? { id: 'usr_link', email: 'ama@bytspot.com', name: 'Ama', emailVerifiedAt }
+    : { id: 'usr_link', email: 'ama@bytspot.com', deletedAt: null, purgeAfter: null });
+  const created: unknown[] = [];
+  const providerIdentity = db.providerIdentity as any;
+  providerIdentity.findUnique = async () => null;
+  providerIdentity.findFirst = async () => null;
+  providerIdentity.create = async (args: any) => { created.push(args.data); return {}; };
+  return created;
+}
+
+async function linkChallenge() {
+  const { id, code } = await createChallenge('ama@bytspot.com', 'usr_link', 'link');
+  await holdPendingLink(id, { provider: 'apple', subject: 'apple-sub' });
+  return { id, code };
+}
+
+test('the emailed link code adds Apple to the existing account and signs in', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const created = linkAccount(new Date());
+  user.update = async () => assert.fail('a confirmed account keeps its password');
+  const { id, code } = await linkChallenge();
+
+  const result = await resetCaller('test-link-ok').auth.confirmLink({ challengeId: id, code });
+
+  assert.equal(typeof result.token, 'string');
+  assert.equal(typeof result.refreshToken, 'string');
+  assert.deepEqual(result.user, { id: 'usr_link', email: 'ama@bytspot.com', name: 'Ama' });
+  assert.equal(result.linkedProvider, 'apple');
+  assert.deepEqual(created, [{ provider: 'apple', subject: 'apple-sub', userId: 'usr_link' }]);
+  // Single use.
+  await assert.rejects(() => resetCaller('test-link-ok').auth.confirmLink({ challengeId: id, code }), { code: 'BAD_REQUEST' });
+});
+
+test('a wrong link code links nothing and says so', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  linkAccount(new Date());
+  (db.providerIdentity as any).create = async () => assert.fail('a wrong code must not link');
+  const { id, code } = await linkChallenge();
+
+  await assert.rejects(
+    () => resetCaller('test-link-wrong').auth.confirmLink({ challengeId: id, code: code === '000000' ? '111111' : '000000' }),
+    { code: 'BAD_REQUEST', message: "That code isn't right. Check the email and try again." },
+  );
+});
+
+test('linking to an unconfirmed account ends its password and every other sign-in', async () => {
+  // Whoever signed up with this address never proved it. The code proves the
+  // linking member does, so the unproven password must stop working.
+  const store = codeStore();
+  redisHandle.get = () => store;
+  linkAccount(null);
+  let written: any = null;
+  user.update = async (args: any) => { written = args.data; return {}; };
+  const otherDevice = await issueRefreshToken('usr_link', 'member');
+  const { id, code } = await linkChallenge();
+  const realNow = Date.now;
+  Date.now = () => realNow() + 5;
+  try {
+    const result = await resetCaller('test-link-unconfirmed').auth.confirmLink({ challengeId: id, code });
+    assert.equal(typeof result.token, 'string');
+    assert.ok(written.emailVerifiedAt instanceof Date);
+    assert.equal(written.passwordSetAt, null);
+    assert.equal(typeof written.password, 'string');
+    await assert.rejects(() => resetCaller('test-link-unconfirmed').auth.refresh({ refreshToken: otherDevice }), { code: 'UNAUTHORIZED' });
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('a provider ID another account uses is never moved by a link code', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  linkAccount(new Date());
+  (db.providerIdentity as any).findUnique = async () => ({ userId: 'usr_someone_else' });
+  const { id, code } = await linkChallenge();
+
+  await assert.rejects(() => resetCaller('test-link-taken').auth.confirmLink({ challengeId: id, code }), { code: 'CONFLICT' });
+});
+
+test('the sign-in CONFLICT tells the app which code to ask for', () => {
+  const format = (appRouter._def as any)._config.errorFormatter;
+  const shape = { message: 'An account already exists for this email.', code: -32009, data: { code: 'CONFLICT', httpStatus: 409 } };
+  const linking = new TRPCError({ code: 'CONFLICT', message: shape.message, cause: new ProviderLinkRequired('chal_1', 'a••@bytspot.com', 'google') });
+  assert.deepEqual(format({ shape, error: linking }).data.link, { challengeId: 'chal_1', maskedEmail: 'a••@bytspot.com', provider: 'google' });
+  // Without a code to ask for, the error is exactly what older apps already handle.
+  assert.deepEqual(format({ shape, error: new TRPCError({ code: 'CONFLICT', message: shape.message }) }), shape);
+});
+
+test('sign-in methods report a chosen password and each linked provider', async () => {
+  user.findUnique = async () => ({ passwordSetAt: null });
+  (db.providerIdentity as any).findMany = async () => [{ provider: 'apple' }];
+
+  assert.deepEqual(await caller().auth.signInMethods(), { password: false, apple: true, google: false });
+});
+
+test('the last way into an account cannot be removed', async () => {
+  user.findUnique = async () => ({ passwordSetAt: null });
+  const providerIdentity = db.providerIdentity as any;
+  providerIdentity.findMany = async () => [{ provider: 'apple' }];
+  providerIdentity.deleteMany = async () => assert.fail('the only sign-in method must stay');
+  await assert.rejects(() => caller().auth.unlinkProvider({ provider: 'apple' }), { code: 'PRECONDITION_FAILED' });
+
+  let removed: any = null;
+  providerIdentity.findMany = async () => [{ provider: 'apple' }, { provider: 'google' }];
+  providerIdentity.deleteMany = async (args: any) => { removed = args.where; return { count: 1 }; };
+  assert.deepEqual(await caller().auth.unlinkProvider({ provider: 'apple' }), { password: false, apple: false, google: true });
+  assert.deepEqual(removed, { userId: 'usr_me', provider: 'apple' });
 });
 
 test('an older client saving preferences does not switch party alerts back on', async () => {

@@ -15,6 +15,7 @@ model User {
   email             String  @unique
   emailVerifiedAt   DateTime? @map("email_verified_at") // set by an email code or an Apple/Google sign-in
   password          String
+  passwordSetAt     DateTime? @map("password_set_at") // null: the password is a generated secret nobody knows
   name              String?
   phone             String?
   profileImage      String? @map("profile_image")

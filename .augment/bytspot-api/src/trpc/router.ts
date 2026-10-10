@@ -10,7 +10,9 @@ import { db } from '../lib/db';
 import { serializableTransactionWithRetry } from '../lib/transactions';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
-import { sendWelcomeEmail, sendBetaLeadEmail } from '../lib/email';
+import { sendWelcomeEmail, sendBetaLeadEmail, mailerIsConfigured, sendEmailVerificationCode } from '../lib/email';
+import { AUTH } from '../vendor/contract';
+import { createChallenge, recordSend, sendCooldownSecs, verifyChallenge } from '../vendor/otp';
 import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
@@ -126,8 +128,8 @@ const authRouter = router({
 
       const token = signToken(user.id, user.email);
 
-      // Identity hashes power contact-graph discovery (non-blocking)
-      void refreshUserIdentityHashes(user.id, { email: user.email });
+      // No identity hashes yet: the email joins contact discovery only after
+      // auth.verifyEmail proves the member owns it.
 
       // Send welcome email (non-blocking)
       if (user.email) {
@@ -135,7 +137,7 @@ const authRouter = router({
         sendWelcomeEmail(user.email, firstName).catch(() => {});
       }
 
-      return { token, user: { id: user.id, email: user.email, name: user.name } };
+      return { token, user: { id: user.id, email: user.email, name: user.name }, emailVerified: false };
     }),
 
   /** POST /auth/login → auth.login mutation */
@@ -162,12 +164,13 @@ const authRouter = router({
         // Grace period elapsed; the row is awaiting purge and must not be usable.
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid email or password' });
       }
-      if (deletion === 'restored') void refreshUserIdentityHashes(user.id, { email: user.email });
+      if (deletion === 'restored' && user.emailVerifiedAt) void refreshUserIdentityHashes(user.id, { email: user.email });
 
       const token = signToken(user.id, user.email);
       return {
         token,
         user: { id: user.id, email: user.email, name: user.name },
+        emailVerified: user.emailVerifiedAt !== null,
         deletionCancelled: deletion === 'restored',
       };
     }),
@@ -202,7 +205,7 @@ const authRouter = router({
       }
       const token = signToken(result.user.id, result.user.email);
       if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
-      return { token, user: result.user, isNewUser: result.isNewUser, deletionCancelled: deletion === 'restored' };
+      return { token, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
     }),
 
   /** Verifies a Google ID token for the configured native iOS OAuth audience. */
@@ -229,7 +232,7 @@ const authRouter = router({
       }
       const token = signToken(result.user.id, result.user.email);
       if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
-      return { token, user: result.user, isNewUser: result.isNewUser, deletionCancelled: deletion === 'restored' };
+      return { token, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
     }),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */
@@ -238,7 +241,7 @@ const authRouter = router({
 
     const user = await db.user.findUnique({
       where: { id: userId },
-      select: { id: true, email: true, name: true, ref: true, createdAt: true },
+      select: { id: true, email: true, emailVerifiedAt: true, name: true, ref: true, createdAt: true },
     });
 
     if (!user) {
@@ -253,6 +256,7 @@ const authRouter = router({
       user: {
         id: user.id,
         email: user.email,
+        emailVerified: user.emailVerifiedAt !== null,
         name: user.name,
         ref: user.ref,
         createdAt: user.createdAt,
@@ -260,6 +264,67 @@ const authRouter = router({
       referralCount,
     };
   }),
+
+  /**
+   * Emails the signed-in member a code that proves they own their account
+   * email. Apple and Google accounts are already verified and get no email.
+   */
+  sendEmailCode: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'auth:email-code' }))
+    .mutation(async ({ ctx }) => {
+      const user = await db.user.findUnique({
+        where: { id: ctx.user.userId },
+        select: { id: true, email: true, emailVerifiedAt: true },
+      });
+      if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+      if (user.emailVerifiedAt) return { alreadyVerified: true as const };
+
+      if (!mailerIsConfigured()) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Email codes are temporarily unavailable' });
+      }
+      const cooldown = await sendCooldownSecs(user.email, 'member');
+      if (cooldown > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: `Wait ${cooldown} seconds before asking for another code` });
+      }
+
+      const challenge = await createChallenge(user.email, user.id, 'member');
+      await sendEmailVerificationCode(user.email, challenge.code, Math.round(AUTH.code.ttlSecs / 60));
+      await recordSend(user.email, 'member');
+      return {
+        alreadyVerified: false as const,
+        challengeId: challenge.id,
+        expiresInSecs: AUTH.code.ttlSecs,
+        resendInSecs: AUTH.code.resendCooldownSecs,
+      };
+    }),
+
+  /** Confirms the code from auth.sendEmailCode and adds the email to contact discovery. */
+  verifyEmail: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:verify-email' }))
+    .input(z.object({
+      challengeId: z.string().min(1).max(100),
+      code: z.string().regex(/^\d+$/, 'Enter the code from the email').length(AUTH.code.length, 'Enter the code from the email'),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const verdict = await verifyChallenge(input.challengeId, input.code, 'member');
+      // A challenge is bound to the member it was sent to; another member's
+      // valid code is reported like an expired one.
+      if (!verdict.ok || verdict.userId !== ctx.user.userId) {
+        const mismatch = !verdict.ok && verdict.reason === 'mismatch';
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: mismatch ? "That code isn't right. Check the email and try again." : 'This code has expired. Send a new one.',
+        });
+      }
+
+      const user = await db.user.update({
+        where: { id: ctx.user.userId },
+        data: { emailVerifiedAt: new Date() },
+        select: { id: true, email: true },
+      });
+      void refreshUserIdentityHashes(user.id, { email: user.email });
+      return { emailVerified: true as const };
+    }),
 });
 
 /**

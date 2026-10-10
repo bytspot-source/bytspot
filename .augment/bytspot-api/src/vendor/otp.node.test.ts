@@ -95,6 +95,22 @@ test('the right code verifies once and then is gone', async () => {
   assert.equal(replay.ok, false);
 });
 
+test('a member email code cannot be spent as a vendor sign-in, nor the reverse', async () => {
+  const member = await createChallenge('person@midtown.example', 'usr_1', 'member');
+  assert.deepEqual(await verifyChallenge(member.id, member.code), { ok: false, reason: 'unknown' });
+
+  const vendor = await createChallenge('person@midtown.example', 'usr_1');
+  assert.deepEqual(await verifyChallenge(vendor.id, vendor.code, 'member'), { ok: false, reason: 'unknown' });
+
+  assert.deepEqual(await verifyChallenge(member.id, member.code, 'member'), { ok: true, userId: 'usr_1' });
+});
+
+test('member and vendor send limits are counted separately', async () => {
+  await recordSend('person@midtown.example', 'member');
+  assert.ok((await sendCooldownSecs('person@midtown.example', 'member')) > 0);
+  assert.equal(await sendCooldownSecs('person@midtown.example'), 0);
+});
+
 test('three wrong guesses lock the challenge, and the third does not also say mismatch', async () => {
   const { id, code } = await createChallenge('owner@midtown.example', 'usr_1');
   const wrong = code === '000000' ? '111111' : '000000';

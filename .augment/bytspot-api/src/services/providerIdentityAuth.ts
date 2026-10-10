@@ -45,7 +45,7 @@ export async function resolveProviderIdentity(
   try {
     return await database.$transaction(async (tx) => {
       const user = await tx.user.create({
-        data: { email: identity.email!, password, name: identity.name },
+        data: { email: identity.email!, emailVerifiedAt: new Date(), password, name: identity.name },
         select: { id: true, email: true, name: true },
       });
       await tx.providerIdentity.create({

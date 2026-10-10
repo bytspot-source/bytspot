@@ -2,12 +2,21 @@ import { initTRPC, TRPCError } from '@trpc/server';
 import type Redis from 'ioredis';
 import { getRedis } from '../lib/redis';
 import { isSessionRevoked, isTokenSignedOut } from '../services/accountDeletion';
+import { ProviderLinkRequired } from '../services/providerLink';
 import type { Context } from './context';
 
 /**
  * tRPC initialisation — single instance, shared across all routers.
  */
-const t = initTRPC.context<Context>().create();
+const t = initTRPC.context<Context>().create({
+  // A sign-in that needs an emailed code to add Apple/Google sign-in tells the
+  // app which code to ask for. Every other error keeps the default shape.
+  errorFormatter({ shape, error }) {
+    if (!(error.cause instanceof ProviderLinkRequired)) return shape;
+    const { challengeId, maskedEmail, provider } = error.cause;
+    return { ...shape, data: { ...shape.data, link: { challengeId, maskedEmail, provider } } };
+  },
+});
 
 /** Base router factory */
 export const router = t.router;

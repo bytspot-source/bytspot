@@ -7,17 +7,26 @@ import { refreshUserIdentityHashes } from './userIdentityHashes';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
+/**
+ * Either the account this identity signs in to, or the existing account that
+ * owns its email. The second must be proven before the identity joins it.
+ */
+export type ProviderResolution =
+  | { user: ProviderUser; isNewUser: boolean }
+  | { linkTo: { id: string; email: string } };
+
 export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user' | 'userIdentityHash'>;
 
 /**
- * Resolves a verified provider subject to exactly one user. We deliberately do
- * not auto-link an existing password account by email: identity linking must be
- * an authenticated, explicit future operation to prevent account takeover.
+ * Resolves a verified provider subject to exactly one user. An existing
+ * account with the same email is never joined here: the caller must have the
+ * member prove control of it first (see services/providerLink.ts), or a
+ * provider email alone would open someone else's account.
  */
 export async function resolveProviderIdentity(
   identity: VerifiedProviderIdentity,
   database: ProviderIdentityDatabase = db,
-): Promise<{ user: ProviderUser; isNewUser: boolean }> {
+): Promise<ProviderResolution> {
   const existing = await database.providerIdentity.findUnique({
     where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
     include: { user: { select: { id: true, email: true, name: true } } },
@@ -31,13 +40,8 @@ export async function resolveProviderIdentity(
     });
   }
 
-  const emailOwner = await database.user.findUnique({ where: { email: identity.email }, select: { id: true } });
-  if (emailOwner) {
-    throw new TRPCError({
-      code: 'CONFLICT',
-      message: 'An account already exists for this email. Sign in with its existing method first.',
-    });
-  }
+  const emailOwner = await database.user.findUnique({ where: { email: identity.email }, select: { id: true, email: true } });
+  if (emailOwner) return { linkTo: emailOwner };
 
   // A provider-only account cannot use password login until a future explicit
   // password-setting flow is completed. Never persist the generated secret.

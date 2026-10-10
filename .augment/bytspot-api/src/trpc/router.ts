@@ -1,5 +1,5 @@
 import { TRPCError } from '@trpc/server';
-import { randomInt } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -10,7 +10,7 @@ import { db } from '../lib/db';
 import { serializableTransactionWithRetry } from '../lib/transactions';
 import { cached, getRedis } from '../lib/redis';
 import { config } from '../config';
-import { sendWelcomeEmail, sendBetaLeadEmail, mailerIsConfigured, sendEmailVerificationCode, sendPasswordResetCode, sendPasswordResetProviderNotice } from '../lib/email';
+import { sendWelcomeEmail, sendBetaLeadEmail, mailerIsConfigured, sendEmailVerificationCode, sendPasswordResetCode, sendProviderLinkCode, sendSignInMethodAddedEmail } from '../lib/email';
 import { captureError } from '../lib/observability';
 import { AUTH } from '../vendor/contract';
 import {
@@ -39,6 +39,17 @@ import { normalizeIosDeviceToken, registerIosPushDevice, unregisterIosPushDevice
 import { sendVenueCrowdAlert } from '../services/notificationDelivery';
 import { appleIdentityAudiences, verifyProviderIdToken } from '../services/providerIdTokenVerifier';
 import { resolveProviderIdentity } from '../services/providerIdentityAuth';
+import {
+  ProviderLinkRequired,
+  attachProviderIdentity,
+  detachProviderIdentity,
+  holdPendingLink,
+  maskEmail,
+  providerTitle,
+  signInMethods,
+  takePendingLink,
+} from '../services/providerLink';
+import type { VerifiedProviderIdentity } from '../services/providerIdTokenVerifier';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { applyDeletionPolicyOnSignIn, signOutSessionsIssuedBefore } from '../services/accountDeletion';
 import { issueRefreshToken, revokeFamily, rotateRefreshToken, signOutEverywhere, signOutToken, spendRefreshToken } from '../vendor/refreshTokens';
@@ -76,6 +87,63 @@ async function memberSession(userId: string, email: string): Promise<{ token: st
     captureError(error, { flow: 'member-refresh-issue' });
     return { token };
   }
+}
+
+/** Verifies an Apple or Google ID token issued for this app. */
+async function verifiedProviderIdentity(provider: 'apple' | 'google', idToken: string): Promise<VerifiedProviderIdentity> {
+  const title = providerTitle(provider);
+  const audience = provider === 'apple'
+    ? (config.appleClientId ? appleIdentityAudiences(config.appleClientId) : null)
+    : (config.googleServerClientId || null);
+  if (!audience) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: `${title} sign-in is unavailable` });
+  try {
+    return await verifyProviderIdToken(provider, idToken, audience);
+  } catch {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: `${title} sign-in could not be verified` });
+  }
+}
+
+/**
+ * The provider's email already has an account. Emails that account a code and
+ * refuses this sign-in with CONFLICT; the code, sent to auth.confirmLink, adds
+ * the provider to the account. When no code can be sent the CONFLICT is plain,
+ * which is what older apps expect anyway.
+ */
+async function startProviderLink(identity: VerifiedProviderIdentity, owner: { id: string; email: string }, clientKey: string): Promise<never> {
+  const conflict = (cause?: ProviderLinkRequired) => new TRPCError({ code: 'CONFLICT', message: 'An account already exists for this email.', cause });
+  if (!mailerIsConfigured()) throw conflict();
+  if (await ipSendCooldownSecs(clientKey, 'link') > 0) {
+    throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again later.' });
+  }
+  const cooldown = await sendCooldownSecs(owner.email, 'link');
+  if (cooldown > 0) {
+    throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: `Wait ${cooldown} seconds before asking for another code` });
+  }
+  let required: ProviderLinkRequired;
+  try {
+    const challenge = await createChallenge(owner.email, owner.id, 'link');
+    await holdPendingLink(challenge.id, identity);
+    await sendProviderLinkCode(owner.email, challenge.code, Math.round(AUTH.code.ttlSecs / 60), providerTitle(identity.provider));
+    await Promise.all([recordSend(owner.email, 'link'), recordIpSend(clientKey, 'link')]);
+    required = new ProviderLinkRequired(challenge.id, maskEmail(owner.email), identity.provider);
+  } catch (error) {
+    captureError(error, { flow: 'provider-link-start' });
+    throw conflict();
+  }
+  throw conflict(required);
+}
+
+/** auth.appleSignIn and auth.googleSignIn after the token is verified. */
+async function providerSignIn(identity: VerifiedProviderIdentity, clientKey: string) {
+  const result = await resolveProviderIdentity(identity);
+  if ('linkTo' in result) return startProviderLink(identity, result.linkTo, clientKey);
+  const deletion = await applyDeletionPolicyOnSignIn(result.user.id);
+  if (deletion === 'purge-pending') {
+    throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is no longer available' });
+  }
+  const session = await memberSession(result.user.id, result.user.email);
+  if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
+  return { ...session, user: result.user, isNewUser: result.isNewUser, emailVerified: true as const, deletionCancelled: deletion === 'restored' };
 }
 
 /**
@@ -150,7 +218,7 @@ const authRouter = router({
 
       const hashed = await bcrypt.hash(password, 12);
       const user = await db.user.create({
-        data: { email, password: hashed, name, ref },
+        data: { email, password: hashed, name, ref, passwordSetAt: new Date() },
       });
 
       const session = await memberSession(user.id, user.email);
@@ -215,25 +283,9 @@ const authRouter = router({
       name: z.string().max(100).optional(),
       ref: z.string().max(100).optional(),
     }))
-    .mutation(async ({ input }) => {
-      if (!config.appleClientId) {
-        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Apple sign-in is unavailable' });
-      }
-      let identity;
-      try {
-        identity = await verifyProviderIdToken('apple', input.identityToken, appleIdentityAudiences(config.appleClientId));
-      } catch {
-        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Apple sign-in could not be verified' });
-      }
-      const result = await resolveProviderIdentity(identity);
-      const deletion = await applyDeletionPolicyOnSignIn(result.user.id);
-      if (deletion === 'purge-pending') {
-        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is no longer available' });
-      }
-      const session = await memberSession(result.user.id, result.user.email);
-      if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
-      return { ...session, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
-    }),
+    .mutation(async ({ ctx, input }) => (
+      providerSignIn(await verifiedProviderIdentity('apple', input.identityToken), ctx.clientRateLimitKey)
+    )),
 
   /** Verifies a Google ID token for the configured native iOS OAuth audience. */
   googleSignIn: publicProcedure
@@ -242,25 +294,9 @@ const authRouter = router({
       idToken: z.string().min(1).max(8_192),
       surface: z.literal('parker'),
     }))
-    .mutation(async ({ input }) => {
-      if (!config.googleServerClientId) {
-        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Google sign-in is unavailable' });
-      }
-      let identity;
-      try {
-        identity = await verifyProviderIdToken('google', input.idToken, config.googleServerClientId);
-      } catch {
-        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Google sign-in could not be verified' });
-      }
-      const result = await resolveProviderIdentity(identity);
-      const deletion = await applyDeletionPolicyOnSignIn(result.user.id);
-      if (deletion === 'purge-pending') {
-        throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is no longer available' });
-      }
-      const session = await memberSession(result.user.id, result.user.email);
-      if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
-      return { ...session, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
-    }),
+    .mutation(async ({ ctx, input }) => (
+      providerSignIn(await verifiedProviderIdentity('google', input.idToken), ctx.clientRateLimitKey)
+    )),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */
   me: protectedProcedure.query(async ({ ctx }) => {
@@ -354,11 +390,12 @@ const authRouter = router({
     }),
 
   /**
-   * Starts "Forgot password". The reply is identical whether the address has a
-   * password account, an Apple/Google account, or none: every request gets a
-   * live challenge, and only a password account's challenge is bound to a
-   * user. A wrong code therefore reads the same everywhere, and only the
-   * mailbox owner learns which case applied.
+   * Starts "Forgot password". The reply is identical whether the address has an
+   * account or not: every request gets a live challenge, and only an account's
+   * challenge is bound to a user. A wrong code therefore reads the same
+   * everywhere, and only the mailbox owner learns which case applied. An
+   * Apple/Google account may use it too: the code proves the mailbox, which is
+   * how such a member adds email sign-in.
    */
   requestPasswordReset: publicProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'auth:password-reset' }))
@@ -378,24 +415,15 @@ const authRouter = router({
         throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: `Wait ${cooldown} seconds before asking for another code` });
       }
 
-      const user = await db.user.findUnique({
-        where: { email },
-        select: { id: true, email: true, _count: { select: { providerIdentities: true } } },
-      });
-      // Apple and Google accounts have a generated password nobody knows;
-      // setting one here would link a password to them, which is a separate,
-      // explicit flow.
-      const resettable = user !== null && user._count.providerIdentities === 0;
-      const challenge = await createChallenge(email, resettable ? user.id : '', 'reset');
+      const user = await db.user.findUnique({ where: { email }, select: { id: true, email: true } });
+      const challenge = await createChallenge(email, user?.id ?? '', 'reset');
       await Promise.all([recordSend(email, 'reset'), recordIpSend(ctx.clientRateLimitKey, 'reset')]);
 
       // Not awaited: waiting on the mailer only when an account exists would
       // make the response time an account oracle.
       const ttlMins = Math.round(AUTH.code.ttlSecs / 60);
-      if (resettable) {
+      if (user) {
         sendPasswordResetCode(user.email, challenge.code, ttlMins).catch((error) => captureError(error, { flow: 'password-reset' }));
-      } else if (user) {
-        sendPasswordResetProviderNotice(user.email).catch((error) => captureError(error, { flow: 'password-reset' }));
       }
 
       return {
@@ -440,7 +468,7 @@ const authRouter = router({
       const hashed = await bcrypt.hash(input.password, 12);
       const user = await db.user.update({
         where: { id: verdict.userId },
-        data: { password: hashed, ...(existing.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }) },
+        data: { password: hashed, passwordSetAt: new Date(), ...(existing.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }) },
         select: { id: true, email: true, name: true },
       });
       if (!existing.emailVerifiedAt || deletion === 'restored') void refreshUserIdentityHashes(user.id, { email: user.email });
@@ -490,6 +518,92 @@ const authRouter = router({
       await signOutToken(input.refreshToken, 'member');
       return { signedOut: true as const };
     }),
+
+  /**
+   * Finishes adding Apple or Google sign-in from the sign-in screen: the code
+   * emailed by a CONFLICT from auth.appleSignIn or auth.googleSignIn proves the
+   * member controls the account, so the provider joins it and they are signed
+   * in. If that account's email was never confirmed, its password was never
+   * proven to be theirs and may have been set by someone else, so it stops
+   * working and every other sign-in ends.
+   */
+  confirmLink: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:link-confirm' }))
+    .input(z.object({
+      challengeId: z.string().min(1).max(100),
+      code: z.string().regex(/^\d+$/, 'Enter the code from the email').length(AUTH.code.length, 'Enter the code from the email'),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      if (await ipSubmitCooldownSecs(ctx.clientRateLimitKey, 'link') > 0) {
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try again later.' });
+      }
+      await recordIpSubmit(ctx.clientRateLimitKey, 'link');
+
+      const expired = () => new TRPCError({ code: 'BAD_REQUEST', message: 'This code has expired. Sign in again to get a new one.' });
+      const verdict = await verifyChallenge(input.challengeId, input.code, 'link');
+      if (!verdict.ok) {
+        if (verdict.reason === 'mismatch') {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: "That code isn't right. Check the email and try again." });
+        }
+        throw expired();
+      }
+      const link = await takePendingLink(input.challengeId);
+      if (!link) throw expired();
+      const existing = await db.user.findUnique({
+        where: { id: verdict.userId },
+        select: { id: true, email: true, name: true, emailVerifiedAt: true },
+      });
+      if (!existing) throw expired();
+
+      await attachProviderIdentity(existing.id, link);
+      const deletion = await applyDeletionPolicyOnSignIn(existing.id);
+      if (deletion === 'purge-pending') throw expired();
+
+      if (!existing.emailVerifiedAt) {
+        const unusable = await bcrypt.hash(randomBytes(32).toString('hex'), 12);
+        await db.user.update({
+          where: { id: existing.id },
+          data: { emailVerifiedAt: new Date(), password: unusable, passwordSetAt: null },
+        });
+        await signOutSessionsIssuedBefore(existing.id);
+        await signOutEverywhere(existing.id, Date.now(), 'member').catch((error) => captureError(error, { flow: 'provider-link' }));
+      }
+      if (!existing.emailVerifiedAt || deletion === 'restored') void refreshUserIdentityHashes(existing.id, { email: existing.email });
+      sendSignInMethodAddedEmail(existing.email, providerTitle(link.provider)).catch((error) => captureError(error, { flow: 'provider-link' }));
+
+      const session = await memberSession(existing.id, existing.email);
+      return {
+        ...session,
+        user: { id: existing.id, email: existing.email, name: existing.name },
+        isNewUser: false,
+        emailVerified: true as const,
+        deletionCancelled: deletion === 'restored',
+        linkedProvider: link.provider,
+      };
+    }),
+
+  /** Which ways into this account work: a chosen password, Apple, Google. */
+  signInMethods: protectedProcedure.query(async ({ ctx }) => signInMethods(ctx.user.userId)),
+
+  /** Adds Apple or Google sign-in from Settings. The session is the proof. */
+  linkProvider: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'auth:link-provider' }))
+    .input(z.object({ provider: z.enum(['apple', 'google']), idToken: z.string().min(1).max(8_192) }))
+    .mutation(async ({ ctx, input }) => {
+      const identity = await verifiedProviderIdentity(input.provider, input.idToken);
+      const outcome = await attachProviderIdentity(ctx.user.userId, identity);
+      if (outcome === 'attached') {
+        const user = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { email: true } });
+        if (user) sendSignInMethodAddedEmail(user.email, providerTitle(input.provider)).catch((error) => captureError(error, { flow: 'provider-link' }));
+      }
+      return signInMethods(ctx.user.userId);
+    }),
+
+  /** Removes Apple or Google sign-in, but never the last way in. */
+  unlinkProvider: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'auth:unlink-provider' }))
+    .input(z.object({ provider: z.enum(['apple', 'google']) }))
+    .mutation(async ({ ctx, input }) => detachProviderIdentity(ctx.user.userId, input.provider)),
 });
 
 /**

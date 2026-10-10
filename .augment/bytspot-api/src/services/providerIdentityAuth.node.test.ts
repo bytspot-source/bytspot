@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { hashEmail } from '../lib/contactHash';
 import { resolveProviderIdentity, type ProviderIdentityDatabase } from './providerIdentityAuth';
+import { attachProviderIdentity, maskEmail, type ProviderLinkDatabase } from './providerLink';
 
 const identity = { provider: 'google' as const, subject: 'google-subject', email: 'person@example.test', name: 'Person' };
 const linkedUser = { id: 'linked-user', email: 'person@example.test', name: 'Person' };
@@ -59,8 +60,31 @@ test('An immutable provider subject is reused without ever looking up the email'
 
 test('A matching email does not auto-link an existing password account', async () => {
   // This is the account-takeover boundary: whoever controls an email at a
-  // provider must not thereby control the password account that used it.
-  await assert.rejects(() => resolveProviderIdentity(identity, database({ emailOwner: { id: 'password-user' } })), { code: 'CONFLICT' });
+  // provider must not thereby control the password account that used it. The
+  // owner is returned so the caller can ask them to prove it; nothing is created.
+  const db = database({ emailOwner: { id: 'password-user', email: 'person@example.test' } });
+  assert.deepEqual(await resolveProviderIdentity(identity, db), { linkTo: { id: 'password-user', email: 'person@example.test' } });
+  assert.deepEqual(db.createdUsers(), []);
+});
+
+test('An account holds one identity per provider, and never one another account holds', async () => {
+  const links = (holder: unknown, sameProvider: unknown) => ({
+    providerIdentity: {
+      findUnique: async () => holder,
+      findFirst: async () => sameProvider,
+      create: async () => assert.fail('nothing may be linked'),
+    },
+  }) as unknown as ProviderLinkDatabase;
+
+  await assert.rejects(() => attachProviderIdentity('usr_a', identity, links({ userId: 'usr_b' }, null)), { code: 'CONFLICT', message: 'This Google ID is already used by another Bytspot account.' });
+  await assert.rejects(() => attachProviderIdentity('usr_a', identity, links(null, { id: 'other-google' })), { code: 'CONFLICT' });
+  assert.equal(await attachProviderIdentity('usr_a', identity, links({ userId: 'usr_a' }, null)), 'already');
+});
+
+test('A masked email is recognisable to its owner without revealing the address', () => {
+  assert.equal(maskEmail('ama@bytspot.com'), 'a••@bytspot.com');
+  assert.equal(maskEmail('a@bytspot.com'), 'a•@bytspot.com');
+  assert.equal(maskEmail('averylongname@bytspot.com'), 'a••••••@bytspot.com');
 });
 
 test('A new Apple identity without a token-derived email is refused', async () => {

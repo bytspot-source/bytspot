@@ -36,6 +36,8 @@ const PUBLIC_MUTATIONS = new Set([
   'auth.requestPasswordReset', 'auth.resetPassword',
   // The refresh token is the credential; the access token may already have lapsed.
   'auth.refresh', 'auth.signOut',
+  // The emailed code is the credential: the member is mid sign-in.
+  'auth.confirmLink',
   'betaSignup.signup',
   'admin.validateInvite',
   // A count of taps on a listed place's booking link; anonymous taps count too.

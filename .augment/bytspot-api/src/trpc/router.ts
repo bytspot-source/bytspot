@@ -41,6 +41,7 @@ import { appleIdentityAudiences, verifyProviderIdToken } from '../services/provi
 import { resolveProviderIdentity } from '../services/providerIdentityAuth';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { applyDeletionPolicyOnSignIn, signOutSessionsIssuedBefore } from '../services/accountDeletion';
+import { issueRefreshToken, revokeFamily, rotateRefreshToken, signOutEverywhere, signOutToken, spendRefreshToken } from '../vendor/refreshTokens';
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
@@ -59,6 +60,22 @@ function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
     expiresIn: config.jwtExpiresIn as string & jwt.SignOptions['expiresIn'],
   });
+}
+
+/**
+ * A member sign-in: an access token plus a refresh token the app trades for a
+ * new pair through auth.refresh, so the member is not asked to sign in again
+ * every time an access token lapses. The refresh token needs Redis; when Redis
+ * is down the sign-in still succeeds without one.
+ */
+async function memberSession(userId: string, email: string): Promise<{ token: string; refreshToken?: string }> {
+  const token = signToken(userId, email);
+  try {
+    return { token, refreshToken: await issueRefreshToken(userId, 'member') };
+  } catch (error) {
+    captureError(error, { flow: 'member-refresh-issue' });
+    return { token };
+  }
 }
 
 /**
@@ -136,7 +153,7 @@ const authRouter = router({
         data: { email, password: hashed, name, ref },
       });
 
-      const token = signToken(user.id, user.email);
+      const session = await memberSession(user.id, user.email);
 
       // No identity hashes yet: the email joins contact discovery only after
       // auth.verifyEmail proves the member owns it.
@@ -147,7 +164,7 @@ const authRouter = router({
         sendWelcomeEmail(user.email, firstName).catch(() => {});
       }
 
-      return { token, user: { id: user.id, email: user.email, name: user.name }, emailVerified: false };
+      return { ...session, user: { id: user.id, email: user.email, name: user.name }, emailVerified: false };
     }),
 
   /** POST /auth/login → auth.login mutation */
@@ -176,9 +193,9 @@ const authRouter = router({
       }
       if (deletion === 'restored' && user.emailVerifiedAt) void refreshUserIdentityHashes(user.id, { email: user.email });
 
-      const token = signToken(user.id, user.email);
+      const session = await memberSession(user.id, user.email);
       return {
-        token,
+        ...session,
         user: { id: user.id, email: user.email, name: user.name },
         emailVerified: user.emailVerifiedAt !== null,
         deletionCancelled: deletion === 'restored',
@@ -213,9 +230,9 @@ const authRouter = router({
       if (deletion === 'purge-pending') {
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is no longer available' });
       }
-      const token = signToken(result.user.id, result.user.email);
+      const session = await memberSession(result.user.id, result.user.email);
       if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
-      return { token, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
+      return { ...session, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
     }),
 
   /** Verifies a Google ID token for the configured native iOS OAuth audience. */
@@ -240,9 +257,9 @@ const authRouter = router({
       if (deletion === 'purge-pending') {
         throw new TRPCError({ code: 'UNAUTHORIZED', message: 'This account is no longer available' });
       }
-      const token = signToken(result.user.id, result.user.email);
+      const session = await memberSession(result.user.id, result.user.email);
       if (result.isNewUser) sendWelcomeEmail(result.user.email, (result.user.name ?? '').split(' ')[0]).catch(() => {});
-      return { token, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
+      return { ...session, user: result.user, isNewUser: result.isNewUser, emailVerified: true, deletionCancelled: deletion === 'restored' };
     }),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */
@@ -429,13 +446,49 @@ const authRouter = router({
       if (!existing.emailVerifiedAt || deletion === 'restored') void refreshUserIdentityHashes(user.id, { email: user.email });
 
       await signOutSessionsIssuedBefore(user.id);
-      const token = signToken(user.id, user.email);
+      await signOutEverywhere(user.id, Date.now(), 'member').catch((error) => captureError(error, { flow: 'password-reset' }));
+      const session = await memberSession(user.id, user.email);
       return {
-        token,
+        ...session,
         user: { id: user.id, email: user.email, name: user.name },
         emailVerified: true as const,
         deletionCancelled: deletion === 'restored',
       };
+    }),
+
+  /**
+   * Trades a refresh token for a new access token and a new refresh token. The
+   * presented token is spent: presenting it again revokes the whole sign-in,
+   * because only a stolen copy would be replayed. UNAUTHORIZED means the
+   * sign-in is over and the member must sign in again; anything else is
+   * transient and the app keeps its session.
+   */
+  refresh: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'auth:refresh' }))
+    .input(z.object({ refreshToken: z.string().min(20).max(200) }))
+    .mutation(async ({ input }) => {
+      const ended = () => new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in again' });
+      const verdict = await spendRefreshToken(input.refreshToken, 'member');
+      if (!verdict.ok) throw ended();
+
+      const user = await db.user.findUnique({ where: { id: verdict.userId }, select: { id: true, email: true, deletedAt: true } });
+      // A pending deletion ends sessions; signing in again is what restores it.
+      if (!user || user.deletedAt) {
+        await revokeFamily(verdict.familyId, 'member');
+        throw ended();
+      }
+
+      const refreshToken = await rotateRefreshToken(user.id, verdict.familyId, 'member');
+      return { token: signToken(user.id, user.email), refreshToken };
+    }),
+
+  /** Ends this device's sign-in. Other devices stay signed in. */
+  signOut: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'auth:sign-out' }))
+    .input(z.object({ refreshToken: z.string().min(20).max(200) }))
+    .mutation(async ({ input }) => {
+      await signOutToken(input.refreshToken, 'member');
+      return { signedOut: true as const };
     }),
 });
 

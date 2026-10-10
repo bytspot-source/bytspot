@@ -10,9 +10,23 @@ import { AUTH } from './contract';
  * nothing that can be presented. Only the browser ever holds the token itself.
  */
 
-const TOKEN_PREFIX = 'vendor:refresh:';
-const FAMILY_PREFIX = 'vendor:refresh:family:';
-const CUTOFF_PREFIX = 'vendor:refresh:cutoff:';
+/**
+ * Which sign-in a token belongs to. The vendor console and the member app share
+ * this store but never each other's tokens: a member's app token must not open
+ * the console, and signing out of one must not end the other.
+ */
+export type RefreshScope = 'vendor' | 'member';
+
+/** Members stay signed in on their phone far longer than a console session. */
+const MEMBER_REFRESH_TTL_SECS = 90 * 24 * 60 * 60;
+
+const tokenPrefix = (scope: RefreshScope) => `${scope}:refresh:`;
+const familyPrefix = (scope: RefreshScope) => `${scope}:refresh:family:`;
+const cutoffPrefix = (scope: RefreshScope) => `${scope}:refresh:cutoff:`;
+
+export function refreshTtlSecs(scope: RefreshScope = 'vendor'): number {
+  return scope === 'member' ? MEMBER_REFRESH_TTL_SECS : AUTH.token.refreshTtlSecs;
+}
 
 export interface RefreshRecord {
   userId: string;
@@ -31,20 +45,20 @@ function digest(token: string): string {
 }
 
 /** Issues a token in a new family. Used once, at sign-in. */
-export async function issueRefreshToken(userId: string): Promise<string> {
-  return mintInFamily(userId, `fam_${randomBytes(16).toString('hex')}`);
+export async function issueRefreshToken(userId: string, scope: RefreshScope = 'vendor'): Promise<string> {
+  return mintInFamily(userId, `fam_${randomBytes(16).toString('hex')}`, scope);
 }
 
 /** Issues the replacement for a spent token, keeping it in the same family. */
-export async function rotateRefreshToken(userId: string, familyId: string): Promise<string> {
-  return mintInFamily(userId, familyId);
+export async function rotateRefreshToken(userId: string, familyId: string, scope: RefreshScope = 'vendor'): Promise<string> {
+  return mintInFamily(userId, familyId, scope);
 }
 
-async function mintInFamily(userId: string, familyId: string): Promise<string> {
+async function mintInFamily(userId: string, familyId: string, scope: RefreshScope): Promise<string> {
   const redis = requireRedis();
   const token = randomBytes(32).toString('base64url');
   const record: RefreshRecord = { userId, familyId, issuedAt: Date.now() };
-  await redis.set(`${TOKEN_PREFIX}${digest(token)}`, JSON.stringify(record), 'EX', AUTH.token.refreshTtlSecs);
+  await redis.set(`${tokenPrefix(scope)}${digest(token)}`, JSON.stringify(record), 'EX', refreshTtlSecs(scope));
   return token;
 }
 
@@ -57,53 +71,53 @@ async function mintInFamily(userId: string, familyId: string): Promise<string> {
  * treated as theft, because a legitimate client never replays. It received the
  * replacement in the same response as the request that spent the original.
  */
-export async function spendRefreshToken(token: string): Promise<RefreshVerdict> {
+export async function spendRefreshToken(token: string, scope: RefreshScope = 'vendor'): Promise<RefreshVerdict> {
   const redis = requireRedis();
-  const key = `${TOKEN_PREFIX}${digest(token)}`;
+  const key = `${tokenPrefix(scope)}${digest(token)}`;
   const raw = await redis.getdel(key);
 
   if (!raw) {
-    const spent = await redis.get(`${FAMILY_PREFIX}spent:${digest(token)}`);
+    const spent = await redis.get(`${familyPrefix(scope)}spent:${digest(token)}`);
     if (spent) {
-      await revokeFamily(spent);
+      await revokeFamily(spent, scope);
       return { ok: false, reason: 'replayed' };
     }
     return { ok: false, reason: 'unknown' };
   }
 
   const record = JSON.parse(raw) as RefreshRecord;
-  if (await familyIsRevoked(record.familyId)) return { ok: false, reason: 'replayed' };
-  const cutoff = Number(await redis.get(`${CUTOFF_PREFIX}${record.userId}`)) || 0;
+  if (await familyIsRevoked(record.familyId, scope)) return { ok: false, reason: 'replayed' };
+  const cutoff = Number(await redis.get(`${cutoffPrefix(scope)}${record.userId}`)) || 0;
   if ((record.issuedAt ?? 0) < cutoff) return { ok: false, reason: 'revoked' };
 
   // Remembered for exactly as long as the token could have lived, so a replay
   // inside its own lifetime is recognised as one rather than as a stranger.
   await redis.set(
-    `${FAMILY_PREFIX}spent:${digest(token)}`,
+    `${familyPrefix(scope)}spent:${digest(token)}`,
     record.familyId,
     'EX',
-    AUTH.token.refreshTtlSecs,
+    refreshTtlSecs(scope),
   );
   return { ok: true, userId: record.userId, familyId: record.familyId };
 }
 
-export async function revokeFamily(familyId: string): Promise<void> {
+export async function revokeFamily(familyId: string, scope: RefreshScope = 'vendor'): Promise<void> {
   const redis = requireRedis();
-  await redis.set(`${FAMILY_PREFIX}revoked:${familyId}`, '1', 'EX', AUTH.token.refreshTtlSecs);
+  await redis.set(`${familyPrefix(scope)}revoked:${familyId}`, '1', 'EX', refreshTtlSecs(scope));
 }
 
-export async function familyIsRevoked(familyId: string): Promise<boolean> {
+export async function familyIsRevoked(familyId: string, scope: RefreshScope = 'vendor'): Promise<boolean> {
   const redis = requireRedis();
-  return Boolean(await redis.get(`${FAMILY_PREFIX}revoked:${familyId}`));
+  return Boolean(await redis.get(`${familyPrefix(scope)}revoked:${familyId}`));
 }
 
 /** Sign-out. Ends this sign-in without touching the person's other devices. */
-export async function signOutToken(token: string): Promise<void> {
+export async function signOutToken(token: string, scope: RefreshScope = 'vendor'): Promise<void> {
   const redis = requireRedis();
-  const raw = await redis.getdel(`${TOKEN_PREFIX}${digest(token)}`);
+  const raw = await redis.getdel(`${tokenPrefix(scope)}${digest(token)}`);
   if (!raw) return;
   const record = JSON.parse(raw) as RefreshRecord;
-  await revokeFamily(record.familyId);
+  await revokeFamily(record.familyId, scope);
 }
 
 /**
@@ -111,7 +125,7 @@ export async function signOutToken(token: string): Promise<void> {
  * by person, so this records a cutoff instead: anything minted before it is
  * refused when spent. Kept for as long as such a token could still live.
  */
-export async function signOutEverywhere(userId: string, now: number = Date.now()): Promise<void> {
+export async function signOutEverywhere(userId: string, now: number = Date.now(), scope: RefreshScope = 'vendor'): Promise<void> {
   const redis = requireRedis();
-  await redis.set(`${CUTOFF_PREFIX}${userId}`, String(now), 'EX', AUTH.token.refreshTtlSecs);
+  await redis.set(`${cutoffPrefix(scope)}${userId}`, String(now), 'EX', refreshTtlSecs(scope));
 }

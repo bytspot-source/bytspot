@@ -7,6 +7,7 @@ import type { Context } from './context';
 import { applyDeletionPolicyOnSignIn } from '../services/accountDeletion';
 import { redisHandle, type RedisLike } from '../vendor/redisHandle';
 import { createChallenge } from '../vendor/otp';
+import { issueRefreshToken } from '../vendor/refreshTokens';
 
 const createCaller = createCallerFactory(appRouter);
 const authenticated: Context = { user: { userId: 'usr_me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-deletion-client' };
@@ -155,6 +156,7 @@ test('a password reset with the emailed code sets the password, confirms the ema
   const result = await resetCaller('test-reset-ok').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' });
 
   assert.equal(typeof result.token, 'string');
+  assert.equal(typeof result.refreshToken, 'string');
   assert.deepEqual(result.user, { id: 'usr_reset', email: 'ama@bytspot.com', name: 'Ama' });
   assert.equal(result.emailVerified, true);
   assert.equal(result.deletionCancelled, false);
@@ -199,6 +201,57 @@ test('a password reset restores a pending deletion like any other sign-in', asyn
 
   const result = await resetCaller('test-reset-restore').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' });
   assert.equal(result.deletionCancelled, true);
+});
+
+test('a refresh token renews the session once and is then spent', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const first = await issueRefreshToken('usr_me', 'member');
+  user.findUnique = async () => ({ id: 'usr_me', email: 'me@bytspot.com', deletedAt: null });
+
+  const renewed = await resetCaller('test-refresh-ok').auth.refresh({ refreshToken: first });
+  assert.equal(typeof renewed.token, 'string');
+  assert.notEqual(renewed.refreshToken, first);
+  // Replaying the spent token ends the sign-in, including its replacement.
+  await assert.rejects(() => resetCaller('test-refresh-ok').auth.refresh({ refreshToken: first }), { code: 'UNAUTHORIZED' });
+  await assert.rejects(() => resetCaller('test-refresh-ok').auth.refresh({ refreshToken: renewed.refreshToken }), { code: 'UNAUTHORIZED' });
+});
+
+test('a pending deletion stops renewal; only signing in again restores the account', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const token = await issueRefreshToken('usr_me', 'member');
+  user.findUnique = async () => ({ id: 'usr_me', email: 'me@bytspot.com', deletedAt: new Date() });
+
+  await assert.rejects(() => resetCaller('test-refresh-deleted').auth.refresh({ refreshToken: token }), { code: 'UNAUTHORIZED' });
+});
+
+test('a password reset ends every earlier sign-in on other devices', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const otherDevice = await issueRefreshToken('usr_reset', 'member');
+  const { id, code } = await createChallenge('ama@bytspot.com', 'usr_reset', 'reset');
+  user.findUnique = async (args: any) => (args.select?.emailVerifiedAt
+    ? { emailVerifiedAt: new Date() }
+    : args.select?.email ? { id: 'usr_reset', email: 'ama@bytspot.com', deletedAt: null } : { deletedAt: null, purgeAfter: null });
+  user.update = async () => ({ id: 'usr_reset', email: 'ama@bytspot.com', name: 'Ama' });
+  const realNow = Date.now;
+  Date.now = () => realNow() + 5;
+  try {
+    const reset = await resetCaller('test-reset-signout').auth.resetPassword({ challengeId: id, code, password: 'a-new-password' });
+    await assert.rejects(() => resetCaller('test-reset-signout').auth.refresh({ refreshToken: otherDevice }), { code: 'UNAUTHORIZED' });
+    assert.equal(typeof (await resetCaller('test-reset-signout').auth.refresh({ refreshToken: reset.refreshToken! })).token, 'string');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('signing out ends that refresh token', async () => {
+  const store = codeStore();
+  redisHandle.get = () => store;
+  const token = await issueRefreshToken('usr_me', 'member');
+  assert.deepEqual(await resetCaller('test-sign-out').auth.signOut({ refreshToken: token }), { signedOut: true });
+  await assert.rejects(() => resetCaller('test-sign-out').auth.refresh({ refreshToken: token }), { code: 'UNAUTHORIZED' });
 });
 
 test('an older client saving preferences does not switch party alerts back on', async () => {

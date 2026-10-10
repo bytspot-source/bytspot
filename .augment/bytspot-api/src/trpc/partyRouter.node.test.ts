@@ -33,6 +33,9 @@ const partyDraft = { id: 'party-1', hostUserId: 'test-user-id', idempotencyKey, 
 // under the default policy (dies when the party ends).
 const linkAlive = { startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: new Date(Date.now() + 4 * 60 * 60 * 1000), shareLinkExpiresAt: null };
 const createCaller = createCallerFactory(appRouter);
+// Nobody has blocked anybody unless a test says so.
+(db.userBlock as any).findMany = async () => [];
+(db.userBlock as any).findFirst = async () => null;
 const anonymousContext: Context = { user: null, clientRateLimitKey: 'test-party-anon' };
 const authenticatedContext: Context = { user: { userId: 'test-user-id', email: 'test@bytspot.com' }, clientRateLimitKey: 'test-party-client' };
 const party = db.party as any;
@@ -887,6 +890,28 @@ test('Invite projects the Official Host identity block with no raw URLs as label
   });
   const sanitized = await caller().events.invite({ partyId: 'party-1' });
   assert.equal((sanitized.host.destinations as any).primarySocial.platform, 'Social');
+});
+
+test('A hidden party, a suspended host or a block reads as gone, except to guests already holding access', async () => {
+  const live = () => ({
+    id: 'party-1', hostUserId: 'host-id', status: 'published', templateId: 'listening-party', title: 'First Listen', tagline: '', requiredMembershipTier: 'green',
+    accessMode: 'free-rsvp', capacity: 80, locationDisclosure: 'public', venueName: 'Sample Venue', moderationHiddenAt: null,
+    hostDestinations: {}, startsAt: new Date('2026-08-10T20:00:00Z'), endsAt: null, shareLinkExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    itinerary: [], ticketTiers: [], host: { name: 'John', suspendedAt: null }, media: [],
+  });
+  party.findFirst = async () => ({ ...live(), moderationHiddenAt: new Date() });
+  await assert.rejects(() => caller().events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  party.findFirst = async () => ({ ...live(), host: { name: 'John', suspendedAt: new Date() } });
+  await assert.rejects(() => caller().events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+  party.findFirst = async () => live();
+  (db.userBlock as any).findFirst = async () => ({ id: 'block-1' });
+  try {
+    await assert.rejects(() => caller().events.invite({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
+    partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+    assert.equal((await caller().events.invite({ partyId: 'party-1' })).title, 'First Listen');
+  } finally {
+    (db.userBlock as any).findFirst = async () => null;
+  }
 });
 
 test('Invite projects published cover and album as HTTPS media URLs', async () => {

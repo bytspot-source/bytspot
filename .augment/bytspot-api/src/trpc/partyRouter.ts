@@ -16,6 +16,7 @@ import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
 import { resolvePlaceCore } from './placesRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
+import { isBlockedBetween } from '../services/safety';
 
 const maxMediaBytes = 600_000;
 const maxMediaPixels = 4_096;
@@ -833,7 +834,7 @@ async function publishedParty(partyId: string) {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
     include: {
-      host: { select: { name: true } },
+      host: { select: { name: true, suspendedAt: true } },
       media: { orderBy: { position: 'asc' }, select: { id: true, kind: true } },
       arrivalVenue: { select: { id: true, name: true, lat: true, lng: true } },
     },
@@ -896,6 +897,22 @@ function assertShareLinkUsable(
   // share link has stopped admitting new arrivals.
   if (viewerUserId && party.hostUserId && viewerUserId === party.hostUserId) return;
   if (party.closedAt || shareLinkExpired(party)) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
+  }
+}
+
+/**
+ * A party hidden by reports, hosted by a suspended account, or hosted by
+ * someone the viewer blocked or was blocked by reads as gone to anyone not
+ * already holding access. Guests keep their passes: taking them would move money.
+ */
+async function assertPartyReachable(
+  party: { hostUserId: string; moderationHiddenAt?: Date | null; host?: { suspendedAt: Date | null } | null },
+  guest: { accessGranted: boolean } | null,
+  viewerUserId?: string | null,
+): Promise<void> {
+  if (guest?.accessGranted || (viewerUserId && viewerUserId === party.hostUserId)) return;
+  if (party.moderationHiddenAt || party.host?.suspendedAt || (viewerUserId && await isBlockedBetween(viewerUserId, party.hostUserId))) {
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   }
 }
@@ -967,6 +984,7 @@ export const partyInvite = publicProcedure
       ? await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } })
       : null;
     assertShareLinkUsable(party, guest, ctx.user?.userId);
+    await assertPartyReachable(party, guest, ctx.user?.userId);
     const identity = safeIdentitySnapshot(party.hostDestinations);
     const destinations = identity ? null : safeDestinations(party.hostDestinations);
     const cover = party.media.find((media) => media.kind === 'cover');
@@ -1655,6 +1673,7 @@ export const partyRsvpRouter = router({
       const party = await publishedParty(input.partyId);
       const callerGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       assertShareLinkUsable(party, callerGuest);
+      await assertPartyReachable(party, callerGuest, ctx.user.userId);
       if (party.accessMode === 'paid-ticket') throw new TRPCError({ code: 'BAD_REQUEST', message: 'Paid Parties require ticket checkout.' });
       if (!meetsRequiredMembershipTier(await membershipTierFor(ctx.user.userId), party.requiredMembershipTier)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
@@ -1708,6 +1727,7 @@ export const partyTicketsRouter = router({
       const party = await publishedParty(input.partyId);
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       assertShareLinkUsable(party, knownGuest);
+      await assertPartyReachable(party, knownGuest, ctx.user.userId);
 
       // The gate. Only a paid-ticket Party has one; a free-entry Party is
       // still allowed to sell sessions inside it.

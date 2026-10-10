@@ -12,6 +12,9 @@ import { useTableBookingLinksForTest } from '../services/tableBookingLinks';
 
 const idempotencyKey = '00000000-0000-4000-8000-000000000010';
 const createCaller = createCallerFactory(appRouter);
+// Nobody has blocked anybody unless a test says so.
+(db.userBlock as any).findMany = async () => [];
+(db.userBlock as any).findFirst = async () => null;
 const plan = db.plan as any;
 const planParticipant = db.planParticipant as any;
 const planItem = db.planItem as any;
@@ -311,6 +314,22 @@ test('Invite asks for no prior relationship, which is what leaves room for Spot 
   user.findUnique = async () => null;
   await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'ghost' }), { code: 'NOT_FOUND' });
   await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'creator-id' }), { code: 'BAD_REQUEST' });
+});
+
+test('A block either way makes the person uninvitable and the link a dead end', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat] });
+  user.findUnique = async () => ({ id: 'stranger-id' });
+  (db.userBlock as any).findFirst = async ({ where }: any) => {
+    const pairs = where.OR.map((o: any) => `${o.blockerId}>${o.blockedId}`);
+    return pairs.includes('stranger-id>creator-id') ? { id: 'block-1' } : null;
+  };
+  try {
+    await assert.rejects(() => caller().plans.invite({ planId: 'plan-1', userId: 'stranger-id' }), { code: 'NOT_FOUND' });
+    planParticipant.create = async () => { throw new Error('a blocked joiner must not be seated'); };
+    await assert.rejects(() => stranger().plans.joinByToken({ token: 'any-link-token' }), { code: 'NOT_FOUND' });
+  } finally {
+    (db.userBlock as any).findFirst = async () => null;
+  }
 });
 
 test('Re-inviting is idempotent, and a removed person returns to a clean invite', async () => {

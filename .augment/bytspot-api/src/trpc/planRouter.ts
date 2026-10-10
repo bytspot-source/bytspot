@@ -3,6 +3,7 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
+import { blockedUserIds, isBlockedBetween } from '../services/safety';
 import { serializableTransaction, serializableTransactionWithRetry } from '../lib/transactions';
 import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { bookableCreateData, capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
@@ -503,10 +504,11 @@ async function publicBookableParties(client: TxClient, userId: string, now: Date
   const user = await client.user.findUnique({ where: { id: userId }, select: { membershipTier: true } });
   const userTier = user?.membershipTier ?? '';
   const allowedTiers = Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(userTier, tier));
+  const blocked = await blockedUserIds(userId);
   const parties = await client.party.findMany({
     where: {
       ...(ids ? { id: { in: ids } } : {}),
-      ...discoverablePartyWhere(now),
+      ...discoverablePartyWhere(now, [...blocked]),
       // Stricter than discovery on purpose: an attachable party must be open
       // to anyone, not merely to a circle this user happens to be in.
       audienceCircleIds: { isEmpty: true },
@@ -873,7 +875,6 @@ export const planRouter = router({
       let discoveredCandidates: import('../services/primePath').PrimePathCandidate[] = [];
       if (wantsNightlife && plan.latitude != null && plan.longitude != null) {
         const attachedPartyIds = new Set(partyIds);
-        const discoverableGate = discoverablePartyWhere(now);
         const DISCOVERY_RADIUS_MILES = 3.5;
         // A Party's own coordinates lead; a bound arrival venue answers for
         // parties published before they existed. Neither means Bytspot does
@@ -884,10 +885,12 @@ export const planRouter = router({
         // Identity is read before the parties, not beside them: tier and
         // circles belong in the query so an ineligible row cannot take a slot
         // under `take` from one the user could actually be shown.
-        const [user, userCircles] = await Promise.all([
+        const [user, userCircles, blocked] = await Promise.all([
           db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
           db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
+          blockedUserIds(ctx.user.userId),
         ]);
+        const discoverableGate = discoverablePartyWhere(now, [...blocked]);
         const discoveryTier = user?.membershipTier ?? '';
         const discoveryCircleIds = userCircles.map((m) => m.circleId);
         const discoverableParties = await db.party.findMany({
@@ -1020,6 +1023,8 @@ export const planRouter = router({
           if (seat.status === 'removed') throw planNotFound();
           return serializePlan(plan, now, ctx.user.userId, granted);
         }
+        // A link forwarded to someone the creator blocked, or who blocked them, seats nobody.
+        if (await isBlockedBetween(ctx.user.userId, plan.creatorUserId)) throw planNotFound();
 
         if (plan.participants.filter((p) => p.status !== 'removed').length >= MAX_PLAN_PARTICIPANTS) {
           throw new TRPCError({ code: 'CONFLICT', message: 'This Plan is full.' });
@@ -1123,7 +1128,10 @@ export const planRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'You are already on this Plan.' });
       }
       const invitee = await db.user.findUnique({ where: { id: input.userId }, select: { id: true } });
-      if (!invitee) throw new TRPCError({ code: 'NOT_FOUND', message: 'That person could not be found.' });
+      // Someone either of them blocked reads exactly like nobody.
+      if (!invitee || await isBlockedBetween(ctx.user.userId, invitee.id)) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: 'That person could not be found.' });
+      }
 
       // Reading a limit and then writing against it has to say Serializable
       // out loud: two concurrent invites to different users would both pass a

@@ -6,6 +6,9 @@ import { db } from '../lib/db';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
+// Nobody has blocked anybody unless a test says so.
+(db.userBlock as any).findMany = async () => [];
+(db.userBlock as any).findFirst = async () => null;
 const sale = db.privateSale as any;
 const request = db.privateSaleRequest as any;
 const handle = db.sellerPaymentHandle as any;
@@ -107,7 +110,8 @@ test('a share link never shows the meet point, and shows the area only when sign
   const signedOut = await anonymous().sales.view({ saleId: 'sale-1' });
   assert.equal(signedOut.areaLabel, null);
   assert.equal(signedOut.sellerName, 'Kojo');
-  assert.deepEqual(saleWhere.seller, { deletedAt: null });
+  assert.deepEqual(saleWhere.seller, { deletedAt: null, suspendedAt: null });
+  assert.equal(saleWhere.moderationHiddenAt, null, 'a sale hidden by reports reads as gone');
   assert.equal(saleWhere.status, 'open');
   assert.ok(saleWhere.windowEnd.gt instanceof Date);
   const signedIn = await buyer().sales.view({ saleId: 'sale-1' });
@@ -115,6 +119,18 @@ test('a share link never shows the meet point, and shows the area only when sign
   for (const view of [signedOut, signedIn]) {
     const text = JSON.stringify(view);
     assert.ok(!text.includes('33.78') && !text.includes('Colony Square') && !text.includes('seller-id'));
+  }
+});
+
+test('a block either way makes the sale read as gone to that member only', async () => {
+  (db.userBlock as any).findFirst = async () => ({ id: 'block-1' });
+  try {
+    await assert.rejects(() => buyer().sales.view({ saleId: 'sale-1' }), { code: 'NOT_FOUND' });
+    await assert.rejects(() => buyer().sales.request({ saleId: 'sale-1' }), { code: 'NOT_FOUND' });
+    await assert.rejects(() => buyer().sales.buyerCard({ saleId: 'sale-1' }), { code: 'NOT_FOUND' });
+    assert.equal((await anonymous().sales.view({ saleId: 'sale-1' })).title, 'Jordan 4 Retro, size 10');
+  } finally {
+    (db.userBlock as any).findFirst = async () => null;
   }
 });
 

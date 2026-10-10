@@ -46,6 +46,9 @@ const envSchema = z.object({
   ADMIN_PASSWORD:         z.string().default(''),
   ADMIN_USER_IDS:         z.string().default(''),
   ADMIN_BOOTSTRAP_EMAILS: z.string().default(''),
+  // Inbox told about every new member report, so reports are acted on within
+  // 24 hours without someone watching the admin console.
+  SAFETY_ALERT_EMAIL:     z.string().default(''),
   CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
 
   // ── OPTIONAL (integrations) ───────────────────────────
@@ -137,6 +140,7 @@ export const config = {
   adminPassword: env.ADMIN_PASSWORD,
   adminUserIds: env.ADMIN_USER_IDS,
   adminBootstrapEmails: env.ADMIN_BOOTSTRAP_EMAILS,
+  safetyAlertEmail: env.SAFETY_ALERT_EMAIL,
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
@@ -183,6 +187,7 @@ export function printConfigDiagnostics(): void {
   check(config.mobilityAggregatorMode === 'live' && config.mobilityAggregatorBaseUrl && config.mobilityAggregatorApiKey ? 'ok' : '', 'Mobility aggregator', 'premium rides will use Uber/Lyft handoff only');
   check(config.adminPassword, 'Admin password', 'invite gating disabled — all signups allowed');
   check(config.adminUserIds, 'Admin allowlist', 'no one can reach admin surfaces');
+  check(config.safetyAlertEmail, 'Safety alert inbox', 'new reports are not emailed to anyone');
   if (config.adminUserIds.includes('@')) {
     // auth.signup is public and unverified, so an email-keyed allowlist would
     // let anyone register an unclaimed admin address and escalate.

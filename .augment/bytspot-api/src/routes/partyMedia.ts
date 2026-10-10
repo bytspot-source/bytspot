@@ -41,12 +41,14 @@ function sendMedia(res: Response, media: { mimeType: string; bytes: Uint8Array }
 partyMediaRouter.get('/media/parties/:mediaId', async (req, res) => {
   const media = await db.partyMedia.findUnique({
     where: { id: req.params.mediaId },
-    include: { party: { select: { id: true, hostUserId: true, status: true, accessMode: true, recapPublishedAt: true } } },
+    include: { party: { select: { id: true, hostUserId: true, status: true, accessMode: true, recapPublishedAt: true, moderationHiddenAt: true } } },
   }).catch(() => null);
   if (!media) return notFound(res);
 
   const viewerUserId = requestUserId(req.headers.authorization);
   const owner = viewerUserId === media.party.hostUserId;
+  // A party hidden by reports shows its photos to nobody but its host.
+  if (!owner && media.party.moderationHiddenAt) return notFound(res);
 
   // A recap is the room from the inside — faces of people who were actually
   // there. Cover and album are the invitation, so for them holding the URL is

@@ -25,6 +25,7 @@ function partyDistanceMiles(fromLat: number, fromLng: number, lat: number | null
 }
 import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partySessionsRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
+import { blockedUserIds } from '../services/safety';
 import { config } from '../config';
 
 // ─── Ticketmaster Discovery API helpers ─────────────────────────────
@@ -122,16 +123,17 @@ export const eventsRouter = router({
       // anyone is standing. Answering it would serve Gulf of Guinea results.
       if (input.lat === 0 && input.lng === 0) return { parties: [] };
       const now = new Date();
-      const gate = discoverablePartyWhere(now);
       const withinBox = boundingBoxWhere(input.lat, input.lng, input.radiusMiles);
       // Who the caller is has to be known before the parties are read, not
       // alongside: tier and circles belong in the query, so a row the caller
       // may never see cannot occupy a slot under `take` and push out one
       // they may. The pure gate still re-checks both.
-      const [user, circles] = await Promise.all([
+      const [user, circles, blocked] = await Promise.all([
         db.user.findUnique({ where: { id: ctx.user.userId }, select: { membershipTier: true } }),
         db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
+        blockedUserIds(ctx.user.userId),
       ]);
+      const gate = discoverablePartyWhere(now, [...blocked]);
       const userTier = user?.membershipTier ?? '';
       const userCircleIds = circles.map((m) => m.circleId);
       const allowedTiers = Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(userTier, tier));

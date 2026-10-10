@@ -86,6 +86,14 @@ test('blocking refuses yourself, unknown members and the limit', async () => {
   assert.deepEqual(await member().safety.block({ userId: 'them' }), { blocked: true }, 'blocking again at the limit is fine');
 });
 
+test('a host, reviewer or seller can be blocked by the item, without their account id', async () => {
+  assert.deepEqual(await member().safety.block({ kind: 'party', targetId: 'p1' }), { blocked: true });
+  assert.deepEqual(writes.find((w) => w.op === 'block.upsert')!.args.create, { blockerId: 'me', blockedId: 'host-id' });
+  party.findFirst = async () => null;
+  await assert.rejects(() => member().safety.block({ kind: 'party', targetId: 'gone' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => member('reviewer-id').safety.block({ kind: 'review', targetId: 'r1' }), { code: 'BAD_REQUEST' });
+});
+
 test('the blocks list shows only who this member blocked', async () => {
   let where: any;
   block.findMany = async (args: any) => { where = args.where; return [{ createdAt: new Date(0), blocked: { id: 'them', name: '  ' } }]; };

@@ -94,12 +94,21 @@ export const safetyRouter = router({
       return { reported: true as const };
     }),
 
+  /**
+   * Block a member by id, or the owner of a party, review or sale by the item,
+   * so the app never needs a host's or seller's account id to offer "Block".
+   */
   block: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'safety-block' }))
-    .input(z.object({ userId: memberId }))
+    .input(z.union([
+      z.object({ userId: memberId }),
+      z.object({ kind: z.enum(REPORT_KINDS), targetId: z.string().min(1).max(128) }),
+    ]))
     .mutation(async ({ ctx, input }) => {
-      if (input.userId === ctx.user.userId) throw new TRPCError({ code: 'BAD_REQUEST', message: "You can't block yourself." });
-      const target = await db.user.findUnique({ where: { id: input.userId }, select: { id: true } });
+      const userId = 'userId' in input ? input.userId : (await reportTarget(input.kind, input.targetId))?.ownerId;
+      if (!userId) throw unavailable();
+      if (userId === ctx.user.userId) throw new TRPCError({ code: 'BAD_REQUEST', message: "You can't block yourself." });
+      const target = await db.user.findUnique({ where: { id: userId }, select: { id: true } });
       if (!target) throw new TRPCError({ code: 'NOT_FOUND', message: 'That member was not found.' });
       const already = await db.userBlock.findUnique({
         where: { blockerId_blockedId: { blockerId: ctx.user.userId, blockedId: target.id } },

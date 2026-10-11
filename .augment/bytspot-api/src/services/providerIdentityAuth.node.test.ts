@@ -107,6 +107,18 @@ test('A new Apple identity without a token-derived email is refused', async () =
   );
 });
 
+test('A new provider account records who invited it', async () => {
+  const db = database();
+  (db.user as any).findUnique = async (args: any) => (args.where.inviteCode === 'AMA7K2' ? { id: 'inviter' } : null);
+  await resolveProviderIdentity(identity, db, { ref: 'ama7k2' });
+  assert.equal(db.createdUsers()[0].ref, 'inviter');
+
+  // Not a code: a campaign source is kept as given.
+  const campaign = database();
+  await resolveProviderIdentity(identity, campaign, { ref: 'native_ios' });
+  assert.equal(campaign.createdUsers()[0].ref, 'native_ios');
+});
+
 test('A provider mapping is created from verified token claims only', async () => {
   const db = database();
   assert.deepEqual(await resolveProviderIdentity(identity, db), { user: linkedUser, isNewUser: true });

@@ -5,6 +5,7 @@ import { db } from '../lib/db';
 import { VerifiedProviderIdentity } from './providerIdTokenVerifier';
 import { refreshUserIdentityHashes } from './userIdentityHashes';
 import { extraEmailOwnerId, normalizeEmail } from './accountEmails';
+import { signupRef } from './inviteCodes';
 
 type ProviderUser = { id: string; email: string; name: string | null };
 
@@ -27,6 +28,7 @@ export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'provide
 export async function resolveProviderIdentity(
   identity: VerifiedProviderIdentity,
   database: ProviderIdentityDatabase = db,
+  { ref }: { ref?: string } = {},
 ): Promise<ProviderResolution> {
   const existing = await database.providerIdentity.findUnique({
     where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
@@ -50,10 +52,11 @@ export async function resolveProviderIdentity(
   // A provider-only account cannot use password login until a future explicit
   // password-setting flow is completed. Never persist the generated secret.
   const password = await bcrypt.hash(randomBytes(32).toString('hex'), 12);
+  const storedRef = await signupRef(ref, database);
   try {
     return await database.$transaction(async (tx) => {
       const user = await tx.user.create({
-        data: { email: identity.email!, emailVerifiedAt: new Date(), password, name: identity.name },
+        data: { email: identity.email!, emailVerifiedAt: new Date(), password, name: identity.name, ref: storedRef },
         select: { id: true, email: true, name: true },
       });
       await tx.providerIdentity.create({

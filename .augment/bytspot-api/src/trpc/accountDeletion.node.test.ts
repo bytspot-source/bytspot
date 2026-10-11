@@ -603,3 +603,29 @@ test('an extra email signs in with the password and cannot be used to sign up ag
   user.create = async () => assert.fail('an address on another account must not sign up');
   await assert.rejects(() => resetCaller('test-extra-signup').auth.signup({ email: 'ama@gmail.com', password: 'a-good-password' }), { code: 'CONFLICT', message: 'Email already registered' });
 });
+
+// ── Invite codes ──
+test('the invite code is issued once and the link carries it', async () => {
+  let stored: string | null = null;
+  let issued = 0;
+  user.findUnique = async () => ({ inviteCode: stored });
+  user.updateMany = async (args: any) => { issued += 1; stored = args.data.inviteCode; return { count: 1 }; };
+  user.count = async (args: any) => (args.where.ref === 'usr_me' ? 2 : 0);
+
+  const first = await caller().auth.invite();
+  assert.match(first.code, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+  assert.equal(first.link, `https://bytspot.app/?ref=${first.code}`);
+  assert.equal(first.referralCount, 2);
+  assert.deepEqual(await caller().auth.invite(), first);
+  assert.equal(issued, 1);
+});
+
+test('signing up with an invite code in any letter case credits the inviter', async () => {
+  const created: any[] = [];
+  user.findUnique = async (args: any) => (args.where.inviteCode === 'AMA7K2' ? { id: 'usr_inviter' } : null);
+  user.create = async (args: any) => { created.push(args.data); return { id: 'usr_new', email: args.data.email, name: null }; };
+
+  await resetCaller('test-invite-signup').auth.signup({ email: 'friend@gmail.com', password: 'a-good-password', ref: ' ama7k2 ' });
+  await resetCaller('test-invite-signup-2').auth.signup({ email: 'other@gmail.com', password: 'a-good-password', ref: 'vibecheck' });
+  assert.deepEqual(created.map((data) => data.ref), ['usr_inviter', 'vibecheck']);
+});

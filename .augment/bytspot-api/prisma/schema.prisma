@@ -23,6 +23,7 @@ model User {
   birthday          String?
   notificationPrefs Json?   @map("notification_prefs") // push/email/sms preference toggles
   ref               String? // signup source: "qr", "tiktok", "organic"
+  inviteCode        String? @unique @map("invite_code") // the member's own code, issued on first use; a new member's `ref` is the inviter's id
 
   // Account deletion is soft for a fixed grace period so an accidental or
   // coerced deletion is recoverable; `purgeAfter` is when the row becomes

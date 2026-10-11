@@ -36,6 +36,7 @@ import {
   verifyChallenge,
 } from '../vendor/otp';
 import { refreshUserIdentityHashes } from '../services/userIdentityHashes';
+import { INVITE_LINK_BASE, inviteCodeFor, signupRef } from '../services/inviteCodes';
 import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
@@ -159,8 +160,8 @@ async function startProviderLink(identity: VerifiedProviderIdentity, owner: { id
 }
 
 /** auth.appleSignIn and auth.googleSignIn after the token is verified. */
-async function providerSignIn(identity: VerifiedProviderIdentity, clientKey: string) {
-  const result = await resolveProviderIdentity(identity);
+async function providerSignIn(identity: VerifiedProviderIdentity, clientKey: string, ref?: string) {
+  const result = await resolveProviderIdentity(identity, undefined, { ref });
   if ('linkTo' in result) return startProviderLink(identity, result.linkTo, clientKey);
   const deletion = await applyDeletionPolicyOnSignIn(result.user.id);
   if (deletion === 'purge-pending') {
@@ -243,7 +244,7 @@ const authRouter = router({
 
       const hashed = await bcrypt.hash(password, 12);
       const user = await db.user.create({
-        data: { email, password: hashed, name, ref, passwordSetAt: new Date() },
+        data: { email, password: hashed, name, ref: await signupRef(ref), passwordSetAt: new Date() },
       });
 
       const session = await memberSession(user.id, user.email);
@@ -313,7 +314,7 @@ const authRouter = router({
       ref: z.string().max(100).optional(),
     }))
     .mutation(async ({ ctx, input }) => (
-      providerSignIn(await verifiedProviderIdentity('apple', input.identityToken), ctx.clientRateLimitKey)
+      providerSignIn(await verifiedProviderIdentity('apple', input.identityToken), ctx.clientRateLimitKey, input.ref)
     )),
 
   /** Verifies a Google ID token for the configured native iOS OAuth audience. */
@@ -322,9 +323,10 @@ const authRouter = router({
     .input(z.object({
       idToken: z.string().min(1).max(8_192),
       surface: z.literal('parker'),
+      ref: z.string().max(100).optional(),
     }))
     .mutation(async ({ ctx, input }) => (
-      providerSignIn(await verifiedProviderIdentity('google', input.idToken), ctx.clientRateLimitKey)
+      providerSignIn(await verifiedProviderIdentity('google', input.idToken), ctx.clientRateLimitKey, input.ref)
     )),
 
   /** Get current user profile + referral count — mirrors GET /auth/me */
@@ -355,6 +357,13 @@ const authRouter = router({
       },
       referralCount,
     };
+  }),
+
+  /** The member's invite code and link, and how many members joined with it. */
+  invite: protectedProcedure.query(async ({ ctx }) => {
+    const code = await inviteCodeFor(ctx.user.userId);
+    const referralCount = await db.user.count({ where: { ref: ctx.user.userId } });
+    return { code, link: INVITE_LINK_BASE + code, referralCount };
   }),
 
   /**

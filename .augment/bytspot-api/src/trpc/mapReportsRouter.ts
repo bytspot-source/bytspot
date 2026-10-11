@@ -11,18 +11,21 @@ import {
   MERGE_METERS,
   REPORT_LIFETIME_MS,
   REPORT_SELECT,
+  TOP_REPORTER_WINDOW_MS,
   TRUST_WINDOW_MS,
   VENUE_REPORT_KINDS,
   activeReportsNear,
   evidenceWeight,
   judgeRow,
   publishMapReportChange,
+  reporterStanding,
   requiredAgreementFor,
   toPublicReport,
   type MapReportVoteKind,
   type PublicMapReport,
   type ReportRow,
 } from '../services/mapReports';
+import { alertPlansOfBusyStop } from '../services/mapReportAlerts';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -57,11 +60,20 @@ async function loadReport(id: string): Promise<ReportRow | null> {
   return (await db.mapReport.findUnique({ where: { id }, select: REPORT_SELECT })) as ReportRow | null;
 }
 
-/** The first confirmation wins the points; a confirmation racing it finds
- *  `confirmedAt` already set and pays nothing. */
+/** The first confirmation wins the points, and tells Plans heading to a busy
+ *  venue; a confirmation racing it finds `confirmedAt` already set and does neither. */
 async function confirmAndPay(row: ReportRow, now: Date): Promise<void> {
   const won = await db.mapReport.updateMany({ where: { id: row.id, confirmedAt: null }, data: { confirmedAt: now } });
   if (won.count !== 1) return;
+  if ((row.kind === 'long_line' || row.kind === 'packed') && row.venueId && row.venue) {
+    void alertPlansOfBusyStop({
+      venueId: row.venueId,
+      venueName: row.venue.name,
+      kind: row.kind,
+      skipUserIds: [row.reporterId, ...row.votes.map((v) => v.voterId)],
+      now,
+    }).catch(() => {});
+  }
   const earned = await db.mapReport.aggregate({
     _sum: { pointsEarned: true },
     where: { reporterId: row.reporterId, confirmedAt: { gte: startOfPointsDay(now) } },
@@ -225,6 +237,21 @@ export const mapReportsRouter = router({
         id = retried.id;
       }
       return { ...(await settle(id, now)), merged: false };
+    }),
+
+  /** The member's confirmed reports this week and their reporter badge, if any. */
+  standing: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'map-reports-standing' }))
+    .query(async ({ ctx }) => {
+      const confirmed = await db.mapReport.findMany({
+        where: {
+          confirmedAt: { gte: new Date(Date.now() - TOP_REPORTER_WINDOW_MS) },
+          reporter: { suspendedAt: null, deletedAt: null },
+        },
+        select: { reporterId: true, lat: true, lng: true },
+        take: 5000,
+      });
+      return reporterStanding(ctx.user.userId, confirmed);
     }),
 
   /** "Still there" or "Gone". A member can change their vote; their own report isn't theirs to vote on. */

@@ -1,9 +1,11 @@
 import { EventEmitter } from 'events';
+import { config } from '../config';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { captureError } from '../lib/observability';
 import { distanceMeters } from './checkinProof';
 import { boundingBoxWhere } from './geoBox';
+import { cellFor, cellName } from './presence';
 
 /** What a member can report on the Map. The first three are on the road; the
  *  rest are about a place, and `long_line` and `packed` need the venue. */
@@ -36,6 +38,11 @@ export const TRUST_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
  *  an unconfirmed or false report earns nothing. */
 export const CONFIRMED_REPORT_POINTS = 5;
 export const DAILY_REPORT_POINT_CEILING = 25;
+
+/** "Top Midtown reporter" goes to the member with the most confirmed reports
+ *  in the area this past week, and only from this many. Ties share it. */
+export const TOP_REPORTER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+export const TOP_REPORTER_MIN_CONFIRMED = 3;
 
 /** A member who was at the venue — a proven check-in there in the last hour —
  *  counts as two. Everyone else counts as one. */
@@ -111,7 +118,57 @@ export type PublicMapReport = {
   goneCount: number;
   createdAt: string;
   expiresAt: string;
+  /** The named neighbourhood, e.g. "Midtown"; null outside the ones Bytspot has mapped. */
+  area: string | null;
+  /** The web page a member shares, readable without the app. */
+  shareUrl: string;
 };
+
+export function reportArea(point: { lat: number; lng: number }): string | null {
+  return cellName(cellFor(point.lat, point.lng));
+}
+
+export function reportHeadline(kind: MapReportKind, venueName: string | null): string {
+  switch (kind) {
+    case 'police': return 'Police reported';
+    case 'construction': return 'Construction reported';
+    case 'incident': return 'Incident reported';
+    case 'long_line': return venueName ? `Long line at ${venueName}` : 'Long line reported';
+    case 'packed': return venueName ? `${venueName} is packed` : 'Packed';
+    case 'parking_full': return venueName ? `Parking full at ${venueName}` : 'Parking full';
+  }
+}
+
+export function reportShareUrl(id: string): string {
+  return `${config.publicApiUrl}/alert/${encodeURIComponent(id)}`;
+}
+
+export type ReporterStanding = { confirmedThisWeek: number; badge: string | null };
+
+/**
+ * A member's confirmed reports this past week, and "Top <area> reporter" when
+ * they have the most in a named area (at least three). Reports outside a
+ * named area count toward the total but toward no badge.
+ */
+export function reporterStanding(userId: string, confirmed: readonly { reporterId: string; lat: number; lng: number }[]): ReporterStanding {
+  const byArea = new Map<string, Map<string, number>>();
+  let confirmedThisWeek = 0;
+  for (const report of confirmed) {
+    if (report.reporterId === userId) confirmedThisWeek++;
+    const area = reportArea(report);
+    if (!area) continue;
+    const counts = byArea.get(area) ?? new Map<string, number>();
+    counts.set(report.reporterId, (counts.get(report.reporterId) ?? 0) + 1);
+    byArea.set(area, counts);
+  }
+  let best: { area: string; count: number } | null = null;
+  for (const [area, counts] of byArea) {
+    const mine = counts.get(userId) ?? 0;
+    if (mine < TOP_REPORTER_MIN_CONFIRMED || mine < Math.max(...counts.values())) continue;
+    if (!best || mine > best.count) best = { area, count: mine };
+  }
+  return { confirmedThisWeek, badge: best ? `Top ${best.area} reporter` : null };
+}
 
 export const REPORT_SELECT = {
   id: true,
@@ -171,6 +228,8 @@ export function toPublicReport(row: ReportRow, verdict: ReportVerdict): PublicMa
     goneCount: verdict.goneCount,
     createdAt: row.createdAt.toISOString(),
     expiresAt: verdict.expiresAt.toISOString(),
+    area: reportArea(row),
+    shareUrl: reportShareUrl(row.id),
   };
 }
 

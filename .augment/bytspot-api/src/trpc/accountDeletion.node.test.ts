@@ -13,6 +13,7 @@ import { ProviderLinkRequired, holdPendingLink } from '../services/providerLink'
 import { holdPendingEmail } from '../services/accountEmails';
 import { hashEmail } from '../lib/contactHash';
 import bcrypt from 'bcryptjs';
+import { config } from '../config';
 
 const createCaller = createCallerFactory(appRouter);
 const authenticated: Context = { user: { userId: 'usr_me', email: 'me@bytspot.com' }, clientRateLimitKey: 'test-deletion-client' };
@@ -610,7 +611,8 @@ test('the invite code is issued once and the link carries it', async () => {
   let issued = 0;
   user.findUnique = async () => ({ inviteCode: stored });
   user.updateMany = async (args: any) => { issued += 1; stored = args.data.inviteCode; return { count: 1 }; };
-  user.count = async (args: any) => (args.where.ref === 'usr_me' ? 2 : 0);
+  // Only invited accounts with a confirmed email count.
+  user.count = async (args: any) => (args.where.ref === 'usr_me' && args.where.emailVerifiedAt?.not === null ? 2 : 0);
 
   const first = await caller().auth.invite();
   assert.match(first.code, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
@@ -628,4 +630,37 @@ test('signing up with an invite code in any letter case credits the inviter', as
   await resetCaller('test-invite-signup').auth.signup({ email: 'friend@gmail.com', password: 'a-good-password', ref: ' ama7k2 ' });
   await resetCaller('test-invite-signup-2').auth.signup({ email: 'other@gmail.com', password: 'a-good-password', ref: 'vibecheck' });
   assert.deepEqual(created.map((data) => data.ref), ['usr_inviter', 'vibecheck']);
+});
+
+// ── Welcome email ──
+// Last in the file: it installs a fake mail client, which stays for the
+// rest of the run.
+test('a password account is welcomed when its email is confirmed, never at signup', async () => {
+  const sent: string[] = [];
+  require.cache[require.resolve('resend')] = { exports: { Resend: class { emails = { send: async (mail: any) => { sent.push(mail.to); return {}; } }; } } } as any;
+  (config as any).resendApiKey = 'test-key';
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  user.findUnique = async () => null;
+  user.create = async (args: any) => ({ id: 'usr_me', email: args.data.email, name: null });
+  await resetCaller('test-welcome-signup').auth.signup({ email: 'someone@theircompany.com', password: 'a-good-password' });
+  await flush();
+  assert.deepEqual(sent, []);
+
+  const store = codeStore();
+  redisHandle.get = () => store;
+  userIdentityHash.deleteMany = async () => ({ count: 0 });
+  userIdentityHash.createMany = async () => ({ count: 0 });
+  const confirm = async (createdAt: Date) => {
+    user.update = async () => ({ id: 'usr_me', email: 'me@bytspot.com', name: 'Ama Owusu', createdAt });
+    const { id, code } = await createChallenge('me@bytspot.com', 'usr_me', 'member');
+    await caller().auth.verifyEmail({ challengeId: id, code });
+    await flush();
+  };
+  await confirm(new Date());
+  assert.deepEqual(sent, ['me@bytspot.com']);
+
+  // Accounts from before the change were welcomed at signup.
+  await confirm(new Date('2026-09-01T00:00:00Z'));
+  assert.deepEqual(sent, ['me@bytspot.com']);
 });

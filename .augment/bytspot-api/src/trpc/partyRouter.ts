@@ -352,11 +352,18 @@ async function mutateDraftMedia<T>(
   });
 }
 
+/** A party presents its host to guests, so hosting needs a confirmed account email. */
+async function requireConfirmedHost(userId: string) {
+  const host = await db.user.findUnique({ where: { id: userId }, select: { emailVerifiedAt: true } });
+  if (!host?.emailVerifiedAt) throw new TRPCError({ code: 'FORBIDDEN', message: 'Confirm your email to host a party.' });
+}
+
 export const partyDraftsRouter = router({
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-draft-create' }))
     .input(draftInput)
     .mutation(async ({ ctx, input }) => {
+      await requireConfirmedHost(ctx.user.userId);
       const existing = await db.party.findUnique({ where: { hostUserId_idempotencyKey: { hostUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } } });
       if (existing) {
         await refreshDraftContent(existing.id, ctx.user.userId, input);
@@ -731,6 +738,7 @@ export const partyPublish = protectedProcedure
   .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-publish' }))
   .input(z.object({ partyId: z.string().min(1), idempotencyKey: z.string().uuid() }))
   .mutation(async ({ ctx, input }) => {
+    await requireConfirmedHost(ctx.user.userId);
     const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId } });
     if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });

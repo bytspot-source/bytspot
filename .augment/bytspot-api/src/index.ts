@@ -21,6 +21,7 @@ import partyMediaRouter from './routes/partyMedia';
 import partyLandingRouter from './routes/partyLanding'; // server-rendered share-link page (link previews need real HTML)
 import planLandingRouter from './routes/planLanding';   // server-rendered Plan invite page for non-members
 import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
+import mapReportsRouter from './routes/mapReports';     // SSE stream (map/reports/stream) of Traffic Intel reports
 import { placesPhotoRouter } from './routes/placesPhoto';
 import partyStripeWebhookRouter from './routes/partyStripeWebhook';
 import vendorAuthRouter from './routes/vendorAuth';
@@ -101,6 +102,7 @@ app.use(partyLandingRouter);
 app.use(planLandingRouter);
 app.use(placesPhotoRouter);
 app.use(diagnosticsRouter);
+app.use(mapReportsRouter);
 app.use(vendorAuthRouter);
 app.use(vendorSetupRouter);
 app.use(vendorDemandRouter);

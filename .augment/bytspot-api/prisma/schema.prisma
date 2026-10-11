@@ -85,6 +85,8 @@ model User {
   blocks                UserBlock[]           @relation("userBlocker")
   blockedBy             UserBlock[]           @relation("userBlocked")
   contentReports        ContentReport[]       @relation("contentReporter")
+  mapReports            MapReport[]           @relation("mapReporter")
+  mapReportVotes        MapReportVote[]       @relation("mapReportVoter")
 
   @@map("users")
 }
@@ -199,6 +201,7 @@ model Venue {
   arrivalParties Party[]          @relation("partyArrivalVenue")
   bookingTaps    BookingLinkTap[]
   media          VenueMedia[]
+  mapReports     MapReport[]
 
   @@map("venues")
 }
@@ -1905,4 +1908,58 @@ model ContentReport {
   @@index([targetKind, targetId])
   @@index([ownerId])
   @@map("content_reports")
+}
+
+/// What a member sees happening at a place right now, shown on the Map's
+/// Traffic Intel. One pin per thing: a second member reporting the same thing
+/// close by agrees with the first rather than adding a pin.
+model MapReport {
+  id                String    @id @default(cuid())
+  reporterId        String    @map("reporter_id")
+  /// police | construction | incident | long_line | packed | parking_full
+  kind              String
+  lat               Float
+  lng               Float
+  venueId           String?   @map("venue_id")
+  /// The phone's own id for the report, so a retried submit is not counted twice.
+  clientReportId    String?   @map("client_report_id")
+  /// 2 when the reporter had a proven check-in at the venue in the last hour.
+  weight            Int       @default(1)
+  /// Agreement needed to confirm, fixed at creation: 2, or 3 for a reporter
+  /// whose recent reports were voted gone more often than confirmed.
+  requiredAgreement Int       @default(2) @map("required_agreement")
+  confirmedAt       DateTime? @map("confirmed_at")
+  removedAt         DateTime? @map("removed_at")
+  pointsEarned      Int       @default(0) @map("points_earned")
+  expiresAt         DateTime  @map("expires_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  reporter User            @relation("mapReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  venue    Venue?          @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  votes    MapReportVote[]
+
+  @@unique([reporterId, clientReportId])
+  @@index([expiresAt, lat, lng])
+  @@index([reporterId, createdAt(sort: Desc)])
+  @@index([venueId])
+  @@map("map_reports")
+}
+
+/// "Still there" or "Gone" on a report, one per member per report. Changing
+/// the vote moves `votedAt`, because agreement and removal count recent votes.
+model MapReportVote {
+  id       String   @id @default(cuid())
+  reportId String   @map("report_id")
+  voterId  String   @map("voter_id")
+  /// still | gone
+  vote     String
+  weight   Int      @default(1)
+  votedAt  DateTime @default(now()) @map("voted_at")
+
+  report MapReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  voter  User      @relation("mapReportVoter", fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, voterId])
+  @@index([voterId])
+  @@map("map_report_votes")
 }

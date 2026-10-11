@@ -76,7 +76,7 @@ beforeEach(() => {
   partyCheckout.groupBy = async () => [];
   partySession.findMany = async () => [];
   venue.findUnique = async () => null;
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date() });
   (config as any).stripeSecretKey = '';
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
@@ -84,6 +84,18 @@ beforeEach(() => {
 test('Party draft creation requires authentication', async () => {
   const publicCaller = createCaller(anonymousContext);
   await assert.rejects(() => publicCaller.events.drafts.create(draftInput), { code: 'UNAUTHORIZED' });
+});
+
+test('Hosting needs a confirmed account email: no draft, no publish', async () => {
+  user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: null });
+  party.create = async () => { throw new Error('must not create a draft'); };
+  party.findFirst = async () => { throw new Error('must not read the draft'); };
+  const unconfirmed = createCaller({ ...authenticatedContext, user: { userId: 'unconfirmed-host', email: 'unconfirmed@example.test' } });
+  await assert.rejects(() => unconfirmed.events.drafts.create(draftInput), { code: 'FORBIDDEN', message: 'Confirm your email to host a party.' });
+  await assert.rejects(
+    () => unconfirmed.events.publish({ partyId: 'party-1', idempotencyKey: '00000000-0000-4000-8000-000000000001' }),
+    { code: 'FORBIDDEN' },
+  );
 });
 
 test('Party draft creation persists the authenticated host and refreshes a retryable draft', async () => {

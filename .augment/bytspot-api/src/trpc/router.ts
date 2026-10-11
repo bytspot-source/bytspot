@@ -159,6 +159,23 @@ async function startProviderLink(identity: VerifiedProviderIdentity, owner: { id
   throw conflict(required);
 }
 
+// Password accounts created before this date were welcomed at signup.
+const WELCOME_ON_CONFIRM_SINCE = new Date('2026-10-11T00:00:00Z');
+
+/**
+ * A password account is welcomed once its email is confirmed, so an address
+ * someone else typed into signup never receives mail for it.
+ */
+function welcomeConfirmedMember(user: { email: string; name: string | null; createdAt: Date }) {
+  if (user.createdAt < WELCOME_ON_CONFIRM_SINCE) return;
+  sendWelcomeEmail(user.email, (user.name ?? '').split(' ')[0]).catch(() => {});
+}
+
+/** Invited accounts count once their email is confirmed, so made-up addresses add nothing. */
+function countConfirmedReferrals(userId: string) {
+  return db.user.count({ where: { ref: userId, emailVerifiedAt: { not: null } } });
+}
+
 /** auth.appleSignIn and auth.googleSignIn after the token is verified. */
 async function providerSignIn(identity: VerifiedProviderIdentity, clientKey: string, ref?: string) {
   const result = await resolveProviderIdentity(identity, undefined, { ref });
@@ -249,14 +266,8 @@ const authRouter = router({
 
       const session = await memberSession(user.id, user.email);
 
-      // No identity hashes yet: the email joins contact discovery only after
-      // auth.verifyEmail proves the member owns it.
-
-      // Send welcome email (non-blocking)
-      if (user.email) {
-        const firstName = (name || '').split(' ')[0];
-        sendWelcomeEmail(user.email, firstName).catch(() => {});
-      }
+      // No identity hashes or welcome email yet: both wait until
+      // auth.verifyEmail proves the member owns the address.
 
       return { ...session, user: { id: user.id, email: user.email, name: user.name }, emailVerified: false };
     }),
@@ -342,9 +353,7 @@ const authRouter = router({
       throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
     }
 
-    const referralCount = await db.user.count({
-      where: { ref: userId },
-    });
+    const referralCount = await countConfirmedReferrals(userId);
 
     return {
       user: {
@@ -362,7 +371,7 @@ const authRouter = router({
   /** The member's invite code and link, and how many members joined with it. */
   invite: protectedProcedure.query(async ({ ctx }) => {
     const code = await inviteCodeFor(ctx.user.userId);
-    const referralCount = await db.user.count({ where: { ref: ctx.user.userId } });
+    const referralCount = await countConfirmedReferrals(ctx.user.userId);
     return { code, link: INVITE_LINK_BASE + code, referralCount };
   }),
 
@@ -421,9 +430,10 @@ const authRouter = router({
       const user = await db.user.update({
         where: { id: ctx.user.userId },
         data: { emailVerifiedAt: new Date() },
-        select: { id: true, email: true },
+        select: { id: true, email: true, name: true, createdAt: true },
       });
       void refreshUserIdentityHashes(user.id, { email: user.email });
+      welcomeConfirmedMember(user);
       return { emailVerified: true as const };
     }),
 
@@ -500,7 +510,7 @@ const authRouter = router({
         throw expired();
       }
 
-      const existing = await db.user.findUnique({ where: { id: verdict.userId }, select: { emailVerifiedAt: true } });
+      const existing = await db.user.findUnique({ where: { id: verdict.userId }, select: { emailVerifiedAt: true, createdAt: true } });
       if (!existing) throw expired();
       const deletion = await applyDeletionPolicyOnSignIn(verdict.userId);
       if (deletion === 'purge-pending') throw expired();
@@ -512,6 +522,7 @@ const authRouter = router({
         select: { id: true, email: true, name: true },
       });
       if (!existing.emailVerifiedAt || deletion === 'restored') void refreshUserIdentityHashes(user.id, { email: user.email });
+      if (!existing.emailVerifiedAt) welcomeConfirmedMember({ ...user, createdAt: existing.createdAt });
 
       await signOutSessionsIssuedBefore(user.id);
       await signOutEverywhere(user.id, Date.now(), 'member').catch((error) => captureError(error, { flow: 'password-reset' }));
@@ -592,7 +603,7 @@ const authRouter = router({
       if (!link) throw expired();
       const existing = await db.user.findUnique({
         where: { id: verdict.userId },
-        select: { id: true, email: true, name: true, emailVerifiedAt: true },
+        select: { id: true, email: true, name: true, emailVerifiedAt: true, createdAt: true },
       });
       if (!existing) throw expired();
 
@@ -608,6 +619,7 @@ const authRouter = router({
         });
         await signOutSessionsIssuedBefore(existing.id);
         await signOutEverywhere(existing.id, Date.now(), 'member').catch((error) => captureError(error, { flow: 'provider-link' }));
+        welcomeConfirmedMember(existing);
       }
       if (!existing.emailVerifiedAt || deletion === 'restored') void refreshUserIdentityHashes(existing.id, { email: existing.email });
       sendSignInMethodAddedEmail(existing.email, providerTitle(link.provider)).catch((error) => captureError(error, { flow: 'provider-link' }));

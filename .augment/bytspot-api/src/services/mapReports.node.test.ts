@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { beforeEach, test } from 'node:test';
 import express from 'express';
 import mapReportsHttpRouter from '../routes/mapReports';
@@ -19,6 +20,7 @@ import {
   type ReportVote,
 } from './mapReports';
 import { busyStopMessage, nextStopItemId, planIsLive } from './mapReportAlerts';
+import { readRelayedPayload, relayPublicKey, verifyRelaySignature } from './mapReportRelay';
 import type { PlanLeg } from './planLegs';
 
 const MIN = 60_000;
@@ -79,6 +81,7 @@ const points = db.pointTransaction as any;
 const planItem = db.planItem as any;
 const plan = db.plan as any;
 const pushDevice = db.iOSPushDevice as any;
+const relayKey = db.mapReportRelayKey as any;
 
 type Row = Record<string, any>;
 let rows: Row[];
@@ -347,4 +350,92 @@ test('an expired, removed or unknown report reads as ended', async () => {
     assert.match(page.html, /This alert has ended/);
     assert.equal(page.cache, 'no-store');
   }
+});
+
+// ── Phase E: reports carried by nearby phones ──────────
+
+function phoneKey(): { publicKey: string; privateKey: KeyObject } {
+  const pair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = pair.publicKey.export({ format: 'jwk' });
+  const raw = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x!, 'base64url'), Buffer.from(jwk.y!, 'base64url')]);
+  return { publicKey: raw.toString('base64'), privateKey: pair.privateKey };
+}
+
+const phone = phoneKey();
+const signed = (payload: Record<string, unknown>, key = phone.privateKey, keyId = 'k1') => {
+  const text = JSON.stringify({ v: 1, keyId, clientReportId: 'relay-0001', kind: 'police', ...at, reportedAt: new Date(Date.now() - 5 * MIN).toISOString(), ...payload });
+  return { keyId, payload: text, signature: sign('sha256', Buffer.from(text), { key, dsaEncoding: 'ieee-p1363' }).toString('base64') };
+};
+
+test('a relayed report must be signed by its key, name that key and be under thirty minutes old', () => {
+  const ok = signed({});
+  assert.equal(verifyRelaySignature(phone.publicKey, ok.payload, ok.signature), true);
+  assert.equal(verifyRelaySignature(phone.publicKey, ok.payload.replace('police', 'incident'), ok.signature), false, 'changed after signing');
+  assert.equal(verifyRelaySignature(phoneKey().publicKey, ok.payload, ok.signature), false, 'another phone');
+  assert.equal(relayPublicKey('not a key'), null);
+  assert.equal(relayPublicKey(Buffer.alloc(65, 4).toString('base64')), null, 'not a point on the curve');
+  assert.ok(readRelayedPayload(ok.payload, 'k1', new Date()));
+  assert.equal(readRelayedPayload(ok.payload, 'k2', new Date()), null, 'signed for another key');
+  assert.equal(readRelayedPayload(signed({ reportedAt: new Date(Date.now() - 31 * MIN).toISOString() }).payload, 'k1', new Date()), null, 'too old');
+  assert.equal(readRelayedPayload(signed({ reportedAt: new Date(Date.now() + 10 * MIN).toISOString() }).payload, 'k1', new Date()), null, 'from the future');
+  assert.equal(readRelayedPayload('{nope', 'k1', new Date()), null);
+});
+
+test('a phone registers its key once; a key belongs to one member, and five are kept', async () => {
+  const keys: Row[] = [];
+  relayKey.findUnique = async ({ where }: any) => keys.find((k) => k.publicKey === where.publicKey) ?? null;
+  relayKey.create = rec('key.create', ({ data }) => { const key = { id: `k${keys.length + 1}`, ...data }; keys.push(key); return { id: key.id }; });
+  relayKey.findMany = async () => [{ id: 'old' }];
+  relayKey.deleteMany = rec('key.deleteMany', () => ({ count: 1 }));
+
+  await assert.rejects(() => member().mapReports.registerRelayKey({ publicKey: 'abc' }), { code: 'BAD_REQUEST' });
+  assert.deepEqual(await member().mapReports.registerRelayKey({ publicKey: phone.publicKey }), { keyId: 'k1' });
+  assert.deepEqual(writes.find((w) => w.op === 'key.deleteMany')!.args.where, { id: { in: ['old'] } });
+  assert.deepEqual(await member().mapReports.registerRelayKey({ publicKey: phone.publicKey }), { keyId: 'k1' }, 'again, same id');
+  assert.equal(writes.filter((w) => w.op === 'key.create').length, 1);
+  await assert.rejects(() => member('someone').mapReports.registerRelayKey({ publicKey: phone.publicKey }), { code: 'CONFLICT' });
+});
+
+test('a carried report is filed as its reporter, at the time they made it, and the carrier earns nothing', async () => {
+  let keyWhere: any;
+  relayKey.findMany = async ({ where }: any) => { keyWhere = where; return [{ id: 'k1', userId: 'reporter', publicKey: phone.publicKey }]; };
+  const report5 = signed({});
+  const { results } = await member('carrier').mapReports.relay({ reports: [report5] });
+  assert.equal(results[0].status, 'accepted');
+  assert.equal(results[0].clientReportId, 'relay-0001');
+  const created = writes.find((w) => w.op === 'report.create')!.args.data;
+  assert.equal(created.reporterId, 'reporter');
+  assert.equal(created.clientReportId, 'relay-0001');
+  assert.equal(created.createdAt.toISOString(), JSON.parse(report5.payload).reportedAt);
+  assert.equal(created.expiresAt.getTime() - created.createdAt.getTime(), REPORT_LIFETIME_MS);
+  assert.deepEqual(keyWhere.user, { suspendedAt: null, deletedAt: null });
+  assert.ok(!JSON.stringify(writes).includes('carrier'), 'nothing is recorded for the carrier');
+});
+
+test('a changed, unknown or wrongly keyed report is rejected without failing the others', async () => {
+  relayKey.findMany = async () => [{ id: 'k1', userId: 'reporter', publicKey: phone.publicKey }];
+  const tampered = signed({});
+  tampered.payload = tampered.payload.replace('police', 'incident');
+  const unknownKey = signed({}, phone.privateKey, 'k9');
+  const swapped = { ...signed({ clientReportId: 'relay-0002' }), keyId: 'k1' };
+  swapped.payload = swapped.payload.replace('"keyId":"k1"', '"keyId":"k2"');
+  const good = signed({ clientReportId: 'relay-0003' });
+  const { results } = await member('carrier').mapReports.relay({ reports: [tampered, unknownKey, swapped, good] });
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected', 'rejected', 'accepted']);
+  assert.equal(writes.filter((w) => w.op === 'report.create').length, 1);
+});
+
+test('a report already filed is accepted again without a second pin, and the hourly limit applies to new ones', async () => {
+  relayKey.findMany = async () => [{ id: 'k1', userId: 'reporter', publicKey: phone.publicKey }];
+  rows.push(row({ reporterId: 'reporter', clientReportId: 'relay-0001' }));
+  report.findUnique = async ({ where }: any) => (where.id
+    ? rows.find((r) => r.id === where.id) ?? null
+    : rows.find((r) => r.reporterId === where.reporterId_clientReportId.reporterId && r.clientReportId === where.reporterId_clientReportId.clientReportId) ?? null);
+  report.count = async () => 10;
+  const { results } = await member('carrier').mapReports.relay({ reports: [signed({}), signed({ clientReportId: 'relay-0002' })] });
+  assert.equal(results[0].status, 'accepted');
+  assert.equal(results[0].report!.id, 'r1');
+  assert.deepEqual(results[1], { clientReportId: 'relay-0002', status: 'rejected', message: 'Too many reports from this member.' });
+  assert.ok(!writes.some((w) => w.op === 'report.create'));
+  await assert.rejects(() => createCaller(as(null)).mapReports.relay({ reports: [signed({})] }), { code: 'UNAUTHORIZED' });
 });

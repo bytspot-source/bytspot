@@ -21,15 +21,19 @@ import {
   reporterStanding,
   requiredAgreementFor,
   toPublicReport,
+  type MapReportKind,
   type MapReportVoteKind,
   type PublicMapReport,
   type ReportRow,
 } from '../services/mapReports';
 import { alertPlansOfBusyStop } from '../services/mapReportAlerts';
+import { RELAY_KEYS_PER_MEMBER, readRelayedPayload, relayPublicKey, verifyRelaySignature } from '../services/mapReportRelay';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
 const HOUR_MS = 60 * 60 * 1000;
 const METERS_PER_MILE = 1609.344;
+/** The same hourly limit as `submit`, for reports that arrive through another phone. */
+const REPORTS_PER_HOUR = 10;
 /** A venue report has to come from someone in the area. */
 const VENUE_REPORT_REACH_METERS = METERS_PER_MILE;
 
@@ -138,6 +142,76 @@ async function sameThing(kind: string, pin: { lat: number; lng: number }, venueI
   return candidates.find((c) => venueId !== null || distanceMeters(pin, c) <= MERGE_METERS) ?? null;
 }
 
+type ReportInput = { kind: MapReportKind; lat: number; lng: number; venueId?: string | null; clientReportId?: string | null };
+
+/**
+ * Files a member's report. The same kind of report already active nearby is
+ * the same thing, so another member's report agrees with it instead of adding
+ * a pin, and a member's repeat returns their own report. `reportedAt` is when
+ * a report carried by another phone was made; null means now.
+ */
+async function submitReport(userId: string, input: ReportInput, now: Date, reportedAt: Date | null): Promise<Settled & { merged: boolean }> {
+  await requireConfirmedEmail(userId);
+  const seenAt = reportedAt ?? now;
+
+  if (VENUE_REPORT_KINDS.has(input.kind) && !input.venueId) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'Choose the place this report is about.' });
+  }
+  const venue = input.venueId
+    ? await db.venue.findUnique({ where: { id: input.venueId }, select: { id: true, lat: true, lng: true } })
+    : null;
+  if (input.venueId && !venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'That place was not found.' });
+  if (venue && distanceMeters(input, venue) > VENUE_REPORT_REACH_METERS) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'You need to be near this place to report it.' });
+  }
+  const venueId = venue?.id ?? null;
+  const pin = venue ? { lat: venue.lat, lng: venue.lng } : { lat: input.lat, lng: input.lng };
+
+  if (input.clientReportId) {
+    const retried = await db.mapReport.findUnique({
+      where: { reporterId_clientReportId: { reporterId: userId, clientReportId: input.clientReportId } },
+      select: { id: true },
+    });
+    if (retried) return { ...(await settle(retried.id, now)), merged: false };
+  }
+
+  const existing = await sameThing(input.kind, pin, venueId, now);
+  if (existing) {
+    if (existing.reporterId === userId) return { ...(await settle(existing.id, now)), merged: false };
+    await castVote(existing.id, userId, 'still', evidenceWeight(await provenAtVenue(userId, venueId, seenAt)), seenAt);
+    return { ...(await settle(existing.id, now)), merged: true };
+  }
+
+  const [proven, required] = await Promise.all([provenAtVenue(userId, venueId, seenAt), requiredAgreement(userId, now)]);
+  let id: string;
+  try {
+    ({ id } = await db.mapReport.create({
+      data: {
+        reporterId: userId,
+        kind: input.kind,
+        lat: pin.lat,
+        lng: pin.lng,
+        venueId,
+        clientReportId: input.clientReportId ?? null,
+        weight: evidenceWeight(proven),
+        requiredAgreement: required,
+        expiresAt: new Date(seenAt.getTime() + REPORT_LIFETIME_MS),
+        createdAt: seenAt,
+      },
+      select: { id: true },
+    }));
+  } catch (error) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && input.clientReportId)) throw error;
+    const retried = await db.mapReport.findUnique({
+      where: { reporterId_clientReportId: { reporterId: userId, clientReportId: input.clientReportId } },
+      select: { id: true },
+    });
+    if (!retried) throw error;
+    id = retried.id;
+  }
+  return { ...(await settle(id, now)), merged: false };
+}
+
 const coordinate = { lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) };
 
 /**
@@ -163,11 +237,7 @@ export const mapReportsRouter = router({
       };
     }),
 
-  /**
-   * Report what you see. The same kind of report already active nearby is the
-   * same thing, so a second member's report agrees with it instead of adding
-   * a pin, and a member's repeat returns their own report.
-   */
+  /** Report what you see. */
   submit: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: HOUR_MS, max: 10, label: 'map-report' }))
     .input(z.object({
@@ -176,67 +246,91 @@ export const mapReportsRouter = router({
       venueId: z.string().min(1).max(128).optional(),
       clientReportId: z.string().regex(/^[A-Za-z0-9-]{8,64}$/).optional(),
     }))
+    .mutation(({ ctx, input }) => submitReport(ctx.user.userId, input, new Date(), null)),
+
+  /**
+   * Registers the phone's public key for signing reports, so a nearby phone
+   * can carry one here when this phone has no signal. A key belongs to one
+   * member; registering it again returns the same id.
+   */
+  registerRelayKey: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: HOUR_MS, max: 10, label: 'map-report-relay-key' }))
+    .input(z.object({ publicKey: z.string().min(1).max(200) }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.user.userId;
-      await requireConfirmedEmail(userId);
-      const now = new Date();
-
-      if (VENUE_REPORT_KINDS.has(input.kind) && !input.venueId) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Choose the place this report is about.' });
+      if (!relayPublicKey(input.publicKey)) throw new TRPCError({ code: 'BAD_REQUEST', message: 'That key is not a P-256 public key.' });
+      const known = await db.mapReportRelayKey.findUnique({ where: { publicKey: input.publicKey }, select: { id: true, userId: true } });
+      if (known) {
+        if (known.userId !== userId) throw new TRPCError({ code: 'CONFLICT', message: 'That key belongs to another account.' });
+        return { keyId: known.id };
       }
-      const venue = input.venueId
-        ? await db.venue.findUnique({ where: { id: input.venueId }, select: { id: true, lat: true, lng: true } })
-        : null;
-      if (input.venueId && !venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'That place was not found.' });
-      if (venue && distanceMeters(input, venue) > VENUE_REPORT_REACH_METERS) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'You need to be near this place to report it.' });
-      }
-      const venueId = venue?.id ?? null;
-      const pin = venue ? { lat: venue.lat, lng: venue.lng } : { lat: input.lat, lng: input.lng };
-
-      if (input.clientReportId) {
-        const retried = await db.mapReport.findUnique({
-          where: { reporterId_clientReportId: { reporterId: userId, clientReportId: input.clientReportId } },
-          select: { id: true },
-        });
-        if (retried) return { ...(await settle(retried.id, now)), merged: false };
-      }
-
-      const existing = await sameThing(input.kind, pin, venueId, now);
-      if (existing) {
-        if (existing.reporterId === userId) return { ...(await settle(existing.id, now)), merged: false };
-        await castVote(existing.id, userId, 'still', evidenceWeight(await provenAtVenue(userId, venueId, now)), now);
-        return { ...(await settle(existing.id, now)), merged: true };
-      }
-
-      const [proven, required] = await Promise.all([provenAtVenue(userId, venueId, now), requiredAgreement(userId, now)]);
-      let id: string;
+      let created: { id: string };
       try {
-        ({ id } = await db.mapReport.create({
-          data: {
-            reporterId: userId,
-            kind: input.kind,
-            lat: pin.lat,
-            lng: pin.lng,
-            venueId,
-            clientReportId: input.clientReportId ?? null,
-            weight: evidenceWeight(proven),
-            requiredAgreement: required,
-            expiresAt: new Date(now.getTime() + REPORT_LIFETIME_MS),
-            createdAt: now,
-          },
-          select: { id: true },
-        }));
+        created = await db.mapReportRelayKey.create({ data: { userId, publicKey: input.publicKey }, select: { id: true } });
       } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && input.clientReportId)) throw error;
-        const retried = await db.mapReport.findUnique({
-          where: { reporterId_clientReportId: { reporterId: userId, clientReportId: input.clientReportId } },
-          select: { id: true },
-        });
-        if (!retried) throw error;
-        id = retried.id;
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
+        const raced = await db.mapReportRelayKey.findUnique({ where: { publicKey: input.publicKey }, select: { id: true, userId: true } });
+        if (!raced || raced.userId !== userId) throw new TRPCError({ code: 'CONFLICT', message: 'That key belongs to another account.' });
+        return { keyId: raced.id };
       }
-      return { ...(await settle(id, now)), merged: false };
+      const older = await db.mapReportRelayKey.findMany({
+        where: { userId }, orderBy: { createdAt: 'desc' }, skip: RELAY_KEYS_PER_MEMBER, select: { id: true },
+      });
+      if (older.length > 0) await db.mapReportRelayKey.deleteMany({ where: { id: { in: older.map((k) => k.id) } } });
+      return { keyId: created.id };
+    }),
+
+  /**
+   * Reports a phone picked up from nearby phones while they had no signal.
+   * Each is signed by its reporter's registered key and is filed as theirs,
+   * at the time they made it; the carrier can't change one or earn from it.
+   * A report already filed, by its reporter or another carrier, is accepted
+   * again without counting twice.
+   */
+  relay: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'map-report-relay' }))
+    .input(z.object({
+      reports: z.array(z.object({
+        keyId: z.string().min(1).max(128),
+        payload: z.string().min(1).max(1024),
+        signature: z.string().min(1).max(200),
+      })).min(1).max(25),
+    }))
+    .mutation(async ({ input }) => {
+      const now = new Date();
+      const keys = await db.mapReportRelayKey.findMany({
+        where: { id: { in: [...new Set(input.reports.map((r) => r.keyId))] }, user: { suspendedAt: null, deletedAt: null } },
+        select: { id: true, userId: true, publicKey: true },
+      });
+      const keyById = new Map(keys.map((k) => [k.id, k]));
+      const results: { clientReportId: string | null; status: 'accepted' | 'rejected'; report?: PublicMapReport; removed?: boolean; message?: string }[] = [];
+      for (const relayed of input.reports) {
+        const key = keyById.get(relayed.keyId);
+        const signed = key && verifyRelaySignature(key.publicKey, relayed.payload, relayed.signature)
+          ? readRelayedPayload(relayed.payload, relayed.keyId, now)
+          : null;
+        if (!key || !signed) {
+          results.push({ clientReportId: null, status: 'rejected', message: 'That report could not be verified.' });
+          continue;
+        }
+        try {
+          const filed = await db.mapReport.findUnique({
+            where: { reporterId_clientReportId: { reporterId: key.userId, clientReportId: signed.clientReportId } },
+            select: { id: true },
+          });
+          if (!filed) {
+            const lastHour = await db.mapReport.count({ where: { reporterId: key.userId, createdAt: { gte: new Date(now.getTime() - HOUR_MS) } } });
+            if (lastHour >= REPORTS_PER_HOUR) throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: 'Too many reports from this member.' });
+          }
+          const reportedAt = new Date(Math.min(new Date(signed.reportedAt).getTime(), now.getTime()));
+          const { report, removed } = await submitReport(key.userId, signed, now, reportedAt);
+          results.push({ clientReportId: signed.clientReportId, status: 'accepted', report, removed });
+        } catch (error) {
+          if (!(error instanceof TRPCError)) throw error;
+          results.push({ clientReportId: signed.clientReportId, status: 'rejected', message: error.message });
+        }
+      }
+      return { results };
     }),
 
   /** The member's confirmed reports this week and their reporter badge, if any. */

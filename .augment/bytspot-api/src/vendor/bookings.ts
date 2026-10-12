@@ -12,6 +12,7 @@ import { windowTemplate } from './windows';
  * what was paid: refunds stay with the processor flow.
  *
  * Tickets hang off no window, so a seat scoped to assigned windows sees none.
+ * Bands, cards, fobs and table tags (see ./bands) find a guest's bookings here.
  */
 
 /** No 0/O or 1/I, so a code read aloud or typed from a screen survives. */
@@ -289,40 +290,86 @@ export async function findByPass(input: { sellerId: string; code: string; window
   return dto;
 }
 
-/** How far ahead a band finds its guest's ticket, so a guest early for tonight is not told they have none. */
+/** How far ahead an NFC item finds its guest's bookings, so a guest early for tonight is not told they have none. */
 export const BAND_LOOKAHEAD_HOURS = 12;
 
+/** The most a tap lists at once. */
+const HOLDINGS_SHOWN = 5;
+
 /**
- * The ticket a band's guest holds for now at this business, at the band's
- * place. One still to check in comes first, then one already checked in, so a
- * second tap reads as already checked in.
+ * Everything an NFC item's guest holds for now at this business: tickets and
+ * bookings that have not ended and start within the lookahead, at the item's
+ * place. Bookings on the item's own rail (its domains) come first; within
+ * those, one still to check in before one already checked in, so a second tap
+ * reads as already checked in. An assigned-scope seat sees its windows only.
  */
-export async function ticketForGuest(input: {
+export async function holdingsForGuest(input: {
   sellerId: string;
   userId: string;
   locationId?: string | null;
+  domains?: readonly string[];
+  windowIds?: string[];
   now?: Date;
-}): Promise<BookingDto | undefined> {
+}): Promise<BookingDto[]> {
   const now = input.now ?? new Date();
-  const rows = await db.vendorTicketOrder.findMany({
-    where: {
-      sellerId: input.sellerId,
-      userId: input.userId,
-      status: 'completed',
-      ticket: {
-        endsAt: { gt: now },
-        startsAt: { lte: new Date(now.getTime() + BAND_LOOKAHEAD_HOURS * 3_600_000) },
-        ...(input.locationId ? { locationId: input.locationId } : {}),
+  const horizon = new Date(now.getTime() + BAND_LOOKAHEAD_HOURS * 3_600_000);
+  const place = input.locationId ? { locationId: input.locationId } : {};
+  const [offers, tickets] = await Promise.all([
+    db.offer.findMany({
+      where: {
+        sellerId: input.sellerId,
+        state: 'ACCEPTED',
+        demand: { raisedByUserId: input.userId },
+        startsAt: { lte: horizon, gt: new Date(now.getTime() - 30 * 86_400_000) },
+        ...place,
+        ...(input.windowIds ? { windowId: { in: input.windowIds } } : {}),
       },
-    },
-    orderBy: { ticket: { startsAt: 'asc' } },
-    take: 10,
-    include: ticketOrderInclude,
+      orderBy: { startsAt: 'asc' },
+      take: 20,
+      include: { ...bookingInclude, window: { select: { ...bookingInclude.window.select, domain: true } } },
+    }),
+    input.windowIds
+      ? Promise.resolve([] as TicketOrderRow[])
+      : db.vendorTicketOrder.findMany({
+          where: { sellerId: input.sellerId, userId: input.userId, status: 'completed', ticket: { endsAt: { gt: now }, startsAt: { lte: horizon }, ...place } },
+          orderBy: { ticket: { startsAt: 'asc' } },
+          take: 10,
+          include: ticketOrderInclude,
+        }),
+  ]);
+  const open = offers.filter((row) => row.startsAt.getTime() + row.durationMins * 60_000 > now.getTime());
+  const domains = input.domains ?? [];
+  const onRail = new Set(open.filter((row) => row.window && domains.includes(row.window.domain)).map((row) => row.id));
+  const all = [...(await withGuestNames(open, now)), ...(await ticketsWithGuestNames(tickets, now))];
+  // Tickets carry no domain; they sit with the rail of events and nights out.
+  const ticketsOnRail = domains.includes('events') || domains.includes('nightlife');
+  const rank = (dto: BookingDto) =>
+    (dto.kind === 'ticket' ? (ticketsOnRail ? 0 : 1) : onRail.has(dto.id) ? 0 : 1) * 3 + (dto.pass === 'ISSUED' ? 0 : dto.pass === 'ADMITTED' ? 1 : 2);
+  all.sort((a, b) => rank(a) - rank(b) || a.startsAt.localeCompare(b.startsAt));
+  return all.slice(0, HOLDINGS_SHOWN);
+}
+
+/** The guest, place and end of a paid ticket or accepted booking an NFC item is linked from. */
+export interface LinkSource {
+  userId: string;
+  locationId: string;
+  endsAt: Date;
+}
+
+export async function linkSource(input: { sellerId: string; bookingId: string; windowIds?: string[] }): Promise<LinkSource | undefined> {
+  const offer = await db.offer.findFirst({
+    where: { id: input.bookingId, sellerId: input.sellerId, state: 'ACCEPTED', ...(input.windowIds ? { windowId: { in: input.windowIds } } : {}) },
+    select: { locationId: true, startsAt: true, durationMins: true, demand: { select: { raisedByUserId: true } } },
   });
-  const row = rows.find((order) => !order.checkedInAt && !order.noShowAt) ?? rows.find((order) => order.checkedInAt) ?? rows[0];
-  if (!row) return undefined;
-  const [dto] = await ticketsWithGuestNames([row], now);
-  return dto;
+  if (offer) {
+    return { userId: offer.demand.raisedByUserId, locationId: offer.locationId, endsAt: new Date(offer.startsAt.getTime() + offer.durationMins * 60_000) };
+  }
+  if (input.windowIds) return undefined;
+  const order = await db.vendorTicketOrder.findFirst({
+    where: { id: input.bookingId, sellerId: input.sellerId, status: 'completed' },
+    select: { userId: true, ticket: { select: { locationId: true, endsAt: true } } },
+  });
+  return order ? { userId: order.userId, locationId: order.ticket.locationId, endsAt: order.ticket.endsAt } : undefined;
 }
 
 export async function moveBooking(input: {

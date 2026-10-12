@@ -392,6 +392,13 @@
         "requiresCapability": "PUBLISH"
       },
       {
+        "id": "tickets",
+        "label": "Tickets",
+        "icon": "ticket.fill",
+        "standardOnly": true,
+        "requiresCapability": "PUBLISH"
+      },
+      {
         "id": "availability",
         "label": "Availability",
         "icon": "clock.fill",

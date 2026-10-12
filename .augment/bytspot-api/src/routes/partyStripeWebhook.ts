@@ -6,6 +6,7 @@ import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services/partyAlerts';
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
 import { applyOfferCheckoutEvent } from '../vendor/offerCheckout';
+import { applyTicketCheckoutEvent } from '../vendor/tickets';
 
 const partyStripeWebhookRouter = Router();
 
@@ -210,6 +211,17 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
   } catch (error) {
     console.error('[offer-checkout-webhook] payment settlement failed', error);
     res.status(500).json({ error: 'Offer payment settlement will be retried.' });
+    return;
+  }
+
+  try {
+    if (await applyTicketCheckoutEvent(event)) {
+      res.json({ received: true });
+      return;
+    }
+  } catch (error) {
+    console.error('[vendor-ticket-webhook] payment settlement failed', error);
+    res.status(500).json({ error: 'Ticket payment settlement will be retried.' });
     return;
   }
 

@@ -87,6 +87,7 @@ import { planRouter } from './planRouter';
 import { coffeeRouter } from './coffeeRouter';
 import { demandRouter } from './demandRouter';
 import { inventoryRouter } from './inventoryRouter';
+import { ticketsRouter } from './ticketsRouter';
 import { adminPlacesRouter } from './adminPlacesRouter';
 import { adminVendorsRouter } from './adminVendorsRouter';
 import { adminSafetyRouter } from './adminSafetyRouter';
@@ -1838,6 +1839,7 @@ export const appRouter = router({
   coffee: coffeeRouter,
   demand: demandRouter,
   inventory: inventoryRouter,
+  tickets: ticketsRouter,
   sales: salesRouter,
   safety: safetyRouter,
   mapReports: mapReportsRouter,

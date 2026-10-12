@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { db } from '../lib/db';
-import { linkBand, readBand } from './bands';
+import { linkBand, logVisit, readBand } from './bands';
 import { findByPass, listBookings, moveBooking } from './bookings';
 import { payoutLines } from './insights';
 import { stripeHandle } from './payout';
@@ -34,6 +34,8 @@ const ids = {
   second: `tix-guest-b-${stamp}`,
   band: `BYT999-${String(stamp % 10_000).padStart(4, '0')}`,
   lostBand: `BYT998-${String(stamp % 10_000).padStart(4, '0')}`,
+  eventFob: `BYT997-${String(stamp % 10_000).padStart(4, '0')}`,
+  keyFob: `BYT996-${String(stamp % 10_000).padStart(4, '0')}`,
 };
 let reachable = false;
 let sessionCount = 0;
@@ -176,18 +178,28 @@ test('a ticket is sold once per guest up to its cap, and its pass checks in once
   const active = { sellerId: ids.seller, locationId: ids.location, tier: 'platinum', assignedByUserId: 'admin', activatedAt: new Date() };
   await db.vendorBand.create({ data: { ...active, serial: ids.band, state: 'active' } });
   await db.vendorBand.create({ data: { ...active, serial: ids.lostBand, state: 'lost', lostAt: new Date() } });
-  assert.equal((await readBand(ids.seller, `https://bytspot.app/${ids.band}`)).booking, undefined, 'nobody wears the band yet');
+  assert.deepEqual((await readBand(ids.seller, `https://bytspot.app/${ids.band}`)).bookings, [], 'nobody wears the band yet');
   await assert.rejects(linkBand({ sellerId: ids.seller, seatId: 'seat', band: ids.band, bookingId: theirs.orderId }), /paid ticket/);
   assert.equal((await linkBand({ sellerId: ids.seller, seatId: 'seat', band: ids.band, bookingId: booking!.id })).holder, 'Ama');
   const tapped = await readBand(ids.seller, ids.band);
-  assert.equal(tapped.booking?.id, booking!.id, 'a tap finds the guest\'s ticket for today');
-  assert.equal(tapped.booking?.pass, 'ISSUED');
+  assert.equal(tapped.bookings[0]?.id, booking!.id, 'a tap finds the guest\'s ticket for today');
+  assert.equal(tapped.bookings[0]?.pass, 'ISSUED');
   await assert.rejects(readBand(ids.seller, ids.lostBand), /marked lost/);
 
-  const checkedIn = await moveBooking({ sellerId: ids.seller, offerId: tapped.booking!.id, seatId: 'seat', operation: 'CHECK_IN' });
+  await db.vendorBand.create({ data: { ...active, tier: null, form: 'event_fob', serial: ids.eventFob, state: 'active' } });
+  const fob = await linkBand({ sellerId: ids.seller, seatId: 'seat', band: ids.eventFob, bookingId: booking!.id });
+  assert.equal(fob.form, 'event_fob');
+  assert.equal(fob.linkedUntil, new Date(new Date(booking!.startsAt).getTime() + booking!.durationMins * 60_000).toISOString(), 'an event fob is linked until the show ends');
+  await db.vendorBand.create({ data: { ...active, tier: null, form: 'key_fob', serial: ids.keyFob, state: 'active' } });
+  assert.equal((await linkBand({ sellerId: ids.seller, seatId: 'seat', band: ids.keyFob, bookingId: booking!.id })).linkedUntil, null);
+  assert.equal((await logVisit({ sellerId: ids.seller, seatId: 'seat', band: ids.keyFob })).member.visits, 1);
+  assert.equal((await logVisit({ sellerId: ids.seller, seatId: 'seat', band: ids.keyFob })).alreadyLogged, true);
+  assert.equal((await readBand(ids.seller, ids.keyFob)).member?.visits, 1);
+
+  const checkedIn = await moveBooking({ sellerId: ids.seller, offerId: tapped.bookings[0]!.id, seatId: 'seat', operation: 'CHECK_IN' });
   assert.equal(checkedIn.pass, 'ADMITTED');
   await assert.rejects(moveBooking({ sellerId: ids.seller, offerId: booking!.id, seatId: 'seat', operation: 'CHECK_IN' }), /booking refused/);
-  assert.equal((await readBand(ids.seller, ids.band)).booking?.pass, 'ADMITTED', 'the barcode and the band check in the same ticket once');
+  assert.equal((await readBand(ids.seller, ids.band)).bookings[0]?.pass, 'ADMITTED', 'the barcode and the band check in the same ticket once');
   assert.equal((await findByPass({ sellerId: ids.seller, code: mine.pass! }))?.pass, 'ADMITTED');
 
   await assert.rejects(editTicket(ids.seller, ticket.id, { quantity: 0 }), (err: unknown) => err instanceof TicketRefused && /1 is already sold/.test(err.blockers[0]));

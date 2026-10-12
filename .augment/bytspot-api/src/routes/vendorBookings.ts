@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { captureError } from '../lib/observability';
 import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
 import { roleScope, type SeatRole } from '../vendor/contract';
-import { BandRefused, linkBand, readBand } from '../vendor/bands';
+import { BandRefused, linkBand, logVisit, readBand } from '../vendor/bands';
 import {
   BookingNotFound,
   BookingRefused,
@@ -105,43 +105,47 @@ function refuseBand(res: Response, err: unknown, route: string): void {
   res.status(500).json({ error: 'Internal error' });
 }
 
-/** Bands find tickets, which hang off no window, so an assigned-scope seat has nothing to find. */
-const BAND_SCOPE_REFUSED = { error: 'Not permitted', blockers: ['Your role checks in bookings for your own services only'] };
-
-/** Reads a tapped or scanned band, and the ticket its guest holds for now. Changes nothing. */
+/** Reads a tapped or scanned band, card, fob or table tag, and what its guest holds for now. Changes nothing. */
 router.post('/vendor/passes/band', requireVendorSeat, requireCapability('VERIFY'), async (req, res) => {
   const parsed = bandCheck.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid band', blockers: ['Tap the band, scan its code or type its number'] });
     return;
   }
-  if (scopedWindows(req)) {
-    res.status(403).json(BAND_SCOPE_REFUSED);
-    return;
-  }
   try {
-    res.status(200).json(await readBand(req.vendor!.seller.id, parsed.data.band));
+    res.status(200).json(await readBand(req.vendor!.seller.id, parsed.data.band, new Date(), scopedWindows(req)));
   } catch (err) {
     refuseBand(res, err, 'vendor/passes:band');
   }
 });
 
-/** Links a band to the guest whose paid ticket was just scanned. */
+/** Links a carried item to the guest whose paid ticket or booking was just read. */
 router.post('/vendor/passes/band/link', requireVendorSeat, requireCapability('CHECK_IN'), async (req, res) => {
   const parsed = bandLink.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid band', blockers: ['Scan the ticket, then tap the band'] });
-    return;
-  }
-  if (scopedWindows(req)) {
-    res.status(403).json(BAND_SCOPE_REFUSED);
+    res.status(400).json({ error: 'Invalid band', blockers: ['Scan the pass, then tap the band, card or fob'] });
     return;
   }
   const { seller, seat } = req.vendor!;
   try {
-    res.status(200).json({ band: await linkBand({ sellerId: seller.id, seatId: seat.id, ...parsed.data }) });
+    res.status(200).json({ band: await linkBand({ sellerId: seller.id, seatId: seat.id, windowIds: scopedWindows(req), ...parsed.data }) });
   } catch (err) {
     refuseBand(res, err, 'vendor/passes:band-link');
+  }
+});
+
+/** Logs a key fob member's visit. */
+router.post('/vendor/passes/band/visit', requireVendorSeat, requireCapability('CHECK_IN'), async (req, res) => {
+  const parsed = bandCheck.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid band', blockers: ['Tap the key fob, scan its code or type its number'] });
+    return;
+  }
+  const { seller, seat } = req.vendor!;
+  try {
+    res.status(200).json(await logVisit({ sellerId: seller.id, seatId: seat.id, band: parsed.data.band }));
+  } catch (err) {
+    refuseBand(res, err, 'vendor/passes:band-visit');
   }
 });
 

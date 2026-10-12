@@ -1,10 +1,10 @@
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
-import { firstName, ticketForGuest, type BookingDto } from './bookings';
+import { firstName, holdingsForGuest, linkSource, type BookingDto } from './bookings';
 
 /**
- * Bytspot wristbands.
+ * Bytspot bands, and the other NFC items that share their rules.
  *
  * Each band's NFC chip and printed QR code carry bytspot.app/<serial>, for
  * example bytspot.app/BYT424-0301. Bytspot assigns ranges of serials to a
@@ -12,14 +12,42 @@ import { firstName, ticketForGuest, type BookingDto } from './bookings';
  * and its tier, and marks it lost when it goes missing. A band that is not
  * active opens nothing.
  *
- * At the door a band is linked once to the guest wearing it, from their paid
- * ticket. After that a tap finds the guest's ticket for the day, and checking
- * in is the same single step as for the ticket's barcode.
+ * Each item is one of five forms, chosen on activation: a band, a card for a
+ * stay, an event fob for a show, a key fob for a regular member, or an epoxy
+ * tag fixed to a restaurant table. At the door a carried item is linked to its
+ * guest from a paid ticket or an accepted booking. After that a tap finds what
+ * the guest holds for now, its own rail first, and checking in is the same
+ * single step as for the pass. A table tag is never linked to a guest.
  */
 
 export const BAND_TIERS = ['green', 'platinum', 'black'] as const;
 export type BandTier = (typeof BAND_TIERS)[number];
 export type BandState = 'assigned' | 'active' | 'lost';
+
+export const BAND_FORMS = ['band', 'card', 'event_fob', 'key_fob', 'epoxy'] as const;
+export type BandForm = (typeof BAND_FORMS)[number];
+
+interface FormRule {
+  /** What the console calls it in a sentence. */
+  noun: string;
+  /** The window domains a tap lists first: the item's Discover rail. */
+  domains: readonly string[];
+  /** A guest carries it, so it links to them. A table tag stays put. */
+  carried: boolean;
+  /** `booking`: the link ends when the booking it came from ends. */
+  linkEnds: 'booking' | 'never';
+}
+
+export const FORM_RULES: Record<BandForm, FormRule> = {
+  band: { noun: 'band', domains: ['nightlife'], carried: true, linkEnds: 'never' },
+  card: { noun: 'card', domains: ['stay'], carried: true, linkEnds: 'booking' },
+  event_fob: { noun: 'event fob', domains: ['events'], carried: true, linkEnds: 'booking' },
+  key_fob: { noun: 'key fob', domains: ['wellness', 'fitness', 'automotive', 'stall', 'green'], carried: true, linkEnds: 'never' },
+  epoxy: { noun: 'table tag', domains: ['dining', 'coffee'], carried: false, linkEnds: 'never' },
+};
+
+/** A key fob visit within this many hours of the last one is the same visit. */
+export const VISIT_GAP_HOURS = 4;
 
 /** The most serials one admin action may assign or release. */
 export const MAX_BAND_RANGE = 1000;
@@ -162,6 +190,7 @@ export async function releaseBands(sellerId: string, from: unknown, to: unknown)
 export interface BandDto {
   id: string;
   serial: string;
+  form: BandForm;
   state: BandState;
   tier: BandTier | null;
   vendorCode: string | null;
@@ -169,9 +198,11 @@ export interface BandDto {
   place: string | null;
   activatedAt: string | null;
   lostAt: string | null;
-  /** First name of the guest it is linked to. */
+  /** First name of the guest it is linked to now. */
   holder: string | null;
   linkedAt: string | null;
+  /** When the link ends by itself, for a card or an event fob. */
+  linkedUntil: string | null;
 }
 
 const BAND_INCLUDE = { location: { select: { label: true } }, holder: { select: { name: true } } } as const;
@@ -186,10 +217,22 @@ function bandTier(raw: string | null): BandTier | null {
   return BAND_TIERS.includes(raw as BandTier) ? (raw as BandTier) : null;
 }
 
-export function toBandDto(row: BandRow): BandDto {
+export function bandForm(raw: string | null | undefined): BandForm {
+  return BAND_FORMS.includes(raw as BandForm) ? (raw as BandForm) : 'band';
+}
+
+/** The guest an item is linked to now; a card past its stay or a fob past its show is free again. */
+export function currentHolder(row: { holderUserId: string | null; linkedUntil: Date | null }, now: Date): string | null {
+  if (!row.holderUserId) return null;
+  return !row.linkedUntil || row.linkedUntil > now ? row.holderUserId : null;
+}
+
+export function toBandDto(row: BandRow, now: Date = new Date()): BandDto {
+  const linked = currentHolder(row, now) !== null;
   return {
     id: row.id,
     serial: row.serial,
+    form: bandForm(row.form),
     state: bandState(row.state),
     tier: bandTier(row.tier),
     vendorCode: row.vendorCode,
@@ -197,14 +240,15 @@ export function toBandDto(row: BandRow): BandDto {
     place: row.location?.label ?? null,
     activatedAt: row.activatedAt?.toISOString() ?? null,
     lostAt: row.lostAt?.toISOString() ?? null,
-    holder: row.holderUserId ? (firstName(row.holder?.name) ?? 'Guest') : null,
-    linkedAt: row.linkedAt?.toISOString() ?? null,
+    holder: linked ? (firstName(row.holder?.name) ?? 'Guest') : null,
+    linkedAt: linked ? (row.linkedAt?.toISOString() ?? null) : null,
+    linkedUntil: linked ? (row.linkedUntil?.toISOString() ?? null) : null,
   };
 }
 
-export async function listBands(sellerId: string): Promise<BandDto[]> {
+export async function listBands(sellerId: string, now: Date = new Date()): Promise<BandDto[]> {
   const rows = await db.vendorBand.findMany({ where: { sellerId }, include: BAND_INCLUDE, orderBy: { serial: 'asc' } });
-  return rows.map(toBandDto);
+  return rows.map((row) => toBandDto(row, now));
 }
 
 export class BandRefused extends Error {
@@ -218,23 +262,28 @@ export class BandRefused extends Error {
 
 const vendorCode = z.string().trim().min(1).max(40);
 
-export const activateBandInput = z.object({
-  /** A band number, or the link its QR code or chip carries. */
-  band: z.string().trim().min(1).max(300),
-  locationId: z.string().trim().min(1).max(64),
-  tier: z.enum(BAND_TIERS),
-  vendorCode: vendorCode.optional(),
-});
-export type ActivateBandInput = z.infer<typeof activateBandInput>;
+export const activateBandInput = z
+  .object({
+    /** A band number, or the link its QR code or chip carries. */
+    band: z.string().trim().min(1).max(300),
+    form: z.enum(BAND_FORMS).default('band'),
+    locationId: z.string().trim().min(1).max(64),
+    /** Required for a band; optional for the other forms. */
+    tier: z.enum(BAND_TIERS).optional(),
+    vendorCode: vendorCode.optional(),
+  })
+  .refine((input) => input.form !== 'band' || input.tier !== undefined, { path: ['tier'] });
+export type ActivateBandInput = z.input<typeof activateBandInput>;
 
 export const editBandInput = z
   .object({
+    form: z.enum(BAND_FORMS).optional(),
     locationId: z.string().trim().min(1).max(64).optional(),
     tier: z.enum(BAND_TIERS).optional(),
     /** Null clears it. */
     vendorCode: vendorCode.nullable().optional(),
   })
-  .refine((edit) => edit.locationId !== undefined || edit.tier !== undefined || edit.vendorCode !== undefined);
+  .refine((edit) => edit.form !== undefined || edit.locationId !== undefined || edit.tier !== undefined || edit.vendorCode !== undefined);
 export type EditBandInput = z.infer<typeof editBandInput>;
 
 async function requirePlace(sellerId: string, locationId: string): Promise<void> {
@@ -250,6 +299,7 @@ function isVendorCodeTaken(err: unknown): boolean {
 }
 
 const CODE_TAKEN = 'Another band already uses that code';
+const NOT_A_SERIAL = 'That is not a Bytspot band or tag number, like BYT424-0301';
 
 /**
  * Activates a band this business holds. Activating one that is already active
@@ -262,7 +312,7 @@ export async function activateBand(
   now: Date = new Date(),
 ): Promise<{ band: BandDto; alreadyActive: boolean }> {
   const serial = parseBandSerial(input.band);
-  if (!serial) throw new BandRefused(['That is not a Bytspot band number, like BYT424-0301']);
+  if (!serial) throw new BandRefused([NOT_A_SERIAL]);
 
   // Another business's band reads as unknown, so its serials cannot be probed.
   const band = await db.vendorBand.findFirst({ where: { serial, sellerId }, include: BAND_INCLUDE });
@@ -276,8 +326,9 @@ export async function activateBand(
       where: { id: band.id, sellerId, state: 'assigned' },
       data: {
         state: 'active',
+        form: input.form ?? 'band',
         locationId: input.locationId,
-        tier: input.tier,
+        ...(input.tier ? { tier: input.tier } : {}),
         ...(input.vendorCode ? { vendorCode: input.vendorCode } : {}),
         activatedAt: now,
         activatedBySeatId: seatId,
@@ -292,16 +343,27 @@ export async function activateBand(
   }
 }
 
-/** Changes a band's place, tier or code. A lost band is kept as it was. */
-export async function editBand(sellerId: string, id: string, edit: EditBandInput): Promise<BandDto> {
-  const band = await db.vendorBand.findFirst({ where: { id, sellerId }, select: { id: true, state: true } });
+/**
+ * Changes a band's form, place, tier or code. A lost band is kept as it was,
+ * and an item linked to a guest keeps its form until the link ends.
+ */
+export async function editBand(sellerId: string, id: string, edit: EditBandInput, now: Date = new Date()): Promise<BandDto> {
+  const band = await db.vendorBand.findFirst({
+    where: { id, sellerId },
+    select: { id: true, state: true, form: true, tier: true, holderUserId: true, linkedUntil: true },
+  });
   if (!band) throw new BandRefused(['That band is not here'], 404);
   if (band.state === 'lost') throw new BandRefused(['A lost band cannot be changed']);
+  if (edit.form && edit.form !== band.form) {
+    if (currentHolder(band, now)) throw new BandRefused([`It is linked to a guest, so it stays a ${FORM_RULES[bandForm(band.form)].noun} for now`]);
+    if (edit.form === 'band' && !edit.tier && !band.tier) throw new BandRefused(['Choose a tier for a band']);
+  }
   if (edit.locationId) await requirePlace(sellerId, edit.locationId);
   try {
     const { count } = await db.vendorBand.updateMany({
       where: { id, sellerId, state: { not: 'lost' } },
       data: {
+        ...(edit.form ? { form: edit.form } : {}),
         ...(edit.locationId ? { locationId: edit.locationId } : {}),
         ...(edit.tier ? { tier: edit.tier } : {}),
         ...(edit.vendorCode !== undefined ? { vendorCode: edit.vendorCode } : {}),
@@ -327,57 +389,120 @@ export async function markBandLost(sellerId: string, id: string, now: Date = new
   return toBandDto(row);
 }
 
-/** An active band of this business, or the refusal a door shows for it. */
+/** An active item of this business, or the refusal a door shows for it. */
 async function bandAtTheDoor(sellerId: string, raw: string): Promise<BandRow> {
   const serial = parseBandSerial(raw);
-  if (!serial) throw new BandRefused(['That is not a Bytspot band number, like BYT424-0301']);
+  if (!serial) throw new BandRefused([NOT_A_SERIAL]);
   const band = await db.vendorBand.findFirst({ where: { serial, sellerId }, include: BAND_INCLUDE });
-  if (!band) throw new BandRefused([`${serial} is not one of your bands`], 404);
-  if (band.state === 'lost') throw new BandRefused([`${serial} was marked lost. Scan the guest's ticket barcode instead`]);
-  if (band.state !== 'active') throw new BandRefused([`${serial} is not activated yet. Activate it under Bands`]);
+  if (!band) throw new BandRefused([`${serial} is not one of your bands or tags`], 404);
+  const noun = FORM_RULES[bandForm(band.form)].noun;
+  if (band.state === 'lost') throw new BandRefused([`${serial} was marked lost. Scan the guest's pass instead`]);
+  if (band.state !== 'active') throw new BandRefused([`${serial} is not activated yet. Activate this ${noun} under Bands`]);
   return band;
+}
+
+export interface MemberVisits {
+  visits: number;
+  lastVisitAt: string | null;
 }
 
 export interface BandAtDoor {
   band: BandDto;
-  /** The linked guest's ticket for now, when they have one. */
-  booking?: BookingDto;
+  /** What the linked guest holds for now, the item's own rail first. */
+  bookings: BookingDto[];
+  /** A key fob member's visits to this business. */
+  member?: MemberVisits;
 }
 
-/** Reads a band without changing anything. Checking in is a separate, explicit step. */
-export async function readBand(sellerId: string, raw: string, now: Date = new Date()): Promise<BandAtDoor> {
-  const row = await bandAtTheDoor(sellerId, raw);
-  const band = toBandDto(row);
-  if (!row.holderUserId) return { band };
-  const booking = await ticketForGuest({ sellerId, userId: row.holderUserId, locationId: row.locationId, now });
-  return booking ? { band, booking } : { band };
+async function memberVisits(sellerId: string, userId: string): Promise<MemberVisits> {
+  const [visits, last] = await Promise.all([
+    db.vendorBandVisit.count({ where: { sellerId, userId } }),
+    db.vendorBandVisit.findFirst({ where: { sellerId, userId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+  ]);
+  return { visits, lastVisitAt: last?.createdAt.toISOString() ?? null };
 }
 
 /**
- * Links a band to the guest who paid for a ticket, so the next tap finds them.
- * Linking it to the same guest again returns it unchanged; a band already
- * worn by someone else is refused.
+ * Reads an item without changing anything. Checking in is a separate,
+ * explicit step. An assigned-scope seat sees bookings on its windows only.
  */
-export async function linkBand(input: { sellerId: string; seatId: string; band: string; bookingId: string; now?: Date }): Promise<BandDto> {
+export async function readBand(sellerId: string, raw: string, now: Date = new Date(), windowIds?: string[]): Promise<BandAtDoor> {
+  const row = await bandAtTheDoor(sellerId, raw);
+  const band = toBandDto(row, now);
+  const userId = currentHolder(row, now);
+  const form = bandForm(row.form);
+  if (!userId || !FORM_RULES[form].carried) return { band, bookings: [] };
+  const [bookings, member] = await Promise.all([
+    holdingsForGuest({ sellerId, userId, locationId: row.locationId, domains: FORM_RULES[form].domains, windowIds, now }),
+    form === 'key_fob' ? memberVisits(sellerId, userId) : Promise.resolve(undefined),
+  ]);
+  return member ? { band, bookings, member } : { band, bookings };
+}
+
+/**
+ * Links a carried item to the guest of a paid ticket or an accepted booking,
+ * so the next tap finds them. A card or an event fob stays linked until that
+ * booking ends; a band or a key fob until it is lost. Linking the same guest
+ * again keeps the link, and an item linked to someone else is refused.
+ */
+export async function linkBand(input: {
+  sellerId: string;
+  seatId: string;
+  band: string;
+  bookingId: string;
+  windowIds?: string[];
+  now?: Date;
+}): Promise<BandDto> {
+  const now = input.now ?? new Date();
   const row = await bandAtTheDoor(input.sellerId, input.band);
-  const order = await db.vendorTicketOrder.findFirst({
-    where: { id: input.bookingId, sellerId: input.sellerId, status: 'completed' },
-    select: { userId: true, ticket: { select: { locationId: true } } },
-  });
-  if (!order) throw new BandRefused(["A band links to a paid ticket. Scan the guest's ticket barcode first"], 404);
-  if (row.locationId && row.locationId !== order.ticket.locationId) {
-    throw new BandRefused([`${row.serial} is for ${row.location?.label ?? 'another place'}. Use a band for this place`]);
+  const rule = FORM_RULES[bandForm(row.form)];
+  if (!rule.carried) throw new BandRefused([`${row.serial} is a table tag. It stays at its table, and diners tap it with their own phone`]);
+  const source = await linkSource({ sellerId: input.sellerId, bookingId: input.bookingId, windowIds: input.windowIds });
+  if (!source) throw new BandRefused([`A ${rule.noun} links to a paid ticket or a booking. Scan the guest's pass first`], 404);
+  if (row.locationId && row.locationId !== source.locationId) {
+    throw new BandRefused([`${row.serial} is for ${row.location?.label ?? 'another place'}. Use one for this place`]);
   }
-  if (row.holderUserId === order.userId) return toBandDto(row);
-  if (row.holderUserId) throw new BandRefused([`${row.serial} is linked to another guest. Give this guest a new band`]);
+  if (source.endsAt <= now) throw new BandRefused(['That booking has ended. Link it from a booking for now']);
+  const linkedUntil = rule.linkEnds === 'booking' ? source.endsAt : null;
+  const holder = currentHolder(row, now);
+  if (holder && holder !== source.userId) throw new BandRefused([`${row.serial} is linked to another guest. Give this guest a new ${rule.noun}`]);
+  if (holder && (!row.linkedUntil || (linkedUntil && linkedUntil <= row.linkedUntil))) return toBandDto(row, now);
 
   const { count } = await db.vendorBand.updateMany({
-    where: { id: row.id, sellerId: input.sellerId, state: 'active', holderUserId: null },
-    data: { holderUserId: order.userId, linkedAt: input.now ?? new Date(), linkedBySeatId: input.seatId },
+    where: {
+      id: row.id,
+      sellerId: input.sellerId,
+      state: 'active',
+      OR: holder ? [{ holderUserId: holder }] : [{ holderUserId: null }, { linkedUntil: { lte: now } }],
+    },
+    data: holder ? { linkedUntil } : { holderUserId: source.userId, linkedAt: now, linkedBySeatId: input.seatId, linkedUntil },
   });
   const linked = await db.vendorBand.findUniqueOrThrow({ where: { id: row.id }, include: BAND_INCLUDE });
-  if (count === 0 && linked.holderUserId !== order.userId) {
-    throw new BandRefused([`${row.serial} was just linked to another guest. Give this guest a new band`]);
+  if (count === 0 && currentHolder(linked, now) !== source.userId) {
+    throw new BandRefused([`${row.serial} was just linked to another guest. Give this guest a new ${rule.noun}`]);
   }
-  return toBandDto(linked);
+  return toBandDto(linked, now);
+}
+
+/**
+ * Logs a key fob member's visit. A second tap within VISIT_GAP_HOURS is the
+ * same visit, so it is counted once.
+ */
+export async function logVisit(input: {
+  sellerId: string;
+  seatId: string;
+  band: string;
+  now?: Date;
+}): Promise<{ member: MemberVisits; alreadyLogged: boolean }> {
+  const now = input.now ?? new Date();
+  const row = await bandAtTheDoor(input.sellerId, input.band);
+  if (bandForm(row.form) !== 'key_fob') throw new BandRefused(['Visits are logged for key fob members']);
+  const userId = currentHolder(row, now);
+  if (!userId) throw new BandRefused([`${row.serial} is not linked to a member yet. Scan their pass, then link the key fob`]);
+  const recent = await db.vendorBandVisit.findFirst({
+    where: { sellerId: input.sellerId, userId, createdAt: { gt: new Date(now.getTime() - VISIT_GAP_HOURS * 3_600_000) } },
+    select: { id: true },
+  });
+  if (!recent) await db.vendorBandVisit.create({ data: { sellerId: input.sellerId, bandId: row.id, userId, seatId: input.seatId, createdAt: now } });
+  return { member: await memberVisits(input.sellerId, userId), alreadyLogged: Boolean(recent) };
 }

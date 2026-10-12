@@ -28,7 +28,7 @@ router.get('/vendor/bands', requireVendorSeat, canManage, async (req, res) => {
 router.post('/vendor/bands/activate', requireVendorSeat, canManage, async (req, res) => {
   const parsed = activateBandInput.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid band', blockers: ['Enter the band number, choose a place and a tier'] });
+    res.status(400).json({ error: 'Invalid band', blockers: ['Enter the number, choose its type and a place, and a tier for a band'] });
     return;
   }
   try {
@@ -42,7 +42,7 @@ router.post('/vendor/bands/activate', requireVendorSeat, canManage, async (req, 
 router.post('/vendor/bands/:id', requireVendorSeat, canManage, async (req, res) => {
   const parsed = editBandInput.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid band', blockers: ['Change the place, the tier or the code'] });
+    res.status(400).json({ error: 'Invalid band', blockers: ['Change the type, the place, the tier or the code'] });
     return;
   }
   try {

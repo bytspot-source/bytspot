@@ -70,6 +70,7 @@ model User {
   offerCheckouts        OfferCheckout[]
   ticketOrders          VendorTicketOrder[]
   heldBands             VendorBand[]
+  bandVisits            VendorBandVisit[]
   mobilityQuotes        MobilityQuote[]
   mobilityTrips         MobilityTrip[]
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
@@ -1246,6 +1247,7 @@ model VendorSeller {
   media         VendorMedia[]
   patches       VendorPatch[]
   bands         VendorBand[]
+  bandVisits    VendorBandVisit[]
   tickets       VendorTicket[]
 
   @@index([state])
@@ -1535,6 +1537,10 @@ model VendorBand {
   sellerId   String  @map("seller_id")
   /// The place it admits to, chosen on activation.
   locationId String? @map("location_id")
+  /// `band`, `card` (a stay), `event_fob` (a show), `key_fob` (a regular
+  /// member) or `epoxy` (fixed to a restaurant table). Chosen on activation;
+  /// the number never decides it.
+  form       String  @default("band")
   /// `green`, `platinum` or `black`, set by the business. The letter a link
   /// ends with is a design hint anyone can edit, so it never decides this.
   tier       String?
@@ -1552,17 +1558,39 @@ model VendorBand {
   holderUserId      String?   @map("holder_user_id")
   linkedAt          DateTime? @map("linked_at")
   linkedBySeatId    String?   @map("linked_by_seat_id")
+  /// When the link ends by itself: a card at the end of the stay, an event fob
+  /// at the end of the show. Null keeps it until the item is lost.
+  linkedUntil       DateTime? @map("linked_until")
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  seller   VendorSeller    @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  location VendorLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  holder   User?           @relation(fields: [holderUserId], references: [id], onDelete: SetNull)
+  seller   VendorSeller      @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location VendorLocation?   @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  holder   User?             @relation(fields: [holderUserId], references: [id], onDelete: SetNull)
+  visits   VendorBandVisit[]
 
   @@unique([sellerId, vendorCode])
   @@index([sellerId, state])
   @@index([sellerId, holderUserId])
   @@map("vendor_bands")
+}
+
+/// A visit by a key fob member, logged at the door.
+model VendorBandVisit {
+  id        String   @id @default(cuid())
+  sellerId  String   @map("seller_id")
+  bandId    String   @map("band_id")
+  userId    String   @map("user_id")
+  seatId    String   @map("seat_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  seller VendorSeller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  band   VendorBand   @relation(fields: [bandId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sellerId, userId, createdAt])
+  @@index([bandId, createdAt])
+  @@map("vendor_band_visits")
 }
 
 /// A ticket a business sells itself for one date, e.g. its Sunday special on

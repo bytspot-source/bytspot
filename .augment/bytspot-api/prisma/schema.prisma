@@ -87,6 +87,7 @@ model User {
   contentReports        ContentReport[]       @relation("contentReporter")
   mapReports            MapReport[]           @relation("mapReporter")
   mapReportVotes        MapReportVote[]       @relation("mapReportVoter")
+  mapReportRelayKeys    MapReportRelayKey[]
 
   @@map("users")
 }
@@ -1962,4 +1963,19 @@ model MapReportVote {
   @@unique([reportId, voterId])
   @@index([voterId])
   @@map("map_report_votes")
+}
+
+/// A phone's key for signing its reports, so a nearby phone can carry one to
+/// the server without being able to change it. Registered while online.
+model MapReportRelayKey {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  /// P-256 public key, uncompressed (65 bytes), base64.
+  publicKey String   @unique @map("public_key")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("map_report_relay_keys")
 }

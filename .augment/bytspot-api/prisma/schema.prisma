@@ -1551,6 +1551,8 @@ model VendorAvailabilityWindow {
   /// blank (`custom.*`) window, which has no catalog template to fall back on.
   title        String?
   durationMins Int?    @map("duration_mins")
+  /// This bookable's own page, e.g. a shop's product page. Guests fall back to the place's website.
+  website      String?
 
   /// What the seller says this window is for, not what we infer from the shape
   /// of their data. Only `request` exists today, because only the ask → offer

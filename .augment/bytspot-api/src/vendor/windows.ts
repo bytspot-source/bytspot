@@ -174,6 +174,7 @@ export interface WindowDto {
   intent: string;
   published: boolean;
   coverUrl?: string;
+  website?: string;
 }
 
 export function windowDto(
@@ -195,7 +196,23 @@ export function windowDto(
     intent: window.intent,
     published: window.active,
     coverUrl: coverUrlFor(window.media ?? []),
+    website: window.website ?? undefined,
   };
+}
+
+/** Sets or clears a bookable's own website. `website` is already normalized by the caller. */
+export async function setWindowWebsite(input: { sellerId: string; windowId: string; website: string | null }): Promise<WindowDto> {
+  const window = await db.vendorAvailabilityWindow.findFirst({
+    where: { id: input.windowId, sellerId: input.sellerId },
+    select: { id: true },
+  });
+  if (!window) throw new NotFound('offering');
+  const row = await db.vendorAvailabilityWindow.update({
+    where: { id: window.id },
+    data: { website: input.website },
+    include: { media: { where: { kind: 'cover' }, select: { id: true, kind: true } } },
+  });
+  return windowDto(row);
 }
 
 export class WindowRefused extends Error {

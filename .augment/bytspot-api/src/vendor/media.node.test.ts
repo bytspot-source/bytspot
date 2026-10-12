@@ -55,6 +55,18 @@ test('a menu belongs on a place, not a bookable, and video stays closed until ob
   });
 });
 
+test('every bookable can carry its own video, one at a time', () => {
+  assert.equal(planUpload({ parent: 'bookable', kind: 'video', existing: [] }).ok, false, 'still needs object storage');
+  assert.deepEqual(planUpload({ parent: 'bookable', kind: 'video', existing: [], storeConfigured: true }), {
+    ok: true,
+    kind: 'video',
+    position: 0,
+    replace: false,
+  });
+  const second = planUpload({ parent: 'bookable', kind: 'video', existing: [{ kind: 'video', position: 0 }], storeConfigured: true });
+  assert.equal(second.ok && second.replace, true);
+});
+
 test('a second cover replaces the first rather than stacking', () => {
   const first = planUpload({ parent: 'location', kind: 'cover', existing: [] });
   assert.deepEqual(first, { ok: true, kind: 'cover', position: 0, replace: false });
@@ -149,4 +161,13 @@ test('guests see a vendor file only after team approval, and video only with pre
   assert.equal(readReviewStatus('APPROVED'), 'pending');
   assert.equal(readReviewStatus(undefined), 'pending');
   assert.equal(mediaHttpStatus('video-needs-hosting'), 402);
+});
+
+test('a guest card plays the bookable video first, then the place video', async () => {
+  const { pickVideo } = await import('./inventory');
+  const own = { id: 'vid_own', kind: 'video', position: 0 };
+  const place = { id: 'vid_place', kind: 'video', position: 0 };
+  assert.match(pickVideo([own], [place]) ?? '', /\/media\/vendor\/vid_own$/);
+  assert.match(pickVideo([], [place]) ?? '', /\/media\/vendor\/vid_place$/);
+  assert.equal(pickVideo([{ id: 'c', kind: 'cover', position: 0 }], []), null);
 });

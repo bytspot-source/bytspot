@@ -542,6 +542,34 @@ router.post('/vendor/bookables/:id/media', requireVendorSeat, async (req, res) =
   }
 });
 
+router.post('/vendor/bookables/:id/media/uploads', requireVendorSeat, async (req, res) => {
+  try {
+    const window = await loadWindow(req.vendor!.seller.id, String(req.params.id));
+    if (!window) {
+      notFound(res);
+      return;
+    }
+    await startVideoUpload(req, res, req.vendor!, 'bookable', window.id);
+  } catch (err) {
+    captureError(err, { route: 'vendor/bookables/:id/media/uploads:post' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+router.post('/vendor/bookables/:id/media/uploads/:mediaId', requireVendorSeat, async (req, res) => {
+  try {
+    const window = await loadWindow(req.vendor!.seller.id, String(req.params.id));
+    if (!window) {
+      notFound(res);
+      return;
+    }
+    await completeVideoUpload(req, res, req.vendor!, 'bookable', window.id, String(req.params.mediaId));
+  } catch (err) {
+    captureError(err, { route: 'vendor/bookables/:id/media/uploads:complete' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 router.delete('/vendor/bookables/:id/media/:mediaId', requireVendorSeat, async (req, res) => {
   try {
     if (!canWrite(req.vendor!)) {

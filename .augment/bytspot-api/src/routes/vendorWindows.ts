@@ -4,7 +4,9 @@ import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
 import { allowedBookableTypes, roleScope, type SeatRole, type SellerState } from '../vendor/contract';
 import { NotFound } from '../vendor/demandFeed';
 import { seatCanSeeBookable, seatCanSeeLocation } from '../vendor/media';
-import { WindowRefused, createWindow, createWindowInput, listWindows, setWindowPublished } from '../vendor/windows';
+import { WindowRefused, createWindow, createWindowInput, listWindows, setWindowPublished, setWindowWebsite } from '../vendor/windows';
+import { z } from 'zod';
+import { normalizeWebsite } from './vendorSetup';
 import { moveSlot, scheduleWrite, slotWrite, updateSchedule, windowSlots, type SlotOperationId } from '../vendor/slots';
 
 const router = Router();
@@ -85,6 +87,39 @@ function publishHandler(published: boolean) {
 
 router.post('/vendor/windows/:id/publish', requireVendorSeat, requireCapability('PUBLISH'), publishHandler(true));
 router.post('/vendor/windows/:id/unpublish', requireVendorSeat, requireCapability('PUBLISH'), publishHandler(false));
+
+const websiteWrite = z.object({ website: z.string().trim().max(200).nullable() });
+
+/** Sets or clears a bookable's own website. An empty string clears it. */
+router.post('/vendor/windows/:id/website', requireVendorSeat, requireCapability('PUBLISH'), async (req, res) => {
+  const parsed = websiteWrite.safeParse(req.body);
+  const windowId = String(req.params.id ?? '');
+  const { seller, seat } = req.vendor!;
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid website', blockers: ['That website does not look right'] });
+    return;
+  }
+  if (!seatCanSeeBookable(seat.role as SeatRole, seat.bookableIds, windowId)) {
+    res.status(404).json({ error: 'No such offering' });
+    return;
+  }
+  const raw = parsed.data.website ?? '';
+  const website = raw ? normalizeWebsite(raw) : null;
+  if (raw && !website) {
+    res.status(422).json({ error: 'Invalid website', blockers: ['That website does not look right'] });
+    return;
+  }
+  try {
+    res.status(200).json(await setWindowWebsite({ sellerId: seller.id, windowId, website: website ?? null }));
+  } catch (err) {
+    if (err instanceof NotFound) {
+      res.status(404).json({ error: 'No such offering' });
+      return;
+    }
+    captureError(err, { route: 'vendor/windows:website' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
 
 /** A bookable's derived slots for its horizon, with what is already taken. */
 router.get('/vendor/windows/:id/slots', requireVendorSeat, async (req, res) => {

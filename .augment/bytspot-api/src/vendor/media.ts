@@ -19,7 +19,7 @@ export const MEDIA_CAPS = {
   cover: { location: 1, bookable: 1 },
   gallery: { location: 8, bookable: 3 },
   menu: { location: 3, bookable: 0 },
-  video: { location: 1, bookable: 0 },
+  video: { location: 1, bookable: 1 },
 } as const;
 
 export const MEDIA_MAX_IMAGE_BYTES = 2_000_000;

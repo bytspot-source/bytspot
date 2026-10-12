@@ -12,6 +12,8 @@ import { buildDemandSnapshot, respondToDemand, NoCapacity, NotFound } from './de
 import { DEMAND_DEFAULTS } from './demand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 import { archivePatch, createPatch, listPatches } from './patches';
+import { liveCardsAt } from './inventory';
+import { setWindowWebsite } from './windows';
 
 /**
  * The rail, end to end, against a real database.
@@ -1537,6 +1539,31 @@ test('a patch code from another business earns that business nothing', async (t)
       await db.vendorPatch.deleteMany({ where: { sellerId: { in: [ids.seller, otherSeller] } } });
       await db.vendorLocation.deleteMany({ where: { sellerId: otherSeller } });
       await db.vendorSeller.deleteMany({ where: { id: otherSeller } });
+    }
+  });
+});
+
+test("a bookable's own website shows on its guest card, and clearing it falls back to the place's", async (t) => {
+  if (!reachable) return t.skip('no database');
+
+  await onPrintedPreset(async () => {
+    const before = await db.vendorLocation.findUniqueOrThrow({ where: { id: ids.location }, select: { website: true } });
+    await db.vendorLocation.update({ where: { id: ids.location }, data: { website: 'https://place.example/' } });
+    try {
+      const saved = await setWindowWebsite({ sellerId: ids.seller, windowId: ids.window, website: 'https://shop.example/item' });
+      assert.equal(saved.website, 'https://shop.example/item');
+      let [card] = await liveCardsAt(ids.location);
+      assert.equal(card.website, 'https://shop.example/item');
+      assert.equal(card.videoUrl, null, 'no video without paid hosting');
+
+      await setWindowWebsite({ sellerId: ids.seller, windowId: ids.window, website: null });
+      [card] = await liveCardsAt(ids.location);
+      assert.equal(card.website, 'https://place.example/');
+
+      await assert.rejects(() => setWindowWebsite({ sellerId: 'someone-else', windowId: ids.window, website: null }));
+    } finally {
+      await db.vendorAvailabilityWindow.update({ where: { id: ids.window }, data: { website: null } });
+      await db.vendorLocation.update({ where: { id: ids.location }, data: { website: before.website } });
     }
   });
 });

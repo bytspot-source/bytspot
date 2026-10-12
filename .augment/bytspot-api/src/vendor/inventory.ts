@@ -39,6 +39,10 @@ export interface InventoryCard {
   durationMins: number;
   intent: string;
   place: { label: string; address: string | null; lat: number; lng: number; phone: string | null; website: string | null };
+  /** This bookable's own website, else the place's. */
+  website: string | null;
+  /** This bookable's video, else the place's. Approved files only. */
+  videoUrl: string | null;
   distanceMiles: number;
   coverUrl: string | null;
   galleryUrls: string[];
@@ -74,6 +78,12 @@ export function pickImagery(windowMedia: MediaRow[], placeMedia: MediaRow[]): { 
   return { coverUrl: cover ? mediaUrl(cover.id) : null, galleryUrls: gallery.slice(0, 6).map((row) => mediaUrl(row.id)) };
 }
 
+/** The window's own video first, then the place's. */
+export function pickVideo(windowMedia: MediaRow[], placeMedia: MediaRow[]): string | null {
+  const video = windowMedia.find((row) => row.kind === 'video') ?? placeMedia.find((row) => row.kind === 'video');
+  return video ? mediaUrl(video.id) : null;
+}
+
 /** Menus hang off the place only, so a window's own media is never read here. */
 export function pickMenus(placeMedia: MediaRow[]): InventoryMenu[] {
   return placeMedia
@@ -92,9 +102,9 @@ export function boundingBox(lat: number, lng: number, radiusMiles: number) {
 const MEDIA_SELECT = { select: { id: true, kind: true, position: true, mimeType: true } } satisfies Prisma.VendorMediaFindManyArgs;
 
 const CARD_INCLUDE = {
-  seller: { select: { id: true, legalName: true } },
-  location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu'] }, reviewStatus: 'approved' }, ...MEDIA_SELECT } } },
-  media: { where: { kind: { in: ['cover', 'gallery'] }, reviewStatus: 'approved' }, ...MEDIA_SELECT },
+  seller: { select: { id: true, legalName: true, videoHostingAt: true } },
+  location: { include: { media: { where: { kind: { in: ['cover', 'gallery', 'menu', 'video'] }, reviewStatus: 'approved' }, ...MEDIA_SELECT } } },
+  media: { where: { kind: { in: ['cover', 'gallery', 'video'] }, reviewStatus: 'approved' }, ...MEDIA_SELECT },
 } satisfies Prisma.VendorAvailabilityWindowInclude;
 
 /** Only what a guest may see: published, at an ACTIVE place, of an ACTIVE business. */
@@ -167,6 +177,9 @@ async function toCards(windows: CardWindow[], now: Date, origin?: { lat: number;
         phone: window.location.phone,
         website: window.location.website,
       },
+      website: window.website ?? window.location.website,
+      // Video is a paid hosting service; without it a business's video is not shown.
+      videoUrl: window.seller.videoHostingAt ? pickVideo(window.media, window.location.media) : null,
       distanceMiles: Math.round(distance * 10) / 10,
       ...pickImagery(window.media, window.location.media),
       menus: pickMenus(window.location.media),

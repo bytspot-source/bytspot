@@ -68,6 +68,7 @@ model User {
   partyCheckouts        PartyCheckout[]
   partySessionClaims    PartySessionClaim[]
   offerCheckouts        OfferCheckout[]
+  ticketOrders          VendorTicketOrder[]
   mobilityQuotes        MobilityQuote[]
   mobilityTrips         MobilityTrip[]
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
@@ -1244,6 +1245,7 @@ model VendorSeller {
   media         VendorMedia[]
   patches       VendorPatch[]
   bands         VendorBand[]
+  tickets       VendorTicket[]
 
   @@index([state])
   @@map("vendor_sellers")
@@ -1310,6 +1312,7 @@ model VendorLocation {
   media   VendorMedia[]
   patches VendorPatch[]
   bands   VendorBand[]
+  tickets VendorTicket[]
 
   /// Every profile read filters a seller's places by state.
   @@index([sellerId, state])
@@ -1552,6 +1555,83 @@ model VendorBand {
   @@unique([sellerId, vendorCode])
   @@index([sellerId, state])
   @@map("vendor_bands")
+}
+
+/// A ticket a business sells itself for one date, e.g. its Sunday special on
+/// 18 October. Each date is its own row with its own price and cap, so a
+/// change to next week never touches what was sold for this week.
+model VendorTicket {
+  id         String  @id @default(cuid())
+  sellerId   String  @map("seller_id")
+  locationId String  @map("location_id")
+  title      String
+  /// What the guest gets, in the business's words.
+  details    String?
+
+  startsAt   DateTime @map("starts_at")
+  endsAt     DateTime @map("ends_at")
+  priceCents Int      @map("price_cents")
+  /// How many may be sold. `sold` never exceeds it: the database refuses it.
+  quantity   Int
+  sold       Int      @default(0)
+
+  createdBySeatId String?   @map("created_by_seat_id")
+  /// Set when the business stops selling it. Tickets already bought stay valid.
+  withdrawnAt     DateTime? @map("withdrawn_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  seller   VendorSeller        @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location VendorLocation      @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  orders   VendorTicketOrder[]
+
+  @@index([sellerId, startsAt])
+  @@index([locationId, startsAt])
+  @@map("vendor_tickets")
+}
+
+/// One guest buying one ticket through Stripe. Bytspot is the merchant of
+/// record and the business is paid by transfer, split as it stood at checkout.
+/// Once paid it carries the pass code shown at the door, which the Pass
+/// scanner reads the same way as a booking's.
+model VendorTicketOrder {
+  id               String    @id @default(cuid())
+  ticketId         String    @map("ticket_id")
+  sellerId         String    @map("seller_id")
+  userId           String    @map("user_id")
+  /// The business's payout account the transfer goes to.
+  destination      String
+  amountCents      Int       @map("amount_cents")
+  platformFeeBps   Int       @map("platform_fee_bps")
+  platformFeeCents Int       @map("platform_fee_cents")
+  sellerNetCents   Int       @map("seller_net_cents")
+  currency         String    @default("usd")
+  /// creating | pending | settling | completed | refunded | expired
+  status           String    @default("creating")
+  stripeSessionId  String?   @unique @map("stripe_session_id")
+  checkoutUrl      String?   @map("checkout_url")
+  paymentIntentId  String?   @map("payment_intent_id")
+  refundId         String?   @map("refund_id")
+  refundReason     String?   @map("refund_reason")
+  expiresAt        DateTime  @map("expires_at")
+  completedAt      DateTime? @map("completed_at")
+
+  /// What the guest shows at the door. Issued once paid, never before.
+  passCode          String?   @unique @map("pass_code")
+  checkedInAt       DateTime? @map("checked_in_at")
+  checkedInBySeatId String?   @map("checked_in_by_seat_id")
+  noShowAt          DateTime? @map("no_show_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  ticket VendorTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, status])
+  @@index([sellerId, status])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("vendor_ticket_orders")
 }
 
 /// A seller's answer to "when?", before it is multiplied into slots. Slots are

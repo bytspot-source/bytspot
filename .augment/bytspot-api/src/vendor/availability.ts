@@ -102,7 +102,7 @@ function zoneOffsetMinutes(instant: Date, timeZone: string): number {
  * solving for: on a DST boundary the first guess uses the wrong side of the
  * shift, and a window would open an hour early for one day of the year.
  */
-function zonedInstant(year: number, month: number, day: number, minutes: number, timeZone: string): Date {
+export function zonedInstant(year: number, month: number, day: number, minutes: number, timeZone: string): Date {
   const naive = Date.UTC(year, month - 1, day, 0, minutes);
   const first = zoneOffsetMinutes(new Date(naive), timeZone);
   const candidate = naive - first * 60_000;

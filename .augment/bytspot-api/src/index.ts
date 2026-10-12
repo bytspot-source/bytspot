@@ -36,6 +36,7 @@ import vendorInsightsRouter from './routes/vendorInsights';
 import vendorBookingsRouter from './routes/vendorBookings';
 import vendorPatchesRouter from './routes/vendorPatches';
 import vendorBandsRouter from './routes/vendorBands';
+import vendorTicketsRouter from './routes/vendorTickets';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
 import { backfillUserIdentityHashes } from './services/userIdentityHashes';
@@ -116,6 +117,7 @@ app.use(vendorInsightsRouter);
 app.use(vendorBookingsRouter);
 app.use(vendorPatchesRouter);
 app.use(vendorBandsRouter);
+app.use(vendorTicketsRouter);
 
 // ─── 404 catch-all ───────────────────────────────────
 app.use((_req, res) => {

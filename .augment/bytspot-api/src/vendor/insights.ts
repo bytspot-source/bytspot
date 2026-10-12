@@ -9,6 +9,8 @@ import { windowTemplate } from './windows';
  * Nothing here is stored. DemandEvent is append-only and written on every
  * broadcast, offer, decline and accept, so the numbers are recomputed from it
  * on each read and can never disagree with the feed a vendor worked from.
+ * Tickets a business sells for its own dates are paid in the app too, so their
+ * orders count wherever money paid in the app does.
  */
 
 export const ANALYTICS_RANGES = [7, 30, 90] as const;
@@ -96,7 +98,7 @@ function titleFor(window: { skuTemplateId: string; title: string | null; duratio
 
 export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now: Date = new Date()): Promise<AnalyticsSummary> {
   const since = new Date(now.getTime() - days * 86_400_000);
-  const [events, offers, checkouts] = await Promise.all([
+  const [events, offers, checkouts, tickets] = await Promise.all([
     db.demandEvent.findMany({ where: { sellerId, occurredAt: { gte: since } }, select: { kind: true } }),
     db.offer.findMany({
       where: { sellerId, state: 'ACCEPTED', updatedAt: { gte: since } },
@@ -113,6 +115,10 @@ export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now:
       where: { sellerId, createdAt: { gte: since }, status: { in: ['completed', 'refunded'] } },
       select: { status: true, amountCents: true, sellerNetCents: true },
     }),
+    db.vendorTicketOrder.findMany({
+      where: { sellerId, createdAt: { gte: since }, status: { in: ['completed', 'refunded'] } },
+      select: { status: true, amountCents: true, sellerNetCents: true },
+    }),
   ]);
   return summarizeAnalytics({
     days,
@@ -124,7 +130,7 @@ export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now:
       priceCents: offer.priceCents,
       payAt: offer.payAt,
     })),
-    checkouts,
+    checkouts: [...checkouts, ...tickets],
   });
 }
 
@@ -223,16 +229,27 @@ export function summarizeEarnings(input: {
   };
 }
 
+function paidLine(row: { completedAt: Date | null; createdAt: Date; status: string; amountCents: number; platformFeeCents: number; sellerNetCents: number }) {
+  return {
+    at: row.completedAt ?? row.createdAt,
+    status: row.status,
+    amountCents: row.amountCents,
+    feeCents: row.platformFeeCents,
+    netCents: row.sellerNetCents,
+  };
+}
+
 export async function loadEarnings(sellerId: string, days: AnalyticsRange, now: Date = new Date()): Promise<EarningsSummary> {
   const since = new Date(now.getTime() - days * 86_400_000);
   const venueOffer = { sellerId, state: 'ACCEPTED', payAt: 'venue', noShowAt: null };
-  const [checkouts, venue, upcoming] = await Promise.all([
+  const paidSince = {
+    sellerId,
+    status: { in: ['completed', 'refunded'] },
+    OR: [{ completedAt: { gte: since, lte: now } }, { completedAt: null, createdAt: { gte: since, lte: now } }],
+  };
+  const [checkouts, tickets, venue, upcoming] = await Promise.all([
     db.offerCheckout.findMany({
-      where: {
-        sellerId,
-        status: { in: ['completed', 'refunded'] },
-        OR: [{ completedAt: { gte: since, lte: now } }, { completedAt: null, createdAt: { gte: since, lte: now } }],
-      },
+      where: paidSince,
       select: {
         status: true,
         amountCents: true,
@@ -243,6 +260,18 @@ export async function loadEarnings(sellerId: string, days: AnalyticsRange, now: 
         offer: { select: { location: { select: { timezone: true } } } },
       },
     }),
+    db.vendorTicketOrder.findMany({
+      where: paidSince,
+      select: {
+        status: true,
+        amountCents: true,
+        platformFeeCents: true,
+        sellerNetCents: true,
+        completedAt: true,
+        createdAt: true,
+        ticket: { select: { location: { select: { timezone: true } } } },
+      },
+    }),
     db.offer.findMany({
       where: { ...venueOffer, startsAt: { gte: since, lte: now } },
       select: { startsAt: true, priceCents: true, location: { select: { timezone: true } } },
@@ -251,14 +280,10 @@ export async function loadEarnings(sellerId: string, days: AnalyticsRange, now: 
   ]);
   return summarizeEarnings({
     days,
-    checkouts: checkouts.map((row) => ({
-      at: row.completedAt ?? row.createdAt,
-      status: row.status,
-      amountCents: row.amountCents,
-      feeCents: row.platformFeeCents,
-      netCents: row.sellerNetCents,
-      timezone: row.offer.location.timezone,
-    })),
+    checkouts: [
+      ...checkouts.map((row) => ({ ...paidLine(row), timezone: row.offer.location.timezone })),
+      ...tickets.map((row) => ({ ...paidLine(row), timezone: row.ticket.location.timezone })),
+    ],
     venue: venue.map((row) => ({ at: row.startsAt, priceCents: row.priceCents, timezone: row.location.timezone })),
     upcomingVenueCents: upcoming._sum.priceCents ?? 0,
   });
@@ -293,21 +318,23 @@ export function payoutTotals(lines: Pick<PayoutLineDto, 'status' | 'netCents' | 
   };
 }
 
-/** Paid and refunded bookings, newest first. Pending checkouts are not money yet. */
-export async function payoutLines(sellerId: string, limit = 50): Promise<PayoutLineDto[]> {
-  const rows = await db.offerCheckout.findMany({
-    where: { sellerId, status: { in: ['completed', 'refunded'] } },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-    include: {
-      offer: {
-        select: { skuTemplateId: true, window: { select: { skuTemplateId: true, title: true, durationMins: true } } },
-      },
-    },
-  });
-  return rows.map((row) => ({
+function payoutLine(
+  row: {
+    id: string;
+    completedAt: Date | null;
+    createdAt: Date;
+    status: string;
+    amountCents: number;
+    platformFeeCents: number;
+    sellerNetCents: number;
+    currency: string;
+    refundReason: string | null;
+  },
+  title: string,
+): PayoutLineDto & { createdAt: Date } {
+  return {
     id: row.id,
-    title: titleFor(row.offer.window, row.offer.skuTemplateId),
+    title,
     paidAt: (row.completedAt ?? row.createdAt).toISOString(),
     status: row.status === 'refunded' ? 'refunded' : 'completed',
     amountCents: row.amountCents,
@@ -315,7 +342,38 @@ export async function payoutLines(sellerId: string, limit = 50): Promise<PayoutL
     netCents: row.sellerNetCents,
     currency: row.currency,
     refundReason: row.refundReason ?? undefined,
-  }));
+    createdAt: row.createdAt,
+  };
+}
+
+/** Paid and refunded bookings and tickets, newest first. Pending checkouts are not money yet. */
+export async function payoutLines(sellerId: string, limit = 50): Promise<PayoutLineDto[]> {
+  const where = { sellerId, status: { in: ['completed', 'refunded'] } };
+  const [rows, tickets] = await Promise.all([
+    db.offerCheckout.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: {
+        offer: {
+          select: { skuTemplateId: true, window: { select: { skuTemplateId: true, title: true, durationMins: true } } },
+        },
+      },
+    }),
+    db.vendorTicketOrder.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: { ticket: { select: { title: true } } },
+    }),
+  ]);
+  return [
+    ...rows.map((row) => payoutLine(row, titleFor(row.offer.window, row.offer.skuTemplateId))),
+    ...tickets.map((row) => payoutLine(row, row.ticket.title)),
+  ]
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, limit)
+    .map(({ createdAt: _createdAt, ...line }) => line);
 }
 
 /**

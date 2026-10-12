@@ -1561,6 +1561,14 @@ model VendorBand {
   /// When the link ends by itself: a card at the end of the stay, an event fob
   /// at the end of the show. Null keeps it until the item is lost.
   linkedUntil       DateTime? @map("linked_until")
+  /// The chip's UID, bound on its first tap with a valid fresh code.
+  sunUid            String?   @map("sun_uid")
+  /// The chip's tap counter on the last accepted tap. A lower or equal one is a replay.
+  sunCounter        Int?      @map("sun_counter")
+  /// Set on the first tap with a valid fresh code. From then on a tap needs a
+  /// new code, and its printed number alone opens nothing.
+  securedAt         DateTime? @map("secured_at")
+  lastTapAt         DateTime? @map("last_tap_at")
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 

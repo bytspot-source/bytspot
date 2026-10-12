@@ -49,6 +49,9 @@ const envSchema = z.object({
   // Inbox told about every new member report, so reports are acted on within
   // 24 hours without someone watching the admin console.
   SAFETY_ALERT_EMAIL:     z.string().default(''),
+  // 32 hex characters. Every band's, card's and fob's chip keys are derived
+  // from it, so it must never change once items are secured.
+  BAND_SUN_MASTER_KEY:    z.string().regex(/^([0-9a-fA-F]{32})?$/, 'BAND_SUN_MASTER_KEY must be 32 hex characters').default(''),
   CRON_SECRET:            z.string().default(isDev ? 'dev-cron-secret' : ''),
 
   // ── OPTIONAL (integrations) ───────────────────────────
@@ -143,6 +146,7 @@ export const config = {
   safetyAlertEmail: env.SAFETY_ALERT_EMAIL,
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,
+  bandSunMasterKey: env.BAND_SUN_MASTER_KEY,
   ticketmasterApiKey: env.TICKETMASTER_API_KEY,
   googlePlacesApiKey: env.GOOGLE_PLACES_API_KEY,
   apnsKeyId: env.APNS_KEY_ID,
@@ -182,6 +186,7 @@ export function printConfigDiagnostics(): void {
   check(config.openaiApiKey, 'OpenAI', 'concierge AI will not work');
   check(config.redisUrl, 'Redis', 'caching disabled, using in-memory fallback');
   check(config.cronSecret, 'Cron secret', 'cron endpoints unprotected');
+  check(config.bandSunMasterKey, 'Band fresh codes', 'secured bands, cards and fobs will be refused at the door');
   check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.mobilityAggregatorMode === 'live' && config.mobilityAggregatorBaseUrl && config.mobilityAggregatorApiKey ? 'ok' : '', 'Mobility aggregator', 'premium rides will use Uber/Lyft handoff only');

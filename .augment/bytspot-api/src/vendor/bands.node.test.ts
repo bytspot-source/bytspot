@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { createCipheriv } from 'node:crypto';
 import { beforeEach, test } from 'node:test';
 import { Prisma } from '@prisma/client';
+import { config } from '../config';
 import { db } from '../lib/db';
 import {
   BandRangeRefused,
@@ -18,6 +20,7 @@ import {
   readBand,
   releaseBands,
 } from './bands';
+import { aesCmac, itemKeys, parseSunCode, verifySun } from './sun';
 
 const vendorBand = db.vendorBand as any;
 const vendorLocation = db.vendorLocation as any;
@@ -40,7 +43,25 @@ function codeTaken() {
   return new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' });
 }
 
+const MASTER = '00112233445566778899aabbccddeeff';
+const CHIP = '04A1B2C3D4E5F6';
+
+/** The link a chip set up with the item's keys gives on tap number `counter`. */
+function tapLink(counter: number, { serial = 'BYT424-0301', uid = CHIP, master = MASTER } = {}): string {
+  const keys = itemKeys(Buffer.from(master, 'hex'), serial);
+  const ctr = Buffer.alloc(3);
+  ctr.writeUIntLE(counter, 0, 3);
+  const picc = Buffer.concat([Buffer.from([0xc7]), Buffer.from(uid, 'hex'), ctr, Buffer.from('a1b2c3d4e5', 'hex')]);
+  const cipher = createCipheriv('aes-128-cbc', keys.metaKey, Buffer.alloc(16)).setAutoPadding(false);
+  const piccData = Buffer.concat([cipher.update(picc), cipher.final()]).toString('hex').toUpperCase();
+  const session = aesCmac(keys.fileKey, Buffer.concat([Buffer.from('3cc300010080', 'hex'), Buffer.from(uid, 'hex'), ctr]));
+  const full = aesCmac(session, Buffer.alloc(0));
+  const cmac = Buffer.from([1, 3, 5, 7, 9, 11, 13, 15].map((i) => full[i])).toString('hex').toUpperCase();
+  return `https://bytspot.app/${serial}?picc_data=${piccData}&cmac=${cmac}`;
+}
+
 beforeEach(() => {
+  (config as { bandSunMasterKey: string }).bandSunMasterKey = MASTER;
   vendorBand.findMany = async () => [];
   vendorBand.findFirst = async () => row();
   vendorBand.findUniqueOrThrow = async () => row({ state: 'active' });
@@ -376,4 +397,88 @@ test('a key fob visit is logged once per visit, and only for a linked key fob', 
   await assert.rejects(() => logVisit({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', now }), /key fob members/);
   vendorBand.findFirst = async () => row({ state: 'active', form: 'key_fob' });
   await assert.rejects(() => logVisit({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', now }), /not linked to a member/);
+});
+
+test('AES-CMAC matches RFC 4493, and NXP\'s sample tap reads its UID and counter', () => {
+  const key = Buffer.from('2b7e151628aed2a6abf7158809cf4f3c', 'hex');
+  assert.equal(aesCmac(key, Buffer.alloc(0)).toString('hex'), 'bb1d6929e95937287fa37d129b756746');
+  assert.equal(aesCmac(key, Buffer.from('6bc1bee22e409f96e93d7e117393172a', 'hex')).toString('hex'), '070a16b46b4d4144f79bdd9dd04a287c');
+  assert.equal(
+    aesCmac(key, Buffer.from('6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411', 'hex')).toString('hex'),
+    'dfa66747de9ae63030ca32611497c827',
+  );
+  const factory = { metaKey: Buffer.alloc(16), fileKey: Buffer.alloc(16) };
+  const sample = parseSunCode('https://sdm.nfcdeveloper.com/tag?picc_data=EF963FF7828658A599F3041510671E88&cmac=94EED9EE65337086');
+  assert.deepEqual(verifySun(factory, sample!), { uid: '04DE5F1EACC040', counter: 61 });
+  assert.equal(verifySun(factory, { ...sample!, cmac: '94EED9EE65337087' }), undefined);
+  assert.equal(verifySun(factory, { ...sample!, piccData: 'nope' }), undefined);
+  assert.equal(parseSunCode('https://bytspot.app/BYT424-0301'), undefined);
+  assert.equal(parseBandSerial(tapLink(1)), 'BYT424-0301');
+});
+
+test('the first tap with a valid fresh code secures the item and binds its chip', async () => {
+  let update: any;
+  vendorBand.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+  vendorBand.findFirst = async () => row({ state: 'active', form: 'event_fob', locationId: 'loc-1' });
+  const read = await readBand('seller-1', tapLink(7), now);
+  assert.equal(read.band.secured, true);
+  assert.deepEqual(update.where, { id: 'band-1', state: 'active', sunUid: null, sunCounter: null });
+  assert.deepEqual(update.data, { sunUid: CHIP, sunCounter: 7, lastTapAt: now, securedAt: now });
+
+  update = undefined;
+  vendorBand.findFirst = async () => row({ state: 'active', locationId: 'loc-1' });
+  assert.equal((await readBand('seller-1', 'BYT424-0301', now)).band.secured, false);
+  assert.equal(update, undefined, 'an item that is not secured reads by its number as before');
+});
+
+test('a secured item needs a new code on every tap', async () => {
+  const secured = { state: 'active', form: 'band', locationId: 'loc-1', sunUid: CHIP, sunCounter: 7, securedAt: now, lastTapAt: now };
+  let update: any;
+  vendorBand.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+  vendorBand.findFirst = async () => row(secured);
+
+  await readBand('seller-1', tapLink(8), now);
+  assert.deepEqual(update.where, { id: 'band-1', state: 'active', sunUid: CHIP, sunCounter: { lt: 8 } });
+  assert.deepEqual(update.data, { sunUid: CHIP, sunCounter: 8, lastTapAt: now });
+
+  for (const [raw, reason] of [
+    ['BYT424-0301', /printed number is not enough/],
+    ['https://bytspot.app/BYT424-0301', /printed number is not enough/],
+    [tapLink(7), /already used/],
+    [tapLink(3), /already used/],
+    [tapLink(9, { uid: '04FFFFFFFFFFFF' }), /may be a copy/],
+    [tapLink(9, { master: 'ffeeddccbbaa99887766554433221100' }), /may be a copy/],
+    [tapLink(9, { serial: 'BYT424-0302' }).replace('0302', '0301'), /may be a copy/],
+    [`${tapLink(9).slice(0, -1)}0`, /may be a copy/],
+  ] as const) {
+    await assert.rejects(() => readBand('seller-1', raw, now), (err: any) => err instanceof BandRefused && reason.test(err.blockers[0]), raw);
+  }
+  await assert.rejects(
+    () => linkBand({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', bookingId: 'order-1', now }),
+    /printed number is not enough/,
+  );
+
+  vendorBand.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => readBand('seller-1', tapLink(9), now), /already used/, 'two phones with the same tap: one wins');
+});
+
+test('a secured key fob logs the visit just read, but not one read long ago', async () => {
+  vendorBand.findFirst = async () =>
+    row({ state: 'active', form: 'key_fob', holderUserId: 'guest-1', sunUid: CHIP, sunCounter: 4, securedAt: now, lastTapAt: new Date(now.getTime() - 60_000) });
+  assert.equal((await logVisit({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', now })).alreadyLogged, false);
+  vendorBand.findFirst = async () =>
+    row({ state: 'active', form: 'key_fob', holderUserId: 'guest-1', sunUid: CHIP, sunCounter: 4, securedAt: now, lastTapAt: new Date(now.getTime() - 6 * 60_000) });
+  await assert.rejects(() => logVisit({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', now }), /printed number is not enough/);
+  await assert.rejects(() => readBand('seller-1', 'BYT424-0301', now), /printed number is not enough/, 'a read is never held');
+});
+
+test('without the master key a secured item is refused, and an unsecured one reads as before', async () => {
+  (config as { bandSunMasterKey: string }).bandSunMasterKey = '';
+  let updated = false;
+  vendorBand.updateMany = async () => { updated = true; return { count: 1 }; };
+  vendorBand.findFirst = async () => row({ state: 'active', sunUid: CHIP, sunCounter: 7, securedAt: now });
+  await assert.rejects(() => readBand('seller-1', tapLink(8), now), /cannot be checked right now/);
+  vendorBand.findFirst = async () => row({ state: 'active' });
+  assert.equal((await readBand('seller-1', tapLink(8), now)).band.secured, false);
+  assert.equal(updated, false);
 });

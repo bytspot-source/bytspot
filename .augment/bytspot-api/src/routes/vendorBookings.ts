@@ -105,7 +105,7 @@ function refuseBand(res: Response, err: unknown, route: string): void {
   res.status(500).json({ error: 'Internal error' });
 }
 
-/** Reads a tapped or scanned band, card, fob or table tag, and what its guest holds for now. Changes nothing. */
+/** Reads a tapped or scanned band, card, fob or table tag, and what its guest holds for now. Changes no booking. */
 router.post('/vendor/passes/band', requireVendorSeat, requireCapability('VERIFY'), async (req, res) => {
   const parsed = bandCheck.safeParse(req.body);
   if (!parsed.success) {

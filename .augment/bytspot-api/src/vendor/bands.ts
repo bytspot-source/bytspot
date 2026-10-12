@@ -1,7 +1,9 @@
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
+import { config } from '../config';
 import { db } from '../lib/db';
 import { firstName, holdingsForGuest, linkSource, type BookingDto } from './bookings';
+import { itemKeys, parseSunCode, verifySun, type SunTap } from './sun';
 
 /**
  * Bytspot bands, and the other NFC items that share their rules.
@@ -18,6 +20,10 @@ import { firstName, holdingsForGuest, linkSource, type BookingDto } from './book
  * guest from a paid ticket or an accepted booking. After that a tap finds what
  * the guest holds for now, its own rail first, and checking in is the same
  * single step as for the pass. A table tag is never linked to a guest.
+ *
+ * An item whose NTAG 424 DNA chip adds a fresh code to its link is secured on
+ * its first tap with a valid code. From then on every tap needs a new code, so
+ * a copied link, a copied chip or the printed number opens nothing.
  */
 
 export const BAND_TIERS = ['green', 'platinum', 'black'] as const;
@@ -48,6 +54,9 @@ export const FORM_RULES: Record<BandForm, FormRule> = {
 
 /** A key fob visit within this many hours of the last one is the same visit. */
 export const VISIT_GAP_HOURS = 4;
+
+/** After a secured item's tap, staff may log the visit for this long without tapping again. */
+export const TAP_HOLD_MINUTES = 5;
 
 /** The most serials one admin action may assign or release. */
 export const MAX_BAND_RANGE = 1000;
@@ -203,6 +212,8 @@ export interface BandDto {
   linkedAt: string | null;
   /** When the link ends by itself, for a card or an event fob. */
   linkedUntil: string | null;
+  /** Its chip makes a fresh code on every tap, and the door checks it. */
+  secured: boolean;
 }
 
 const BAND_INCLUDE = { location: { select: { label: true } }, holder: { select: { name: true } } } as const;
@@ -243,6 +254,7 @@ export function toBandDto(row: BandRow, now: Date = new Date()): BandDto {
     holder: linked ? (firstName(row.holder?.name) ?? 'Guest') : null,
     linkedAt: linked ? (row.linkedAt?.toISOString() ?? null) : null,
     linkedUntil: linked ? (row.linkedUntil?.toISOString() ?? null) : null,
+    secured: Boolean(row.securedAt),
   };
 }
 
@@ -389,8 +401,23 @@ export async function markBandLost(sellerId: string, id: string, now: Date = new
   return toBandDto(row);
 }
 
-/** An active item of this business, or the refusal a door shows for it. */
-async function bandAtTheDoor(sellerId: string, raw: string): Promise<BandRow> {
+/** The chip's UID and counter when the code checks out for this item. */
+function checkTap(serial: string, raw: string): { tap?: SunTap; coded: boolean; checkable: boolean } {
+  const code = parseSunCode(raw);
+  if (!code) return { coded: false, checkable: Boolean(config.bandSunMasterKey) };
+  if (!config.bandSunMasterKey) return { coded: true, checkable: false };
+  return { tap: verifySun(itemKeys(Buffer.from(config.bandSunMasterKey, 'hex'), serial), code), coded: true, checkable: true };
+}
+
+/**
+ * An active item of this business, or the refusal a door shows for it.
+ *
+ * A tap with a valid fresh code moves the item's counter on, and secures the
+ * item the first time. A secured item then needs a new code on every tap; with
+ * `hold`, a tap in the last TAP_HOLD_MINUTES also counts, so staff can act on
+ * what they just read. An item that is not secured reads as before.
+ */
+async function bandAtTheDoor(sellerId: string, raw: string, now: Date, hold = false): Promise<BandRow> {
   const serial = parseBandSerial(raw);
   if (!serial) throw new BandRefused([NOT_A_SERIAL]);
   const band = await db.vendorBand.findFirst({ where: { serial, sellerId }, include: BAND_INCLUDE });
@@ -398,7 +425,31 @@ async function bandAtTheDoor(sellerId: string, raw: string): Promise<BandRow> {
   const noun = FORM_RULES[bandForm(band.form)].noun;
   if (band.state === 'lost') throw new BandRefused([`${serial} was marked lost. Scan the guest's pass instead`]);
   if (band.state !== 'active') throw new BandRefused([`${serial} is not activated yet. Activate this ${noun} under Bands`]);
-  return band;
+
+  const { tap, coded, checkable } = checkTap(serial, raw);
+  if (!tap) {
+    if (!band.securedAt) return band;
+    if (!checkable) throw new BandRefused([`Secured items cannot be checked right now. Scan the guest's pass instead`]);
+    if (!coded && hold && band.lastTapAt && now.getTime() - band.lastTapAt.getTime() <= TAP_HOLD_MINUTES * 60_000) return band;
+    if (!coded) throw new BandRefused([`${serial} is secured, so its printed number is not enough. Tap the ${noun} on the phone, or scan the guest's pass`]);
+    throw new BandRefused([`This tap did not check out, so it may be a copy of ${serial}. Scan the guest's pass instead`]);
+  }
+  if (band.sunUid && band.sunUid !== tap.uid) {
+    throw new BandRefused([`This tap did not check out, so it may be a copy of ${serial}. Scan the guest's pass instead`]);
+  }
+  const replay = new BandRefused([`That tap of ${serial} was already used. Tap the ${noun} again`]);
+  if (band.sunCounter != null && tap.counter <= band.sunCounter) throw replay;
+  const { count } = await db.vendorBand.updateMany({
+    where: {
+      id: band.id,
+      state: 'active',
+      sunUid: band.sunUid ?? null,
+      sunCounter: band.sunCounter == null ? null : { lt: tap.counter },
+    },
+    data: { sunUid: tap.uid, sunCounter: tap.counter, lastTapAt: now, ...(band.securedAt ? {} : { securedAt: now }) },
+  });
+  if (count === 0) throw replay;
+  return { ...band, sunUid: tap.uid, sunCounter: tap.counter, lastTapAt: now, securedAt: band.securedAt ?? now };
 }
 
 export interface MemberVisits {
@@ -423,11 +474,12 @@ async function memberVisits(sellerId: string, userId: string): Promise<MemberVis
 }
 
 /**
- * Reads an item without changing anything. Checking in is a separate,
- * explicit step. An assigned-scope seat sees bookings on its windows only.
+ * Reads an item. It changes no booking: checking in is a separate, explicit
+ * step. A secured item's tap is used up. An assigned-scope seat sees bookings
+ * on its windows only.
  */
 export async function readBand(sellerId: string, raw: string, now: Date = new Date(), windowIds?: string[]): Promise<BandAtDoor> {
-  const row = await bandAtTheDoor(sellerId, raw);
+  const row = await bandAtTheDoor(sellerId, raw, now);
   const band = toBandDto(row, now);
   const userId = currentHolder(row, now);
   const form = bandForm(row.form);
@@ -454,7 +506,7 @@ export async function linkBand(input: {
   now?: Date;
 }): Promise<BandDto> {
   const now = input.now ?? new Date();
-  const row = await bandAtTheDoor(input.sellerId, input.band);
+  const row = await bandAtTheDoor(input.sellerId, input.band, now);
   const rule = FORM_RULES[bandForm(row.form)];
   if (!rule.carried) throw new BandRefused([`${row.serial} is a table tag. It stays at its table, and diners tap it with their own phone`]);
   const source = await linkSource({ sellerId: input.sellerId, bookingId: input.bookingId, windowIds: input.windowIds });
@@ -486,7 +538,8 @@ export async function linkBand(input: {
 
 /**
  * Logs a key fob member's visit. A second tap within VISIT_GAP_HOURS is the
- * same visit, so it is counted once.
+ * same visit, so it is counted once. A secured fob read in the last
+ * TAP_HOLD_MINUTES needs no new tap.
  */
 export async function logVisit(input: {
   sellerId: string;
@@ -495,7 +548,7 @@ export async function logVisit(input: {
   now?: Date;
 }): Promise<{ member: MemberVisits; alreadyLogged: boolean }> {
   const now = input.now ?? new Date();
-  const row = await bandAtTheDoor(input.sellerId, input.band);
+  const row = await bandAtTheDoor(input.sellerId, input.band, now, true);
   if (bandForm(row.form) !== 'key_fob') throw new BandRefused(['Visits are logged for key fob members']);
   const userId = currentHolder(row, now);
   if (!userId) throw new BandRefused([`${row.serial} is not linked to a member yet. Scan their pass, then link the key fob`]);

@@ -385,6 +385,13 @@
         "requiresCapability": "PUBLISH"
       },
       {
+        "id": "bands",
+        "label": "Bands",
+        "icon": "wave.3.right.circle.fill",
+        "standardOnly": true,
+        "requiresCapability": "PUBLISH"
+      },
+      {
         "id": "availability",
         "label": "Availability",
         "icon": "clock.fill",

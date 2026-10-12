@@ -1243,6 +1243,7 @@ model VendorSeller {
   offers        Offer[]
   media         VendorMedia[]
   patches       VendorPatch[]
+  bands         VendorBand[]
 
   @@index([state])
   @@map("vendor_sellers")
@@ -1308,6 +1309,7 @@ model VendorLocation {
   offers  Offer[]
   media   VendorMedia[]
   patches VendorPatch[]
+  bands   VendorBand[]
 
   /// Every profile read filters a seller's places by state.
   @@index([sellerId, state])
@@ -1517,6 +1519,39 @@ model VendorPatch {
 
   @@index([sellerId, kind])
   @@map("vendor_patches")
+}
+
+/// A Bytspot wristband: an NFC chip and a printed QR code that both carry
+/// bytspot.app/<serial>. Bytspot assigns serials to a business; no door
+/// accepts one until that business has activated it.
+model VendorBand {
+  id         String  @id @default(cuid())
+  /// e.g. BYT424-0301. A tier letter on the end of the link is not part of it.
+  serial     String  @unique
+  sellerId   String  @map("seller_id")
+  /// The place it admits to, chosen on activation.
+  locationId String? @map("location_id")
+  /// `green`, `platinum` or `black`, set by the business. The letter a link
+  /// ends with is a design hint anyone can edit, so it never decides this.
+  tier       String?
+  /// The business's own code for the band. Unique within the business.
+  vendorCode String? @map("vendor_code")
+  /// `assigned` until activated, then `active`; `lost` is final.
+  state      String  @default("assigned")
+
+  assignedByUserId  String    @map("assigned_by_user_id")
+  activatedAt       DateTime? @map("activated_at")
+  activatedBySeatId String?   @map("activated_by_seat_id")
+  lostAt            DateTime? @map("lost_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  seller   VendorSeller    @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  location VendorLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@unique([sellerId, vendorCode])
+  @@index([sellerId, state])
+  @@map("vendor_bands")
 }
 
 /// A seller's answer to "when?", before it is multiplied into slots. Slots are

@@ -139,6 +139,8 @@ test('only an admin reaches Admin Places and Vendors', async () => {
     await assert.rejects(() => guestCaller().admin.vendors.mediaQueue(), { code: 'FORBIDDEN' });
     await assert.rejects(() => guestCaller().admin.vendors.reviewMedia({ mediaId: 'med_1', approve: true }), { code: 'FORBIDDEN' });
     await assert.rejects(() => guestCaller().admin.vendors.setVideoHosting({ sellerId: 'sel_1', enabled: true }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.assignBands({ sellerId: 'sel_1', from: 'BYT424-0301', to: 'BYT424-0400' }), { code: 'FORBIDDEN' });
+    await assert.rejects(() => guestCaller().admin.vendors.releaseBands({ sellerId: 'sel_1', from: 'BYT424-0301', to: 'BYT424-0400' }), { code: 'FORBIDDEN' });
   });
 });
 

@@ -6,8 +6,8 @@ import { isInAppBrowserUA } from './partyLanding';
 
 const planLandingRouter = Router();
 
-const APP_STORE_ID = '6761876421';
-const APP_STORE_URL = `https://apps.apple.com/app/id${APP_STORE_ID}`;
+export const APP_STORE_ID = '6761876421';
+export const APP_STORE_URL = `https://apps.apple.com/app/id${APP_STORE_ID}`;
 
 /**
  * Server-rendered Plan invite landing page.
@@ -32,7 +32,7 @@ const ESCAPES: Record<string, string> = {
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 };
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ESCAPES[char]);
 }
 

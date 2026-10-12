@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
+import express from 'express';
+import mapReportsHttpRouter from '../routes/mapReports';
 import { createCallerFactory, resetLocalRateLimitForTests } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
 import { db } from '../lib/db';
@@ -10,10 +12,14 @@ import {
   REPORT_LIFETIME_MS,
   judgeReport,
   onMapReportChange,
+  reportHeadline,
+  reporterStanding,
   requiredAgreementFor,
   type MapReportChange,
   type ReportVote,
 } from './mapReports';
+import { busyStopMessage, nextStopItemId, planIsLive } from './mapReportAlerts';
+import type { PlanLeg } from './planLegs';
 
 const MIN = 60_000;
 const now = new Date('2026-10-11T22:00:00Z');
@@ -70,6 +76,9 @@ const vote = db.mapReportVote as any;
 const venue = db.venue as any;
 const checkIn = db.checkIn as any;
 const points = db.pointTransaction as any;
+const planItem = db.planItem as any;
+const plan = db.plan as any;
+const pushDevice = db.iOSPushDevice as any;
 
 type Row = Record<string, any>;
 let rows: Row[];
@@ -113,6 +122,9 @@ beforeEach(() => {
     return {};
   });
   points.create = rec('points.create', () => ({}));
+  planItem.findMany = async () => [];
+  plan.findMany = async () => [];
+  pushDevice.findMany = rec('push.devices', () => []);
   (db as any).$transaction = async (ops: Promise<unknown>[]) => Promise.all(ops);
 });
 
@@ -216,4 +228,123 @@ test('guests can list reports; a member sees their own and their vote, never who
   const mine = await member().mapReports.list({ ...at });
   assert.equal(mine.reports[0].myVote, 'still');
   assert.equal(mine.reports[0].status, 'confirmed');
+});
+
+// ── Phase D: badge, plan alerts, share page ────────────
+
+const midtown = { lat: 33.7838, lng: -84.383 };
+const elsewhere = { lat: 34.2, lng: -84.1 };
+
+test('"Top Midtown reporter" goes to the most confirmed reports there this week, from three, ties shared', () => {
+  const confirmed = (reporterId: string, count: number, at = midtown) => Array.from({ length: count }, () => ({ reporterId, ...at }));
+  assert.deepEqual(reporterStanding('me', [...confirmed('me', 3), ...confirmed('other', 2)]), { confirmedThisWeek: 3, badge: 'Top Midtown reporter' });
+  assert.equal(reporterStanding('me', [...confirmed('me', 3), ...confirmed('other', 4)]).badge, null, 'someone has more');
+  assert.equal(reporterStanding('me', [...confirmed('me', 3), ...confirmed('other', 3)]).badge, 'Top Midtown reporter', 'a tie is shared');
+  assert.equal(reporterStanding('me', confirmed('me', 2)).badge, null, 'fewer than three');
+  assert.deepEqual(reporterStanding('me', confirmed('me', 5, elsewhere)), { confirmedThisWeek: 5, badge: null }, 'outside a named area');
+});
+
+test('standing reads the past week of confirmed reports', async () => {
+  let where: any;
+  report.findMany = async (args: any) => { where = args.where; return [{ reporterId: 'me', ...midtown }, { reporterId: 'me', ...midtown }, { reporterId: 'me', ...midtown }]; };
+  assert.deepEqual(await member().mapReports.standing(), { confirmedThisWeek: 3, badge: 'Top Midtown reporter' });
+  assert.ok(Date.now() - where.confirmedAt.gte.getTime() >= 7 * 24 * 60 * MIN - 1000);
+  assert.deepEqual(where.reporter, { suspendedAt: null, deletedAt: null });
+  await assert.rejects(() => createCaller(as(null)).mapReports.standing(), { code: 'UNAUTHORIZED' });
+});
+
+test('reports carry their area, headline and a share link', async () => {
+  rows.push(row({ ...midtown }), row({ id: 'r2', kind: 'packed', venueId: 'v1', venue: { name: 'Ponce City Market' }, ...elsewhere }));
+  const { reports } = await createCaller(as(null)).mapReports.list({ ...midtown, radiusMiles: 5 });
+  const police = reports.find((r) => r.id === 'r1')!;
+  assert.equal(police.area, 'Midtown');
+  assert.match(police.shareUrl, /\/alert\/r1$/);
+  assert.equal(reportHeadline('packed', 'Ponce City Market'), 'Ponce City Market is packed');
+  assert.equal(reportHeadline('long_line', null), 'Long line reported');
+  assert.equal(reportHeadline('police', 'Anywhere'), 'Police reported');
+});
+
+const leg = (itemId: string, startsAt: Date | null): PlanLeg => ({
+  itemId, position: null, needKind: 'nightlife', title: itemId, startsAt, durationMins: null, latitude: null, longitude: null, priceCents: null, seats: null,
+});
+
+test("a plan's next stop is the first that hasn't started, and a plan is live from three hours before", () => {
+  const t = new Date('2026-10-11T22:00:00Z');
+  assert.equal(nextStopItemId([leg('a', ago(30)), leg('b', null), leg('c', null)], now), 'b');
+  assert.equal(nextStopItemId([leg('a', ago(30))], now), null);
+  const live = { lifecycle: 'confirmed', startsAt: t, endsAt: null, expiresAt: null, deletedAt: null };
+  assert.equal(planIsLive({ ...live, startsAt: new Date(t.getTime() + 2 * 60 * MIN) }, t), true);
+  assert.equal(planIsLive({ ...live, startsAt: new Date(t.getTime() + 4 * 60 * MIN) }, t), false, 'too far ahead');
+  assert.equal(planIsLive({ ...live, startsAt: new Date(t.getTime() - 9 * 60 * MIN) }, t), false, 'over, with no stated end');
+  assert.equal(planIsLive({ ...live, lifecycle: 'cancelled' }, t), false);
+  assert.equal(planIsLive({ ...live, startsAt: null }, t), false, 'no time, no next stop');
+  assert.equal(busyStopMessage('packed', 'MJQ').title, 'Your next stop just got packed');
+});
+
+test('confirming a packed report alerts the members going whose next stop it is, not those who reported', async () => {
+  venue.findUnique = async ({ where, select }: any) => (where.id === 'v1' ? (select?.googlePlaceId ? { googlePlaceId: 'gp1' } : { id: 'v1', lat: 33.78, lng: -84.38 }) : null);
+  let itemWhere: any;
+  planItem.findMany = async (args: any) => { itemWhere = args.where; return [{ id: 'stop', planId: 'p1' }, { id: 'later', planId: 'p2' }]; };
+  const item = (id: string, position: number, startsAt: Date | null) => ({ id, position, createdAt: new Date(), needKind: 'nightlife', title: id, party: startsAt ? { startsAt, endsAt: null, lat: null, lng: null, capacity: null } : null, offer: null });
+  plan.findMany = async () => [
+    { id: 'p1', lifecycle: 'confirmed', startsAt: new Date(Date.now() - 60 * MIN), endsAt: null, expiresAt: null, deletedAt: null,
+      items: [item('dinner', 0, new Date(Date.now() - 60 * MIN)), item('stop', 1, null)],
+      participants: [{ userId: 'friend' }, { userId: 'reporter' }] },
+    { id: 'p2', lifecycle: 'confirmed', startsAt: new Date(Date.now() - 60 * MIN), endsAt: null, expiresAt: null, deletedAt: null,
+      items: [item('first', 0, null), item('later', 1, null)],
+      participants: [{ userId: 'other' }] },
+  ];
+  rows.push(row({ kind: 'packed', venueId: 'v1', venue: { name: 'MJQ' } }));
+  await member('me').mapReports.vote({ reportId: 'r1', vote: 'still' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(itemWhere.OR, [{ party: { arrivalVenueId: 'v1' } }, { placeId: 'gp1' }]);
+  const pushed = writes.filter((w) => w.op === 'push.devices').map((w) => w.args.where.userId.in);
+  assert.deepEqual(pushed, [['friend']], 'p2 is heading elsewhere first; the reporter already knows');
+});
+
+test('a police report confirmation alerts no plan', async () => {
+  let looked = false;
+  planItem.findMany = async () => { looked = true; return []; };
+  rows.push(row());
+  await member('me').mapReports.vote({ reportId: 'r1', vote: 'still' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(looked, false);
+});
+
+async function getAlert(id: string): Promise<{ status: number; html: string; cache: string | null; csp: string | null }> {
+  const app = express();
+  app.use(mapReportsHttpRouter);
+  const server = app.listen(0);
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/alert/${id}`);
+    return { status: res.status, html: await res.text(), cache: res.headers.get('cache-control'), csp: res.headers.get('content-security-policy') };
+  } finally {
+    server.close();
+  }
+}
+
+test('a shared report opens a page anyone can read, naming the area and never the reporter', async () => {
+  rows.push(row({ kind: 'long_line', venueId: 'v1', venue: { name: 'Ponce <City> Market' }, ...midtown, votes: [{ voterId: 'friend', vote: 'still', weight: 1, votedAt: new Date() }] }));
+  const page = await getAlert('r1');
+  assert.equal(page.status, 200);
+  assert.match(page.html, /<meta property="og:title" content="Midtown: Long line at Ponce &lt;City&gt; Market">/);
+  assert.match(page.html, /Confirmed/);
+  assert.match(page.html, /2 min ago/);
+  assert.match(page.html, /apps\.apple\.com\/app\/id6761876421/);
+  assert.doesNotMatch(page.html, /reporter|friend/);
+  assert.doesNotMatch(page.html, /<script/);
+  assert.equal(page.cache, 'public, max-age=60');
+  assert.match(page.csp!, /default-src 'none'/);
+});
+
+test('an expired, removed or unknown report reads as ended', async () => {
+  rows.push(row({ id: 'gone', votes: [{ voterId: 'a', vote: 'gone', weight: 1, votedAt: new Date() }, { voterId: 'b', vote: 'gone', weight: 1, votedAt: new Date() }] }));
+  for (const id of ['gone', 'nope']) {
+    const page = await getAlert(id);
+    assert.equal(page.status, 404);
+    assert.match(page.html, /This alert has ended/);
+    assert.equal(page.cache, 'no-store');
+  }
 });

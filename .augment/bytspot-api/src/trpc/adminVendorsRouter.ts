@@ -14,6 +14,7 @@ import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { advanceSeller, awaitingApproval, markVerified, outstandingRequirements, satisfiedRequirements } from '../vendor/sellerState';
 import { requirementsForState } from '../vendor/contract';
 import { mediaUrl } from '../vendor/media';
+import { assignBands, bandSummaries, BandRangeRefused, releaseBands } from '../vendor/bands';
 
 /** Where the verified email links: the vendor console's own origin. */
 export function vendorConsoleOrigin(origins: string[] = config.corsOrigins): string {
@@ -34,6 +35,7 @@ export const adminVendorsRouter = router({
         take: 500,
       });
       const live = new Set(requirementsForState('ACTIVE'));
+      const bands = await bandSummaries(sellers.map((seller) => seller.id));
       const rows = sellers.map((seller) => {
         const satisfied = satisfiedRequirements(seller, seller.locations);
         return {
@@ -50,6 +52,7 @@ export const adminVendorsRouter = router({
           locations: seller.locations.filter((l) => l.state !== 'CLOSED').map((l) => ({ label: l.label, address: l.address, state: l.state })),
           missing: [...live].filter((id) => !satisfied.includes(id)),
           outstanding: outstandingRequirements(seller, seller.locations),
+          bands: bands.get(seller.id) ?? { total: 0, active: 0, lost: 0, ranges: [] },
         };
       });
       rows.sort((a, b) => Number(b.awaitingApproval) - Number(a.awaitingApproval));
@@ -161,5 +164,48 @@ export const adminVendorsRouter = router({
         detail: { sellerId: seller.id, enabled: input.enabled },
       });
       return { enabled: input.enabled };
+    }),
+
+  /**
+   * Gives a business a range of Bytspot bands, e.g. BYT424-0301 to BYT424-0400.
+   * Refused whole if any band in it belongs to another business.
+   */
+  assignBands: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-assign-bands' }))
+    .input(z.object({ sellerId: z.string().min(1).max(64), from: z.string().trim().min(1).max(40), to: z.string().trim().min(1).max(40) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const seller = await db.vendorSeller.findUnique({ where: { id: input.sellerId }, select: { id: true, state: true } });
+      if (!seller || seller.state === 'CLOSED') throw new TRPCError({ code: 'NOT_FOUND', message: 'No such business.' });
+      try {
+        const result = await assignBands(seller.id, ctx.user.userId, input.from, input.to);
+        auditAdminAction({
+          actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.assignBands',
+          detail: { sellerId: seller.id, from: input.from, to: input.to, added: result.added },
+        });
+        return result;
+      } catch (err) {
+        if (err instanceof BandRangeRefused) throw new TRPCError({ code: 'BAD_REQUEST', message: err.reason });
+        throw err;
+      }
+    }),
+
+  /** Takes back the bands in a range that the business never activated. */
+  releaseBands: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-release-bands' }))
+    .input(z.object({ sellerId: z.string().min(1).max(64), from: z.string().trim().min(1).max(40), to: z.string().trim().min(1).max(40) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      try {
+        const result = await releaseBands(input.sellerId, input.from, input.to);
+        auditAdminAction({
+          actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.releaseBands',
+          detail: { sellerId: input.sellerId, from: input.from, to: input.to, released: result.released },
+        });
+        return result;
+      } catch (err) {
+        if (err instanceof BandRangeRefused) throw new TRPCError({ code: 'BAD_REQUEST', message: err.reason });
+        throw err;
+      }
     }),
 });

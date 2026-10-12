@@ -91,6 +91,8 @@ export function bookingOperationBlocker(operation: BookingOperation, offer: Atte
 
 export interface BookingDto {
   id: string;
+  /** A ticket the guest bought for one of the business's dates, or an accepted offer. */
+  kind: 'booking' | 'ticket';
   title: string;
   where: string;
   locationId: string;
@@ -145,6 +147,7 @@ export function toBookingDto(row: BookingRow, guestName: string | undefined, now
   const checkout = row.checkouts[0]?.status;
   return {
     id: row.id,
+    kind: 'booking',
     title,
     where: row.location.label,
     locationId: row.locationId,
@@ -197,6 +200,7 @@ export function ticketOrderToBookingDto(row: TicketOrderRow, guestName: string |
   const facts = ticketFacts(row);
   return {
     id: row.id,
+    kind: 'ticket',
     title: row.ticket.title,
     where: row.ticket.location.label,
     locationId: row.ticket.locationId,
@@ -282,6 +286,42 @@ export async function findByPass(input: { sellerId: string; code: string; window
   });
   if (!ticket) return undefined;
   const [dto] = await ticketsWithGuestNames([ticket], input.now ?? new Date());
+  return dto;
+}
+
+/** How far ahead a band finds its guest's ticket, so a guest early for tonight is not told they have none. */
+export const BAND_LOOKAHEAD_HOURS = 12;
+
+/**
+ * The ticket a band's guest holds for now at this business, at the band's
+ * place. One still to check in comes first, then one already checked in, so a
+ * second tap reads as already checked in.
+ */
+export async function ticketForGuest(input: {
+  sellerId: string;
+  userId: string;
+  locationId?: string | null;
+  now?: Date;
+}): Promise<BookingDto | undefined> {
+  const now = input.now ?? new Date();
+  const rows = await db.vendorTicketOrder.findMany({
+    where: {
+      sellerId: input.sellerId,
+      userId: input.userId,
+      status: 'completed',
+      ticket: {
+        endsAt: { gt: now },
+        startsAt: { lte: new Date(now.getTime() + BAND_LOOKAHEAD_HOURS * 3_600_000) },
+        ...(input.locationId ? { locationId: input.locationId } : {}),
+      },
+    },
+    orderBy: { ticket: { startsAt: 'asc' } },
+    take: 10,
+    include: ticketOrderInclude,
+  });
+  const row = rows.find((order) => !order.checkedInAt && !order.noShowAt) ?? rows.find((order) => order.checkedInAt) ?? rows[0];
+  if (!row) return undefined;
+  const [dto] = await ticketsWithGuestNames([row], now);
   return dto;
 }
 

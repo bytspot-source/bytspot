@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { db } from '../lib/db';
+import { linkBand, readBand } from './bands';
 import { findByPass, listBookings, moveBooking } from './bookings';
 import { payoutLines } from './insights';
 import { stripeHandle } from './payout';
@@ -31,6 +32,8 @@ const ids = {
   location: `tix-loc-${stamp}`,
   first: `tix-guest-a-${stamp}`,
   second: `tix-guest-b-${stamp}`,
+  band: `BYT999-${String(stamp % 10_000).padStart(4, '0')}`,
+  lostBand: `BYT998-${String(stamp % 10_000).padStart(4, '0')}`,
 };
 let reachable = false;
 let sessionCount = 0;
@@ -170,9 +173,22 @@ test('a ticket is sold once per guest up to its cap, and its pass checks in once
   assert.equal(await findByPass({ sellerId: ids.seller, code: mine.pass!, windowIds: [] }), undefined, 'an assigned-scope seat sees no tickets');
   assert.deepEqual((await listBookings({ sellerId: ids.seller, when: 'upcoming' })).map((row) => row.id), [booking!.id]);
 
-  const checkedIn = await moveBooking({ sellerId: ids.seller, offerId: booking!.id, seatId: 'seat', operation: 'CHECK_IN' });
+  const active = { sellerId: ids.seller, locationId: ids.location, tier: 'platinum', assignedByUserId: 'admin', activatedAt: new Date() };
+  await db.vendorBand.create({ data: { ...active, serial: ids.band, state: 'active' } });
+  await db.vendorBand.create({ data: { ...active, serial: ids.lostBand, state: 'lost', lostAt: new Date() } });
+  assert.equal((await readBand(ids.seller, `https://bytspot.app/${ids.band}`)).booking, undefined, 'nobody wears the band yet');
+  await assert.rejects(linkBand({ sellerId: ids.seller, seatId: 'seat', band: ids.band, bookingId: theirs.orderId }), /paid ticket/);
+  assert.equal((await linkBand({ sellerId: ids.seller, seatId: 'seat', band: ids.band, bookingId: booking!.id })).holder, 'Ama');
+  const tapped = await readBand(ids.seller, ids.band);
+  assert.equal(tapped.booking?.id, booking!.id, 'a tap finds the guest\'s ticket for today');
+  assert.equal(tapped.booking?.pass, 'ISSUED');
+  await assert.rejects(readBand(ids.seller, ids.lostBand), /marked lost/);
+
+  const checkedIn = await moveBooking({ sellerId: ids.seller, offerId: tapped.booking!.id, seatId: 'seat', operation: 'CHECK_IN' });
   assert.equal(checkedIn.pass, 'ADMITTED');
   await assert.rejects(moveBooking({ sellerId: ids.seller, offerId: booking!.id, seatId: 'seat', operation: 'CHECK_IN' }), /booking refused/);
+  assert.equal((await readBand(ids.seller, ids.band)).booking?.pass, 'ADMITTED', 'the barcode and the band check in the same ticket once');
+  assert.equal((await findByPass({ sellerId: ids.seller, code: mine.pass! }))?.pass, 'ADMITTED');
 
   await assert.rejects(editTicket(ids.seller, ticket.id, { quantity: 0 }), (err: unknown) => err instanceof TicketRefused && /1 is already sold/.test(err.blockers[0]));
   assert.equal((await editTicket(ids.seller, ticket.id, { priceCents: 5000, quantity: 3 })).quantity, 3);

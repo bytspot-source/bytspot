@@ -1,7 +1,17 @@
 import { Router, type Response } from 'express';
 import { captureError } from '../lib/observability';
 import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
-import { activateBand, activateBandInput, BandRefused, editBand, editBandInput, listBands, markBandLost } from '../vendor/bands';
+import {
+  activateBand,
+  activateBandInput,
+  BandRefused,
+  editBand,
+  editBandInput,
+  listBands,
+  markBandLost,
+  secureBand,
+  secureBandInput,
+} from '../vendor/bands';
 
 const router = Router();
 
@@ -36,6 +46,23 @@ router.post('/vendor/bands/activate', requireVendorSeat, canManage, async (req, 
     res.status(200).json(await activateBand(seller.id, seat.id, parsed.data));
   } catch (err) {
     refuse(res, err, 'vendor/bands:activate');
+  }
+});
+
+/**
+ * One round of turning on an item's fresh code. The phone relays the APDUs to
+ * the chip and posts the answers back; the keys stay on the server.
+ */
+router.post('/vendor/bands/secure', requireVendorSeat, canManage, async (req, res) => {
+  const parsed = secureBandInput.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid band', blockers: ['Tap the band, card, fob or tag on the phone'] });
+    return;
+  }
+  try {
+    res.status(200).json(await secureBand(req.vendor!.seller.id, parsed.data));
+  } catch (err) {
+    refuse(res, err, 'vendor/bands:secure');
   }
 });
 

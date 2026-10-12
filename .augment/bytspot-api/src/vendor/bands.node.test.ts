@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { createCipheriv } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import { beforeEach, test } from 'node:test';
 import { Prisma } from '@prisma/client';
 import { config } from '../config';
@@ -19,7 +20,9 @@ import {
   parseBandSerial,
   readBand,
   releaseBands,
+  secureBand,
 } from './bands';
+import { authAnswer, authFinish, changeKey, enableSdm, fullCommand, ndefTemplate, readNdefUrl, responseVerified } from './ntag424';
 import { aesCmac, itemKeys, parseSunCode, verifySun } from './sun';
 
 const vendorBand = db.vendorBand as any;
@@ -481,4 +484,262 @@ test('without the master key a secured item is refused, and an unsecured one rea
   vendorBand.findFirst = async () => row({ state: 'active' });
   assert.equal((await readBand('seller-1', tapLink(8), now)).band.secured, false);
   assert.equal(updated, false);
+});
+
+test('the chip commands match NXP\'s worked examples (AN12196)', () => {
+  const hex = (value: string) => Buffer.from(value, 'hex');
+  const upper = (value: Buffer) => value.toString('hex').toUpperCase();
+  const reply = authAnswer(Buffer.alloc(16), hex('A04C124213C186F22399D33AC2A3021591AF'), hex('13C5DB8A5930439FC3DEF9A4C675360F'))!;
+  assert.equal(upper(reply.apdu), '90AF00002035C3E05A752E0144BAC0DE51C1F22C56B34408A23D8AEA266CAB947EA8E0118D00');
+  const session = authFinish(Buffer.alloc(16), reply.rndA, reply.rndB, hex('3FA64DB5446D1F34CD6EA311167F5E4985B89690C04A05F17FA7AB2F081206639100'))!;
+  assert.equal(upper(session.ti), '9D00C4DF');
+  assert.equal(upper(session.encKey), '1309C877509E5A215007FF0ED19CA564');
+  assert.equal(upper(session.macKey), '4C6626F5E72EA694202139295C7A7FC7');
+  assert.equal(authFinish(Buffer.alloc(16), reply.rndA, reply.rndB, hex('3FA64DB5446D1F34CD6EA311167F5E4985B89690C04A05F17FA7AB2F081206639100').fill(0, 0, 1)), undefined);
+
+  session.counter = 1;
+  assert.equal(upper(fullCommand(session, 0x5f, hex('02'), hex('4000E0C1F121200000430000430000'))), '905F0000190261B6D97903566E84C3AE5274467E89EAD799B7C1A0EF7A0400');
+  assert.equal(responseVerified(session, 1, hex('57BFF87B1241E93D9100')), true);
+  assert.equal(responseVerified(session, 2, hex('57BFF87B1241E93D9100')), false);
+
+  const keys = { encKey: hex('4CF3CB41A22583A61E89B158D252FC53'), macKey: hex('5529860B2FC5FB6154B7F28361D30BF9'), ti: hex('7614281A'), counter: 2 };
+  assert.equal(
+    upper(changeKey(keys, 2, hex('F3847D627727ED3BC9C4CC050489B966'), Buffer.alloc(16))),
+    '90C4000029022CF362B7BF4311FF3BE1DAA295E8C68DE09050560D19B9E16C2393AE9CD1FAC75D0CE20BCD1D06E600',
+  );
+  assert.equal(
+    upper(changeKey(keys, 0, hex('5004BF991F408672B1EF00F08F9E8647'), Buffer.alloc(16))),
+    '90C400002900C0EB4DEEFEDDF0B513A03A95A75491818580503190D4D05053FF75668A01D6FDA6610234BDED643200',
+  );
+
+  const template = ndefTemplate('BYT424-0301');
+  assert.equal(template.file.subarray(template.piccOffset, template.piccOffset + 32).toString('ascii'), '0'.repeat(32));
+  assert.equal(template.file.subarray(template.macOffset - 6, template.macOffset).toString('ascii'), '&cmac=');
+  assert.equal(readNdefUrl(Buffer.concat([template.file, hex('9000')])), `https://bytspot.app/BYT424-0301?picc_data=${'0'.repeat(32)}&cmac=${'0'.repeat(16)}`);
+  assert.equal(upper(enableSdm({ ...keys, counter: 0 }, template)).slice(0, 10), '905F000019');
+});
+
+/** An NTAG 424 DNA chip, to the extent securing it uses, with its own crypto. */
+class Chip {
+  keys: Buffer[] = [0, 1, 2, 3, 4].map(() => Buffer.alloc(16));
+  ndef: Buffer = Buffer.concat([Buffer.from('0021d1011d5504', 'hex'), Buffer.from('bytspot.app/BYT424-0301', 'ascii')]);
+  writeFree = true;
+  sdm?: { picc: number; mac: number };
+  readCtr = 0;
+  private pending?: { rndB: Buffer; keyNo: number };
+  private session?: { enc: Buffer; mac: Buffer; ti: Buffer; ctr: number; keyNo: number };
+
+  constructor(readonly uid = CHIP) {}
+
+  private aes(decrypt: boolean, key: Buffer, iv: Buffer | null, data: Buffer) {
+    const mode = iv ? 'aes-128-cbc' : 'aes-128-ecb';
+    const c = (decrypt ? createDecipheriv(mode, key, iv) : createCipheriv(mode, key, iv)).setAutoPadding(false);
+    return Buffer.concat([c.update(data), c.final()]);
+  }
+
+  private mact(key: Buffer, data: Buffer) {
+    const full = aesCmac(key, data);
+    return Buffer.from([1, 3, 5, 7, 9, 11, 13, 15].map((i) => full[i]));
+  }
+
+  private sw(code: string, data: Buffer = Buffer.alloc(0)) {
+    if (!code.startsWith('91') || code === '9100' || code === '91AF') return Buffer.concat([data, Buffer.from(code, 'hex')]);
+    this.session = undefined;
+    return Buffer.from(code, 'hex');
+  }
+
+  private ok(data: Buffer = Buffer.alloc(0)) {
+    const s = this.session!;
+    s.ctr += 1;
+    const ctr = Buffer.alloc(2);
+    ctr.writeUInt16LE(s.ctr);
+    return Buffer.concat([data, this.mact(s.mac, Buffer.concat([Buffer.from([0]), ctr, s.ti, data])), Buffer.from('9100', 'hex')]);
+  }
+
+  transmit(apdu: Buffer): Buffer {
+    const head = apdu.subarray(0, 2).toString('hex').toUpperCase();
+    if (head === '00A4') return this.sw('9000');
+    if (head === '00B0') {
+      const file = Buffer.alloc(256);
+      this.ndef.copy(file);
+      if (this.sdm) {
+        this.readCtr += 1;
+        const ctr = Buffer.alloc(3);
+        ctr.writeUIntLE(this.readCtr, 0, 3);
+        const uid = Buffer.from(this.uid, 'hex');
+        const picc = this.aes(false, this.keys[2], Buffer.alloc(16), Buffer.concat([Buffer.from([0xc7]), uid, ctr, randomBytes(5)]));
+        const session = aesCmac(this.keys[1], Buffer.concat([Buffer.from('3cc300010080', 'hex'), uid, ctr]));
+        Buffer.from(picc.toString('hex').toUpperCase(), 'ascii').copy(file, this.sdm.picc);
+        Buffer.from(this.mact(session, Buffer.alloc(0)).toString('hex').toUpperCase(), 'ascii').copy(file, this.sdm.mac);
+      }
+      return this.sw('9000', file);
+    }
+    if (head === '00D6') {
+      if (!this.writeFree) return this.sw('6982');
+      this.ndef = Buffer.from(apdu.subarray(5, 5 + apdu[4]));
+      return this.sw('9000');
+    }
+    if (head === '9071') {
+      const keyNo = apdu[5];
+      this.session = undefined;
+      this.pending = { rndB: randomBytes(16), keyNo };
+      return this.sw('91AF', this.aes(false, this.keys[keyNo], Buffer.alloc(16), this.pending.rndB));
+    }
+    if (head === '90AF' && this.pending) {
+      const { rndB, keyNo } = this.pending;
+      this.pending = undefined;
+      const key = this.keys[keyNo];
+      const plain = this.aes(true, key, Buffer.alloc(16), apdu.subarray(5, 37));
+      const rndA = plain.subarray(0, 16);
+      if (!plain.subarray(16).equals(Buffer.concat([rndB.subarray(1), rndB.subarray(0, 1)]))) return this.sw('91AE');
+      const ti = randomBytes(4);
+      const x = Buffer.from(rndA.subarray(2, 8).map((b, i) => b ^ rndB[i]));
+      const ctx = Buffer.concat([rndA.subarray(0, 2), x, rndB.subarray(6), rndA.subarray(8)]);
+      this.session = {
+        enc: aesCmac(key, Buffer.concat([Buffer.from('a55a00010080', 'hex'), ctx])),
+        mac: aesCmac(key, Buffer.concat([Buffer.from('5aa500010080', 'hex'), ctx])),
+        ti,
+        ctr: 0,
+        keyNo,
+      };
+      const body = Buffer.concat([ti, rndA.subarray(1), rndA.subarray(0, 1), Buffer.alloc(12)]);
+      return this.sw('9100', this.aes(false, key, Buffer.alloc(16), body));
+    }
+    const s = this.session;
+    if ((head === '905F' || head === '90C4') && s) {
+      const ins = apdu[1];
+      const body = apdu.subarray(5, 5 + apdu[4]);
+      const header = body.subarray(0, 1);
+      const encrypted = body.subarray(1, -8);
+      const ctr = Buffer.alloc(2);
+      ctr.writeUInt16LE(s.ctr);
+      if (!this.mact(s.mac, Buffer.concat([Buffer.from([ins]), ctr, s.ti, header, encrypted])).equals(body.subarray(-8))) return this.sw('911E');
+      const iv = this.aes(false, s.enc, null, Buffer.concat([Buffer.from('a55a', 'hex'), s.ti, ctr, Buffer.alloc(8)]));
+      const data = this.aes(true, s.enc, iv, encrypted);
+      if (ins === 0x5f) {
+        if (s.keyNo !== 0) return this.sw('919D');
+        this.writeFree = (data[2] & 0x0f) === 0x0e;
+        this.sdm = data[0] & 0x40 ? { picc: data.readUIntLE(6, 3), mac: data.readUIntLE(12, 3) } : undefined;
+        return this.ok();
+      }
+      const keyNo = header[0];
+      if (keyNo === s.keyNo) {
+        this.keys[keyNo] = Buffer.from(data.subarray(0, 16));
+        this.session = undefined;
+        return Buffer.from('9100', 'hex');
+      }
+      const next = Buffer.from(data.subarray(0, 16).map((b, i) => b ^ this.keys[keyNo][i]));
+      if (data.readUInt32LE(17) !== (~crc32(next)) >>> 0) return this.sw('911E');
+      this.keys[keyNo] = next;
+      return this.ok();
+    }
+    return this.sw('911C');
+  }
+}
+
+/** Plays the phone: sends each APDU in order and stops at the first the chip refuses. */
+async function secureWith(chip: Chip, link = 'https://bytspot.app/BYT424-0301') {
+  let state: string | undefined;
+  let responses: string[] | undefined;
+  for (let round = 0; round < 12; round++) {
+    const step = await secureBand('seller-1', { band: link, uid: chip.uid, state, responses }, now);
+    if ('band' in step) return step.band;
+    responses = [];
+    for (const apdu of step.apdus) {
+      const reply = chip.transmit(Buffer.from(apdu, 'hex'));
+      responses.push(reply.toString('hex'));
+      if (!['9000', '9100', '91AF'].includes(reply.subarray(-2).toString('hex').toUpperCase())) break;
+    }
+    state = step.state;
+  }
+  throw new Error('securing did not finish');
+}
+
+function securingRow() {
+  let secured: any;
+  vendorBand.findFirst = async () => row({ state: 'active', locationId: 'loc-1', ...secured });
+  vendorBand.updateMany = async (input: any) => { secured = { ...secured, ...input.data }; return { count: 1 }; };
+  vendorBand.findUniqueOrThrow = async () => row({ state: 'active', locationId: 'loc-1', ...secured });
+  return () => secured;
+}
+
+test('a factory chip is secured from the phone, and then only its fresh taps open it', async () => {
+  const saved = securingRow();
+  const chip = new Chip();
+  const band = await secureWith(chip);
+  assert.equal(band.secured, true);
+  assert.equal(saved().sunUid, CHIP);
+  assert.equal(saved().sunCounter, 1);
+  const keys = itemKeys(Buffer.from(MASTER, 'hex'), 'BYT424-0301');
+  assert.deepEqual(chip.keys.slice(0, 3), [keys.appKey, keys.fileKey, keys.metaKey], 'the chip now holds the item\'s keys');
+  assert.equal(chip.writeFree, false, 'only key 0 may rewrite the link');
+
+  const tap = () => readNdefUrl(chip.transmit(Buffer.from('00B0000000', 'hex')))!;
+  const first = tap();
+  assert.match(first, /^https:\/\/bytspot\.app\/BYT424-0301\?picc_data=[0-9A-F]{32}&cmac=[0-9A-F]{16}$/);
+  assert.equal((await readBand('seller-1', first, now)).band.secured, true);
+  await assert.rejects(() => readBand('seller-1', first, now), /already used/);
+  await assert.rejects(() => readBand('seller-1', 'BYT424-0301', now), /printed number is not enough/);
+  await readBand('seller-1', tap(), now);
+  assert.equal(saved().sunCounter, 3);
+});
+
+test('a chip left half done is finished, and a secured item is not set up again', async () => {
+  const keys = itemKeys(Buffer.from(MASTER, 'hex'), 'BYT424-0301');
+  securingRow();
+  const halfway = new Chip();
+  halfway.keys[1] = keys.fileKey;
+  halfway.keys[2] = keys.metaKey;
+  halfway.writeFree = false;
+  halfway.ndef = ndefTemplate('BYT424-0301').file;
+  halfway.sdm = { picc: ndefTemplate('BYT424-0301').piccOffset, mac: ndefTemplate('BYT424-0301').macOffset };
+  assert.equal((await secureWith(halfway)).secured, true);
+  assert.deepEqual(halfway.keys[0], keys.appKey, 'key 0 was still the factory one, so it was changed too');
+
+  securingRow();
+  const onlyKey1 = new Chip();
+  onlyKey1.keys[1] = keys.fileKey;
+  assert.equal((await secureWith(onlyKey1)).secured, true);
+  assert.deepEqual(onlyKey1.keys.slice(0, 3), [keys.appKey, keys.fileKey, keys.metaKey]);
+
+  securingRow();
+  const done = new Chip();
+  await secureWith(done);
+  const before = done.keys.map((key) => Buffer.from(key));
+  securingRow();
+  assert.equal((await secureWith(done)).secured, true, 'a chip already Bytspot\'s is secured without writing');
+  assert.deepEqual(done.keys, before);
+
+  let asked = false;
+  vendorBand.findFirst = async () => { asked = true; return row({ state: 'active', securedAt: now, sunUid: CHIP, sunCounter: 4 }); };
+  assert.equal((await secureBand('seller-1', { band: 'BYT424-0301', uid: CHIP }, now) as any).band.secured, true);
+  assert.equal(asked, true);
+});
+
+test('securing refuses another company\'s keys, another chip, a changed state and a lost band', async () => {
+  securingRow();
+  const foreign = new Chip();
+  foreign.keys[0] = Buffer.alloc(16, 7);
+  await assert.rejects(() => secureWith(foreign), /set up with other keys/);
+
+  securingRow();
+  const start = await secureBand('seller-1', { band: 'BYT424-0301', uid: CHIP }, now) as any;
+  const other = { band: 'BYT424-0301', uid: '04FFFFFFFFFFFF', state: start.state, responses: ['9000', '9000', '9000'] };
+  await assert.rejects(() => secureBand('seller-1', other, now), /tap the same item/);
+  await assert.rejects(() => secureBand('seller-2', { ...other, uid: CHIP }, now), /tap the same item/);
+  await assert.rejects(() => secureBand('seller-1', { ...other, uid: CHIP, state: `${start.state.slice(0, -2)}AA` }, now), /tap the same item/);
+  await assert.rejects(
+    () => secureBand('seller-1', { ...other, uid: CHIP }, new Date(now.getTime() + 4 * 60_000)),
+    /took too long/,
+  );
+  await assert.rejects(() => secureBand('seller-1', { band: 'BYT424-0301', uid: '04A1B2C3' }, now), /hides its number/);
+
+  const elsewhere = new Chip();
+  elsewhere.ndef = Buffer.concat([Buffer.from('0021d1011d5504', 'hex'), Buffer.from('bytspot.app/BYT424-0302', 'ascii')]);
+  await assert.rejects(() => secureWith(elsewhere), /another number than BYT424-0301/);
+
+  vendorBand.findFirst = async () => row({ state: 'lost' });
+  await assert.rejects(() => secureBand('seller-1', { band: 'BYT424-0301', uid: CHIP }, now), /marked lost/);
+  (config as { bandSunMasterKey: string }).bandSunMasterKey = '';
+  await assert.rejects(() => secureBand('seller-1', { band: 'BYT424-0301', uid: CHIP }, now), /not set up yet/);
 });

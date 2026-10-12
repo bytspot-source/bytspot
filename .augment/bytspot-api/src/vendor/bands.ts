@@ -1,8 +1,27 @@
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { firstName, holdingsForGuest, linkSource, type BookingDto } from './bookings';
+import {
+  READ_NDEF,
+  SELECT_APP,
+  SELECT_NDEF_FILE,
+  authAnswer,
+  authFinish,
+  authStart,
+  changeKey,
+  enableSdm,
+  ndefTemplate,
+  readNdefUrl,
+  responseVerified,
+  statusOf,
+  writeNdef,
+  KEY_APP,
+  KEY_FILE_READ,
+  KEY_META_READ,
+} from './ntag424';
 import { itemKeys, parseSunCode, verifySun, type SunTap } from './sun';
 
 /**
@@ -558,4 +577,238 @@ export async function logVisit(input: {
   });
   if (!recent) await db.vendorBandVisit.create({ data: { sellerId: input.sellerId, bandId: row.id, userId, seatId: input.seatId, createdAt: now } });
   return { member: await memberVisits(input.sellerId, userId), alreadyLogged: Boolean(recent) };
+}
+
+/**
+ * Turning on an item's fresh code from a phone.
+ *
+ * The phone sends each APDU the server gives it to the chip, in order, stops
+ * at the first one the chip refuses, and posts every answer back with the
+ * state it was given. The state is sealed with a key from the master key, so
+ * the phone can neither read nor change it. The steps:
+ *
+ * 1. Read the chip's link.
+ * 2. Write the link with room for the code, and authenticate with key 0.
+ * 3. Turn the code on and set the item's three keys, key 0 last, since
+ *    changing it ends the session.
+ * 4. Read the link back. Only a valid fresh code from this chip secures it.
+ *
+ * A chip left half done is finished, not refused: a chip that already gives a
+ * valid code is secured once Bytspot's key 0 opens it; a key already set to
+ * Bytspot's makes the chip refuse the change, and the next round uses it as
+ * the old key; and when the factory key 0 no longer opens the chip, Bytspot's
+ * is tried.
+ */
+
+const FACTORY_KEY = Buffer.alloc(16);
+const SECURE_STATE_MINUTES = 3;
+const MAX_SECURE_ROUNDS = 10;
+
+type ApduKind = 'selectApp' | 'selectFile' | 'read' | 'write' | 'auth1' | 'auth2' | 'sdm' | 'key1' | 'key2' | 'key0';
+type Key0 = 'factory' | 'bytspot';
+
+interface SecureState {
+  sellerId: string;
+  bandId: string;
+  uid: string;
+  exp: number;
+  round: number;
+  sent: ApduKind[];
+  /** The key 0 this round authenticates with, and the ones tried so far. */
+  key0: Key0;
+  tried: Key0[];
+  /** Keys a half-done run already set to Bytspot's. */
+  changed: number[];
+  /** A valid code read before Bytspot's key 0 was confirmed. */
+  pending?: SunTap;
+  rndA?: string;
+  rndB?: string;
+  macKey?: string;
+  ti?: string;
+}
+
+export interface SecureStep {
+  /** The next APDUs, as hex, for the phone to send in order. */
+  apdus: string[];
+  state: string;
+}
+
+export const secureBandInput = z.object({
+  /** The link read from the chip, or the item number. */
+  band: z.string().trim().min(1).max(300),
+  /** The chip's UID as the phone read it. */
+  uid: z.string().trim().regex(/^[0-9a-fA-F]+$/).max(32),
+  state: z.string().max(4000).optional(),
+  responses: z.array(z.string().regex(/^[0-9a-fA-F]*$/).max(600)).max(10).optional(),
+});
+export type SecureBandInput = z.infer<typeof secureBandInput>;
+
+function stateKey(master: Buffer): Buffer {
+  return createHmac('sha256', master).update('bytspot-secure-state').digest();
+}
+
+function seal(master: Buffer, state: SecureState): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', stateKey(master), iv);
+  const body = Buffer.concat([cipher.update(JSON.stringify(state), 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
+}
+
+function unseal(master: Buffer, sealed: string): SecureState | undefined {
+  try {
+    const raw = Buffer.from(sealed, 'base64url');
+    const decipher = createDecipheriv('aes-256-gcm', stateKey(master), raw.subarray(0, 12));
+    decipher.setAuthTag(raw.subarray(12, 28));
+    return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8')) as SecureState;
+  } catch {
+    return undefined;
+  }
+}
+
+const HOLD_STILL = 'The chip stopped answering. Hold it still against the top of the phone and try again';
+const OTHER_KEYS = 'This chip was set up with other keys, so Bytspot cannot secure it. Ask Bytspot for another';
+
+/**
+ * One round of securing an item. Without `state` it starts; each answer
+ * returns the next APDUs, until the item comes back secured.
+ */
+export async function secureBand(sellerId: string, input: SecureBandInput, now: Date = new Date()): Promise<SecureStep | { band: BandDto }> {
+  if (!config.bandSunMasterKey) throw new BandRefused(['Securing is not set up yet. Ask Bytspot to turn it on']);
+  const master = Buffer.from(config.bandSunMasterKey, 'hex');
+  const serial = parseBandSerial(input.band);
+  if (!serial) throw new BandRefused([NOT_A_SERIAL]);
+  const band = await db.vendorBand.findFirst({ where: { serial, sellerId }, include: BAND_INCLUDE });
+  if (!band) throw new BandRefused([`${serial} is not one of your bands or tags`], 404);
+  if (band.state === 'lost') throw new BandRefused([`${serial} was marked lost and cannot be used again`]);
+  if (band.securedAt) return { band: toBandDto(band, now) };
+  const uid = input.uid.toUpperCase();
+  if (uid.length !== 14) throw new BandRefused(['This chip hides its number, so it cannot be secured. Ask Bytspot for another']);
+  const keys = itemKeys(master, serial);
+  const key0 = (which: Key0) => (which === 'bytspot' ? keys.appKey : FACTORY_KEY);
+
+  type Carry = Pick<SecureState, 'round' | 'key0' | 'tried' | 'changed' | 'pending'>;
+  const next = (carry: Carry, sent: ApduKind[], apdus: Buffer[], extra: Partial<SecureState> = {}): SecureStep => ({
+    apdus: apdus.map((apdu) => apdu.toString('hex').toUpperCase()),
+    state: seal(master, { ...carry, ...extra, sent, sellerId, bandId: band.id, uid, exp: now.getTime() + SECURE_STATE_MINUTES * 60_000 }),
+  });
+  const authWith = (carry: Carry, which: Key0) =>
+    next({ ...carry, key0: which, tried: carry.tried.includes(which) ? carry.tried : [...carry.tried, which] }, ['selectApp', 'auth1'], [
+      SELECT_APP,
+      authStart(KEY_APP),
+    ]);
+
+  if (!input.state) {
+    return next({ round: 1, key0: 'factory', tried: [], changed: [] }, ['selectApp', 'selectFile', 'read'], [SELECT_APP, SELECT_NDEF_FILE, READ_NDEF]);
+  }
+  const state = unseal(master, input.state);
+  if (!state || state.sellerId !== sellerId || state.bandId !== band.id || state.uid !== uid) {
+    throw new BandRefused(['Start again, and tap the same item'], 409);
+  }
+  if (state.exp < now.getTime()) throw new BandRefused(['That took too long. Start again'], 409);
+  if (state.round >= MAX_SECURE_ROUNDS) throw new BandRefused(['This chip could not be secured. Ask Bytspot for another']);
+  const answers = (input.responses ?? []).map((hex) => Buffer.from(hex, 'hex'));
+  const answer = (kind: ApduKind) => {
+    const index = state.sent.lastIndexOf(kind);
+    return index >= 0 ? answers[index] : undefined;
+  };
+  const carry: Carry = { round: state.round + 1, key0: state.key0, tried: state.tried, changed: state.changed, pending: state.pending };
+
+  const secure = async (tap: SunTap) => {
+    const { count } = await db.vendorBand.updateMany({
+      where: { id: band.id, sellerId, state: { not: 'lost' }, securedAt: null },
+      data: { sunUid: tap.uid, sunCounter: tap.counter, securedAt: now },
+    });
+    const row = await db.vendorBand.findUniqueOrThrow({ where: { id: band.id }, include: BAND_INCLUDE });
+    if (count === 0 && !row.securedAt) throw new BandRefused(['That did not go through. Try again']);
+    return { band: toBandDto(row, now) };
+  };
+
+  // Steps 1 and 4: the link read from the chip.
+  if (state.sent.includes('read')) {
+    const readBack = answer('read');
+    const finished = state.sent.includes('sdm');
+    if (finished && state.macKey && state.ti) {
+      const chip = { macKey: Buffer.from(state.macKey, 'hex'), ti: Buffer.from(state.ti, 'hex') };
+      const steps: [ApduKind, number][] = [['sdm', 0], ['key1', 1], ['key2', 2]];
+      for (const [kind, counter] of steps) {
+        const reply = answer(kind);
+        if (!reply) throw new BandRefused([HOLD_STILL]);
+        if (statusOf(reply) === '911E' && kind !== 'sdm') {
+          // That key was already Bytspot's from a run that stopped halfway.
+          return authWith({ ...carry, changed: [...carry.changed, kind === 'key1' ? KEY_FILE_READ : KEY_META_READ] }, state.key0);
+        }
+        if (!responseVerified(chip, counter, reply)) throw new BandRefused(["The chip's answer did not check out. Start again"]);
+      }
+    }
+    if (!readBack) throw new BandRefused([HOLD_STILL]);
+    const url = readNdefUrl(readBack);
+    if (url && parseBandSerial(url) !== serial) throw new BandRefused([`This chip carries another number than ${serial}. Tap ${serial}`]);
+    const code = url ? parseSunCode(url) : undefined;
+    const tap = code ? verifySun(keys, code) : undefined;
+    if (tap && tap.uid !== uid) throw new BandRefused([OTHER_KEYS]);
+    if (finished) {
+      if (!tap) throw new BandRefused(['The chip did not give a valid code after securing. Ask Bytspot for another']);
+      return secure(tap);
+    }
+    if (tap) return authWith({ ...carry, pending: tap }, 'bytspot');
+    const template = ndefTemplate(serial);
+    return next({ ...carry, tried: ['factory'] }, ['selectApp', 'selectFile', 'write', 'auth1'], [
+      SELECT_APP,
+      SELECT_NDEF_FILE,
+      writeNdef(template),
+      authStart(KEY_APP),
+    ]);
+  }
+
+  // Step 2, first half: the chip's challenge.
+  if (state.sent.includes('auth1')) {
+    const first = answer('auth1');
+    if (!first) {
+      // A link written before turns the free write off: authenticate without writing.
+      const write = answer('write');
+      if (write && statusOf(write) !== '9000') return authWith(carry, 'factory');
+      throw new BandRefused([HOLD_STILL]);
+    }
+    const reply = authAnswer(key0(state.key0), first);
+    if (!reply) throw new BandRefused([HOLD_STILL]);
+    return next(carry, ['auth2'], [reply.apdu], { rndA: reply.rndA.toString('hex'), rndB: reply.rndB.toString('hex') });
+  }
+
+  // Step 2, second half: authenticated, so step 3.
+  if (state.sent.includes('auth2')) {
+    const second = answer('auth2');
+    if (!second || !state.rndA || !state.rndB) throw new BandRefused([HOLD_STILL]);
+    if (statusOf(second) === '91AE') {
+      const other: Key0 = state.key0 === 'factory' ? 'bytspot' : 'factory';
+      if (!state.tried.includes(other)) {
+        const changed = state.pending ? [KEY_FILE_READ, KEY_META_READ] : carry.changed;
+        return authWith({ ...carry, pending: undefined, changed }, other);
+      }
+      // A valid code with the factory key 0: keys 1 and 2 are Bytspot's already.
+      if (state.pending && state.key0 === 'bytspot') {
+        return authWith({ ...carry, pending: undefined, changed: [KEY_FILE_READ, KEY_META_READ] }, 'factory');
+      }
+      throw new BandRefused([OTHER_KEYS]);
+    }
+    const session = authFinish(key0(state.key0), Buffer.from(state.rndA, 'hex'), Buffer.from(state.rndB, 'hex'), second);
+    if (!session) throw new BandRefused([HOLD_STILL]);
+    if (state.key0 === 'bytspot' && state.pending) return secure(state.pending);
+    const old = (keyNo: number, bytspot: Buffer) => (state.changed.includes(keyNo) ? bytspot : FACTORY_KEY);
+    const sent: ApduKind[] = ['sdm', 'key1', 'key2'];
+    const apdus = [
+      enableSdm(session, ndefTemplate(serial)),
+      changeKey(session, KEY_FILE_READ, keys.fileKey, old(KEY_FILE_READ, keys.fileKey)),
+      changeKey(session, KEY_META_READ, keys.metaKey, old(KEY_META_READ, keys.metaKey)),
+    ];
+    if (state.key0 === 'factory') {
+      sent.push('key0');
+      apdus.push(changeKey(session, KEY_APP, keys.appKey, FACTORY_KEY));
+    }
+    return next({ ...carry, pending: undefined }, [...sent, 'selectApp', 'selectFile', 'read'], [...apdus, SELECT_APP, SELECT_NDEF_FILE, READ_NDEF], {
+      macKey: session.macKey.toString('hex'),
+      ti: session.ti.toString('hex'),
+    });
+  }
+
+  throw new BandRefused(['Start again, and tap the same item'], 409);
 }

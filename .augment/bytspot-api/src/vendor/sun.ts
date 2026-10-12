@@ -57,11 +57,15 @@ export function aesCmac(key: Buffer, message: Buffer): Buffer {
   return aesBlock(key, xor(state, last));
 }
 
-/** An item's two keys: the meta key reads `picc_data`, the file key makes `cmac`. */
-export function itemKeys(master: Buffer, serial: string): { metaKey: Buffer; fileKey: Buffer } {
+/**
+ * An item's keys: the meta key reads `picc_data`, the file key makes `cmac`,
+ * and the app key is the chip's key 0, which guards its settings and keys.
+ */
+export function itemKeys(master: Buffer, serial: string): { metaKey: Buffer; fileKey: Buffer; appKey: Buffer } {
   return {
     metaKey: aesCmac(master, Buffer.from(`\x01bytspot-sun-meta:${serial}`)),
     fileKey: aesCmac(master, Buffer.from(`\x02bytspot-sun-file:${serial}`)),
+    appKey: aesCmac(master, Buffer.from(`\x03bytspot-sun-app:${serial}`)),
   };
 }
 

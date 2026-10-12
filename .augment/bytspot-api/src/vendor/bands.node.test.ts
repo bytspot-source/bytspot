@@ -10,13 +10,16 @@ import {
   bandRange,
   bandRuns,
   editBand,
+  linkBand,
   markBandLost,
   parseBandSerial,
+  readBand,
   releaseBands,
 } from './bands';
 
 const vendorBand = db.vendorBand as any;
 const vendorLocation = db.vendorLocation as any;
+const vendorTicketOrder = db.vendorTicketOrder as any;
 
 const now = new Date('2026-10-18T20:00:00Z');
 
@@ -40,6 +43,8 @@ beforeEach(() => {
   vendorBand.count = async () => 0;
   vendorBand.deleteMany = async () => ({ count: 0 });
   vendorLocation.findFirst = async () => ({ id: 'loc-1' });
+  vendorTicketOrder.findFirst = async () => ({ userId: 'guest-1', ticket: { locationId: 'loc-1' } });
+  vendorTicketOrder.findMany = async () => [];
 });
 
 test('a band number reads the same typed, scanned or tapped', () => {
@@ -186,4 +191,57 @@ test('marking a band lost is final and scoped to the business', async () => {
   vendorBand.updateMany = async () => ({ count: 0 });
   vendorBand.findFirst = async () => null;
   await assert.rejects(() => markBandLost('seller-2', 'band-1', now), (err: any) => err instanceof BandRefused && err.status === 404);
+});
+
+test('a door refuses a band that is not active, or is not this business\'s', async () => {
+  vendorBand.findFirst = async () => row();
+  await assert.rejects(() => readBand('seller-1', 'BYT424-0301', now), (err: any) => err instanceof BandRefused && /not activated yet/.test(err.blockers[0]));
+  vendorBand.findFirst = async () => row({ state: 'lost', lostAt: now });
+  await assert.rejects(() => readBand('seller-1', 'https://bytspot.app/BYT424-0301', now), (err: any) => /marked lost/.test(err.blockers[0]));
+  vendorBand.findFirst = async () => null;
+  await assert.rejects(() => readBand('seller-2', 'BYT424-0301', now), (err: any) => err instanceof BandRefused && err.status === 404);
+  await assert.rejects(() => readBand('seller-1', 'table 4', now), (err: any) => /not a Bytspot band/.test(err.blockers[0]));
+});
+
+test('an active band nobody wears yet reads with no ticket', async () => {
+  vendorBand.findFirst = async () => row({ state: 'active', tier: 'platinum', locationId: 'loc-1' });
+  const read = await readBand('seller-1', 'BYT424-0301', now);
+  assert.equal(read.band.holder, null);
+  assert.equal(read.band.tier, 'platinum');
+  assert.equal(read.booking, undefined);
+});
+
+test('a band links once, to the guest whose paid ticket was scanned', async () => {
+  let update: any;
+  vendorBand.findFirst = async () => row({ state: 'active', locationId: 'loc-1' });
+  vendorBand.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+  vendorBand.findUniqueOrThrow = async () => row({ state: 'active', locationId: 'loc-1', holderUserId: 'guest-1', holder: { name: 'Ama Mensah' }, linkedAt: now });
+  const band = await linkBand({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', bookingId: 'order-1', now });
+  assert.equal(band.holder, 'Ama');
+  assert.deepEqual(update.where, { id: 'band-1', sellerId: 'seller-1', state: 'active', holderUserId: null });
+  assert.deepEqual(update.data, { holderUserId: 'guest-1', linkedAt: now, linkedBySeatId: 'seat-1' });
+
+  update = undefined;
+  vendorBand.findFirst = async () => row({ state: 'active', locationId: 'loc-1', holderUserId: 'guest-1', holder: { name: 'Ama' } });
+  assert.equal((await linkBand({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', bookingId: 'order-1', now })).holder, 'Ama');
+  assert.equal(update, undefined, 'linking the same guest again changes nothing');
+
+  vendorBand.findFirst = async () => row({ state: 'active', locationId: 'loc-1', holderUserId: 'guest-2', holder: { name: 'Kofi' } });
+  await assert.rejects(
+    () => linkBand({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', bookingId: 'order-1', now }),
+    (err: any) => /linked to another guest/.test(err.blockers[0]),
+  );
+});
+
+test('a band does not link to an unpaid ticket or one for another place', async () => {
+  vendorBand.findFirst = async () => row({ state: 'active', locationId: 'loc-2', location: { label: 'Uptown' } });
+  await assert.rejects(
+    () => linkBand({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', bookingId: 'order-1', now }),
+    (err: any) => err.blockers[0] === 'BYT424-0301 is for Uptown. Use a band for this place',
+  );
+  vendorTicketOrder.findFirst = async () => null;
+  await assert.rejects(
+    () => linkBand({ sellerId: 'seller-1', seatId: 'seat-1', band: 'BYT424-0301', bookingId: 'offer-1', now }),
+    (err: any) => err instanceof BandRefused && err.status === 404,
+  );
 });

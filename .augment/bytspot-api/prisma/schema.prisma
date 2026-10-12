@@ -69,6 +69,7 @@ model User {
   partySessionClaims    PartySessionClaim[]
   offerCheckouts        OfferCheckout[]
   ticketOrders          VendorTicketOrder[]
+  heldBands             VendorBand[]
   mobilityQuotes        MobilityQuote[]
   mobilityTrips         MobilityTrip[]
   socialInvitesSent     SocialInvitation[]    @relation("socialInviteFrom")
@@ -1546,14 +1547,21 @@ model VendorBand {
   activatedAt       DateTime? @map("activated_at")
   activatedBySeatId String?   @map("activated_by_seat_id")
   lostAt            DateTime? @map("lost_at")
+  /// The guest wearing it, linked at the door from their paid ticket. A tap
+  /// then finds that guest's ticket for the day.
+  holderUserId      String?   @map("holder_user_id")
+  linkedAt          DateTime? @map("linked_at")
+  linkedBySeatId    String?   @map("linked_by_seat_id")
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
   seller   VendorSeller    @relation(fields: [sellerId], references: [id], onDelete: Cascade)
   location VendorLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  holder   User?           @relation(fields: [holderUserId], references: [id], onDelete: SetNull)
 
   @@unique([sellerId, vendorCode])
   @@index([sellerId, state])
+  @@index([sellerId, holderUserId])
   @@map("vendor_bands")
 }
 

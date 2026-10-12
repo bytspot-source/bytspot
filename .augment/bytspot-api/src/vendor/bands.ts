@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../lib/db';
+import { firstName, ticketForGuest, type BookingDto } from './bookings';
 
 /**
  * Bytspot wristbands.
@@ -10,6 +11,10 @@ import { db } from '../lib/db';
  * business; the business activates each band, choosing the place it admits to
  * and its tier, and marks it lost when it goes missing. A band that is not
  * active opens nothing.
+ *
+ * At the door a band is linked once to the guest wearing it, from their paid
+ * ticket. After that a tap finds the guest's ticket for the day, and checking
+ * in is the same single step as for the ticket's barcode.
  */
 
 export const BAND_TIERS = ['green', 'platinum', 'black'] as const;
@@ -164,11 +169,14 @@ export interface BandDto {
   place: string | null;
   activatedAt: string | null;
   lostAt: string | null;
+  /** First name of the guest it is linked to. */
+  holder: string | null;
+  linkedAt: string | null;
 }
 
-type BandRow = Prisma.VendorBandGetPayload<{ include: { location: { select: { label: true } } } }>;
+const BAND_INCLUDE = { location: { select: { label: true } }, holder: { select: { name: true } } } as const;
 
-const BAND_INCLUDE = { location: { select: { label: true } } } as const;
+type BandRow = Prisma.VendorBandGetPayload<{ include: typeof BAND_INCLUDE }>;
 
 function bandState(raw: string): BandState {
   return raw === 'active' || raw === 'lost' ? raw : 'assigned';
@@ -189,6 +197,8 @@ export function toBandDto(row: BandRow): BandDto {
     place: row.location?.label ?? null,
     activatedAt: row.activatedAt?.toISOString() ?? null,
     lostAt: row.lostAt?.toISOString() ?? null,
+    holder: row.holderUserId ? (firstName(row.holder?.name) ?? 'Guest') : null,
+    linkedAt: row.linkedAt?.toISOString() ?? null,
   };
 }
 
@@ -315,4 +325,59 @@ export async function markBandLost(sellerId: string, id: string, now: Date = new
   if (!row) throw new BandRefused(['That band is not here'], 404);
   if (count === 0 && row.state !== 'lost') throw new BandRefused(['That did not go through. Try again']);
   return toBandDto(row);
+}
+
+/** An active band of this business, or the refusal a door shows for it. */
+async function bandAtTheDoor(sellerId: string, raw: string): Promise<BandRow> {
+  const serial = parseBandSerial(raw);
+  if (!serial) throw new BandRefused(['That is not a Bytspot band number, like BYT424-0301']);
+  const band = await db.vendorBand.findFirst({ where: { serial, sellerId }, include: BAND_INCLUDE });
+  if (!band) throw new BandRefused([`${serial} is not one of your bands`], 404);
+  if (band.state === 'lost') throw new BandRefused([`${serial} was marked lost. Scan the guest's ticket barcode instead`]);
+  if (band.state !== 'active') throw new BandRefused([`${serial} is not activated yet. Activate it under Bands`]);
+  return band;
+}
+
+export interface BandAtDoor {
+  band: BandDto;
+  /** The linked guest's ticket for now, when they have one. */
+  booking?: BookingDto;
+}
+
+/** Reads a band without changing anything. Checking in is a separate, explicit step. */
+export async function readBand(sellerId: string, raw: string, now: Date = new Date()): Promise<BandAtDoor> {
+  const row = await bandAtTheDoor(sellerId, raw);
+  const band = toBandDto(row);
+  if (!row.holderUserId) return { band };
+  const booking = await ticketForGuest({ sellerId, userId: row.holderUserId, locationId: row.locationId, now });
+  return booking ? { band, booking } : { band };
+}
+
+/**
+ * Links a band to the guest who paid for a ticket, so the next tap finds them.
+ * Linking it to the same guest again returns it unchanged; a band already
+ * worn by someone else is refused.
+ */
+export async function linkBand(input: { sellerId: string; seatId: string; band: string; bookingId: string; now?: Date }): Promise<BandDto> {
+  const row = await bandAtTheDoor(input.sellerId, input.band);
+  const order = await db.vendorTicketOrder.findFirst({
+    where: { id: input.bookingId, sellerId: input.sellerId, status: 'completed' },
+    select: { userId: true, ticket: { select: { locationId: true } } },
+  });
+  if (!order) throw new BandRefused(["A band links to a paid ticket. Scan the guest's ticket barcode first"], 404);
+  if (row.locationId && row.locationId !== order.ticket.locationId) {
+    throw new BandRefused([`${row.serial} is for ${row.location?.label ?? 'another place'}. Use a band for this place`]);
+  }
+  if (row.holderUserId === order.userId) return toBandDto(row);
+  if (row.holderUserId) throw new BandRefused([`${row.serial} is linked to another guest. Give this guest a new band`]);
+
+  const { count } = await db.vendorBand.updateMany({
+    where: { id: row.id, sellerId: input.sellerId, state: 'active', holderUserId: null },
+    data: { holderUserId: order.userId, linkedAt: input.now ?? new Date(), linkedBySeatId: input.seatId },
+  });
+  const linked = await db.vendorBand.findUniqueOrThrow({ where: { id: row.id }, include: BAND_INCLUDE });
+  if (count === 0 && linked.holderUserId !== order.userId) {
+    throw new BandRefused([`${row.serial} was just linked to another guest. Give this guest a new band`]);
+  }
+  return toBandDto(linked);
 }

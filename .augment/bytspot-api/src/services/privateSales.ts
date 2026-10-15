@@ -87,14 +87,13 @@ export function saleState(sale: { status: string; windowEnd: Date }, now = new D
   return sale.windowEnd.getTime() <= now.getTime() ? 'ended' : 'open';
 }
 
-/** Clears the meet point of every sale closed or ended more than 7 days ago. */
+/** Clears the meet point and item photo of every sale closed or ended more than 7 days ago. */
 export async function scrubClosedSaleMeetPoints(now = new Date()): Promise<{ scrubbed: number }> {
   const cutoff = new Date(now.getTime() - MEET_POINT_RETENTION_MS);
+  const closed = { OR: [{ closedAt: { lte: cutoff } }, { status: 'open', windowEnd: { lte: cutoff } }] };
+  await db.privateSalePhoto.deleteMany({ where: { sale: closed } });
   const { count } = await db.privateSale.updateMany({
-    where: {
-      meetScrubbedAt: null,
-      OR: [{ closedAt: { lte: cutoff } }, { status: 'open', windowEnd: { lte: cutoff } }],
-    },
+    where: { meetScrubbedAt: null, ...closed },
     data: { meetLat: null, meetLng: null, meetPlaceName: null, meetScrubbedAt: now },
   });
   return { scrubbed: count };

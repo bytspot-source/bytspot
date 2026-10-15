@@ -31,7 +31,7 @@ function recapRow(overrides: { status?: string; recapPublishedAt?: Date | null }
   return { ...row, kind: 'recap', party: { ...row.party, recapPublishedAt } };
 }
 
-async function get(authorization?: string): Promise<{ status: number; corp: string | null; contentType: string | null; cacheControl: string | null; body: Buffer }> {
+async function get(authorization?: string, path = '/media/parties/media-1'): Promise<{ status: number; corp: string | null; contentType: string | null; cacheControl: string | null; body: Buffer }> {
   const app = express();
   // Mirrors src/index.ts, where the default helmet policy applies to this route.
   app.use(helmet());
@@ -40,7 +40,7 @@ async function get(authorization?: string): Promise<{ status: number; corp: stri
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/media/parties/media-1`, {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
       headers: authorization ? { authorization } : {},
     });
     const body = Buffer.from(await res.arrayBuffer());
@@ -144,4 +144,34 @@ test('a recap stops being readable if the party leaves published', async () => {
   assert.equal((await get(bearer('usr_guest'))).status, 404);
   // The host still reviews their own album.
   assert.equal((await get(bearer('host-1'))).status, 200);
+});
+
+test('a sale photo shows while the sale is open and reads as gone after', async () => {
+  const salePhoto = db.privateSalePhoto as any;
+  const original = salePhoto.findUnique;
+  const row = (sale: Record<string, unknown>) => ({
+    id: 'photo-1', mimeType: 'image/png', bytes: new Uint8Array(pngBytes),
+    sale: { status: 'open', windowEnd: new Date(Date.now() + 3_600_000), moderationHiddenAt: null, seller: { deletedAt: null, suspendedAt: null }, ...sale },
+  });
+  try {
+    salePhoto.findUnique = async () => row({});
+    const open = await get(undefined, '/media/sales/photo-1');
+    assert.equal(open.status, 200);
+    assert.equal(open.contentType, 'image/png');
+    assert.deepEqual(open.body, pngBytes);
+    for (const closed of [
+      { status: 'sold' },
+      { windowEnd: new Date(Date.now() - 1_000) },
+      { moderationHiddenAt: new Date() },
+      { seller: { deletedAt: new Date(), suspendedAt: null } },
+      { seller: { deletedAt: null, suspendedAt: new Date() } },
+    ]) {
+      salePhoto.findUnique = async () => row(closed);
+      assert.equal((await get(undefined, '/media/sales/photo-1')).status, 404, JSON.stringify(closed));
+    }
+    salePhoto.findUnique = async () => null;
+    assert.equal((await get(undefined, '/media/sales/missing')).status, 404);
+  } finally {
+    salePhoto.findUnique = original;
+  }
 });

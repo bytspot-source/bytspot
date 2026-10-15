@@ -1278,65 +1278,6 @@ const conciergeRouter = router({
 });
 
 /**
- * ── Payments (Stripe) sub-router ──────────────────────
- */
-const paymentsRouter = router({
-  /** POST /payments/checkout → payments.checkout mutation (auth required — handles $$) */
-  checkout: protectedProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'payments:checkout' }))
-    .input(z.object({
-      spotId: z.string().max(100),
-      spotName: z.string().max(200),
-      address: z.string().max(500),
-      duration: z.number().min(0.5).max(24),
-      totalCost: z.number().min(0.01).max(10000),
-    }))
-    .mutation(async ({ input }) => {
-      if (!config.stripeSecretKey) {
-        return {
-          url: null as string | null,
-          demoMode: true,
-          message: 'Stripe not configured — set STRIPE_SECRET_KEY env var on Render',
-        };
-      }
-
-      const stripe = new Stripe(config.stripeSecretKey);
-      const { spotName, address, duration, totalCost, spotId } = input;
-
-      if (!spotName || !totalCost) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: 'spotName and totalCost are required' });
-      }
-
-      try {
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ['card'],
-          mode: 'payment',
-          line_items: [{
-            price_data: {
-              currency: 'usd',
-              unit_amount: Math.round(totalCost * 100),
-              product_data: {
-                name: `Parking — ${spotName}`,
-                description: `${duration}h at ${address}`,
-              },
-            },
-            quantity: 1,
-          }],
-          metadata: { spotId: spotId || '', duration: String(duration) },
-          success_url: `${config.frontendUrl}/parking/success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${config.frontendUrl}/parking/cancelled`,
-        });
-
-        return { url: session.url };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Stripe error';
-        console.error('[payments] Stripe error:', msg);
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: msg });
-      }
-    }),
-});
-
-/**
  * ── Subscription (Bytspot Premium) sub-router ────────
  */
 const subscriptionRouter = router({
@@ -1821,7 +1762,6 @@ export const appRouter = router({
   venues: venuesRouter,
   rides: ridesRouter,
   concierge: conciergeRouter,
-  payments: paymentsRouter,
   subscription: subscriptionRouter,
   tips: tipsRouter,
   providers: providersRouter,

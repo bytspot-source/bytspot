@@ -1,7 +1,9 @@
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
+import { config } from '../config';
 import { db } from '../lib/db';
+import { parseImageDataUri } from '../lib/imageDataUri';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 import {
   MAX_BUYERS_PER_SALE,
@@ -31,6 +33,19 @@ const requestId = z.object({ requestId: z.string().min(1).max(64) });
 
 const unavailable = () => new TRPCError({ code: 'NOT_FOUND', message: SALE_UNAVAILABLE });
 
+// Same envelope the party media upload accepts: JPEG, PNG or WebP, at most 600 KB.
+const photoDataUri = z.string().max(900_000);
+
+function photoUrl(photo: { id: string } | null | undefined): string | null {
+  return photo ? `${config.publicApiUrl}/media/sales/${encodeURIComponent(photo.id)}` : null;
+}
+
+function parsePhoto(dataUri: string) {
+  const { bytes, mimeType } = parseImageDataUri(dataUri, 'The item photo');
+  const imageBytes = Uint8Array.from(bytes);
+  return { mimeType, bytes: imageBytes, byteSize: imageBytes.length };
+}
+
 /**
  * An open sale whose seller still has an account, or NOT_FOUND. Hidden by
  * reports, sold by a suspended account, or between two members where either
@@ -39,7 +54,7 @@ const unavailable = () => new TRPCError({ code: 'NOT_FOUND', message: SALE_UNAVA
 async function liveSale(id: string, viewerId?: string | null, now = new Date()) {
   const sale = await db.privateSale.findFirst({
     where: { id, status: 'open', windowEnd: { gt: now }, moderationHiddenAt: null, seller: { deletedAt: null, suspendedAt: null } },
-    include: { seller: { select: { name: true } } },
+    include: { seller: { select: { name: true } }, photo: { select: { id: true } } },
   });
   if (!sale) throw unavailable();
   if (viewerId && await isBlockedBetween(viewerId, sale.sellerId)) throw unavailable();
@@ -143,6 +158,7 @@ export const salesRouter = router({
       windowEnd: z.coerce.date(),
       buyerLimit: z.number().int().min(1).max(MAX_BUYERS_PER_SALE).default(1),
       providers: z.array(provider).min(1).max(PAYMENT_PROVIDERS.length),
+      photo: photoDataUri.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const now = new Date();
@@ -169,6 +185,7 @@ export const salesRouter = router({
         }
       }
 
+      const photo = input.photo ? parsePhoto(input.photo) : null;
       const point = snapMeetPoint(input.meetPoint.lat, input.meetPoint.lng);
       const sale = await db.privateSale.create({
         data: {
@@ -183,9 +200,26 @@ export const salesRouter = router({
           windowStart: input.windowStart,
           windowEnd: input.windowEnd,
           buyerLimit: input.buyerLimit,
+          ...(photo ? { photo: { create: photo } } : {}),
         },
+        include: { photo: { select: { id: true } } },
       });
-      return { saleId: sale.id, shareUrl: `https://bytspot.app/sale/${sale.id}` };
+      return { saleId: sale.id, shareUrl: `https://bytspot.app/sale/${sale.id}`, photoUrl: photoUrl(sale.photo) };
+    }),
+
+  /** Adds, replaces or removes the item photo on an open sale. A new photo gets a new URL. */
+  setPhoto: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'sales-photo' }))
+    .input(saleId.extend({ photo: photoDataUri.nullable() }))
+    .mutation(async ({ ctx, input }) => {
+      const sale = await ownSale(ctx.user.userId, input.saleId);
+      if (saleState(sale) !== 'open') throw unavailable();
+      const photo = input.photo ? parsePhoto(input.photo) : null;
+      const saved = await db.$transaction(async (tx) => {
+        await tx.privateSalePhoto.deleteMany({ where: { saleId: sale.id } });
+        return photo ? tx.privateSalePhoto.create({ data: { saleId: sale.id, ...photo }, select: { id: true } }) : null;
+      });
+      return { saleId: sale.id, photoUrl: photoUrl(saved) };
     }),
 
   /** Moves the meet window of an open sale. */
@@ -222,7 +256,10 @@ export const salesRouter = router({
         where: { sellerId: ctx.user.userId },
         orderBy: { createdAt: 'desc' },
         take: 50,
-        include: { requests: { orderBy: { createdAt: 'asc' }, include: { buyer: { select: { name: true } } } } },
+        include: {
+          requests: { orderBy: { createdAt: 'asc' }, include: { buyer: { select: { name: true } } } },
+          photo: { select: { id: true } },
+        },
       });
       return {
         limits,
@@ -232,6 +269,7 @@ export const salesRouter = router({
           priceCents: sale.priceCents,
           state: saleState(sale, now),
           shareUrl: `https://bytspot.app/sale/${sale.id}`,
+          photoUrl: photoUrl(sale.photo),
           meetPoint: sale.meetLat !== null && sale.meetLng !== null
             ? { lat: sale.meetLat, lng: sale.meetLng, placeName: sale.meetPlaceName, areaLabel: sale.meetAreaLabel }
             : null,
@@ -251,7 +289,7 @@ export const salesRouter = router({
     }),
 
   /**
-   * What a share link shows. Signed out: title and price. Signed in: plus the
+   * What a share link shows. Signed out: title, price and photo. Signed in: plus the
    * neighborhood and the caller's own request. Never the meet point.
    */
   view: publicProcedure
@@ -271,6 +309,7 @@ export const salesRouter = router({
         title: sale.title,
         priceCents: sale.priceCents,
         sellerName: firstName(sale.seller.name),
+        photoUrl: photoUrl(sale.photo),
         windowStart: sale.windowStart,
         windowEnd: sale.windowEnd,
         areaLabel: ctx.user ? sale.meetAreaLabel : null,
@@ -344,6 +383,7 @@ export const salesRouter = router({
         title: sale.title,
         priceCents: sale.priceCents,
         sellerName: firstName(sale.seller.name),
+        photoUrl: photoUrl(sale.photo),
         meetPoint: { lat: sale.meetLat, lng: sale.meetLng, placeName: sale.meetPlaceName, areaLabel: sale.meetAreaLabel },
         windowStart: sale.windowStart,
         windowEnd: sale.windowEnd,

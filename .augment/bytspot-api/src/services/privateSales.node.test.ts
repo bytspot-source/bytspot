@@ -50,18 +50,25 @@ test('an open sale whose window has passed is ended', () => {
   assert.equal(saleState({ status: 'sold', windowEnd: new Date('2026-10-09T13:00:00Z') }, now), 'sold');
 });
 
-test('meet points are cleared 7 days after a sale closes or ends', async () => {
+test('meet points and item photos are cleared 7 days after a sale closes or ends', async () => {
   const sale = db.privateSale as any;
+  const photo = db.privateSalePhoto as any;
   const original = sale.updateMany;
+  const originalPhotoDelete = photo.deleteMany;
   let args: any;
+  let photoArgs: any;
   sale.updateMany = async (a: any) => { args = a; return { count: 2 }; };
+  photo.deleteMany = async (a: any) => { photoArgs = a; return { count: 1 }; };
   try {
     const now = new Date('2026-10-20T00:00:00Z');
     assert.deepEqual(await scrubClosedSaleMeetPoints(now), { scrubbed: 2 });
     const cutoff = new Date('2026-10-13T00:00:00Z');
-    assert.deepEqual(args.where, { meetScrubbedAt: null, OR: [{ closedAt: { lte: cutoff } }, { status: 'open', windowEnd: { lte: cutoff } }] });
+    const closed = { OR: [{ closedAt: { lte: cutoff } }, { status: 'open', windowEnd: { lte: cutoff } }] };
+    assert.deepEqual(args.where, { meetScrubbedAt: null, ...closed });
     assert.deepEqual(args.data, { meetLat: null, meetLng: null, meetPlaceName: null, meetScrubbedAt: now });
+    assert.deepEqual(photoArgs.where, { sale: closed });
   } finally {
     sale.updateMany = original;
+    photo.deleteMany = originalPhotoDelete;
   }
 });

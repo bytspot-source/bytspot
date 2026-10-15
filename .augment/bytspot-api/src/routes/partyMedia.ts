@@ -84,4 +84,18 @@ partyMediaRouter.get('/media/parties/:mediaId', async (req, res) => {
   return sendMedia(res, media, published ? 'public, max-age=86400' : 'private, no-store', published);
 });
 
+// A Private Sale's item photo is part of what its share link shows, so anyone
+// with the URL can render it while the sale is open. Ended, sold, cancelled,
+// hidden or a removed seller's sale reads as 404, like the link itself.
+partyMediaRouter.get('/media/sales/:photoId', async (req, res) => {
+  const photo = await db.privateSalePhoto.findUnique({
+    where: { id: req.params.photoId },
+    include: { sale: { select: { status: true, windowEnd: true, moderationHiddenAt: true, seller: { select: { deletedAt: true, suspendedAt: true } } } } },
+  }).catch(() => null);
+  const sale = photo?.sale;
+  if (!photo || !sale || sale.status !== 'open' || sale.windowEnd.getTime() <= Date.now() || sale.moderationHiddenAt
+    || sale.seller.deletedAt || sale.seller.suspendedAt) return notFound(res);
+  return sendMedia(res, photo, 'private, max-age=60', false);
+});
+
 export default partyMediaRouter;

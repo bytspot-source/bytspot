@@ -2002,10 +2002,27 @@ model PrivateSale {
 
   seller   User                 @relation("privateSaleSeller", fields: [sellerId], references: [id], onDelete: Cascade)
   requests PrivateSaleRequest[]
+  photo    PrivateSalePhoto?
 
   @@index([sellerId, status])
   @@index([status, windowEnd])
   @@map("private_sales")
+}
+
+/// The item photo shown on a Private Sale link. One per sale; deleted with the
+/// meet point 7 days after the sale closes.
+model PrivateSalePhoto {
+  id        String   @id @default(cuid())
+  saleId    String   @unique @map("sale_id")
+  mimeType  String   @map("mime_type")
+  bytes     Bytes
+  byteSize  Int      @map("byte_size")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sale PrivateSale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@map("private_sale_photos")
 }
 
 model PrivateSaleRequest {

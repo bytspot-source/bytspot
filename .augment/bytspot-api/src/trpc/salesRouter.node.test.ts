@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { createCallerFactory, resetLocalRateLimitForTests } from './trpc';
 import { appRouter } from './router';
+import { config } from '../config';
 import { db } from '../lib/db';
 import type { Context } from './context';
 
@@ -69,7 +70,7 @@ test('a sale needs a saved handle per provider, a valid window and room under th
   };
   let created: any;
   sale.create = async ({ data }: any) => { created = data; return { id: 'sale-new', ...data }; };
-  assert.deepEqual(await seller().sales.create(input), { saleId: 'sale-new', shareUrl: 'https://bytspot.app/sale/sale-new' });
+  assert.deepEqual(await seller().sales.create(input), { saleId: 'sale-new', shareUrl: 'https://bytspot.app/sale/sale-new', photoUrl: null });
   assert.notEqual(created.meetLat, input.meetPoint.lat, 'the exact spot is never stored');
   assert.equal(created.buyerLimit, 1);
 
@@ -172,6 +173,59 @@ test('a buyer asks once; the seller approves up to the buyer limit', async () =>
   request.count = async () => 1;
   await assert.rejects(() => seller().sales.approve({ requestId: 'req-1' }), { code: 'CONFLICT' });
   assert.deepEqual(await seller().sales.decline({ requestId: 'req-1' }), { status: 'declined' });
+});
+
+const png = (width: number, height: number) => {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  bytes.write('IHDR', 12, 'ascii');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return `data:image/png;base64,${bytes.toString('base64')}`;
+};
+
+test('a sale can carry one item photo, checked like party media, shown on its link', async () => {
+  const input = {
+    title: 'Jordan 4 Retro, size 10', priceCents: 22_000,
+    meetPoint: { lat: 33.787861, lng: -84.383191, placeName: 'Colony Square plaza' },
+    windowStart: new Date(Date.now() + hour), windowEnd: new Date(Date.now() + 3 * hour), providers: ['venmo' as const],
+  };
+  let created: any;
+  sale.create = async ({ data }: any) => { created = data; return { id: 'sale-new', ...data, photo: data.photo ? { id: 'photo-1' } : null }; };
+  const result = await seller().sales.create({ ...input, photo: png(1200, 1200) });
+  assert.equal(result.photoUrl, `${config.publicApiUrl}/media/sales/photo-1`);
+  assert.equal(created.photo.create.mimeType, 'image/png');
+  assert.equal(created.photo.create.byteSize, 24);
+
+  await assert.rejects(() => seller().sales.create({ ...input, photo: 'data:text/plain;base64,aGk=' }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => seller().sales.create({ ...input, photo: png(8000, 6000) }), { code: 'BAD_REQUEST' });
+
+  sale.findFirst = async ({ where }: any) => { saleWhere = where; return { ...openSale(), photo: { id: 'photo-1' } }; };
+  const view = await anonymous().sales.view({ saleId: 'sale-1' });
+  assert.equal(view.photoUrl, `${config.publicApiUrl}/media/sales/photo-1`, 'the photo is part of what a link shows, signed out too');
+});
+
+test('the seller adds, replaces or removes the photo on an open sale only', async () => {
+  const calls: string[] = [];
+  const originalTransaction = (db as any).$transaction;
+  (db as any).$transaction = async (fn: any) => fn({
+    privateSalePhoto: {
+      deleteMany: async ({ where }: any) => { calls.push(`delete:${where.saleId}`); return { count: 1 }; },
+      create: async ({ data }: any) => { calls.push(`create:${data.saleId}:${data.mimeType}`); return { id: 'photo-2' }; },
+    },
+  });
+  assert.deepEqual(await seller().sales.setPhoto({ saleId: 'sale-1', photo: png(900, 1600) }),
+    { saleId: 'sale-1', photoUrl: `${config.publicApiUrl}/media/sales/photo-2` });
+  assert.deepEqual(calls, ['delete:sale-1', 'create:sale-1:image/png']);
+  calls.length = 0;
+  assert.deepEqual(await seller().sales.setPhoto({ saleId: 'sale-1', photo: null }), { saleId: 'sale-1', photoUrl: null });
+  assert.deepEqual(calls, ['delete:sale-1']);
+
+  sale.findFirst = async () => ({ ...openSale(), status: 'sold' });
+  await assert.rejects(() => seller().sales.setPhoto({ saleId: 'sale-1', photo: null }), { code: 'NOT_FOUND' });
+  sale.findFirst = async () => null;
+  await assert.rejects(() => buyer().sales.setPhoto({ saleId: 'sale-1', photo: null }), { code: 'NOT_FOUND' });
+  (db as any).$transaction = originalTransaction;
 });
 
 test('closing a sale is final and repeatable', async () => {

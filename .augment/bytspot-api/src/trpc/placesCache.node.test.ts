@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cachedWithStale, locationBucket, mergeIncludedTypes, nearbySearchCacheKey, placesRouter, type StaleStore } from './placesRouter';
 import { config } from '../config';
+import { db } from '../lib/db';
+import { rankRecommendations, type RecommendPlace, type RecommendVenue } from '../services/recommendations';
 
 test('Two callers on the same block share one Google search', () => {
   // ~40m apart: previously two cache keys, two paid calls.
@@ -132,5 +134,116 @@ test('The singular type still works and merges with types without duplicating', 
   } finally {
     (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
     globalThis.fetch = originalFetch;
+  }
+});
+
+// ── Recommendations ─────────────────────────────────────
+
+const HERE = { lat: 33.7866, lng: -84.3833 };
+
+function place(over: Partial<RecommendPlace> & { placeId: string }): RecommendPlace {
+  return {
+    name: over.placeId, address: '1 Peachtree St', lat: HERE.lat + 0.002, lng: HERE.lng,
+    rating: 4.6, ratingCount: 300, priceLevel: 'PRICE_LEVEL_MODERATE', types: ['restaurant'],
+    primaryType: 'restaurant', photoUrls: [], photoAttributions: [], isOpen: true, websiteUri: null,
+    ...over,
+  };
+}
+
+function bytspotVenue(over: Partial<RecommendVenue> = {}): RecommendVenue {
+  return {
+    id: 'v1', slug: 'closers', name: 'Closers Coffee', address: '2 Peachtree St', lat: HERE.lat + 0.001, lng: HERE.lng,
+    category: 'coffee', imageUrl: null, googlePlaceId: null, crowd: null, ...over,
+  };
+}
+
+test('A coffee vibe recommends coffee shops, not the restaurant next door', () => {
+  const r = rankRecommendations({ ...HERE, vibe: 'coffee' }, {
+    cafe: [place({ placeId: 'cafe1', types: ['coffee_shop', 'cafe'], primaryType: 'coffee_shop' })],
+    eat: [place({ placeId: 'rest1' })],
+  }, []);
+  assert.deepEqual(r.forYou.map((i) => i.id), ['gp:cafe1']);
+  assert.equal(r.forYou[0].reasons[0], 'Fits coffee');
+  assert.ok(r.forYou[0].reasons.includes('4.6★ · 300 reviews'));
+});
+
+test('Open, well-reviewed places outrank closed or thinly reviewed ones', () => {
+  const r = rankRecommendations({ ...HERE, vibe: 'drinks' }, {
+    drink: [
+      place({ placeId: 'closed', types: ['bar'], primaryType: 'bar', isOpen: false }),
+      place({ placeId: 'few', types: ['bar'], primaryType: 'bar', rating: 5, ratingCount: 3 }),
+      place({ placeId: 'best', types: ['bar'], primaryType: 'bar', rating: 4.7, ratingCount: 900 }),
+      place({ placeId: 'bad', types: ['bar'], primaryType: 'bar', rating: 3.1, ratingCount: 400 }),
+    ],
+  }, []);
+  assert.deepEqual(r.forYou.map((i) => i.id), ['gp:best', 'gp:few', 'gp:closed']);
+});
+
+test('How far the guest will go limits what is recommended', () => {
+  const far = place({ placeId: 'far', lat: HERE.lat + 0.012, types: ['coffee_shop'], primaryType: 'coffee_shop' });
+  const near = place({ placeId: 'near', types: ['coffee_shop'], primaryType: 'coffee_shop' });
+  assert.deepEqual(rankRecommendations({ ...HERE, vibe: 'coffee', walk: 'closest' }, { cafe: [far, near] }, []).forYou.map((i) => i.id), ['gp:near']);
+  assert.equal(rankRecommendations({ ...HERE, vibe: 'coffee', walk: 'far' }, { cafe: [far, near] }, []).forYou.length, 2);
+});
+
+test('A Bytspot venue and its Google listing are one recommendation', () => {
+  const r = rankRecommendations({ ...HERE, vibe: 'coffee' }, {
+    cafe: [place({ placeId: 'gp-closers', name: 'Closers Coffee', lat: HERE.lat + 0.0011, types: ['coffee_shop'], primaryType: 'coffee_shop' })],
+  }, [bytspotVenue({ crowd: { level: 1, label: 'Chill', source: 'typical' } })]);
+  assert.equal(r.forYou.length, 1);
+  assert.equal(r.forYou[0].kind, 'venue');
+  assert.equal(r.forYou[0].slug, 'closers');
+  assert.equal(r.forYou[0].placeId, 'gp-closers');
+  assert.equal(r.forYou[0].rating, 4.6);
+  // A catalog reading is never presented as live.
+  assert.ok(r.forYou[0].reasons.includes('Usually chill now'));
+});
+
+test('Explore lists rated attractions and skips unrated or untyped listings', () => {
+  const r = rankRecommendations({ ...HERE, vibe: 'food' }, {
+    eat: [place({ placeId: 'rest1' })],
+    explore: [
+      place({ placeId: 'park', types: ['park'], primaryType: 'park', ratingCount: 2000 }),
+      place({ placeId: 'tour', types: ['tourist_attraction'], primaryType: null, ratingCount: 40 }),
+      place({ placeId: 'tiny', types: ['museum'], primaryType: 'museum', ratingCount: 4 }),
+    ],
+  }, []);
+  assert.deepEqual(r.explore.map((i) => i.id), ['gp:park']);
+  assert.ok(!r.explore[0].reasons.some((x) => x.startsWith('Fits')));
+});
+
+test('Recommendations share one Google search per pool and say when Google is down', async () => {
+  const originalKey = config.googlePlacesApiKey;
+  const originalFetch = globalThis.fetch;
+  const venue = db.venue as unknown as { findMany: (args: unknown) => Promise<unknown[]> };
+  const originalFindMany = venue.findMany;
+  (config as { googlePlacesApiKey: string }).googlePlacesApiKey = 'test-key';
+  const bodies: Record<string, any>[] = [];
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    bodies.push(body);
+    const isCafe = body.includedTypes.includes('coffee_shop');
+    const places = isCafe ? [{ id: 'cafe1', displayName: { text: 'Cafe One' }, location: { latitude: 40.0012, longitude: -75.0 }, rating: 4.8, userRatingCount: 120, types: ['coffee_shop'], primaryType: 'coffee_shop', currentOpeningHours: { openNow: true } }] : [];
+    return new Response(JSON.stringify({ places }), { status: 200 });
+  }) as unknown as typeof fetch;
+  venue.findMany = async () => [];
+  try {
+    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-recommend' } as never);
+    const r = await caller.recommend({ lat: 40.0, lng: -75.0, vibe: 'coffee', walk: 'close', group: 'solo' });
+    assert.equal(r.placesSource, 'google');
+    assert.deepEqual(r.forYou.map((i) => i.name), ['Cafe One']);
+    assert.ok(r.forYou[0].reasons.includes('Open now'));
+    assert.deepEqual(bodies.map((b) => b.includedTypes.join(',')).sort(), ['art_gallery,museum,park,performing_arts_theater,tourist_attraction', 'bakery,cafe,coffee_shop']);
+    assert.ok(bodies.every((b) => b.rankPreference === 'POPULARITY'));
+
+    globalThis.fetch = (async () => new Response('denied', { status: 403 })) as typeof fetch;
+    venue.findMany = async () => [{ ...bytspotVenue({ lat: 41.0001, lng: -75.0 }), crowdLevels: [] }];
+    const down = await caller.recommend({ lat: 41.0, lng: -75.0, vibe: 'coffee' });
+    assert.equal(down.placesSource, 'unavailable');
+    assert.deepEqual(down.forYou.map((i) => i.slug), ['closers']);
+  } finally {
+    (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+    venue.findMany = originalFindMany;
   }
 });

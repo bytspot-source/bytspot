@@ -6,6 +6,7 @@
  * Every reason shown to a guest is derived from data on the candidate (its
  * type, rating, opening state, distance, crowd reading). Nothing is invented.
  */
+import { isLiveOccupancySource } from './typicalOccupancy';
 
 /** Google place groups fetched separately, so one category cannot crowd out another. */
 export const RECOMMEND_POOLS = {
@@ -145,7 +146,7 @@ function bayesRating(rating: number, count: number): number {
 
 function crowdReason(crowd: RecommendItem['crowd']): string | null {
   if (!crowd?.label) return null;
-  return crowd.source === 'typical' ? `Usually ${crowd.label.toLowerCase()} now` : `${crowd.label} right now`;
+  return isLiveOccupancySource(crowd.source) ? `${crowd.label} right now` : `Usually ${crowd.label.toLowerCase()} now`;
 }
 
 function distanceReason(meters: number): string {
@@ -189,7 +190,8 @@ export function scoreCandidate(
   if (rating !== null && count >= 20 && rating < 3.5) return null;
 
   const walk = (input.walk ?? '').toLowerCase();
-  const group = (input.group ?? '').toLowerCase();
+  const rawGroup = (input.group ?? '').toLowerCase();
+  const group = rawGroup === 'date_night' ? 'date' : rawGroup;
   const types = typesOf(c);
   const primary = primaryTypeOf(c);
   const crowd = c.venue?.crowd ?? null;

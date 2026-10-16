@@ -197,6 +197,10 @@ test('A Bytspot venue and its Google listing are one recommendation', () => {
   assert.equal(r.forYou[0].rating, 4.6);
   // A catalog reading is never presented as live.
   assert.ok(r.forYou[0].reasons.includes('Usually chill now'));
+  const simulated = rankRecommendations({ ...HERE, vibe: 'coffee' }, {}, [bytspotVenue({ crowd: { level: 3, label: 'Busy', source: 'simulation' } })]);
+  assert.ok(simulated.forYou[0].reasons.includes('Usually busy now'));
+  const live = rankRecommendations({ ...HERE, vibe: 'coffee' }, {}, [bytspotVenue({ crowd: { level: 3, label: 'Busy', source: 'user_report' } })]);
+  assert.ok(live.forYou[0].reasons.includes('Busy right now'));
 });
 
 test('Explore lists rated attractions and skips unrated or untyped listings', () => {

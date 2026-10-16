@@ -12,6 +12,10 @@ import { db } from '../lib/db';
 import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
 import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
+import {
+  RECOMMEND_POOLS, rankRecommendations, radiusForWalk, recommendCell, searchRadiusFor, vibeProfile,
+  type RecommendPlace, type RecommendPool, type RecommendVenue,
+} from '../services/recommendations';
 
 const GP_BASE = 'https://places.googleapis.com/v1';
 
@@ -248,7 +252,105 @@ export async function textSearchCore(
   }
 }
 
+export function recommendPoolCacheKey(pool: RecommendPool, cellKey: string, radius: number): string {
+  return `gp:${CACHE_VERSION}:rec:${pool}:${cellKey}:${radius}`;
+}
+
+/**
+ * One popularity-ranked search per pool, cell and radius, shared by every
+ * guest in the cell and every vibe, so recommendations cost a handful of
+ * Google calls per neighbourhood rather than one per guest.
+ */
+async function fetchRecommendPool(pool: RecommendPool, lat: number, lng: number, radius: number) {
+  const cell = recommendCell(lat, lng);
+  return cachedWithStale(recommendPoolCacheKey(pool, cell.key, radius), 1800, async () => {
+    const body = {
+      includedTypes: [...RECOMMEND_POOLS[pool]],
+      maxResultCount: 20,
+      rankPreference: 'POPULARITY',
+      locationRestriction: { circle: { center: { latitude: cell.lat, longitude: cell.lng }, radius } },
+    };
+    const data = await gpPost<{ places?: unknown[] }>('/places:searchNearby', body, SEARCH_FIELDS);
+    return (data.places ?? []).map(mapPlace);
+  });
+}
+
+const CROWD_FRESH_MS = 2 * 60 * 60 * 1000;
+
+async function recommendVenues(lat: number, lng: number, radius: number): Promise<RecommendVenue[]> {
+  const dLat = radius / 111_320;
+  const dLng = radius / (111_320 * Math.max(0.1, Math.cos((lat * Math.PI) / 180)));
+  try {
+    const rows = await db.venue.findMany({
+      where: { discoverable: true, lat: { gte: lat - dLat, lte: lat + dLat }, lng: { gte: lng - dLng, lte: lng + dLng } },
+      select: {
+        id: true, slug: true, name: true, address: true, lat: true, lng: true, category: true, imageUrl: true, googlePlaceId: true,
+        crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1, select: { level: true, label: true, source: true, recordedAt: true } },
+      },
+    });
+    const now = Date.now();
+    return rows.map((v) => {
+      const c = v.crowdLevels[0];
+      const fresh = c && now - new Date(c.recordedAt).getTime() <= CROWD_FRESH_MS;
+      return {
+        id: v.id, slug: v.slug, name: v.name, address: v.address, lat: v.lat, lng: v.lng,
+        category: v.category, imageUrl: v.imageUrl, googlePlaceId: v.googlePlaceId,
+        crowd: fresh ? { level: c.level, label: c.label, source: c.source ?? null } : null,
+      };
+    });
+  } catch (err) {
+    captureError(err, { operation: 'recommendVenues' });
+    return [];
+  }
+}
+
 export const placesRouter = router({
+  /**
+   * Places picked for a guest from their onboarding answers (vibe, how far
+   * they will go, who they are with) and their position. `forYou` matches the
+   * vibe; `explore` is the best-rated culture, parks and attractions nearby.
+   */
+  recommend: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'places-recommend' }))
+    .input(z.object({
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      vibe: z.string().max(40).optional(),
+      walk: z.string().max(40).optional(),
+      group: z.string().max(40).optional(),
+      /** The guest's local hour, for intents with no place type of their own. */
+      hour: z.number().int().min(0).max(23).optional(),
+    }))
+    .query(async ({ input }) => {
+      const profile = vibeProfile(input.vibe, input.hour);
+      const radius = radiusForWalk(input.walk);
+      const exploreRadius = Math.max(radius, 3000);
+      const wanted = [...new Set<RecommendPool>([...profile.pools, 'explore'])];
+
+      let placesSource: 'none' | 'google' | 'google-stale' | 'unavailable' = 'none';
+      const pools: Partial<Record<RecommendPool, RecommendPlace[]>> = {};
+      const venuesPromise = recommendVenues(input.lat, input.lng, radius);
+      if (config.googlePlacesApiKey) {
+        const results = await Promise.all(wanted.map(async (pool) => {
+          const searchRadius = searchRadiusFor(pool === 'explore' ? exploreRadius : radius);
+          try {
+            const { data, stale } = await fetchRecommendPool(pool, input.lat, input.lng, searchRadius);
+            return { pool, places: data, stale, ok: true };
+          } catch (err) {
+            captureError(err, { provider: 'google-places', operation: 'recommend' });
+            return { pool, places: [] as MappedPlace[], stale: false, ok: false };
+          }
+        }));
+        for (const r of results) {
+          // A stale copy is still the right list of places, but "open now" may no longer be true.
+          pools[r.pool] = r.stale ? r.places.map((p) => ({ ...p, isOpen: null })) : r.places;
+        }
+        placesSource = results.every((r) => !r.ok) ? 'unavailable' : results.some((r) => r.stale) ? 'google-stale' : 'google';
+      }
+      const venues = await venuesPromise;
+      return { ...rankRecommendations(input, pools, venues), placesSource };
+    }),
+
   nearbySearch: publicProcedure
     .input(z.object({
       lat: z.number(), lng: z.number(),

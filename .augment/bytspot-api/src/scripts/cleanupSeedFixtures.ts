@@ -1,7 +1,8 @@
 /**
  * One-time removal of rows left by older versions of prisma/seed.ts:
  *   - the Colony Square venue, seeded at the retired app fixture's coordinates
- *   - the invented parking lots the seed gave every venue
+ *   - the invented parking lots the seed gave every venue, in both the
+ *     original random form and the later fixed 40/80-space form
  *
  * Dry run by default; pass --apply to delete. Parking rows are matched on the
  * exact values the seed wrote. Colony Square is deleted only when nothing but
@@ -30,10 +31,18 @@ export interface CleanupReport {
 
 const SEEDED_PARKING_WHERE = `
   (p."name" = v."name" || ' Lot' OR p."name" = 'Street — nearby')
-  AND p."type" IN ('lot', 'garage')
-  AND p."total_spots" IN (40, 80)
-  AND p."price_per_hr" IN (0, 6)
-  AND p."available" = GREATEST(4, FLOOR(p."total_spots" * 0.4))`;
+  AND (
+    (p."type" IN ('lot', 'garage', 'street')
+      AND p."total_spots" BETWEEN 20 AND 99
+      AND p."available" BETWEEN 0 AND p."total_spots" - 1
+      AND p."price_per_hr" >= 2 AND p."price_per_hr" < 10
+      AND ABS(p."price_per_hr" * 100 - ROUND(p."price_per_hr" * 100)) < 0.000001)
+    OR
+    (p."type" IN ('lot', 'garage')
+      AND p."total_spots" IN (40, 80)
+      AND p."price_per_hr" IN (0, 6)
+      AND p."available" = GREATEST(4, FLOOR(p."total_spots" * 0.4)))
+  )`;
 
 async function venueLinks(tx: Tx, venueId: string): Promise<Record<string, number>> {
   const columns = await tx.$queryRawUnsafe<{ table_name: string; column_name: string }[]>(`

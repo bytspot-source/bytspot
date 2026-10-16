@@ -8,7 +8,6 @@ const db = new PrismaClient();
 
 const nightlifeVenues = [
   { name: 'Ponce City Market', slug: 'ponce-city-market', address: '675 Ponce De Leon Ave NE', lat: 33.7726, lng: -84.3655, category: 'market' },
-  { name: 'Colony Square', slug: 'colony-square', address: '1197 Peachtree St NE', lat: 33.7878, lng: -84.3832, category: 'market' },
   { name: 'Piedmont Park', slug: 'piedmont-park', address: '400 Park Dr NE', lat: 33.7879, lng: -84.3733, category: 'park' },
   { name: "Ormsby's", slug: 'ormsbys', address: '1170 Howell Mill Rd NW', lat: 33.7815, lng: -84.4072, category: 'bar' },
   { name: 'Livingston', slug: 'livingston', address: '659 Peachtree St NE', lat: 33.7714, lng: -84.3847, category: 'restaurant' },
@@ -52,22 +51,6 @@ async function main() {
         source: crowd.source,
       },
     });
-
-    const parkingTypes = ['lot', 'garage', 'street'] as const;
-    const numSpots = v.category === 'parking' ? 2 : 1;
-    for (let i = 0; i < numSpots; i++) {
-      const total = v.category === 'golf' || v.category === 'park' ? 80 : 40;
-      await db.parkingSpot.create({
-        data: {
-          venueId: venue.id,
-          name: i === 0 ? `${v.name} Lot` : 'Street — nearby',
-          type: parkingTypes[i % parkingTypes.length],
-          totalSpots: total,
-          available: Math.max(4, Math.floor(total * 0.4)),
-          pricePerHr: v.category === 'park' ? 0 : 6,
-        },
-      });
-    }
 
     console.log(`  ✅ ${venue.name} [${v.category}] — typical ${crowd.label} (ET ${hour}:00)`);
   }

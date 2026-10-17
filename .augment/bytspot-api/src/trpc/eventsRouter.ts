@@ -23,7 +23,7 @@ function partyDistanceMiles(fromLat: number, fromLng: number, lat: number | null
   if (lat === null || lng === null) return null;
   return distanceMeters({ lat: fromLat, lng: fromLng }, { lat, lng }) / METERS_PER_MILE;
 }
-import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partySessionsRouter, partyTicketsRouter } from './partyRouter';
+import { hostDestinationsRouter, partyArrivalRouter, partyControlRouter, partyDraftsRouter, partyInvite, partyMediaRouter, partyMediaUrl, partyPassRouter, partyPublish, partyRecapRouter, partyRsvpRouter, partySessionsRouter, partyTicketsRouter } from './partyRouter';
 import { cached } from '../lib/redis';
 import { blockedUserIds } from '../services/safety';
 import { config } from '../config';
@@ -212,6 +212,12 @@ export const eventsRouter = router({
         : [];
       const grantedMap = new Map(granted.map((row) => [row.partyId, row._count._all]));
       const sessionFloors = await partySessionPriceFloors(answering.map((row) => row.party.id), new Date());
+      // Only the cover: a published party's cover is already public, while
+      // album and recap photos keep their own read rules.
+      const covers = answering.length > 0
+        ? await db.partyMedia.findMany({ where: { partyId: { in: answering.map((row) => row.party.id) }, kind: 'cover' }, select: { id: true, partyId: true } })
+        : [];
+      const coverMap = new Map(covers.map((media) => [media.partyId, partyMediaUrl(media.id)]));
       const parties = answering
         .map(({ party, distanceMiles: distance }) => ({
           id: party.id,
@@ -235,6 +241,7 @@ export const eventsRouter = router({
           // The terms travel with the number: a `minimum` floor is not a
           // price a guest can pay, and the card has to say bottles are extra.
           sessionsFrom: sessionFloors.get(party.id) ?? null,
+          coverURL: coverMap.get(party.id) ?? null,
         }));
       return { parties };
     }),

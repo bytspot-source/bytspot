@@ -1462,6 +1462,7 @@ function nearbyFixture(rows: Record<string, unknown>[]) {
   (db.socialCircleMember as any).findMany = async () => [];
   (db.partyGuest as any).groupBy = async () => [];
   party.findMany = async () => rows;
+  (db.partyMedia as any).findMany = async () => [];
 }
 
 test('events.nearby answers with parties a guest can actually reach', async () => {
@@ -1477,6 +1478,19 @@ test('events.nearby answers with parties a guest can actually reach', async () =
   // Distance is measured, not implied by being in the box.
   assert.ok(found.distanceMiles < 1, `expected a short distance, got ${found.distanceMiles}`);
   assert.equal(found.spacesRemaining, 60);
+});
+
+test('events.nearby carries the cover only, and null when the host set none', async () => {
+  nearbyFixture([nearbyParty(), nearbyParty({ id: 'party-bare', title: 'No Cover' })]);
+  let asked: any;
+  (db.partyMedia as any).findMany = async (args: any) => {
+    asked = args;
+    return [{ id: 'media-cover-1', partyId: 'party-near' }];
+  };
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  assert.equal(asked.where.kind, 'cover');
+  assert.match(parties.find((p) => p.id === 'party-near')!.coverURL ?? '', /\/media\/parties\/media-cover-1$/);
+  assert.equal(parties.find((p) => p.id === 'party-bare')!.coverURL, null);
 });
 
 test('events.nearby seats come from live occupancy, and a full party still shows', async () => {

@@ -220,7 +220,7 @@ function partyShareUrl(id: string): string {
   return `${config.partyShareBaseUrl}/party/${encodeURIComponent(id)}`;
 }
 
-function partyMediaUrl(id: string): string {
+export function partyMediaUrl(id: string): string {
   return `${config.publicApiUrl}/media/parties/${encodeURIComponent(id)}`;
 }
 

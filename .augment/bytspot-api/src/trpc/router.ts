@@ -83,6 +83,7 @@ import { reviewsRouter } from './reviewsRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
 import { mobilityRouter } from './mobilityRouter';
+import { conciergeDiscoveryRouter } from './conciergeRouter';
 import { planRouter } from './planRouter';
 import { coffeeRouter } from './coffeeRouter';
 import { demandRouter } from './demandRouter';
@@ -1210,6 +1211,7 @@ STRICT RULES:
 }
 
 const conciergeRouter = router({
+  ...conciergeDiscoveryRouter._def.record,
   /** POST /concierge/chat → concierge.chat mutation (auth required — costs $, rate limited) */
   chat: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'concierge' }))

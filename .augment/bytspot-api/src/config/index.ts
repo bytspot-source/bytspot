@@ -56,6 +56,8 @@ const envSchema = z.object({
 
   // ── OPTIONAL (integrations) ───────────────────────────
   FRONTEND_URL:           z.string().default('https://beta.bytspot.com'),
+  // Release A is opt-in until the paired native build is validated in TestFlight.
+  CONCIERGE_DISCOVERY_ENABLED: z.enum(['true', 'false']).default('false'),
   OPENAI_API_KEY:         z.string().default(''),
   TICKETMASTER_API_KEY:   z.string().default(''),
   GOOGLE_PLACES_API_KEY:  z.string().default(''),
@@ -139,6 +141,7 @@ export const config = {
   vendorBookingFeeBps: env.VENDOR_BOOKING_FEE_BPS,
   vendorBookingFeeMinCents: env.VENDOR_BOOKING_FEE_MIN_CENTS,
   frontendUrl: env.FRONTEND_URL,
+  conciergeDiscoveryEnabled: env.CONCIERGE_DISCOVERY_ENABLED === 'true',
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
   adminUserIds: env.ADMIN_USER_IDS,

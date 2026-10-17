@@ -123,7 +123,7 @@ export async function gpPost<T>(path: string, body: object, fieldMask: string): 
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) {
-    console.error(`[places] Google ${res.status}: ${await res.text().catch(() => '')}`);
+    console.error(`[places] Google request failed (${res.status})`);
     throw new Error(`Google Places API error ${res.status}`);
   }
   return res.json() as Promise<T>;
@@ -214,7 +214,7 @@ export async function cachedWithStale<T>(
     if (redis) {
       const hit = await Promise.resolve(redis.get(staleKey)).catch(() => null);
       if (hit) {
-        console.warn(`[places] serving stale ${key}: ${(err as Error).message}`);
+        console.warn('[places] serving stale cached results');
         return { data: JSON.parse(hit) as T, stale: true };
       }
     }

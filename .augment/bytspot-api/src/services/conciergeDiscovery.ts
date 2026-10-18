@@ -45,11 +45,12 @@ export const conciergeMenuEvidenceSchema = z.object({
 }, 'Evidence must reference the reviewed source revision');
 
 /** Phase 6: the closed set of actions Concierge may offer. Each runs on the guest's
- * device only after the guest approves it; none is a booking, order or payment. */
-export const CONCIERGE_ACTIONS = ['directions', 'website', 'book_table', 'save'] as const;
+ * device only after the guest approves it; none is a booking, order or payment.
+ * Phase 7: add_to_plan adds a details-only reference to a Plan the guest chooses. */
+export const CONCIERGE_ACTIONS = ['directions', 'website', 'book_table', 'add_to_plan', 'save'] as const;
 export type ConciergeActionType = typeof CONCIERGE_ACTIONS[number];
 export const conciergeActionSchema = z.union([
-  z.object({ type: z.enum(['directions', 'website', 'save']) }).strict(),
+  z.object({ type: z.enum(['directions', 'website', 'add_to_plan', 'save']) }).strict(),
   z.object({
     type: z.literal('book_table'), provider: z.enum(['opentable', 'resy']), label: z.enum(['OpenTable', 'Resy']), url: z.string(),
   }).strict().refine((a) => tableBookingUrlError(a.provider, a.url) === null
@@ -166,9 +167,12 @@ function excludedWords(target: string): string[] {
 function compact(text: string): string { return text.replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '').trim(); }
 
 /** A request to act on a shown place. Unsupported acts are named so the reply can decline them. */
-export type ConciergeActionRequest = { type: ConciergeActionType | 'unsupported'; target: number | 'last' | 'it' | { name: string } };
+export type ConciergeActionRequest = { type: ConciergeActionType | 'unsupported' | 'ride'; target: number | 'last' | 'it' | { name: string } };
+const PLAN_ADD = /^(?:please\s+|can you\s+|could you\s+)?(?:add|put)\s+(?:the\s+)?(.{2,120}?)\s+(?:to|on|in|into)\s+(?:my|a|the|our|this)\s+plans?[.!?]*$/iu;
 const ACTION_VERBS: Array<[RegExp, ConciergeActionRequest['type']]> = [
-  [/\b(?:order|buy|pay|purchase|call|phone|text|message|email|tickets?|deliver(?:y)?|check (?:me |us )?in|add (?:it |that |this |them )?to (?:my |a )?plan|uber|lyft|rides?)\b/i, 'unsupported'],
+  [PLAN_ADD, 'add_to_plan'],
+  [/\b(?:uber|lyft|rides?|taxi|cab)\b/i, 'ride'],
+  [/\b(?:order|buy|pay|purchase|call|phone|text|message|email|tickets?|deliver(?:y)?|check (?:me |us )?in)\b/i, 'unsupported'],
   [/\b(?:book|reserve)\b.*\b(?:table|reservation|it|that|this|there|them|one)\b|\breservation\b/i, 'book_table'],
   [/\b(?:directions?|navigate|navigation|route me|take me (?:to|there)|get me there|how (?:do i|can i|to) get)\b/i, 'directions'],
   [/\b(?:website|web site|homepage)\b/i, 'website'],
@@ -185,6 +189,10 @@ export function conciergeActionRequest(raw: string): ConciergeActionRequest | nu
   if (ordinal) return { type, target: ORDINALS[(ordinal[1] ?? ordinal[2]).toLowerCase()] };
   if (/\b(?:last)\b/i.test(text)) return { type, target: 'last' };
   const named = text.match(/\b(?:to|for|at|of|from)\s+(?:the\s+)?([\p{L}\p{N} &'’.-]{2,120}?)[.!?]*$/iu)?.[1].trim();
+  const planned = type === 'add_to_plan' ? text.match(PLAN_ADD)?.[1].trim() : undefined;
+  if (planned !== undefined) {
+    return /^(?:it|that|this|there|them|that one|this one|the place|place|one)$/i.test(planned) ? { type, target: 'it' } : { type, target: { name: planned } };
+  }
   const saved = type === 'save' ? text.match(/^(?:please\s+|can you\s+|could you\s+)?(?:save|bookmark|favou?rite|remember)\s+(?:the\s+)?([\p{L}\p{N} &'’.-]{2,120}?)[.!?]*$/iu)?.[1].trim() : undefined;
   const name = named ?? saved;
   if (name && !/^(?:it|that|this|there|them|that one|this one|the place|place|one|my plan|a plan)$/i.test(name)
@@ -207,16 +215,19 @@ function resolveActionTarget(target: ConciergeActionRequest['target'], cards: Co
   return matches.length === 1 ? matches[0] : matches.length ? 'ambiguous' : null;
 }
 
-const ACTION_PROMPTS: Record<ConciergeActionType, string> = {
-  directions: 'Directions to', website: 'Website for', book_table: 'Book a table at', save: 'Save',
+const ACTION_CHOICES: Record<ConciergeActionType, (ordinal: string) => string> = {
+  directions: (o) => `Directions to the ${o} one`, website: (o) => `Website for the ${o} one`,
+  book_table: (o) => `Book a table at the ${o} one`, add_to_plan: (o) => `Add the ${o} one to my Plan`, save: (o) => `Save the ${o} one`,
 };
-const SUPPORTED_ACTIONS = 'Concierge can open directions, open a place website, open a hand-checked OpenTable or Resy link, or save a place on this device. You approve each action first.';
+const SUPPORTED_ACTIONS = 'Concierge can open directions, open a place website, open a hand-checked OpenTable or Resy link, add a place to one of your Plans, or save a place on this device. You approve each action first.';
+const RIDE_REPLY = 'Concierge cannot book a ride. After you add a place to a Plan, the Plan shows Uber and Lyft links with that stop filled in; you book and pay for the ride in that app.';
 
 function actionReply(type: ConciergeActionType, card: ConciergeCard): string {
   const approval = 'Nothing happens until you approve it.';
   if (type === 'directions') return `I can open directions to ${card.name}. ${approval}`;
   if (type === 'website') return `I can open the website for ${card.name}. A website is not a verified menu. ${approval}`;
   if (type === 'save') return `I can save ${card.name} on this device. ${approval}`;
+  if (type === 'add_to_plan') return `I can add ${card.name} to a Plan you choose. It is added as a reference, not a booking. After that, Concierge can help you get there. ${approval}`;
   const booking = card.actions.find((a) => a.type === 'book_table');
   const label = booking && 'label' in booking ? booking.label : 'the booking provider';
   return `I can open ${label} for ${card.name}. You book with ${label}; Bytspot does not make or confirm the booking. ${approval}`;
@@ -493,7 +504,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       const websiteUrl = stale ? null : conciergeWebsiteURL(p?.websiteUri);
       const booking = conciergeActionSchema.safeParse({ type: 'book_table', ...(placeId ? bookings.get(placeId) : undefined) });
       const actions: ConciergeAction[] = [{ type: 'directions' }, ...(websiteUrl ? [{ type: 'website' as const }] : []),
-        ...(placeId && booking.success ? [booking.data] : []), { type: 'save' }];
+        ...(placeId && booking.success ? [booking.data] : []), { type: 'add_to_plan' }, { type: 'save' }];
       cards.push({ id, kind: v ? 'venue' : 'place', placeId, name: spot.name, address: typeof spot.address === 'string' ? spot.address : '',
         lat: spot.lat, lng: spot.lng, category, rating, isOpen: stale || typeof p?.isOpen !== 'boolean' ? null : p.isOpen,
         photoUrl: null, crowd: null, reasons, capability: 'details',
@@ -518,7 +529,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
           ? 'No reviewed menu match was confirmed. These are places to investigate, not confirmed dish matches. Dish quality and dietary suitability are not verified.' : '',
       plan.openNow ? 'Only listings Google reports open now are included; hours can change.' : '',
       plan.exclusions.length ? 'Excluded terms were checked against listing names and categories only; other suitability is not verified.' : '',
-      plan.firstStop ? 'This searches a first stop for tonight; I cannot build a multi-stop plan or make bookings yet.' : '',
+      plan.firstStop ? 'This searches a first stop for tonight. You can add a place to one of your Plans; Concierge does not make bookings.' : '',
       'Search terms guide discovery, but listing matches do not verify every requested preference.',
     ].filter(Boolean).join(' ');
     if (!selected.length) return result(failed || stale || menuFailed ? 'unavailable' : 'empty',
@@ -528,9 +539,10 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     const requested = plan.action;
     if (requested) {
       if (requested.type === 'unsupported') return result('ready', `Concierge cannot do that for you. ${SUPPORTED_ACTIONS} ${caveats}`, selected, refinements);
+      if (requested.type === 'ride') return result('ready', `${RIDE_REPLY} ${SUPPORTED_ACTIONS} ${caveats}`, selected,
+        selected.map((_, index) => ACTION_CHOICES.add_to_plan(['first', 'second', 'third'][index])));
       const target = resolveActionTarget(requested.target, selected);
-      const prompt = ACTION_PROMPTS[requested.type];
-      const choices = selected.map((_, index) => `${prompt} the ${['first', 'second', 'third'][index]} one`);
+      const choices = selected.map((_, index) => ACTION_CHOICES[requested.type as ConciergeActionType](['first', 'second', 'third'][index]));
       if (target === 'ambiguous' || target === null) return result('ready',
         `${target === null ? 'I could not match that to a place shown.' : 'Which place?'} Say “first”, “second” or “third”. ${caveats}`, selected, choices);
       if (!target.actions.some((a) => a.type === requested.type)) {

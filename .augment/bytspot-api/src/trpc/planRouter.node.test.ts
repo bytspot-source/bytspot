@@ -6,7 +6,7 @@ import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemDestination, itemIsBooked, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemDestination, itemIsBooked, usePlaceLocationResolverForTest, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
 import { useTableBookingLinksForTest } from '../services/tableBookingLinks';
 
@@ -722,6 +722,46 @@ test('A reference names its place only when it has no supply', async () => {
     { code: 'BAD_REQUEST' },
   );
   await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'x', placeId: 'places/../x' }), { code: 'BAD_REQUEST' });
+});
+
+test('A place reference takes its destination from the server lookup, never the client', async () => {
+  plan.findUnique = async () => planFixture();
+  let seeded: any = null;
+  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+  const looked: string[] = [];
+  const restore = usePlaceLocationResolverForTest(async (placeId) => {
+    looked.push(placeId);
+    return placeId === 'ChIJ_found' ? { name: 'Example Grill', address: '1 Main St', lat: 33.77, lng: -84.39 } : null;
+  });
+  try {
+    await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Client Title', placeId: 'ChIJ_found' });
+    assert.equal(seeded.title, 'Client Title');
+    assert.deepEqual([seeded.placeName, seeded.placeAddress, seeded.placeLat, seeded.placeLng], ['Example Grill', '1 Main St', 33.77, -84.39]);
+    assert.ok(seeded.placeResolvedAt instanceof Date);
+    assert.equal(seeded.capability, 'details');
+    await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Gone', placeId: 'ChIJ_missing' });
+    assert.deepEqual([seeded.placeName, seeded.placeLat, seeded.placeLng, seeded.placeResolvedAt], [null, null, null, null]);
+    await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'No place' });
+    assert.deepEqual(looked, ['ChIJ_found', 'ChIJ_missing']);
+    await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'coffee', supplyRef: { coffeeReservationId: 'r-1' }, placeId: 'ChIJ_found' }), { code: 'BAD_REQUEST' });
+    assert.equal(looked.length, 2, 'a supplied item never looks up a place');
+  } finally {
+    restore();
+  }
+});
+
+test('a place reference is a destination for 30 days after the server resolved it', () => {
+  const now = new Date('2026-10-18T12:00:00Z');
+  const place = { placeName: 'Example Grill', placeAddress: '', placeLat: 33.77, placeLng: -84.39 };
+  const at = (days: number) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  assert.deepEqual(itemDestination({ ...place, placeResolvedAt: at(29) }, now), { name: 'Example Grill', address: null, lat: 33.77, lng: -84.39 });
+  assert.equal(itemDestination({ ...place, placeResolvedAt: at(30) }, now), null);
+  assert.equal(itemDestination({ ...place, placeResolvedAt: at(-1) }, now), null);
+  assert.equal(itemDestination({ ...place, placeResolvedAt: null }, now), null);
+  assert.equal(itemDestination({ ...place, placeLat: null, placeResolvedAt: at(1) }, now), null);
+  // Supply keeps precedence over a place reference.
+  const offer = { location: { label: 'Peach Table', address: null, lat: 1, lng: 2 } };
+  assert.equal(itemDestination({ ...place, placeResolvedAt: at(1), offer }, now)?.name, 'Peach Table');
 });
 
 test('"I booked it" is the guest\u2019s word, kept apart from what Bytspot booked', async () => {

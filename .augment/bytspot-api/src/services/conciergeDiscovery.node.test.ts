@@ -306,7 +306,7 @@ test('ordinary dishes, free text and functional starters work without a planner'
     assert.equal(searches, 1, text);
     assert.equal(response.status, 'ready');
     if (/dumplings|khachapuri/.test(text)) assert.match(response.reply, /No reviewed menu match was confirmed/);
-    if (/plan/.test(text)) assert.match(response.reply, /first stop.*cannot build a multi-stop plan/);
+    if (/plan/.test(text)) assert.match(response.reply, /first stop.*add a place to one of your Plans; Concierge does not make bookings/);
     assert.deepEqual(response.refinements, ['Closer', 'Coffee nearby', 'Restaurants nearby']);
   }
 });
@@ -560,7 +560,7 @@ const opentable = { provider: 'opentable' as const, label: 'OpenTable', url: 'ht
 test('cards list only supported actions derived from server facts', async () => {
   const response = await threeCoffees({ tableBookings: async () => new Map([['p1', opentable]]) })(input('coffee'));
   assert.deepEqual(response.cards.map((c) => c.actions.map((a) => a.type)),
-    [['directions', 'website', 'save'], ['directions', 'book_table', 'save'], ['directions', 'save']]);
+    [['directions', 'website', 'add_to_plan', 'save'], ['directions', 'book_table', 'add_to_plan', 'save'], ['directions', 'add_to_plan', 'save']]);
   assert.deepEqual(response.cards[1].actions[1], { type: 'book_table', ...opentable });
   assert.equal(response.proposal, null);
   for (const link of [{ ...opentable, url: 'https://evil.example.com/r' }, { ...opentable, provider: 'resy' as const },
@@ -598,7 +598,7 @@ test('an action request keeps the earlier search and proposes exactly one approv
 
 test('unsupported, unavailable, ambiguous and unmatched actions never produce a proposal', async () => {
   const discover = threeCoffees();
-  for (const text of ['order the first one', 'pay for it', 'call the second one', 'buy tickets there', 'add it to my plan', 'check me in']) {
+  for (const text of ['order the first one', 'pay for it', 'call the second one', 'buy tickets there', 'check me in']) {
     const response = await discover(input('coffee', text));
     assert.equal(response.proposal, null, text);
     assert.match(response.reply, /^Concierge cannot do that for you/);
@@ -643,4 +643,34 @@ test('the output contract rejects proposals and actions the cards do not support
   assert.equal(conciergeDiscoverOutput.safeParse(card([{ type: 'website' }])).success, false);
   assert.equal(conciergeDiscoverOutput.safeParse(card([{ type: 'save' }, { type: 'save' }])).success, false);
   assert.equal(conciergeDiscoverOutput.safeParse(card([{ type: 'pay' }])).success, false);
+});
+
+test('adding a shown place to a Plan is one approvable proposal, never a booking', async () => {
+  const discover = threeCoffees();
+  const cases: Array<[string, string]> = [
+    ['add the second one to my plan', 'gp:p1'], ['Add Third Roast to my Plan', 'gp:p2'],
+    ['put the last one on our plan', 'gp:p2'], ['please add Real Coffee to a plan', 'gp:p0'],
+  ];
+  for (const [text, cardId] of cases) {
+    const response = await discover(input('coffee', text));
+    assert.deepEqual(response.proposal, { type: 'add_to_plan', cardId }, text);
+    assert.match(response.reply, /to a Plan you choose\. It is added as a reference, not a booking\..*Nothing happens until you approve it/);
+    assert.equal(conciergeDiscoverOutput.safeParse(response).success, true);
+  }
+  const ambiguous = await discover(input('coffee', 'add it to my plan'));
+  assert.equal(ambiguous.proposal, null);
+  assert.deepEqual(ambiguous.refinements, ['Add the first one to my Plan', 'Add the second one to my Plan', 'Add the third one to my Plan']);
+  for (const choice of ambiguous.refinements) assert.equal(conciergeActionRequest(choice)?.type, 'add_to_plan');
+  assert.deepEqual(conciergeActionRequest('add it to my plan'), { type: 'add_to_plan', target: 'it' });
+  assert.equal(planConcierge(input('help plan tonight')).action, null);
+  assert.equal(planConcierge(input('coffee', 'find a place to add to my plan nearby')).action, null);
+});
+
+test('ride requests point to Plan handoffs and never propose a ride', async () => {
+  for (const text of ['get me an uber to the first one', 'can I take a Lyft there', 'book a ride']) {
+    const response = await threeCoffees()(input('coffee', text));
+    assert.equal(response.proposal, null, text);
+    assert.match(response.reply, /^Concierge cannot book a ride\. After you add a place to a Plan, the Plan shows Uber and Lyft links/);
+    assert.deepEqual(response.refinements, ['Add the first one to my Plan', 'Add the second one to my Plan', 'Add the third one to my Plan']);
+  }
 });

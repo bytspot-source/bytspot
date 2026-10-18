@@ -7,6 +7,7 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import type { AuthPayload } from '../middleware/auth';
 import { adminGroupFor } from '../services/adminRbac';
+import { menuRevisionMatches, menuSourceMime } from '../services/menuEvidence';
 import { captureError } from '../lib/observability';
 import { requireVendorSeat, type VendorContext } from '../middleware/vendorAuth';
 import { verifyVendorAccessToken } from '../vendor/accessToken';
@@ -100,7 +101,7 @@ async function listMedia(vendor: VendorContext, parent: MediaParent, id: string)
   const rows = await db.vendorMedia.findMany({
     where: listWhere(parent, id),
     orderBy: [{ kind: 'asc' }, { position: 'asc' }],
-    select: { id: true, kind: true, position: true, mimeType: true, byteSize: true, reviewStatus: true, reviewNote: true },
+    select: { id: true, kind: true, position: true, mimeType: true, byteSize: true, reviewStatus: true, reviewNote: true, updatedAt: true },
   });
   return { media: rows.map(mediaDto), videoAvailable: videoAvailableFor(vendor) };
 }
@@ -124,7 +125,7 @@ async function compactKind(parent: MediaParent, parentId: string, kind: MediaKin
   });
 }
 
-async function saveUpload(
+export async function saveUpload(
   req: Request,
   res: Response,
   vendor: VendorContext,
@@ -183,7 +184,8 @@ async function saveUpload(
         parent,
         parentId,
         kind: plan.kind,
-        mediaId,
+        // The row identity is stable; object identity must never be reused across revisions.
+        mediaId: nextMediaId(),
       })
     : null;
 
@@ -642,6 +644,47 @@ function parentIsPublic(
   if (media.bookable) return media.bookable.active && media.bookable.location.state === 'ACTIVE';
   return false;
 }
+
+/** Exact revision preview: never redirect to a capability URL that outlives authorization. */
+export async function handleMenuSource(req: Request, res: Response) {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  const revision = String(req.params.revision);
+  async function authorizedSource() {
+    const media = await db.vendorMedia.findUnique({
+      where: { id: String(req.params.mediaId) },
+      include: { location: true, bookable: { include: { location: true } }, seller: { select: { videoHostingAt: true, state: true } } },
+    });
+    if (!media || media.kind !== 'menu' || !menuRevisionMatches(revision, media.updatedAt)
+      || !menuSourceMime(media.mimeType)) return null;
+    const published = media.seller.state === 'ACTIVE' && parentIsPublic(media) && guestCanSeeMedia(media, media.seller);
+    if (!published && !requestIsAdmin(req.headers.authorization)) {
+      const userId = requestVendorUserId(req.headers.authorization);
+      if (!userId) return null;
+      const seat = await db.vendorSeat.findFirst({
+        where: { sellerId: media.sellerId, userId, state: 'ACTIVE' },
+        select: { role: true, locationIds: true, bookableIds: true },
+      });
+      if (!seat || (media.locationId
+        ? !seatCanSeeLocation(seat.role as SeatRole, seat.locationIds, media.locationId)
+        : !media.bookableId || !seatCanSeeBookable(seat.role as SeatRole, seat.bookableIds, media.bookableId))) return null;
+    }
+    return media;
+  }
+  try {
+    if (!/^(0|[1-9]\d*)$/.test(revision) || !Number.isSafeInteger(Number(revision))) return notFound(res);
+    const media = await authorizedSource();
+    if (!media) return notFound(res);
+    const bytes = await bytesFor(media);
+    if (!bytes?.length) return notFound(res);
+    const current = await authorizedSource();
+    if (!current || current.storageKey !== media.storageKey || current.mimeType !== media.mimeType) return notFound(res);
+    return sendMedia(res, { mimeType: current.mimeType, bytes }, 'private, no-store', true);
+  } catch {
+    return notFound(res);
+  }
+}
+router.get('/media/menu-source/:mediaId/:revision', handleMenuSource);
 
 router.get('/media/vendor/:mediaId', async (req, res) => {
   try {

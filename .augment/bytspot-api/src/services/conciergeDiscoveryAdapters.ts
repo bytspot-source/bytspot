@@ -8,6 +8,7 @@ import {
 import { DISCOVERY_RAILS } from './discoveryTaxonomy';
 import { conciergePlacesSearch, discoveryBounds } from './conciergePlaces';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
+import { findMenuEvidence } from './menuEvidence';
 
 const CATEGORY_TERMS: Record<string, string[]> = {
   coffee: ['coffee', 'cafe', 'café', 'coffee shop', 'coffee_shop'], restaurant: ['restaurant', 'dining', 'food'],
@@ -115,4 +116,5 @@ Use mode=name only for an explicitly named establishment. Never turn user/model 
   return parsed.success ? parsed.data : null;
 };
 
-export const discoverConcierge = createConciergeDiscovery({ venues: conciergeVenues, places: conciergePlacesSearch, reconcile: conciergeReconcilePlaces, plan: conciergePlanner });
+export const discoverConcierge = createConciergeDiscovery({ venues: conciergeVenues, places: conciergePlacesSearch,
+  reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence });

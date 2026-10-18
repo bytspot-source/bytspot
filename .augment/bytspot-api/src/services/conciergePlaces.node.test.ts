@@ -10,7 +10,7 @@ import { conciergePlacesCacheKey, createConciergePlacesSearch, discoveryBounds, 
 const search: ConciergeSearch = planConcierge({ location: { lat: 40, lng: -75 }, messages: [{ role: 'user', content: 'coffee' }] }).search;
 const directCache: typeof cachedWithStale = async (_key, _ttl, fetcher) => ({ data: await fetcher(), stale: false });
 const rawPlace = { id: 'real-place', displayName: { text: 'Coffee One' }, formattedAddress: '1 Test Street',
-  location: { latitude: 40.001, longitude: -75 }, primaryType: 'coffee_shop', currentOpeningHours: { openNow: true } };
+  location: { latitude: 40.001, longitude: -75 }, primaryType: 'coffee_shop', currentOpeningHours: { openNow: true }, websiteUri: 'https://coffee.example.com/menu' };
 function provider(over: Partial<ConciergePlacesDependencies> = {}) {
   return createConciergePlacesSearch({ enabled: () => true, cache: directCache, post: async () => ({ places: [rawPlace] }), ...over });
 }
@@ -38,13 +38,15 @@ test('provider uses one restricted text search with real coordinates and text-on
     assert.ok(low.latitude < 40 && high.latitude > 40);
     assert.ok(low.longitude < -75 && high.longitude > -75);
     assert.ok(high.latitude - low.latitude < 0.04);
-    assert.doesNotMatch(fields, /photos|reviews|websiteUri/);
+    assert.doesNotMatch(fields, /photos|reviews/);
+    assert.match(fields, /places.websiteUri/);
     return { places: [rawPlace] };
   } });
   const response = await discover(search);
   assert.equal(calls, 1);
   assert.equal(response.source, 'google');
   assert.equal(response.places[0].placeId, 'real-place');
+  assert.equal(response.places[0].websiteUri, 'https://coffee.example.com/menu');
   assert.deepEqual(response.places[0].photoUrls, []);
 });
 

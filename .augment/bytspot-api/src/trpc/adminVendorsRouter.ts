@@ -15,6 +15,18 @@ import { advanceSeller, awaitingApproval, markVerified, outstandingRequirements,
 import { requirementsForState } from '../vendor/contract';
 import { mediaUrl } from '../vendor/media';
 import { assignBands, bandSummaries, BandRangeRefused, releaseBands } from '../vendor/bands';
+import {
+  linkMenuVenue, linkMenuVenueSchema, menuDishDto, menuMediaSelect, MenuEvidenceError,
+  reviewMenuDish, reviewMenuDishSchema,
+} from '../services/menuEvidence';
+
+function menuAdminError(error: unknown): never {
+  if (error instanceof MenuEvidenceError) {
+    throw new TRPCError({ code: error.status === 404 ? 'NOT_FOUND' : error.status === 403 ? 'FORBIDDEN' : error.status === 400 ? 'BAD_REQUEST' : 'CONFLICT', message: error.message });
+  }
+  // Do not expose submitted text or database diagnostics through the RPC error.
+  throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Menu review is temporarily unavailable.' });
+}
 
 /** Where the verified email links: the vendor console's own origin. */
 export function vendorConsoleOrigin(origins: string[] = config.corsOrigins): string {
@@ -22,6 +34,64 @@ export function vendorConsoleOrigin(origins: string[] = config.corsOrigins): str
 }
 
 export const adminVendorsRouter = router({
+  menuQueue: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-menu-queue' }))
+    .input(z.object({ reviewStatus: z.enum(['pending', 'approved', 'rejected']).optional() }).strict().optional())
+    .query(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const rows = await db.vendorMenuDish.findMany({ where: { reviewStatus: input?.reviewStatus ?? 'pending' },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 200,
+        include: { media: { select: menuMediaSelect }, location: { select: {
+          id: true, label: true, address: true, sellerId: true, menuVenueId: true,
+          seller: { select: { legalName: true } }, menuVenue: { select: { name: true, address: true, discoverable: true } },
+        } } },
+      });
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.menuQueue' });
+      return { dishes: rows.map((row) => ({ ...menuDishDto(row), locationId: row.location.id,
+        locationLabel: row.location.label, address: row.location.address, sellerId: row.location.sellerId,
+        business: row.location.seller.legalName?.trim() || 'Unnamed business', venueId: row.location.menuVenueId,
+        venueName: row.location.menuVenue?.name ?? null, venueAddress: row.location.menuVenue?.address ?? null,
+        venueDiscoverable: row.location.menuVenue?.discoverable ?? false })) };
+    }),
+
+  menuVenues: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-menu-venues' }))
+    .input(z.object({ query: z.string().trim().min(2).max(100) }).strict())
+    .query(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const venues = await db.venue.findMany({ where: { discoverable: true, OR: [
+        { name: { contains: input.query, mode: 'insensitive' } }, { address: { contains: input.query, mode: 'insensitive' } },
+      ] }, select: { id: true, name: true, address: true }, orderBy: [{ name: 'asc' }, { id: 'asc' }], take: 20 });
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.menuVenues' });
+      return { venues: venues.map((venue) => ({ venueId: venue.id, name: venue.name, address: venue.address })) };
+    }),
+
+  linkMenuVenue: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-link-menu-venue' }))
+    .input(linkMenuVenueSchema)
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      try {
+        const result = await linkMenuVenue(input);
+        auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.linkMenuVenue',
+          detail: { locationId: input.locationId, venueId: input.venueId ?? 'unbound', previousVenueId: input.expectedVenueId ?? 'unbound' } });
+        return result;
+      } catch (error) { return menuAdminError(error); }
+    }),
+
+  reviewMenuDish: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 120, label: 'admin-vendors-review-menu-dish' }))
+    .input(reviewMenuDishSchema)
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      try {
+        const result = await reviewMenuDish(input, ctx.user.userId);
+        auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.reviewMenuDish',
+          detail: { dishId: input.dishId, reviewStatus: result.reviewStatus, venueId: input.expectedVenueId ?? 'unbound' } });
+        return result;
+      } catch (error) { return menuAdminError(error); }
+    }),
+
   /** Businesses waiting on approval first, then the rest, newest first. */
   list: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-list' }))

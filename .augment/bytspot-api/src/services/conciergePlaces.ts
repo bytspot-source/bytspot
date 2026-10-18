@@ -21,17 +21,18 @@ export function discoveryBounds(location: { lat: number; lng: number }, radius: 
 export function conciergePlacesCacheKey(raw: ConciergeSearch): string {
   const search = conciergeSearchSchema.parse(raw);
   const query = createHash('sha256').update(search.query.toLowerCase().trim()).digest('hex');
-  return `gp:concierge:v2:${search.mode}:${search.location.lat}:${search.location.lng}:${search.radius}:${query}:20`;
+  return `gp:concierge:v3:${search.mode}:${search.location.lat}:${search.location.lng}:${search.radius}:${query}:20`;
 }
 
 // Text-only: never request photos, reviews, booking links or editorial content.
 export const CONCIERGE_PLACE_FIELDS = [
   'places.id', 'places.displayName', 'places.formattedAddress', 'places.location',
-  'places.rating', 'places.userRatingCount', 'places.types', 'places.primaryType', 'places.currentOpeningHours',
+  'places.rating', 'places.userRatingCount', 'places.types', 'places.primaryType', 'places.currentOpeningHours', 'places.websiteUri',
 ].join(',');
 const rawPlaceSchema = z.object({
   id: z.string().min(1), displayName: z.object({ text: z.string().min(1) }),
   formattedAddress: z.string().optional(),
+  websiteUri: z.string().max(2048).optional(),
   location: z.object({ latitude: coordinateSchema.shape.lat, longitude: coordinateSchema.shape.lng }),
   rating: z.number().finite().min(0).max(5).optional(), userRatingCount: z.number().int().min(0).optional(),
   types: z.array(z.string()).optional(), primaryType: z.string().optional(),

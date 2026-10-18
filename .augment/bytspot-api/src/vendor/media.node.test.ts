@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   guestCanSeeMedia,
+  mediaDto,
+  mediaUrl,
   readReviewStatus,
   MEDIA_CAPS,
   MEDIA_REFUSALS,
@@ -18,6 +20,13 @@ import { vendorObjectKey } from './mediaStore';
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 const jpegUri = `data:image/jpeg;base64,${jpeg.toString('base64')}`;
 const pdfUri = `data:application/pdf;base64,${Buffer.from('%PDF-1.4').toString('base64')}`;
+
+test('vendor menu picker URLs pin a revision, while non-menu media keeps its existing URL', () => {
+  const row = { id: 'menu-one', kind: 'menu', position: 0, mimeType: 'application/pdf', byteSize: 100,
+    updatedAt: new Date('2026-10-18T12:00:00.000Z') };
+  assert.ok(mediaDto(row).url.endsWith(`/media/menu-source/menu-one/${row.updatedAt.getTime()}`));
+  assert.equal(mediaDto({ ...row, kind: 'cover' }).url, mediaUrl(row.id));
+});
 
 test('an assigned seat sees only named places and windows; an empty assignment sees nothing', () => {
   assert.equal(seatCanSeeLocation('owner', [], 'loc_1'), true);

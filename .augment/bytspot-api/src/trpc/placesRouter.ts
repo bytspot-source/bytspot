@@ -111,6 +111,26 @@ export async function resolvePlaceCore(
   }
 }
 
+/** The point a Plan's place reference leads to. Location fields only, a short
+ * deadline, and null on any failure so an attach never waits on or fails with Google. */
+export async function resolvePlaceLocation(
+  placeId: string,
+): Promise<{ name: string; address: string; lat: number; lng: number } | null> {
+  if (!config.googlePlacesApiKey || !/^[A-Za-z0-9_-]{1,255}$/.test(placeId)) return null;
+  try {
+    const data = await gpGet<Record<string, unknown>>(`/places/${encodeURIComponent(placeId)}`,
+      'id,displayName,formattedAddress,location', 2500);
+    const m = mapPlace(data);
+    const valid = m.placeId === placeId && m.name && typeof (data.location as { latitude?: unknown } | undefined)?.latitude === 'number'
+      && typeof (data.location as { longitude?: unknown } | undefined)?.longitude === 'number'
+      && Math.abs(m.lat) <= 90 && Math.abs(m.lng) <= 180;
+    return valid ? { name: m.name.slice(0, 120), address: m.address.slice(0, 240), lat: m.lat, lng: m.lng } : null;
+  } catch (err) {
+    captureError(err, { provider: 'google-places', operation: 'resolvePlaceLocation' });
+    return null;
+  }
+}
+
 export async function gpPost<T>(path: string, body: object, fieldMask: string): Promise<T> {
   const res = await fetch(`${GP_BASE}${path}`, {
     method: 'POST',
@@ -129,7 +149,7 @@ export async function gpPost<T>(path: string, body: object, fieldMask: string): 
   return res.json() as Promise<T>;
 }
 
-async function gpGet<T>(path: string, fieldMask: string): Promise<T> {
+async function gpGet<T>(path: string, fieldMask: string, timeoutMs = 8000): Promise<T> {
   // Header, not query string, matching gpPost: a key in a URL rides along
   // into logs and error traces.
   const res = await fetch(`${GP_BASE}${path}`, {
@@ -138,7 +158,7 @@ async function gpGet<T>(path: string, fieldMask: string): Promise<T> {
       'X-Goog-Api-Key': config.googlePlacesApiKey,
       'X-Goog-FieldMask': fieldMask,
     },
-    signal: AbortSignal.timeout(8000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     console.error(`[places] Google ${res.status}: ${await res.text().catch(() => '')}`);

@@ -15,6 +15,7 @@ import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/
 import { planFeasibility } from '../services/planFeasibility';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
+import { resolvePlaceLocation } from './placesRouter';
 
 /**
  * Plan — the control plane.
@@ -153,7 +154,23 @@ type DestinationSources = {
     locationDisclosure: string;
     arrivalVenue: { name: string; address: string; lat: number; lng: number } | null;
   } | null;
+  placeName?: string | null;
+  placeAddress?: string | null;
+  placeLat?: number | null;
+  placeLng?: number | null;
+  placeResolvedAt?: Date | null;
 };
+
+/** Google place locations may be kept for 30 days; after that a reference has no point. */
+export const PLACE_DESTINATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+let placeLocationResolver = resolvePlaceLocation;
+/** Tests only: swap the Google lookup behind place references. Returns a restore function. */
+export function usePlaceLocationResolverForTest(resolver: typeof resolvePlaceLocation): () => void {
+  const previous = placeLocationResolver;
+  placeLocationResolver = resolver;
+  return () => { placeLocationResolver = previous; };
+}
 
 /**
  * The point a ride app is sent to, or null when the item has none it may
@@ -161,7 +178,7 @@ type DestinationSources = {
  * published the venue and attached a real one, so an after-approval or
  * withheld room never leaks its place through a Plan.
  */
-export function itemDestination(item: DestinationSources): PlanItemDestination | null {
+export function itemDestination(item: DestinationSources, now: Date = new Date()): PlanItemDestination | null {
   const location = item.offer?.location;
   if (location) return { name: location.label, address: location.address, lat: location.lat, lng: location.lng };
   const spot = item.coffeeReservation?.spot ?? item.coffeeSpot;
@@ -172,6 +189,12 @@ export function itemDestination(item: DestinationSources): PlanItemDestination |
   if (party?.locationDisclosure === 'public' && party.arrivalVenue) {
     const venue = party.arrivalVenue;
     return { name: venue.name, address: venue.address, lat: venue.lat, lng: venue.lng };
+  }
+  // A place reference, as the server resolved it. Never a client-supplied point.
+  if (item.placeName && item.placeLat != null && item.placeLng != null && item.placeResolvedAt
+    && now.getTime() - item.placeResolvedAt.getTime() >= 0
+    && now.getTime() - item.placeResolvedAt.getTime() < PLACE_DESTINATION_TTL_MS) {
+    return { name: item.placeName, address: item.placeAddress || null, lat: item.placeLat, lng: item.placeLng };
   }
   return null;
 }
@@ -312,7 +335,7 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
       reservation: item.coffeeReservation
         ? { holdExpiresAt: item.coffeeReservation.holdExpiresAt, status: item.coffeeReservation.status }
         : null,
-      destination: itemDestination(item),
+      destination: itemDestination(item, now),
       // A listed OpenTable or Resy handoff for a reference item, joined on read
       // so a pulled link leaves every Plan at once.
       tableBooking: tableBookingLinkFor(item.placeId),
@@ -1264,7 +1287,11 @@ export const planRouter = router({
         placeId: z.string().regex(/^[A-Za-z0-9_-]{1,255}$/).optional(),
       }),
     )
-    .mutation(async ({ ctx, input }) => serializableTransactionWithRetry(async (tx) => {
+    .mutation(async ({ ctx, input }) => {
+      // Resolved before the write transaction, so a slow Google call never holds it open.
+      const place = input.placeId && !input.partyId && !input.supplyRef ? await placeLocationResolver(input.placeId) : null;
+      const placeResolvedAt = place ? new Date() : null;
+      return serializableTransactionWithRetry(async (tx) => {
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
       assertPlanMutable(plan, new Date());
       if (input.partyId && input.supplyRef?.partyId && input.partyId !== input.supplyRef.partyId) {
@@ -1324,10 +1351,13 @@ export const planRouter = router({
         capability: supply.capability, partyId, coffeeReservationId,
         selectionKey, bookableId: supply.snapshot?.id ?? null,
         placeId: input.placeId ?? null,
+        placeName: place?.name ?? null, placeAddress: place?.address ?? null,
+        placeLat: place?.lat ?? null, placeLng: place?.lng ?? null, placeResolvedAt,
         position: attachSequence.position,
       } });
       return { id: item.id, capability: item.capability, status: item.status };
-    }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.')),
+    }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.');
+    }),
 
   /**
    * The booking spine — "every booking is a Plan of one". A lone bookable is

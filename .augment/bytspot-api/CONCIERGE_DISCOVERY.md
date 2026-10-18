@@ -54,7 +54,7 @@ Each card contains exactly:
 | `rail` | One of the 13 shared discovery rail strings below |
 | `websiteUrl` | Public https website or null; a handoff, not menu evidence |
 | `menuEvidence` | 0–3 reviewed menu entries (Phase 4) |
-| `actions` | 1–4 supported actions for this card (Phase 6) |
+| `actions` | 1–5 supported actions for this card (Phases 6–7) |
 
 Rails: `explore`, `eat_drink`, `shop_style`, `experience`, `social`, `events`, `wellness`, `create_learn`, `nightlife`, `stay`, `move`, `celebrate`, `services`. Canonical category aliases mirror the read-only beta discovery-taxonomy contract v1. Google primary-type aliases are mapped additionally. Unknown categories remain visible under `explore`. Rails never grant capabilities.
 
@@ -118,12 +118,21 @@ Validation executed on October 17, 2026:
 
 ## Guest-approved actions (Phase 6)
 
-- Closed set: `directions`, `website`, `book_table`, `save`. The server adds each one only from facts: `directions` and `save` on every card, `website` only with a `websiteUrl`, and `book_table` only with an admin hand-checked OpenTable or Resy link for the card's `placeId` (`{ type, provider, label, url }`). A failed link lookup (1 s limit) offers no booking action.
+- Closed set: `directions`, `website`, `book_table`, `add_to_plan` (Phase 7), `save`. The server adds each one only from facts: `directions`, `add_to_plan` and `save` on every card, `website` only with a `websiteUrl`, and `book_table` only with an admin hand-checked OpenTable or Resy link for the card's `placeId` (`{ type, provider, label, url }`). A failed link lookup (1 s limit) offers no booking action.
 - No action is a booking, order, payment, call, ticket, Plan write or check-in. `book_table` opens the provider; Bytspot does not make or confirm the booking.
 - A user message after a search that asks to act on a shown result (for example "Directions to the second one", "save Real Coffee", "book a table at the first one") is not search text. The earlier search runs again, and the message is resolved against the returned cards by position (first/second/third/last), by a unique name match, or by "it" when only one card is shown. The model planner never sees these messages and cannot select actions.
 - Result: `status: ready`, the same cards, and `proposal: { type, cardId }` with a fixed reply that ends "Nothing happens until you approve it." The output schema rejects a proposal for a card or action that is not in the response.
-- No proposal when the request is unsupported (order, pay, call, tickets, Plan, check-in, rides), the card does not have that action, the target is ambiguous or no shown card matches. The reply says which actions are supported, or asks "first", "second" or "third" with matching refinements.
+- No proposal when the request is unsupported (order, pay, call, tickets, check-in, rides), the card does not have that action, the target is ambiguous or no shown card matches. The reply says which actions are supported, or asks "first", "second" or "third" with matching refinements.
 - Clients must show an approval step before every action, including card buttons, and run at most one action per approval. A `book_table` handoff may record `places.bookingTap` with `surface: concierge`.
+
+## Plans and arrival (Phase 7)
+
+- `add_to_plan` is on every card. "Add the second one to my Plan" or "put Real Coffee on our plan" proposes it for one shown card. The reply says the place is added as a reference, not a booking.
+- Approval on the client is the existing Add to Plan sheet: the guest chooses one of their editable Plans or a new Plan and confirms. The write is the existing `plans.attach` reference (`capability: details`, with `placeId` for Google places). Nothing is requested, reserved or paid for.
+- `plans.attach` with a `placeId` and no supply looks up the place server-side (Google Place Details, location fields only, 2.5 s limit) before the write transaction, and stores name, address and point on the item (`place_*` columns, migration `20261023_plan_item_place_destination`). The client never supplies the point. A failed lookup stores nothing and the item has no destination.
+- `destination` on a Plan item falls back to that snapshot for 30 days after the lookup; supply destinations keep precedence. The Plan's "Get there" Uber and Lyft links then work for the item.
+- Ride requests ("get me an Uber there") never propose anything. The reply says Concierge cannot book a ride, that a Plan shows Uber and Lyft links for its stops, and offers "Add the … one to my Plan" refinements.
+- After the add, the client offers arrival help for that stop: Apple Maps directions and the Plan's Uber or Lyft links, leaving from the previous Plan stop with a destination, each behind its own approval.
 
 ## Deliberately deferred
 

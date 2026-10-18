@@ -128,11 +128,37 @@ export interface DiscoverablePartyFacts extends PartyFacts {
   templateId: string;
   locationDisclosure: string;
   shareLinkExpiresAt: Date | null;
+  /** Host opt-in for an approval door. Absent reads as not opted in. */
+  showOnDiscover?: boolean;
 }
 
 /** Access modes a stranger may be shown. Anything else is a door that needs
  * a person, so the party is not offered to someone who has not been let in. */
 const DISCOVERABLE_ACCESS_MODES = ['free-rsvp', 'paid-ticket'];
+
+/** The one door a host may opt onto Discover with its location withheld. */
+export const APPROVAL_ACCESS_MODE = 'private-approval';
+
+export type DiscoverDoor = 'open' | 'approval';
+
+export function discoverDoor(party: { accessMode: string }): DiscoverDoor {
+  return party.accessMode === APPROVAL_ACCESS_MODE ? 'approval' : 'open';
+}
+
+/**
+ * Opt-in for surfaces that withhold location. Only `events.nearby` passes it:
+ * every other caller places a party on a map or into a Plan, and an approval
+ * door's location must never reach either.
+ */
+export interface DiscoveryScope {
+  approvalOptIn?: boolean;
+}
+
+const OPEN_DOOR_WHERE = {
+  accessMode: { in: DISCOVERABLE_ACCESS_MODES },
+  templateId: { not: 'private-party' },
+  locationDisclosure: 'public',
+};
 
 /**
  * The database half of the same rule `filterDiscoverableParties` enforces.
@@ -143,21 +169,23 @@ const DISCOVERABLE_ACCESS_MODES = ['free-rsvp', 'paid-ticket'];
  * between them. A party hidden by reports, hosted by a suspended account, or
  * hosted by someone the caller blocked or was blocked by is never offered.
  */
-export function discoverablePartyWhere(now: Date, excludedHostIds: readonly string[] = []) {
-  return {
+export function discoverablePartyWhere(now: Date, excludedHostIds: readonly string[] = [], scope: DiscoveryScope = {}) {
+  const base = {
     status: 'published',
     moderationHiddenAt: null,
     host: { suspendedAt: null },
     ...(excludedHostIds.length > 0 ? { hostUserId: { notIn: [...excludedHostIds] } } : {}),
     closedAt: null,
     admissionPaused: false,
-    accessMode: { in: DISCOVERABLE_ACCESS_MODES },
-    templateId: { not: 'private-party' },
-    locationDisclosure: 'public',
-    AND: [
-      { OR: [{ endsAt: { gt: now } }, { endsAt: null, startsAt: { gt: new Date(now.getTime() - 6 * 60 * 60 * 1000) } }] },
-      { OR: [{ shareLinkExpiresAt: null }, { shareLinkExpiresAt: { gt: now } }] },
-    ],
+  };
+  const window = [
+    { OR: [{ endsAt: { gt: now } }, { endsAt: null, startsAt: { gt: new Date(now.getTime() - 6 * 60 * 60 * 1000) } }] },
+    { OR: [{ shareLinkExpiresAt: null }, { shareLinkExpiresAt: { gt: now } }] },
+  ];
+  if (!scope.approvalOptIn) return { ...base, ...OPEN_DOOR_WHERE, AND: window };
+  return {
+    ...base,
+    AND: [...window, { OR: [OPEN_DOOR_WHERE, { accessMode: APPROVAL_ACCESS_MODE, showOnDiscover: true }] }],
   };
 }
 
@@ -197,19 +225,25 @@ export function discoveredPartyCandidate(
  * that loaded it. A host's private party must not become findable because one
  * call site forgot a clause.
  */
-export function filterDiscoverableParties(
-  parties: DiscoverablePartyFacts[],
-  ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string>; now: Date },
-): DiscoverablePartyFacts[] {
+export function filterDiscoverableParties<T extends DiscoverablePartyFacts>(
+  parties: T[],
+  ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string>; now: Date } & DiscoveryScope,
+): T[] {
   return parties.filter((p) => {
     if (ctx.attachedPartyIds.has(p.id)) return false;
     if (p.status !== 'published' || p.closedAt !== null || p.admissionPaused) return false;
     // A private template, a door that needs approval, or an address withheld
     // until approval all mean the host chose who comes. Discovery is not an
-    // invitation, so none of them are offered.
-    if (p.templateId === 'private-party') return false;
-    if (p.locationDisclosure !== 'public') return false;
-    if (!DISCOVERABLE_ACCESS_MODES.includes(p.accessMode)) return false;
+    // invitation, so none of them are offered — unless the host opted an
+    // approval door in and the caller withholds its location.
+    const optedInApproval = ctx.approvalOptIn === true
+      && p.accessMode === APPROVAL_ACCESS_MODE
+      && p.showOnDiscover === true;
+    if (!optedInApproval) {
+      if (p.templateId === 'private-party') return false;
+      if (p.locationDisclosure !== 'public') return false;
+      if (!DISCOVERABLE_ACCESS_MODES.includes(p.accessMode)) return false;
+    }
     // An expired share link is indistinguishable from a deleted party, and
     // discovery must not be the one surface that reveals it.
     if (p.shareLinkExpiresAt !== null && ctx.now >= p.shareLinkExpiresAt) return false;

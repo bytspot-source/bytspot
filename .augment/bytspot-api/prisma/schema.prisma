@@ -91,6 +91,9 @@ model User {
   mapReports            MapReport[]           @relation("mapReporter")
   mapReportVotes        MapReportVote[]       @relation("mapReportVoter")
   mapReportRelayKeys    MapReportRelayKey[]
+  notificationSends     NotificationSend[]
+  feedback              Feedback[]
+  feedbackDismissals    FeedbackDismissal[]
 
   @@map("users")
 }
@@ -116,6 +119,21 @@ model IOSPushDevice {
 
   @@index([userId, invalidatedAt])
   @@map("ios_push_devices")
+}
+
+/// One row per push that must reach a member at most once. A scheduled job
+/// claims the key before sending, so overlapping runs cannot double-send.
+model NotificationSend {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  dedupeKey String   @map("dedupe_key")
+  sentAt    DateTime @default(now()) @map("sent_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([sentAt])
+  @@map("notification_sends")
 }
 
 // ─── Provider identities ─────────────────────────────
@@ -337,6 +355,9 @@ model Party {
   /// Set while reports hold it for review, and kept when an admin removes it.
   /// Hidden from everyone who doesn't already hold access.
   moderationHiddenAt     DateTime? @map("moderation_hidden_at")
+  /// Host opt-in for an approval-only door to appear on Discover, with its
+  /// location withheld. Ignored for open doors, which are always discoverable.
+  showOnDiscover         Boolean   @default(false) @map("show_on_discover")
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
@@ -961,6 +982,40 @@ model Review {
   @@unique([userId, venueId])
   @@index([venueId, createdAt(sort: Desc)])
   @@map("reviews")
+}
+
+// ─── Feedback ────────────────────────────────────────
+/// A member's private rating of something they attended. Hosts only ever read
+/// the count and average; notes and identities stay with Bytspot.
+model Feedback {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  targetKind String   @map("target_kind") // party | plan | venue
+  targetId   String   @map("target_id")
+  rating     Int // 1-5
+  tags       String[] @default([])
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, targetKind, targetId])
+  @@index([targetKind, targetId])
+  @@map("feedback")
+}
+
+/// "Not now" on a feedback prompt. Keeps the target out of `pending` for good.
+model FeedbackDismissal {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  targetKind String   @map("target_kind")
+  targetId   String   @map("target_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, targetKind, targetId])
+  @@map("feedback_dismissals")
 }
 
 // ─── Plan (control plane) ─────────────────────────────

@@ -6,6 +6,7 @@ import { runCrowdAlerts } from '../services/crowdAlerts';
 import { runCrowdSimulation } from '../services/crowdSimulator';
 import { purgeExpiredAccounts } from '../services/accountDeletion';
 import { purgeAbandonedPartyDrafts } from '../services/abandonedDrafts';
+import { sendUpcomingReminders } from '../services/scheduledPushes';
 
 const router = Router();
 
@@ -102,6 +103,26 @@ router.post('/cron/purge-party-drafts', async (req, res) => {
   } catch (err) {
     console.error('[cron/purge-party-drafts] error:', err);
     captureError(err, { job: 'purge-party-drafts' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * POST /cron/reminders
+ * Reminders as a Party or Plan approaches, and the feedback prompt after it
+ * ends. Safe to repeat: every send is claimed once per member.
+ */
+router.post('/cron/reminders', async (req, res) => {
+  if (!verifyCronSecret(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  try {
+    const result = await sendUpcomingReminders(new Date());
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[cron/reminders] error:', err);
+    captureError(err, { job: 'reminders' });
     res.status(500).json({ error: 'Internal error' });
   }
 });

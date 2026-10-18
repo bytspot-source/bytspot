@@ -80,6 +80,7 @@ import { issueRefreshToken, revokeFamily, rotateRefreshToken, signOutEverywhere,
 import { userRouter } from './userRouter';
 import { socialRouter } from './socialRouter';
 import { reviewsRouter } from './reviewsRouter';
+import { feedbackRouter } from './feedbackRouter';
 import { eventsRouter, mapTmEvent } from './eventsRouter';
 import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH_FIELDS } from './placesRouter';
 import { mobilityRouter } from './mobilityRouter';
@@ -1774,6 +1775,7 @@ export const appRouter = router({
   user: userRouter,
   social: socialRouter,
   reviews: reviewsRouter,
+  feedback: feedbackRouter,
   events: eventsRouter,
   places: placesRouter,
   mobility: mobilityRouter,

@@ -236,7 +236,7 @@ async function refund(
     category: 'reservations',
     title: 'You were refunded',
     body: `${reason} Your payment is on its way back.`,
-    url: '/requests',
+    url: 'https://bytspot.app/requests',
     type: 'offer-refunded',
   }).catch((err: any) => console.error('[offer-checkout] refund notice failed:', err?.message));
   return 'refunded';

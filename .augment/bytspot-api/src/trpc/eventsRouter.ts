@@ -9,7 +9,8 @@ import { partyLineupRouter } from './partyLineupRouter';
 import { partySessionAuthoringRouter } from './partySessionAuthoringRouter';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
-import { discoverablePartyWhere, filterDiscoverableParties, partySessionPriceFloors, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { discoverablePartyWhere, discoverDoor, filterDiscoverableParties, partySessionPriceFloors, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { hostDiscoveryTags } from '../services/hostTaxonomy';
 import { capabilityForAccessMode } from '../services/bookableProjection';
 import { distanceMeters } from '../services/checkinProof';
 import { boundingBoxWhere } from '../services/geoBox';
@@ -133,7 +134,9 @@ export const eventsRouter = router({
         db.socialCircleMember.findMany({ where: { userId: ctx.user.userId }, select: { circleId: true } }),
         blockedUserIds(ctx.user.userId),
       ]);
-      const gate = discoverablePartyWhere(now, [...blocked]);
+      // Approval doors the host opted in are answered with their location
+      // withheld; the stored point still decides the radius, server-side.
+      const gate = discoverablePartyWhere(now, [...blocked], { approvalOptIn: true });
       const userTier = user?.membershipTier ?? '';
       const userCircleIds = circles.map((m) => m.circleId);
       const allowedTiers = Object.keys(membershipTierRank).filter((tier) => meetsRequiredMembershipTier(userTier, tier));
@@ -157,7 +160,8 @@ export const eventsRouter = router({
       // reaching it truncates the answer rather than corrupting it.
       const PAGE_SIZE = 200;
       const MAX_PAGES = 5;
-      const kept: { party: DiscoverablePartyFacts & { venueName: string }; distanceMiles: number }[] = [];
+      type NearbyFacts = DiscoverablePartyFacts & { venueName: string; templateConfig: unknown };
+      const kept: { party: NearbyFacts; distanceMiles: number }[] = [];
       let cursor: string | undefined;
       for (let page = 0; page < MAX_PAGES && kept.length < input.limit; page += 1) {
         const batch = await db.party.findMany({
@@ -166,8 +170,8 @@ export const eventsRouter = router({
             id: true, title: true, capacity: true, status: true, admissionPaused: true,
             closedAt: true, endsAt: true, startsAt: true, accessMode: true,
             requiredMembershipTier: true, audienceCircleIds: true,
-            templateId: true, locationDisclosure: true, shareLinkExpiresAt: true,
-            venueName: true, lat: true, lng: true,
+            templateId: true, templateConfig: true, locationDisclosure: true, shareLinkExpiresAt: true,
+            showOnDiscover: true, venueName: true, lat: true, lng: true,
             arrivalVenue: { select: { lat: true, lng: true } },
           },
           orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
@@ -176,7 +180,7 @@ export const eventsRouter = router({
         });
         if (batch.length === 0) break;
         cursor = batch[batch.length - 1].id;
-        const facts: (DiscoverablePartyFacts & { venueName: string })[] = batch.map((p) => ({
+        const facts: NearbyFacts[] = batch.map((p) => ({
           id: p.id, title: p.title, capacity: p.capacity, status: p.status,
           admissionPaused: p.admissionPaused, closedAt: p.closedAt, endsAt: p.endsAt,
           startsAt: p.startsAt, accessMode: p.accessMode,
@@ -185,16 +189,19 @@ export const eventsRouter = router({
           templateId: p.templateId,
           locationDisclosure: p.locationDisclosure,
           shareLinkExpiresAt: p.shareLinkExpiresAt,
+          showOnDiscover: p.showOnDiscover,
           latitude: p.lat ?? p.arrivalVenue?.lat ?? null,
           longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
           venueName: p.venueName,
+          templateConfig: p.templateConfig,
         }));
         const eligible = filterDiscoverableParties(facts, {
           userTier,
           userCircleIds: new Set(userCircleIds),
           attachedPartyIds: new Set<string>(),
           now,
-        }) as (DiscoverablePartyFacts & { venueName: string })[];
+          approvalOptIn: true,
+        });
         for (const party of eligible) {
           const distance = partyDistanceMiles(input.lat, input.lng, party.latitude, party.longitude);
           if (distance !== null && distance <= input.radiusMiles) kept.push({ party, distanceMiles: distance });
@@ -219,30 +226,41 @@ export const eventsRouter = router({
         : [];
       const coverMap = new Map(covers.map((media) => [media.partyId, partyMediaUrl(media.id)]));
       const parties = answering
-        .map(({ party, distanceMiles: distance }) => ({
-          id: party.id,
-          title: party.title,
-          venueName: party.venueName,
-          startsAt: party.startsAt.toISOString(),
-          endsAt: party.endsAt?.toISOString() ?? null,
-          accessMode: party.accessMode,
-          capability: capabilityForAccessMode(party.accessMode),
-          requiredMembershipTier: party.requiredMembershipTier,
-          latitude: party.latitude,
-          longitude: party.longitude,
-          distanceMiles: Math.round(distance * 10) / 10,
-          // Seats are live occupancy, never Typical. A party whose capacity
-          // is already met still shows, so a guest is not told a party does
-          // not exist when it is simply full.
-          capacity: party.capacity,
-          spacesRemaining: Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
-          // A free door says nothing about what bottles cost, so the card
-          // carries the floor rather than letting the access mode imply it.
-          // The terms travel with the number: a `minimum` floor is not a
-          // price a guest can pay, and the card has to say bottles are extra.
-          sessionsFrom: sessionFloors.get(party.id) ?? null,
-          coverURL: coverMap.get(party.id) ?? null,
-        }));
+        .map(({ party, distanceMiles: distance }) => {
+          const door = discoverDoor(party);
+          // An approval door's place is the host's to reveal after approval,
+          // so no coordinate, venue, or distance that could triangulate it.
+          const locationHidden = door === 'approval';
+          const { hostCategory, hostType } = hostDiscoveryTags(party.templateConfig);
+          return {
+            id: party.id,
+            title: party.title,
+            venueName: locationHidden ? null : party.venueName,
+            startsAt: party.startsAt.toISOString(),
+            endsAt: party.endsAt?.toISOString() ?? null,
+            accessMode: party.accessMode,
+            capability: capabilityForAccessMode(party.accessMode),
+            door,
+            locationHidden,
+            hostCategory: hostCategory ?? null,
+            hostType: hostType ?? null,
+            requiredMembershipTier: party.requiredMembershipTier,
+            latitude: locationHidden ? null : party.latitude,
+            longitude: locationHidden ? null : party.longitude,
+            distanceMiles: locationHidden ? null : Math.round(distance * 10) / 10,
+            // Seats are live occupancy, never Typical. A party whose capacity
+            // is already met still shows, so a guest is not told a party does
+            // not exist when it is simply full.
+            capacity: party.capacity,
+            spacesRemaining: Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
+            // A free door says nothing about what bottles cost, so the card
+            // carries the floor rather than letting the access mode imply it.
+            // The terms travel with the number: a `minimum` floor is not a
+            // price a guest can pay, and the card has to say bottles are extra.
+            sessionsFrom: sessionFloors.get(party.id) ?? null,
+            coverURL: coverMap.get(party.id) ?? null,
+          };
+        });
       return { parties };
     }),
 

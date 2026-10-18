@@ -6,6 +6,7 @@ import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 import { sequenceForAppend } from '../services/planLegs';
 import { newPassCode } from './bookings';
+import { dispatchPlanItemAdded } from '../services/planAlerts';
 
 /**
  * Taking an offer.
@@ -121,7 +122,9 @@ export async function acceptOffer(input: {
   // tombstones it. Postgres only detects that pair when both sides are
   // serializable, so a Read Committed accept would let a delete decide there
   // was nothing to protect and strand a table the seller had committed.
-  return serializableTransactionWithRetry(async (tx) => {
+  let filedPlanId: string | null = null;
+  const accepted = await serializableTransactionWithRetry(async (tx) => {
+    filedPlanId = null;
     // Take the demand row first, before any capacity or offer row is touched.
     //
     // Two guests cannot accept the same demand, but two *offers* on one demand
@@ -256,6 +259,7 @@ export async function acceptOffer(input: {
             position: sequence.position,
           },
         });
+        filedPlanId = plan.id;
       }
     }
 
@@ -278,4 +282,6 @@ export async function acceptOffer(input: {
       terms: offer.terms ?? undefined,
     };
   }, 'Another change to this booking is in flight. Try again.');
+  if (filedPlanId) dispatchPlanItemAdded({ planId: filedPlanId, actorUserId: input.userId, itemTitles: [offer.location.label] });
+  return accepted;
 }

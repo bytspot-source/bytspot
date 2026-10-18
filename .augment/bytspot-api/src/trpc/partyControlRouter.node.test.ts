@@ -14,10 +14,11 @@ const guestContext: Context = { user: { userId: 'guest-user', email: 'guest@byts
 const credential = 'A'.repeat(43);
 const idempotencyKey = '00000000-0000-4000-8000-000000000011';
 const partyEndsAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
-const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null, closedAt: null, passCode: 'BYT-EXISTING' };
+const publishedParty = { id: 'party-1', hostUserId: 'host-user', status: 'published', title: 'First Listen', capacity: 80, admissionPaused: false, accessMode: 'free-rsvp', showOnDiscover: false, startsAt: new Date(Date.now() + 60 * 60 * 1000), endsAt: partyEndsAt, shareLinkExpiresAt: null, closedAt: null, passCode: 'BYT-EXISTING' };
 const party = db.party as any;
 const partyGuest = db.partyGuest as any;
 const user = db.user as any;
+const feedback = db.feedback as any;
 const prisma = db as any;
 
 function caller(context = hostContext) {
@@ -39,6 +40,7 @@ beforeEach(() => {
   partyGuest.updateMany = async () => ({ count: 1 });
   partyGuest.upsert = async ({ create }: any) => ({ id: 'guest-1', ...create });
   user.findUnique = async () => ({ membershipTier: 'green' });
+  feedback.aggregate = async () => ({ _avg: { rating: null }, _count: { _all: 0 } });
   prisma.$transaction = async (callback: any) => callback({ party, partyGuest });
 });
 
@@ -227,6 +229,7 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
     capacity: 80, confirmed: 41, spacesRemaining: 39, pending: 6, checkedIn: 12,
     shareUrl: 'https://bytspot.app/party/party-1', passCode: 'BYT-EXISTING',
     shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true, closedAt: null,
+    door: 'open', showOnDiscover: true, feedback: { count: 0, average: null },
   });
 
   // Missing pass codes stay null — Control retrieves the issued code, it never mints a new one.
@@ -234,6 +237,36 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
   const withoutCode = await caller().events.control.summary({ partyId: 'party-1' });
   assert.equal(withoutCode.shareUrl, 'https://bytspot.app/party/party-1');
   assert.equal(withoutCode.passCode, null);
+});
+
+test('Summary carries the Discover listing and only the feedback count and average', async () => {
+  party.findFirst = async () => ({ ...publishedParty, accessMode: 'private-approval', showOnDiscover: false });
+  let asked: any;
+  feedback.aggregate = async (args: any) => { asked = args; return { _avg: { rating: 4.333 }, _count: { _all: 3 } }; };
+  const summary = await caller().events.control.summary({ partyId: 'party-1' });
+  assert.equal(summary.door, 'approval');
+  assert.equal(summary.showOnDiscover, false);
+  assert.deepEqual(summary.feedback, { count: 3, average: 4.3 });
+  // An aggregate, never rows: no note or member identity can reach the host.
+  assert.deepEqual(Object.keys(asked).sort(), ['_avg', '_count', 'where']);
+  assert.deepEqual(asked.where, { targetKind: 'party', targetId: 'party-1', user: { suspendedAt: null } });
+});
+
+test('setShowOnDiscover is host-only and only means something for an approval door', async () => {
+  const publicCaller = createCaller({ user: null, clientRateLimitKey: 'test-control-anon' });
+  await assert.rejects(() => publicCaller.events.control.setShowOnDiscover({ partyId: 'party-1', show: true }), { code: 'UNAUTHORIZED' });
+  party.findFirst = async ({ where }: any) => where.hostUserId === 'host-user' ? { ...publishedParty, accessMode: 'private-approval' } : null;
+  await assert.rejects(() => caller(guestContext).events.control.setShowOnDiscover({ partyId: 'party-1', show: true }), { code: 'NOT_FOUND' });
+
+  let written: any;
+  party.updateMany = async (args: any) => { written = args; return { count: 1 }; };
+  assert.deepEqual(await caller().events.control.setShowOnDiscover({ partyId: 'party-1', show: true }), { partyId: 'party-1', showOnDiscover: true });
+  assert.deepEqual(written.data, { showOnDiscover: true });
+  assert.equal(written.where.hostUserId, 'host-user');
+  assert.equal(written.where.accessMode, 'private-approval');
+
+  party.findFirst = async () => publishedParty;
+  await assert.rejects(() => caller().events.control.setShowOnDiscover({ partyId: 'party-1', show: true }), { code: 'BAD_REQUEST' });
 });
 
 test('Guest list projects person fields and infers source from ticket tier', async () => {

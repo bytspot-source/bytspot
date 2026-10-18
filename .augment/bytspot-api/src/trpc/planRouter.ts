@@ -16,6 +16,7 @@ import { planFeasibility } from '../services/planFeasibility';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 import { resolvePlaceLocation } from './placesRouter';
+import { dispatchPlanItemAdded } from '../services/planAlerts';
 
 /**
  * Plan — the control plane.
@@ -589,6 +590,7 @@ async function insertBookableSelections(client: TxClient, planId: string,
   supplies: Awaited<ReturnType<typeof resolveBookableSelections>>,
   existing: LoadedPlan['items'] = []) {
   const ids: string[] = [];
+  const addedTitles: string[] = [];
   // Append after whatever the Plan already holds. Reusing an existing item
   // leaves the count alone, so a retry cannot walk the order forward.
   //
@@ -614,8 +616,9 @@ async function insertBookableSelections(client: TxClient, planId: string,
       planId, ...supply, bookableId: snapshot.id, status: 'available', position: position++,
     } });
     ids.push(item.id);
+    addedTitles.push(supply.title);
   }
-  return { ids };
+  return { ids, addedTitles };
 }
 
 export const planRouter = router({
@@ -719,12 +722,16 @@ export const planRouter = router({
   addBookables: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-add-bookables' }))
     .input(z.object({ planId: z.string().min(1), bookableSelections: bookableSelectionsInput }).strict())
-    .mutation(async ({ ctx, input }) => serializableTransactionWithRetry(async (tx) => {
-      const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
-      assertPlanMutable(plan, new Date());
-      const supplies = await resolveBookableSelections(tx, ctx.user.userId, input.bookableSelections, new Date());
-      return insertBookableSelections(tx, plan.id, supplies, plan.items);
-    }, 'Another change to this Plan is in flight. Retry the same selections.')),
+    .mutation(async ({ ctx, input }) => {
+      const { ids, addedTitles } = await serializableTransactionWithRetry(async (tx) => {
+        const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
+        assertPlanMutable(plan, new Date());
+        const supplies = await resolveBookableSelections(tx, ctx.user.userId, input.bookableSelections, new Date());
+        return insertBookableSelections(tx, plan.id, supplies, plan.items);
+      }, 'Another change to this Plan is in flight. Retry the same selections.');
+      dispatchPlanItemAdded({ planId: input.planId, actorUserId: ctx.user.userId, itemTitles: addedTitles });
+      return { ids };
+    }),
 
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 12, label: 'plan-create' }))
@@ -1291,7 +1298,9 @@ export const planRouter = router({
       // Resolved before the write transaction, so a slow Google call never holds it open.
       const place = input.placeId && !input.partyId && !input.supplyRef ? await placeLocationResolver(input.placeId) : null;
       const placeResolvedAt = place ? new Date() : null;
-      return serializableTransactionWithRetry(async (tx) => {
+      let addedTitle: string | null = null;
+      const attached = await serializableTransactionWithRetry(async (tx) => {
+      addedTitle = null;
       const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
       assertPlanMutable(plan, new Date());
       if (input.partyId && input.supplyRef?.partyId && input.partyId !== input.supplyRef.partyId) {
@@ -1355,8 +1364,11 @@ export const planRouter = router({
         placeLat: place?.lat ?? null, placeLng: place?.lng ?? null, placeResolvedAt,
         position: attachSequence.position,
       } });
+      addedTitle = supply.title;
       return { id: item.id, capability: item.capability, status: item.status };
     }, 'Another supply change is in flight, or this reservation is already attached. Retry the same request.');
+      if (addedTitle) dispatchPlanItemAdded({ planId: input.planId, actorUserId: ctx.user.userId, itemTitles: [addedTitle] });
+      return attached;
     }),
 
   /**

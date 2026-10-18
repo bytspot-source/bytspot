@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { config } from '../config';
-import { verifyCronSecret } from './cron';
+import cronRouter, { verifyCronSecret } from './cron';
 
 const req = (authorization?: string) => ({ headers: authorization ? { authorization } : {} });
 
@@ -31,4 +31,14 @@ test('A configured cron secret admits only the exact token', () => {
   } finally {
     (config as { cronSecret: string }).cronSecret = original;
   }
+});
+
+test('The reminders endpoint is mounted behind the cron secret', async () => {
+  const layer = (cronRouter as any).stack.find((l: any) => l.route?.path === '/cron/reminders');
+  assert.ok(layer, 'expected POST /cron/reminders');
+  assert.equal(layer.route.methods.post, true);
+  let status = 0;
+  const res = { status(code: number) { status = code; return this; }, json() { return this; } };
+  await layer.route.stack[0].handle(req(), res);
+  assert.equal(status, 401);
 });

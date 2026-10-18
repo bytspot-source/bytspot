@@ -173,3 +173,37 @@ services:
       - key: SENTRY_DSN
         sync: false
 
+  # ─── Reminders: a Party or Plan approaching, and the feedback prompt after ─
+  # Each push is claimed once per member, so an overlapping or retried run
+  # sends nothing twice. This job sends push, so it needs the APNs settings
+  # and the same .p8 Secret File mounted at APNS_KEY_PATH as the API.
+  - type: cron
+    name: bytspot-reminders
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    schedule: "*/5 * * * *"
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: node dist/scripts/sendReminders.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BYTSPOT_RUNTIME
+        value: job
+      - key: DATABASE_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: APNS_KEY_ID
+        sync: false
+      - key: APNS_TEAM_ID
+        sync: false
+      - key: APNS_KEY_PATH
+        sync: false
+      - key: APNS_BUNDLE_ID
+        sync: false
+      - key: APNS_ENVIRONMENT
+        sync: false
+

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { config } from '../config';
+import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
@@ -24,9 +26,91 @@ function service(over: Partial<ConciergeDependencies> = {}) {
   return createConciergeDiscovery({ venues: async () => [], places: async () => ({ places: [], source: 'google' }), ...over });
 }
 
+function menuMatch(over: Partial<MenuEvidenceResult['evidence']> = {}): MenuEvidenceResult {
+  const now = new Date(), reviewed = new Date(now.getTime() - 1000);
+  return { venue: venue({ name: 'Reviewed Kitchen', category: 'restaurant', lat: 40.01 }), evidence: {
+    dishId: 'dish-one', revision: '1792240000000', dishName: 'Dumplings', source: 'vendor_menu', mediaId: 'menu-one',
+    sourceUrl: `${config.publicApiUrl}/media/menu-evidence/dish-one/1792240000000`,
+    reviewedAt: reviewed.toISOString(), expiresAt: new Date(reviewed.getTime() + MENU_REVIEW_MS).toISOString(), retrievedAt: now.toISOString(), ...over,
+  } };
+}
+
+test('reviewed menu search finds a canonically bound venue even without name or provider matches', async () => {
+  const match = menuMatch();
+  const result = await service({ menuEvidence: async () => [match] })(input('dumplings nearby'));
+  assert.equal(result.status, 'ready');
+  assert.equal(result.cards[0].id, match.venue.id);
+  assert.equal(result.cards[0].source, 'bytspot');
+  assert.equal(result.cards[0].capability, 'details');
+  assert.deepEqual(result.cards[0].menuEvidence, [match.evidence]);
+  assert.equal(result.cards[0].rating, null);
+  assert.equal(result.cards[0].isOpen, null);
+  assert.equal(result.cards[0].websiteUrl, null);
+  assert.match(result.reply, /does not guarantee current availability, dish quality or dietary safety/);
+});
+
+test('reviewed evidence ranks ahead of unconfirmed nearby listings without transferring evidence by proximity', async () => {
+  const result = await service({ menuEvidence: async () => [menuMatch()],
+    places: async () => ({ source: 'google', places: [place({ placeId: 'different-place', name: 'Different Kitchen', primaryType: 'restaurant' })] }),
+  })(input('dumplings'));
+  assert.equal(result.cards.length, 2);
+  assert.equal(result.cards[0].id, 'real-venue');
+  assert.equal(result.cards[0].menuEvidence.length, 1);
+  assert.equal(result.cards[1].menuEvidence.length, 0);
+});
+
+test('zero vendors and unavailable menus do not block honest Google discovery or website handoffs', async () => {
+  for (const failed of [false, true]) {
+    const result = await service({ menuEvidence: async () => { if (failed) throw new Error('private database detail'); return []; },
+      places: async () => ({ source: 'google', places: [place({ primaryType: 'restaurant', websiteUri: 'https://restaurant.example.com/menu' })] }),
+    })(input('dumplings'));
+    assert.equal(result.status, 'ready');
+    assert.deepEqual(result.cards[0].menuEvidence, []);
+    assert.equal(result.cards[0].websiteUrl, 'https://restaurant.example.com/menu');
+    assert.match(result.reply, /not confirmed dish matches/);
+    assert.doesNotMatch(result.reply, /private database detail/);
+    if (failed) assert.match(result.reply, /Reviewed-menu lookup is unavailable/);
+  }
+});
+
+test('stale, forged, misplaced or malformed menu evidence never produces an authority claim', async () => {
+  for (const match of [menuMatch({ expiresAt: new Date(Date.now() - 1).toISOString() }),
+    menuMatch({ retrievedAt: new Date(Date.now() + 60000).toISOString() }),
+    menuMatch({ sourceUrl: 'https://attacker.example.com/menu' }),
+    menuMatch({ sourceUrl: `${config.publicApiUrl}/media/vendor/menu-one` }),
+    { ...menuMatch(), venue: venue({ category: 'park' }) },
+  ]) {
+    const result = await service({ menuEvidence: async () => [match] })(input('dumplings'));
+    assert.deepEqual(result.cards, []);
+  }
+  const duplicate = menuMatch();
+  const result = await service({ menuEvidence: async () => [duplicate, duplicate] })(input('dumplings'));
+  assert.equal(result.cards[0].menuEvidence.length, 1);
+});
+
+test('hidden canonical IDs and open-now requirements apply equally to menu matches', async () => {
+  const result = await service({ menuEvidence: async () => [menuMatch()],
+    places: async () => ({ source: 'google', places: [place()] }),
+    reconcile: async () => ({ venues: [], hiddenPlaceIds: ['real-google'] }),
+  })(input('dumplings'));
+  assert.deepEqual(result.cards, []);
+  const closed = await service({ menuEvidence: async () => [menuMatch()] })(input('dumplings open now'));
+  assert.deepEqual(closed.cards, []);
+});
+
+test('website handoffs reject unsafe URLs and cached websites do not appear as fresh sources', async () => {
+  for (const websiteUri of ['http://restaurant.example.com', 'https://localhost/menu', 'https://127.0.0.1',
+    'https://user:pass@restaurant.example.com', 'javascript:alert(1)', 'https://restaurant.example.com\\n', 'https://private.internal/menu']) {
+    const result = await service({ places: async () => ({ source: 'google', places: [place({ websiteUri })] }) })(input('coffee'));
+    assert.equal(result.cards[0].websiteUrl, null);
+  }
+  const stale = await service({ places: async () => ({ source: 'google-stale', places: [place({ websiteUri: 'https://restaurant.example.com' })] }) })(input('coffee'));
+  assert.equal(stale.cards[0].websiteUrl, null);
+});
+
 test('missing location does not call any discovery dependency', async () => {
   const never = async (): Promise<never> => { assert.fail('Must not call a provider or database'); };
-  const discover = service({ venues: never, places: never, plan: never });
+  const discover = service({ venues: never, places: never, plan: never, menuEvidence: never });
   const response = await discover({ messages: [{ role: 'user', content: 'coffee' }] });
   assert.equal(response.status, 'needs_location');
   assert.deepEqual(response.cards, []);
@@ -221,7 +305,7 @@ test('ordinary dishes, free text and functional starters work without a planner'
     } })(input(text));
     assert.equal(searches, 1, text);
     assert.equal(response.status, 'ready');
-    if (/dumplings|khachapuri/.test(text)) assert.match(response.reply, /Menus, dish quality/);
+    if (/dumplings|khachapuri/.test(text)) assert.match(response.reply, /No reviewed menu match was confirmed/);
     if (/plan/.test(text)) assert.match(response.reply, /first stop.*cannot build a multi-stop plan/);
     assert.deepEqual(response.refinements, ['Closer', 'Coffee nearby', 'Restaurants nearby']);
   }
@@ -251,7 +335,7 @@ test('one structured planner call can classify a dish but never creates evidence
   assert.equal(response.cards[0].rail, 'eat_drink');
   assert.equal(response.cards[0].id, 'gp:real-google');
   assert.equal(response.cards[0].capability, 'details');
-  assert.match(response.reply, /Menus, dish quality/); // Model cannot remove this caveat.
+  assert.match(response.reply, /Dish quality and dietary suitability are not verified/); // Model cannot remove this caveat.
 });
 
 test('invalid model plans fall back whole: no URLs, result text, IDs, coordinates or lost constraints', async () => {
@@ -408,7 +492,7 @@ test('planner timeout aborts and falls back once without losing constraints or e
     const result = await service({ plan })(input('Find dumplings near me'));
     assert.equal(result.status, 'empty');
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PROVIDER_ERROR/);
-    assert.match(result.reply, /Menus, dish quality/);
+    assert.match(result.reply, /Dish quality and dietary suitability are not verified/);
   }
 });
 

@@ -78,6 +78,7 @@ export function mediaDto(row: {
   byteSize: number;
   reviewStatus?: string;
   reviewNote?: string | null;
+  updatedAt?: Date;
 }): MediaDto {
   return {
     id: row.id,
@@ -85,7 +86,9 @@ export function mediaDto(row: {
     position: row.position,
     mimeType: row.mimeType,
     byteSize: row.byteSize,
-    url: mediaUrl(row.id),
+    url: row.kind === 'menu' && row.updatedAt
+      ? `${config.publicApiUrl}/media/menu-source/${encodeURIComponent(row.id)}/${row.updatedAt.getTime()}`
+      : mediaUrl(row.id),
     ...(row.reviewStatus !== undefined ? { reviewStatus: readReviewStatus(row.reviewStatus), reviewNote: row.reviewNote ?? null } : {}),
   };
 }

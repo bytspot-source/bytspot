@@ -29,6 +29,8 @@ import vendorSetupRouter from './routes/vendorSetup';   // vendor console sign-i
 import vendorPartySessionsRouter from './routes/vendorPartySessions';
 import vendorDemandRouter from './routes/vendorDemand';
 import vendorMediaRouter from './routes/vendorMedia';
+import vendorMenuDishesRouter from './routes/vendorMenuDishes';
+import menuEvidenceMediaRouter from './routes/menuEvidenceMedia';
 import adminVenueMediaRouter from './routes/adminVenueMedia';
 import vendorWindowsRouter from './routes/vendorWindows';
 import vendorTeamRouter from './routes/vendorTeam';
@@ -110,6 +112,8 @@ app.use(vendorSetupRouter);
 app.use(vendorDemandRouter);
 app.use(vendorPartySessionsRouter);
 app.use(vendorMediaRouter);
+app.use(vendorMenuDishesRouter);
+app.use(menuEvidenceMediaRouter);
 app.use(adminVenueMediaRouter);
 app.use(vendorWindowsRouter);
 app.use(vendorTeamRouter);

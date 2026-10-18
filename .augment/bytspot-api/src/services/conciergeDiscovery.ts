@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { isIP } from 'node:net';
+import { config } from '../config';
+import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import { distanceMeters, radiusForWalk, sameSpot, type RecommendPlace, type RecommendVenue } from './recommendations';
 import { DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 
@@ -17,6 +20,29 @@ export const conciergeDiscoverInput = z.object({
   }).strict().optional(),
 }).strict();
 
+/** A provider website is a handoff, never proof of a menu or a supported transaction. */
+export function conciergeWebsiteURL(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 2048 || /[\s\\\p{C}]/u.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || url.username || url.password || !host.includes('.') || isIP(host.replace(/^\[|\]$/g, ''))
+      || /(^|\.)(localhost|local|internal|test|invalid)$/.test(host) || url.port) return null;
+    return url.href;
+  } catch { return null; }
+}
+
+export const conciergeMenuEvidenceSchema = z.object({
+  dishId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), revision: z.string().regex(/^[1-9][0-9]{0,15}$/),
+  dishName: z.string().min(1).max(120), source: z.literal('vendor_menu'),
+  mediaId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), sourceUrl: z.string(),
+  reviewedAt: z.string().datetime(), expiresAt: z.string().datetime(), retrievedAt: z.string().datetime(),
+}).strict().refine((e) => {
+  const reviewed = Date.parse(e.reviewedAt), expires = Date.parse(e.expiresAt), retrieved = Date.parse(e.retrievedAt);
+  return reviewed <= retrieved && retrieved < expires && expires - reviewed <= MENU_REVIEW_MS
+    && e.sourceUrl === `${config.publicApiUrl.replace(/\/$/, '')}/media/menu-evidence/${e.dishId}/${e.revision}`;
+}, 'Evidence must reference the reviewed source revision');
+
 export const conciergeCardSchema = z.object({
   id: z.string().min(1), kind: z.enum(['venue', 'place']), placeId: z.string().nullable(),
   name: z.string().min(1), address: z.string(), lat: coordinateSchema.shape.lat, lng: coordinateSchema.shape.lng,
@@ -24,6 +50,8 @@ export const conciergeCardSchema = z.object({
   photoUrl: z.string().nullable(), crowd: z.null(), reasons: z.array(z.string()).max(3),
   capability: z.literal('details'), source: z.enum(['bytspot', 'google', 'google-stale']),
   rail: z.enum(DISCOVERY_RAILS),
+  websiteUrl: z.string().refine((url) => conciergeWebsiteURL(url) !== null).nullable().default(null),
+  menuEvidence: z.array(conciergeMenuEvidenceSchema).max(3).default([]),
 }).strict();
 export const conciergeDiscoverOutput = z.object({
   version: z.literal(1), reply: z.string(), status: z.enum(['ready', 'needs_location', 'unavailable', 'empty']),
@@ -60,6 +88,7 @@ export interface ConciergeDependencies {
   places(search: ConciergeSearch): Promise<PlacesOutcome>;
   reconcile?(places: RecommendPlace[]): Promise<{ venues: RecommendVenue[]; hiddenPlaceIds: string[] }>;
   plan?(context: ConciergePlanContext, options: { signal: AbortSignal }): Promise<unknown>;
+  menuEvidence?(search: ConciergeSearch): Promise<MenuEvidenceResult[]>;
 }
 
 type Intent = Pick<ConciergeSearch, 'query' | 'rail' | 'mode'>;
@@ -288,10 +317,19 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     });
     // At most one bounded planner call, then one bounded Google search. Failures are kept
     // separate from successful empty searches; neither source can invent cards.
-    const [venueResult, placeResult] = await Promise.allSettled([
+    const checksMenus = Boolean(dependencies.menuEvidence && search.mode === 'category'
+      && ['eat_drink', 'explore'].includes(search.rail));
+    const [venueResult, placeResult, menuResult] = await Promise.allSettled([
       withDeadline(Promise.resolve().then(() => dependencies.venues(search)), 3000),
       withDeadline(Promise.resolve().then(() => dependencies.places(search)), 9000),
+      checksMenus ? withDeadline(Promise.resolve().then(() => dependencies.menuEvidence!(search)), 3000) : Promise.resolve([]),
     ]);
+    const menuFailed = menuResult.status === 'rejected';
+    const menuRows = (menuResult.status === 'fulfilled' ? menuResult.value : []).filter((row) => {
+      const parsed = conciergeMenuEvidenceSchema.safeParse(row.evidence);
+      return parsed.success && discoveryRail(row.venue.category) === 'eat_drink'
+        && Date.parse(parsed.data.retrievedAt) <= Date.now() && Date.now() < Date.parse(parsed.data.expiresAt);
+    });
     const provider = placeResult.status === 'fulfilled' ? placeResult.value : { places: [], source: 'unavailable' as const };
     let failed = venueResult.status === 'rejected' || provider.source === 'none' || provider.source === 'unavailable';
     const stale = provider.source === 'google-stale';
@@ -309,7 +347,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
         failed = true;
       }
     }
-    const venues = [...(venueResult.status === 'fulfilled' ? venueResult.value : []), ...reconciled]
+    const venues = [...(venueResult.status === 'fulfilled' ? venueResult.value : []), ...reconciled, ...menuRows.map((row) => row.venue)]
       .filter((v) => !hidden.has(googleIdentity(v.googlePlaceId) ?? ''))
       .filter((v) => typeof v.id === 'string' && /^[A-Za-z0-9_-]{1,255}$/.test(v.id) && typeof v.name === 'string' && v.name.trim()
         && !matchesExclusions(v.name, v.category ?? '') && withinSearch(search.location, { lat: v.lat, lng: v.lng }, search.radius))
@@ -339,6 +377,10 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       if (search.mode !== 'name' && search.rail !== 'explore' && actualRail !== 'explore'
         && actualRail !== search.rail && !(search.rail === 'celebrate' && actualRail === 'events')) return;
       const rating = p?.rating != null && Number.isFinite(p.rating) && p.rating >= 0 && p.rating <= 5 ? p.rating : null;
+      // Evidence can attach only through the exact canonical venue ID; name/distance
+      // reconciliation alone cannot transfer a reviewed dish to a different place.
+      const evidenceByDish = new Map(menuRows.filter((row) => row.venue.id === v?.id).map((row) => [row.evidence.dishId, row.evidence]));
+      const menuEvidence = actualRail === 'eat_drink' ? [...evidenceByDish.values()].slice(0, 3) : [];
       const reasons = [`${Math.round(distanceMeters(search.location, spot))} m away (straight-line)`];
       if (stale && p) reasons.push('Cached place information; opening status unverified');
       else if (p?.isOpen === true) reasons.push('Open now according to Google');
@@ -346,27 +388,32 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       cards.push({ id, kind: v ? 'venue' : 'place', placeId, name: spot.name, address: typeof spot.address === 'string' ? spot.address : '',
         lat: spot.lat, lng: spot.lng, category, rating, isOpen: stale || typeof p?.isOpen !== 'boolean' ? null : p.isOpen,
         photoUrl: null, crowd: null, reasons, capability: 'details',
-        source: v ? 'bytspot' : stale ? 'google-stale' : 'google', rail: discoveryRail(category) });
+        source: v ? 'bytspot' : stale ? 'google-stale' : 'google', rail: actualRail,
+        menuEvidence, websiteUrl: stale ? null : conciergeWebsiteURL(p?.websiteUri) });
     }
     // Bytspot always owns a shared identity, including name+75m matches used by Discover.
     for (const venue of venues) append(venue, places.find((p) => sameSpot(venue, p)) ?? null);
     for (const place of places) {
       if (!venues.some((v) => sameSpot(v, place))) append(null, place);
     }
-    const selected = cards.sort((a, b) => distanceMeters(search.location, a) - distanceMeters(search.location, b)
-      || a.id.localeCompare(b.id)).slice(0, 3);
+    const selected = cards.sort((a, b) => Number(b.menuEvidence.length > 0) - Number(a.menuEvidence.length > 0)
+      || distanceMeters(search.location, a) - distanceMeters(search.location, b) || a.id.localeCompare(b.id)).slice(0, 3);
     const caveats = [
       failed ? 'Some discovery sources are unavailable; these results may be incomplete.' : '',
       stale ? 'Google information is cached; opening status is unverified.' : '',
       plan.budget ? 'I cannot verify prices or promise these are cheaper.' : '',
-      plan.menu ? 'Menus, dish quality and dietary suitability are not verified.' : '',
+      menuFailed ? 'Reviewed-menu lookup is unavailable; place discovery still works, but dish matches are unconfirmed.' : '',
+      selected.some((card) => card.menuEvidence.length)
+        ? 'Reviewed menu entries are labeled and linked to their source. A menu listing does not guarantee current availability, dish quality or dietary safety.'
+        : plan.menu || selected.some((card) => card.rail === 'eat_drink')
+          ? 'No reviewed menu match was confirmed. These are places to investigate, not confirmed dish matches. Dish quality and dietary suitability are not verified.' : '',
       plan.openNow ? 'Only listings Google reports open now are included; hours can change.' : '',
       plan.exclusions.length ? 'Excluded terms were checked against listing names and categories only; other suitability is not verified.' : '',
       plan.firstStop ? 'This searches a first stop for tonight; I cannot build a multi-stop plan or make bookings yet.' : '',
       'Search terms guide discovery, but listing matches do not verify every requested preference.',
     ].filter(Boolean).join(' ');
-    if (!selected.length) return result(failed || stale ? 'unavailable' : 'empty',
-      `${failed || stale ? 'I could not verify matching places nearby. Please try again.' : `No matching places were found within ${search.radius} m of your supplied location.`} ${caveats}`,
+    if (!selected.length) return result(failed || stale || menuFailed ? 'unavailable' : 'empty',
+      `${failed || stale || menuFailed ? 'I could not verify matching places nearby. Please try again.' : `No matching places were found within ${search.radius} m of your supplied location.`} ${caveats}`,
       [], ['Coffee nearby', 'Restaurants nearby']);
     return result('ready', `Here are nearby place listings within ${search.radius} m of your supplied location. Details only; availability is not guaranteed. ${caveats}`,
       selected, ['Closer', 'Coffee nearby', 'Restaurants nearby']);

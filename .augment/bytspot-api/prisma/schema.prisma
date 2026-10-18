@@ -206,6 +206,7 @@ model Venue {
   bookingTaps    BookingLinkTap[]
   media          VenueMedia[]
   mapReports     MapReport[]
+  menuLocation   VendorLocation? @relation("MenuVenue")
 
   @@map("venues")
 }
@@ -1316,6 +1317,9 @@ model VendorLocation {
   patches VendorPatch[]
   bands   VendorBand[]
   tickets VendorTicket[]
+  menuVenueId String? @unique @map("menu_venue_id")
+  menuVenue Venue? @relation("MenuVenue", fields: [menuVenueId], references: [id], onDelete: SetNull)
+  menuDishes VendorMenuDish[]
 
   /// Every profile read filters a seller's places by state.
   @@index([sellerId, state])
@@ -1796,6 +1800,8 @@ model VendorMedia {
   location VendorLocation?           @relation(fields: [locationId], references: [id], onDelete: Cascade)
   bookable VendorAvailabilityWindow? @relation(fields: [bookableId], references: [id], onDelete: Cascade)
 
+  menuDishes VendorMenuDish[]
+
   @@unique([locationId, kind, position])
   @@unique([bookableId, kind, position])
   @@unique([storageKey])
@@ -1804,6 +1810,33 @@ model VendorMedia {
   @@index([bookableId])
   @@index([reviewStatus, createdAt])
   @@map("vendor_media")
+}
+
+/// A vendor assertion, never guest evidence until explicitly reviewed against
+/// one canonical venue and one exact menu revision. SQL enforces source scope
+/// and invalidates reviews on content, source or venue-binding changes.
+model VendorMenuDish {
+  id String @id @default(cuid())
+  locationId String @map("location_id")
+  mediaId String @map("media_id")
+  dishName String @map("dish_name")
+  aliases String[] @default([])
+  reviewStatus String @default("pending") @map("review_status")
+  reviewedAt DateTime? @map("reviewed_at")
+  reviewedByUserId String? @map("reviewed_by_user_id")
+  reviewNote String? @map("review_note")
+  reviewedVenueId String? @map("reviewed_venue_id")
+  sourceUpdatedAt DateTime? @map("source_updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  location VendorLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  media VendorMedia @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@index([locationId])
+  @@index([mediaId])
+  @@index([reviewStatus, reviewedAt])
+  @@map("vendor_menu_dishes")
 }
 
 /// The facts taken against one derived slot. A row exists only once someone

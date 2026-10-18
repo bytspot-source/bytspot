@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { candidatesFromPlan, candidatesFromDiscovery, filterDiscoverableParties, capabilityForAccessMode, discoveredPartyCandidate, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from './primePathCandidates';
+import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, capabilityForAccessMode, discoveredPartyCandidate, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from './primePathCandidates';
 
 const now = new Date('2026-09-07T20:00:00Z');
 const ctx = { partySize: 4 };
@@ -159,6 +159,29 @@ test('A host who chose who comes is never discoverable by a stranger', () => {
   // A share link that has not expired yet, and an open party, both stay.
   assert.equal(filterDiscoverableParties([discoverableParty({ shareLinkExpiresAt: new Date('2026-09-08T02:00:00Z') })], open).length, 1);
   assert.equal(filterDiscoverableParties([discoverableParty()], open).length, 1);
+});
+
+test('An opted-in approval door reaches only a surface that withholds location', () => {
+  const base = { userTier: 'black', userCircleIds: new Set<string>(), attachedPartyIds: new Set<string>(), now };
+  const house = discoverableParty({ id: 'p-house', accessMode: 'private-approval', templateId: 'private-party', locationDisclosure: 'after-approval', showOnDiscover: true });
+  // Prime Path, Plan bookables, and anything else that places a party never pass the scope.
+  assert.deepEqual(filterDiscoverableParties([house], base), []);
+  assert.deepEqual(candidatesFromDiscovery([house], new Map(), base, now), []);
+  assert.equal(filterDiscoverableParties([house], { ...base, approvalOptIn: true }).length, 1);
+  // Opt-in defaults off, and it never widens an open door.
+  assert.deepEqual(filterDiscoverableParties([{ ...house, showOnDiscover: undefined }], { ...base, approvalOptIn: true }), []);
+  assert.deepEqual(filterDiscoverableParties([discoverableParty({ locationDisclosure: 'withheld', showOnDiscover: true })], { ...base, approvalOptIn: true }), []);
+});
+
+test('The default discovery query is the open-door gate, unchanged for every other caller', () => {
+  const where = discoverablePartyWhere(now) as Record<string, unknown>;
+  assert.deepEqual(where.accessMode, { in: ['free-rsvp', 'paid-ticket'] });
+  assert.deepEqual(where.templateId, { not: 'private-party' });
+  assert.equal(where.locationDisclosure, 'public');
+  assert.ok(!JSON.stringify(where).includes('showOnDiscover'));
+  const scoped = discoverablePartyWhere(now, [], { approvalOptIn: true }) as Record<string, any>;
+  assert.equal(scoped.accessMode, undefined);
+  assert.deepEqual(scoped.AND.at(-1).OR[1], { accessMode: 'private-approval', showOnDiscover: true });
 });
 
 test('An ended party is judged by endsAt, or six hours past its start when it has none', () => {

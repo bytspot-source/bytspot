@@ -252,7 +252,9 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
   if (!party || shareLinkExpired(party)) return sendNotFound(res);
 
   const cover = party.media[0];
-  const venue = party.locationDisclosure === 'public' ? party.venueName : null;
+  // An approval door on Discover is reachable by strangers; its place waits for approval.
+  const discoverListed = party.accessMode === 'private-approval' && party.showOnDiscover;
+  const venue = party.locationDisclosure === 'public' && !discoverListed ? party.venueName : null;
   const html = renderPage({
     id: party.id,
     title: party.title,
@@ -260,7 +262,7 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
     hostName: party.host.name ?? 'Bytspot Host',
     when: formatWhen(party.startsAt),
     venue,
-    disclosureNote: DISCLOSURE_NOTE[party.locationDisclosure] ?? DISCLOSURE_NOTE.withheld,
+    disclosureNote: discoverListed ? DISCLOSURE_NOTE['after-approval'] : (DISCLOSURE_NOTE[party.locationDisclosure] ?? DISCLOSURE_NOTE.withheld),
     tier: party.requiredMembershipTier,
     access: ACCESS_LABEL[party.accessMode] ?? party.accessMode,
     coverUrl: cover ? `${config.publicApiUrl}/media/parties/${encodeURIComponent(cover.id)}` : null,

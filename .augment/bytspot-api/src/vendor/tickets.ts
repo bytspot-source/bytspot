@@ -460,7 +460,9 @@ async function refund(order: VendorTicketOrder, sessionId: string, paymentIntent
     category: 'reservations',
     title: 'You were refunded',
     body: `${reason} Your payment is on its way back.`,
-    url: ticketUrl(order.ticketId),
+    // The ticket page lives on the web host, which push refuses; the app's
+    // passes are under Access.
+    url: 'https://bytspot.app/access',
     type: 'ticket-refunded',
   }).catch((err: any) => console.error('[vendor-ticket] refund notice failed:', err?.message));
   return 'refunded';

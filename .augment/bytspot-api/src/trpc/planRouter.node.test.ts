@@ -59,6 +59,8 @@ function planFixture(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   resetLocalRateLimitForTests();
+  // Plan-add pushes resolve their audience here; nobody is addressable unless a test says so.
+  user.findMany = async () => [];
   // Every serializable write re-reads on the transaction client, so the mock
   // has to hand the caller back the same tables it would see outside.
   (db as any).$transaction = async (fn: (tx: any) => Promise<unknown>) => fn(db);
@@ -436,6 +438,16 @@ test('Attaching a room requires a real published room', async () => {
   // An item with no room behind it has nothing to derive from and stays a
   // reference, so it needs its own title.
   await assert.rejects(() => caller().plans.attach({ planId: 'plan-1', needKind: 'dining' }), { code: 'BAD_REQUEST' });
+});
+
+test('Attaching tells the other participants, never the person who attached', async () => {
+  plan.findUnique = async () => planFixture({ participants: [creatorSeat, guestSeat] });
+  party.findFirst = async () => ({ id: 'party-1', title: 'The Basement', accessMode: 'free-rsvp' });
+  const asked = new Promise<string[]>((resolve) => {
+    user.findMany = async ({ where }: any) => { resolve(where.id.in); return []; };
+  });
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', title: 'The Basement', partyId: 'party-1' });
+  assert.deepEqual(await asked, ['guest-id']);
 });
 
 test('The caller cannot state the capability, so a Plan cannot advertise a booking Bytspot does not control', async () => {
@@ -1516,8 +1528,83 @@ test('events.nearby answers with parties a guest can actually reach', async () =
   // the ranker cannot disagree about what this party offers.
   assert.equal(found.capability, 'book');
   // Distance is measured, not implied by being in the box.
-  assert.ok(found.distanceMiles < 1, `expected a short distance, got ${found.distanceMiles}`);
+  assert.ok(found.distanceMiles !== null && found.distanceMiles < 1, `expected a short distance, got ${found.distanceMiles}`);
   assert.equal(found.spacesRemaining, 60);
+  assert.equal(found.door, 'open');
+  assert.equal(found.locationHidden, false);
+  assert.equal(found.hostCategory, null);
+  assert.equal(found.hostType, null);
+});
+
+test('events.nearby carries the Host Studio category and type, and only a valid pair', async () => {
+  nearbyFixture([
+    nearbyParty({ id: 'p-tagged', templateConfig: { kind: 'listening-party', hostCategory: 'music', hostType: 'listening' } }),
+    nearbyParty({ id: 'p-mismatched', templateConfig: { kind: 'listening-party', hostCategory: 'party', hostType: 'listening' } }),
+  ]);
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  const tagged = parties.find((p) => p.id === 'p-tagged')!;
+  assert.equal(tagged.hostCategory, 'music');
+  assert.equal(tagged.hostType, 'listening');
+  const mismatched = parties.find((p) => p.id === 'p-mismatched')!;
+  assert.equal(mismatched.hostCategory, null);
+  assert.equal(mismatched.hostType, null);
+});
+
+test('events.nearby lists an opted-in approval door with no location, and nothing that could place it', async () => {
+  const house = { kind: 'private-party', hostCategory: 'party', hostType: 'house' };
+  nearbyFixture([
+    nearbyParty({ id: 'p-house', title: 'House Party', accessMode: 'private-approval', templateId: 'private-party', locationDisclosure: 'after-approval', showOnDiscover: true, templateConfig: house, venueName: '12 Secret Lane' }),
+    nearbyParty({ id: 'p-open' }),
+  ]);
+  (db.partyMedia as any).findMany = async () => [{ id: 'media-house', partyId: 'p-house' }];
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  const row = parties.find((p) => p.id === 'p-house')!;
+  assert.ok(row, 'an opted-in approval door is listed');
+  assert.equal(row.door, 'approval');
+  assert.equal(row.locationHidden, true);
+  assert.equal(row.capability, 'request');
+  assert.equal(row.venueName, null);
+  assert.equal(row.latitude, null);
+  assert.equal(row.longitude, null);
+  assert.equal(row.distanceMiles, null);
+  assert.equal(row.title, 'House Party');
+  assert.match(row.coverURL ?? '', /media-house$/);
+  assert.equal(row.hostCategory, 'party');
+  assert.equal(row.hostType, 'house');
+  // Not a coordinate, a street, or a distance anywhere in the payload.
+  const wire = JSON.stringify(row);
+  assert.ok(!wire.includes('12 Secret Lane'));
+  assert.ok(!wire.includes('33.787') && !wire.includes('-84.384'));
+  const open = parties.find((p) => p.id === 'p-open')!;
+  assert.equal(open.locationHidden, false);
+  assert.equal(open.door, 'open');
+  assert.equal(open.venueName, 'Aster Room');
+});
+
+test('events.nearby keeps approval doors off Discover unless the host opted in', async () => {
+  nearbyFixture([
+    nearbyParty({ id: 'p-default', accessMode: 'private-approval' }),
+    nearbyParty({ id: 'p-off', accessMode: 'private-approval', showOnDiscover: false }),
+    // The opt-in only means something for the approval door: an open door
+    // with a withheld location stays off.
+    nearbyParty({ id: 'p-withheld-open', locationDisclosure: 'withheld', showOnDiscover: true }),
+  ]);
+  const { parties } = await nearby().events.nearby(MIDTOWN);
+  assert.deepEqual(parties.map((p) => p.id), []);
+});
+
+test('events.nearby still applies radius, circles, tier, and share-link expiry to opted-in approval doors', async () => {
+  const approval = { accessMode: 'private-approval', templateId: 'private-party', showOnDiscover: true };
+  nearbyFixture([
+    nearbyParty({ ...approval, id: 'p-far', lat: 33.7866 + 9 / 69, lng: -84.3833 + 9 / 69 }),
+    nearbyParty({ ...approval, id: 'p-circle', audienceCircleIds: ['circle-x'] }),
+    nearbyParty({ ...approval, id: 'p-tier', requiredMembershipTier: 'black' }),
+    nearbyParty({ ...approval, id: 'p-expired', shareLinkExpiresAt: new Date(Date.now() - 60 * 1000) }),
+    nearbyParty({ ...approval, id: 'p-paused', admissionPaused: true }),
+    nearbyParty({ ...approval, id: 'p-ok' }),
+  ]);
+  const { parties } = await nearby().events.nearby({ ...MIDTOWN, radiusMiles: 10 });
+  assert.deepEqual(parties.map((p) => p.id), ['p-ok']);
 });
 
 test('events.nearby carries the cover only, and null when the host set none', async () => {
@@ -1599,10 +1686,15 @@ test('events.nearby asks the database for parties this caller may see, so inelig
   const circleClause = captured.where.AND.find((c: any) => c.OR?.some((o: any) => o.audienceCircleIds));
   assert.ok(circleClause, 'expected an audience-circle clause in the query');
   assert.deepEqual(circleClause.OR[1].audienceCircleIds.hasSome, ['circle-a']);
-  // The privacy gate survives the AND merge rather than being overwritten.
-  assert.equal(captured.where.templateId.not, 'private-party');
-  assert.equal(captured.where.locationDisclosure, 'public');
-  assert.deepEqual(captured.where.accessMode.in, ['free-rsvp', 'paid-ticket']);
+  // The privacy gate survives the AND merge rather than being overwritten:
+  // an open door, or an approval door its host opted onto Discover.
+  const doorClause = captured.where.AND.find((c: any) => c.OR?.some((o: any) => o.accessMode));
+  assert.ok(doorClause, 'expected a door clause in the query');
+  assert.deepEqual(doorClause.OR, [
+    { accessMode: { in: ['free-rsvp', 'paid-ticket'] }, templateId: { not: 'private-party' }, locationDisclosure: 'public' },
+    { accessMode: 'private-approval', showOnDiscover: true },
+  ]);
+  assert.equal(captured.where.accessMode, undefined);
 });
 
 test('events.nearby keeps reading pages rather than answering "nothing" from a page of box corners', async () => {

@@ -121,6 +121,17 @@ test('Party draft creation persists the authenticated host and refreshes a retry
   assert.equal(updated.title, 'Edited First Listen');
 });
 
+test('showOnDiscover is stored only for an approval door, and defaults off', async () => {
+  const written: any[] = [];
+  party.create = async ({ data }: any) => { written.push(data); return { id: 'party-1' }; };
+  const approval = { ...draftInput, accessMode: 'private-approval' as const, audienceCircleIds: [] };
+  const host = createCaller({ user: { userId: 'discover-host', email: 'discover@bytspot.com' }, clientRateLimitKey: 'test-party-discover' });
+  await host.events.drafts.create({ ...approval, idempotencyKey: '00000000-0000-4000-8000-0000000000a1', showOnDiscover: true });
+  await host.events.drafts.create({ ...approval, idempotencyKey: '00000000-0000-4000-8000-0000000000a2' });
+  await host.events.drafts.create({ ...draftInput, idempotencyKey: '00000000-0000-4000-8000-0000000000a3', showOnDiscover: true });
+  assert.deepEqual(written.map((data) => data.showOnDiscover), [true, false, false]);
+});
+
 test('Draft retries do not update content after publishing wins the race', async () => {
   const publishedParty = { ...partyDraft, status: 'published', passCode: 'BYT-EXISTING' };
   party.findUnique = async () => partyDraft;
@@ -1180,6 +1191,14 @@ test('Invite coordinates require a public venue and a real arrival Venue', async
     assert.equal(hidden.latitude, null, `${disclosure} must not leak latitude`);
     assert.equal(hidden.longitude, null, `${disclosure} must not leak longitude`);
   }
+
+  // An approval door on Discover reaches strangers, so its place waits for
+  // approval even when the host left the disclosure public.
+  party.findFirst = async () => ({ ...base, hostUserId: 'host-1', accessMode: 'private-approval', showOnDiscover: true, locationDisclosure: 'public', arrivalVenue: venue });
+  const listed = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(listed.locationLabel, null);
+  assert.equal(listed.latitude, null);
+  assert.equal(listed.longitude, null);
 });
 
 // A recap is the room from the inside, so unlike cover and album it is a second

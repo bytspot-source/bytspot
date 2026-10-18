@@ -136,6 +136,8 @@ const draftInput = z.object({
   ticketTiers: z.array(ticketTierInput).max(10),
   cohosts: z.array(z.object({ email: z.string().email().max(255), role: z.enum(hostRoles) })).max(20),
   templateConfig: z.object({ kind: z.enum(templateConfigKinds) }).passthrough(),
+  /// Approval doors only: list on Discover with the location withheld.
+  showOnDiscover: z.boolean().optional(),
   source: z.literal('host-studio'),
 }).superRefine((input, ctx) => {
   // The same pairing the database enforces, refused here so the host is told
@@ -234,7 +236,7 @@ function isUniqueConstraint(error: unknown): boolean {
 
 type PartyContent = Pick<Prisma.PartyUncheckedCreateInput,
   'templateId' | 'title' | 'tagline' | 'startsAt' | 'endsAt' | 'venueName' | 'lat' | 'lng' | 'locationDisclosure' | 'capacity' | 'accessMode' |
-  'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig'>;
+  'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig' | 'showOnDiscover'>;
 
 /**
  * Run of Show slice 1: hosts may set an explicit end; otherwise the last
@@ -255,6 +257,9 @@ function partyContent(input: z.infer<typeof draftInput>): PartyContent {
     capacity: input.capacity, accessMode: input.accessMode, requiredMembershipTier: input.requiredMembershipTier,
     hostDestinations: (input.hostDestinations ?? null) as Prisma.InputJsonValue, audienceCircleIds: input.audienceCircleIds, itinerary: input.itinerary, ticketTiers: input.ticketTiers,
     cohosts: input.cohosts, templateConfig: input.templateConfig as Prisma.InputJsonValue,
+    // An open door is on Discover by definition; the flag only means something
+    // for a door that needs approval.
+    showOnDiscover: input.accessMode === 'private-approval' && input.showOnDiscover === true,
   };
 }
 
@@ -941,6 +946,10 @@ export const partyInvite = publicProcedure
     const recapPhotoCount = canReadRecap(party, guest, ctx.user?.userId)
       ? party.media.filter((media) => media.kind === 'recap').length
       : 0;
+    // An approval door listed on Discover reaches people the host never sent
+    // a link to, so its place waits for approval like Discover promised.
+    const discoverStranger = party.accessMode === 'private-approval' && party.showOnDiscover
+      && !guest?.accessGranted && ctx.user?.userId !== party.hostUserId;
     const now = new Date();
     const sessions = await db.partySession.findMany({ where: { partyId: party.id, withdrawnAt: null }, orderBy: [{ position: 'asc' }] });
     // Holds are counted per session so what a guest reads is what checkout
@@ -973,9 +982,9 @@ export const partyInvite = publicProcedure
       scheduledDate: party.startsAt.toISOString(),
       endsAt: party.endsAt?.toISOString() ?? null,
       runOfShow: runOfShow(party.startsAt, party.itinerary),
-      locationLabel: party.locationDisclosure === 'public' ? party.venueName : null,
+      locationLabel: party.locationDisclosure === 'public' && !discoverStranger ? party.venueName : null,
       locationDisclosure: party.locationDisclosure,
-      ...publicArrivalCoordinate(party),
+      ...(discoverStranger ? { latitude: null, longitude: null } : publicArrivalCoordinate(party)),
       accessMode: party.accessMode,
       capacity: party.capacity,
       participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
@@ -1189,7 +1198,7 @@ export const ABANDONED_DRAFT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 type HostRoomRow = {
   id: string; title: string; venueName: string; startsAt: Date; endsAt: Date | null;
   admissionPaused: boolean; shareLinkExpiresAt: Date | null; closedAt: Date | null;
-  passCode: string | null; capacity: number;
+  passCode: string | null; capacity: number; accessMode: string; showOnDiscover: boolean;
   recapPublishedAt: Date | null; media: { id: string }[];
 };
 
@@ -1198,7 +1207,7 @@ type HostRoomRow = {
 const hostRoomSelect = {
   id: true, title: true, venueName: true, startsAt: true, endsAt: true,
   admissionPaused: true, shareLinkExpiresAt: true, closedAt: true,
-  passCode: true, capacity: true, recapPublishedAt: true,
+  passCode: true, capacity: true, accessMode: true, showOnDiscover: true, recapPublishedAt: true,
   media: { where: { kind: 'recap' }, select: { id: true } },
 } as const;
 
@@ -1225,7 +1234,28 @@ function hostRoomView(party: HostRoomRow) {
     // second one is the fact the guests can see.
     recapPhotoCount: party.media.length,
     recapPublished: party.recapPublishedAt !== null,
+    showOnDiscover: discoverListing(party),
   };
+}
+
+/** An open door is always listed; an approval door only when the host opted in. */
+function discoverListing(party: { accessMode: string; showOnDiscover: boolean }): boolean {
+  return party.accessMode !== 'private-approval' || party.showOnDiscover;
+}
+
+/**
+ * What guests thought, as the host may see it: a count and an average. Notes
+ * and who wrote them stay private, so a guest can be honest about a room
+ * whose host knows them.
+ */
+async function partyFeedbackAggregate(partyId: string): Promise<{ count: number; average: number | null }> {
+  const agg = await db.feedback.aggregate({
+    where: { targetKind: 'party', targetId: partyId, user: { suspendedAt: null } },
+    _avg: { rating: true },
+    _count: { _all: true },
+  });
+  const average = agg._avg.rating;
+  return { count: agg._count._all, average: average === null ? null : Math.round(average * 10) / 10 };
 }
 
 async function hostControlledParty(partyId: string, userId: string) {
@@ -1354,10 +1384,11 @@ export const partyControlRouter = router({
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
       const party = await hostControlledParty(input.partyId, ctx.user.userId);
-      const [confirmed, pending, checkedIn] = await Promise.all([
+      const [confirmed, pending, checkedIn, feedback] = await Promise.all([
         db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
         db.partyGuest.count({ where: { partyId: party.id, status: 'pending' } }),
         db.partyGuest.count({ where: { partyId: party.id, status: 'checked-in' } }),
+        partyFeedbackAggregate(party.id),
       ]);
       return {
         partyId: party.id,
@@ -1374,7 +1405,30 @@ export const partyControlRouter = router({
         shareLinkExpired: shareLinkExpired(party),
         shareLinkExpiryIsDefault: party.shareLinkExpiresAt === null,
         closedAt: party.closedAt?.toISOString() ?? null,
+        door: party.accessMode === 'private-approval' ? 'approval' as const : 'open' as const,
+        showOnDiscover: discoverListing(party),
+        feedback,
       };
+    }),
+
+  /**
+   * Host opt-in for an approval door to be listed on Discover. The listing
+   * never carries the location; approval still decides who learns it.
+   */
+  setShowOnDiscover: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-show-on-discover' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), show: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      if (party.accessMode !== 'private-approval') {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Open doors are always listed on Discover.' });
+      }
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', accessMode: 'private-approval' },
+        data: { showOnDiscover: input.show },
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      return { partyId: party.id, showOnDiscover: input.show };
     }),
 
   /**

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { appRouter } from './router';
-import { conciergeDiscoveryRouter } from './conciergeRouter';
+import { conciergeDiscoveryRouter, conciergeOpenTo } from './conciergeRouter';
 import { resetLocalRateLimitForTests } from './trpc';
 import type { Context } from './context';
 import { config } from '../config';
 
-const originalEnabled = config.conciergeDiscoveryEnabled;
-test.beforeEach(() => { Object.assign(config, { conciergeDiscoveryEnabled: true }); });
-test.afterEach(() => { Object.assign(config, { conciergeDiscoveryEnabled: originalEnabled }); });
+const original = { conciergeDiscoveryEnabled: config.conciergeDiscoveryEnabled, conciergeAudience: config.conciergeAudience, conciergePilotUserIds: config.conciergePilotUserIds };
+test.beforeEach(() => { Object.assign(config, { conciergeDiscoveryEnabled: true, conciergeAudience: 'everyone', conciergePilotUserIds: '' }); });
+test.afterEach(() => { Object.assign(config, original); });
 
 const member: Context = { user: { userId: 'concierge-test-user', email: 'member@example.test' }, clientRateLimitKey: 'concierge-test' };
 const missingLocation = { messages: [{ role: 'user' as const, content: 'coffee' }] };
@@ -40,6 +40,37 @@ test('disabled discovery returns no cards without running search adapters', asyn
   assert.equal(result.status, 'unavailable');
   assert.match(result.reply, /not enabled/);
   assert.deepEqual(result.cards, []);
+});
+
+test('the pilot audience opens Concierge only to listed user ids', async () => {
+  resetLocalRateLimitForTests();
+  Object.assign(config, { conciergeAudience: 'pilot', conciergePilotUserIds: '' });
+  assert.equal(conciergeOpenTo('concierge-test-user'), false, 'an empty pilot list opens Concierge to no one');
+  Object.assign(config, { conciergePilotUserIds: ' other-user , concierge-test-user ' });
+  assert.equal(conciergeOpenTo('concierge-test-user'), true);
+  assert.equal(conciergeOpenTo('concierge-test'), false, 'ids match whole entries only');
+  assert.equal(conciergeOpenTo(undefined), false);
+  assert.equal(conciergeOpenTo(' '), false);
+  Object.assign(config, { conciergeDiscoveryEnabled: false });
+  assert.equal(conciergeOpenTo('concierge-test-user'), false, 'the discovery flag still turns Concierge off for the pilot');
+
+  Object.assign(config, { conciergeDiscoveryEnabled: true });
+  const location = { ...missingLocation, location: { lat: 47.6062, lng: -122.3321 } };
+  const outsider = conciergeDiscoveryRouter.createCaller({ ...member, user: { ...member.user!, userId: 'not-in-pilot' } });
+  const refused = await outsider.discover(location);
+  assert.equal(refused.status, 'unavailable');
+  assert.match(refused.reply, /not enabled/);
+  assert.deepEqual(refused.cards, []);
+  Object.assign(config, { conciergePhotoEnabled: true });
+  try {
+    assert.equal((await outsider.identifyDish({ image: 'data:image/png;base64,AAAA' })).status, 'unavailable');
+    const pilot = conciergeDiscoveryRouter.createCaller(member);
+    assert.equal((await pilot.identifyDish({ image: 'data:image/png;base64,AAAA' })).status, 'invalid_photo');
+    assert.equal((await pilot.discover(missingLocation)).status, 'needs_location');
+  } finally {
+    Object.assign(config, { conciergePhotoEnabled: false });
+    resetLocalRateLimitForTests();
+  }
 });
 
 test('discover has its own per-user 20-per-minute rate limit', async () => {

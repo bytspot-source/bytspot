@@ -60,6 +60,10 @@ const envSchema = z.object({
   CONCIERGE_DISCOVERY_ENABLED: z.enum(['true', 'false']).default('false'),
   // Photo identification also requires discovery; opt-in separately for the pilot.
   CONCIERGE_PHOTO_ENABLED: z.enum(['true', 'false']).default('false'),
+  // `pilot` (default) opens Concierge only to CONCIERGE_PILOT_USER_IDS; an empty list opens it to no one.
+  CONCIERGE_AUDIENCE: z.enum(['pilot', 'everyone']).default('pilot'),
+  // Comma-separated user ids, never emails.
+  CONCIERGE_PILOT_USER_IDS: z.string().default(''),
   OPENAI_API_KEY:         z.string().default(''),
   TICKETMASTER_API_KEY:   z.string().default(''),
   GOOGLE_PLACES_API_KEY:  z.string().default(''),
@@ -145,6 +149,8 @@ export const config = {
   frontendUrl: env.FRONTEND_URL,
   conciergeDiscoveryEnabled: env.CONCIERGE_DISCOVERY_ENABLED === 'true',
   conciergePhotoEnabled: env.CONCIERGE_PHOTO_ENABLED === 'true',
+  conciergeAudience: env.CONCIERGE_AUDIENCE,
+  conciergePilotUserIds: env.CONCIERGE_PILOT_USER_IDS,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
   adminUserIds: env.ADMIN_USER_IDS,
@@ -203,6 +209,12 @@ export function printConfigDiagnostics(): void {
     // auth.signup is public and unverified, so an email-keyed allowlist would
     // let anyone register an unclaimed admin address and escalate.
     throw new Error('ADMIN_USER_IDS must contain user ids, not email addresses');
+  }
+  if (config.conciergePilotUserIds.includes('@')) {
+    throw new Error('CONCIERGE_PILOT_USER_IDS must contain user ids, not email addresses');
+  }
+  if (config.conciergeDiscoveryEnabled && config.conciergeAudience === 'pilot') {
+    check(config.conciergePilotUserIds, 'Concierge pilot list', 'Concierge is enabled but open to no one');
   }
   check(config.apnsKeyId && config.apnsTeamId && config.apnsKeyPath && config.apnsBundleId ? 'ok' : '', 'APNs', 'native push will not send');
   check(config.appleClientId, 'Sign in with Apple', 'native Apple sign-in will not work');

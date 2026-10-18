@@ -4,7 +4,7 @@
 
 `concierge.discover` is an authenticated tRPC **mutation**, limited to 20 requests per user per minute. `concierge.chat` retains its existing input, output and implementation. No database schema, dependency, or provider additions. The companion native implementation is in bytspot-beta PR #148. Production deployment settings have not been changed.
 
-The new route is **disabled by default**. Set `CONCIERGE_DISCOVERY_ENABLED=true` in the API environment for an approved TestFlight pilot; `false` stops discovery before any model/catalog/provider search. Legacy `concierge.chat` is unaffected. Enable the API before distributing the paired native build.
+The new route is **disabled by default**. Set `CONCIERGE_DISCOVERY_ENABLED=true` in the API environment for an approved TestFlight pilot; `false` stops discovery before any model/catalog/provider search. `CONCIERGE_AUDIENCE` defaults to `pilot`: only signed-in user ids listed in `CONCIERGE_PILOT_USER_IDS` (comma-separated, never emails) reach discovery and photo search, and an empty list opens it to no one. Everyone else gets the same not-enabled reply. Set `CONCIERGE_AUDIENCE=everyone` to release to all signed-in guests. Legacy `concierge.chat` is unaffected. Enable the API before distributing the paired native build.
 
 ## Exact input contract
 

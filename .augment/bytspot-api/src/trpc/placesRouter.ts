@@ -471,7 +471,7 @@ export const placesRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'places-booking-tap' }))
     .input(z.object({
       placeId: z.string().trim().regex(/^(places\/)?[A-Za-z0-9_-]{1,255}$/),
-      surface: z.enum(['venue', 'plan']),
+      surface: z.enum(['venue', 'plan', 'concierge']),
     }))
     .mutation(async ({ ctx, input }) => {
       const venue = await db.venue.findFirst({

@@ -4,6 +4,7 @@ import { config } from '../config';
 import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import { distanceMeters, radiusForWalk, sameSpot, type RecommendPlace, type RecommendVenue } from './recommendations';
 import { DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
+import { tableBookingUrlError, type TableBookingLink } from './tableBookingLinks';
 
 export const coordinateSchema = z.object({
   lat: z.number().finite().min(-90).max(90),
@@ -43,6 +44,19 @@ export const conciergeMenuEvidenceSchema = z.object({
     && e.sourceUrl === `${config.publicApiUrl.replace(/\/$/, '')}/media/menu-evidence/${e.dishId}/${e.revision}`;
 }, 'Evidence must reference the reviewed source revision');
 
+/** Phase 6: the closed set of actions Concierge may offer. Each runs on the guest's
+ * device only after the guest approves it; none is a booking, order or payment. */
+export const CONCIERGE_ACTIONS = ['directions', 'website', 'book_table', 'save'] as const;
+export type ConciergeActionType = typeof CONCIERGE_ACTIONS[number];
+export const conciergeActionSchema = z.union([
+  z.object({ type: z.enum(['directions', 'website', 'save']) }).strict(),
+  z.object({
+    type: z.literal('book_table'), provider: z.enum(['opentable', 'resy']), label: z.enum(['OpenTable', 'Resy']), url: z.string(),
+  }).strict().refine((a) => tableBookingUrlError(a.provider, a.url) === null
+    && (a.provider === 'opentable') === (a.label === 'OpenTable'), 'Only a hand-checked OpenTable or Resy link'),
+]);
+export type ConciergeAction = z.infer<typeof conciergeActionSchema>;
+
 export const conciergeCardSchema = z.object({
   id: z.string().min(1), kind: z.enum(['venue', 'place']), placeId: z.string().nullable(),
   name: z.string().min(1), address: z.string(), lat: coordinateSchema.shape.lat, lng: coordinateSchema.shape.lng,
@@ -52,11 +66,23 @@ export const conciergeCardSchema = z.object({
   rail: z.enum(DISCOVERY_RAILS),
   websiteUrl: z.string().refine((url) => conciergeWebsiteURL(url) !== null).nullable().default(null),
   menuEvidence: z.array(conciergeMenuEvidenceSchema).max(3).default([]),
+  actions: z.array(conciergeActionSchema).max(CONCIERGE_ACTIONS.length).default([]),
 }).strict();
+export const conciergeProposalSchema = z.object({ type: z.enum(CONCIERGE_ACTIONS), cardId: z.string().min(1) }).strict();
 export const conciergeDiscoverOutput = z.object({
   version: z.literal(1), reply: z.string(), status: z.enum(['ready', 'needs_location', 'unavailable', 'empty']),
   cards: z.array(conciergeCardSchema).max(3), refinements: z.array(z.string()).max(4),
-}).strict();
+  proposal: conciergeProposalSchema.nullable().default(null),
+}).strict().superRefine((response, ctx) => {
+  for (const card of response.cards) {
+    const types = card.actions.map((a) => a.type);
+    if (new Set(types).size !== types.length || (types.includes('website') && !card.websiteUrl)
+      || (types.includes('book_table') && !card.placeId)) ctx.addIssue({ code: 'custom', message: 'Unsupported card action' });
+  }
+  const { proposal } = response;
+  if (proposal && (response.status !== 'ready' || !response.cards.some((card) => card.id === proposal.cardId
+    && card.actions.some((a) => a.type === proposal.type)))) ctx.addIssue({ code: 'custom', message: 'A proposal needs a shown card action' });
+});
 export type ConciergeInput = z.infer<typeof conciergeDiscoverInput>;
 export type ConciergeResponse = z.infer<typeof conciergeDiscoverOutput>;
 export type ConciergeCard = z.infer<typeof conciergeCardSchema>;
@@ -84,6 +110,7 @@ export type ConciergePlanContext = {
 };
 export const CONCIERGE_PLAN_TIMEOUT_MS = 1200;
 export interface ConciergeDependencies {
+  tableBookings?(placeIds: string[]): Promise<Map<string, TableBookingLink>>;
   venues(search: ConciergeSearch): Promise<RecommendVenue[]>;
   places(search: ConciergeSearch): Promise<PlacesOutcome>;
   reconcile?(places: RecommendPlace[]): Promise<{ venues: RecommendVenue[]; hiddenPlaceIds: string[] }>;
@@ -137,8 +164,73 @@ function excludedWords(target: string): string[] {
   return words(target).flatMap((word) => /^(?:coffee|caf[eé]s?)$/.test(word) ? ['coffee', 'cafe', 'café', 'cafes'] : [word]);
 }
 function compact(text: string): string { return text.replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '').trim(); }
+
+/** A request to act on a shown place. Unsupported acts are named so the reply can decline them. */
+export type ConciergeActionRequest = { type: ConciergeActionType | 'unsupported'; target: number | 'last' | 'it' | { name: string } };
+const ACTION_VERBS: Array<[RegExp, ConciergeActionRequest['type']]> = [
+  [/\b(?:order|buy|pay|purchase|call|phone|text|message|email|tickets?|deliver(?:y)?|check (?:me |us )?in|add (?:it |that |this |them )?to (?:my |a )?plan|uber|lyft|rides?)\b/i, 'unsupported'],
+  [/\b(?:book|reserve)\b.*\b(?:table|reservation|it|that|this|there|them|one)\b|\breservation\b/i, 'book_table'],
+  [/\b(?:directions?|navigate|navigation|route me|take me (?:to|there)|get me there|how (?:do i|can i|to) get)\b/i, 'directions'],
+  [/\b(?:website|web site|homepage)\b/i, 'website'],
+  [/^(?:please\s+|can you\s+|could you\s+)?(?:save|bookmark|favou?rite|remember)\b/i, 'save'],
+];
+const ORDINALS: Record<string, number> = { first: 1, '1st': 1, '1': 1, second: 2, '2nd': 2, '2': 2, third: 3, '3rd': 3, '3': 3 };
+
+export function conciergeActionRequest(raw: string): ConciergeActionRequest | null {
+  const text = raw.trim();
+  if (text.length > 200 || /^(?:find|search)\b|\b(?:near me|nearby|around me)\b/i.test(text)) return null;
+  const type = ACTION_VERBS.find(([pattern]) => pattern.test(text))?.[1];
+  if (!type) return null;
+  const ordinal = text.match(/\b(first|second|third|1st|2nd|3rd)\b|(?:#|\bnumber\s*|\boption\s*)([1-3])\b/i);
+  if (ordinal) return { type, target: ORDINALS[(ordinal[1] ?? ordinal[2]).toLowerCase()] };
+  if (/\b(?:last)\b/i.test(text)) return { type, target: 'last' };
+  const named = text.match(/\b(?:to|for|at|of|from)\s+(?:the\s+)?([\p{L}\p{N} &'’.-]{2,120}?)[.!?]*$/iu)?.[1].trim();
+  const saved = type === 'save' ? text.match(/^(?:please\s+|can you\s+|could you\s+)?(?:save|bookmark|favou?rite|remember)\s+(?:the\s+)?([\p{L}\p{N} &'’.-]{2,120}?)[.!?]*$/iu)?.[1].trim() : undefined;
+  const name = named ?? saved;
+  if (name && !/^(?:it|that|this|there|them|that one|this one|the place|place|one|my plan|a plan)$/i.test(name)
+    && !/^(?:book|reserve|get|go)\b/i.test(name)) return { type, target: { name } };
+  return { type, target: 'it' };
+}
+
+function normalizedName(text: string): string { return words(text).join(' '); }
+
+function resolveActionTarget(target: ConciergeActionRequest['target'], cards: ConciergeCard[]): ConciergeCard | 'ambiguous' | null {
+  if (typeof target === 'number') return cards[target - 1] ?? null;
+  if (target === 'last') return cards.at(-1) ?? null;
+  if (target === 'it') return cards.length === 1 ? cards[0] : 'ambiguous';
+  const wanted = normalizedName(target.name);
+  if (!wanted) return null;
+  const matches = cards.filter((card) => {
+    const name = normalizedName(card.name);
+    return name === wanted || ` ${name} `.includes(` ${wanted} `) || ` ${wanted} `.includes(` ${name} `);
+  });
+  return matches.length === 1 ? matches[0] : matches.length ? 'ambiguous' : null;
+}
+
+const ACTION_PROMPTS: Record<ConciergeActionType, string> = {
+  directions: 'Directions to', website: 'Website for', book_table: 'Book a table at', save: 'Save',
+};
+const SUPPORTED_ACTIONS = 'Concierge can open directions, open a place website, open a hand-checked OpenTable or Resy link, or save a place on this device. You approve each action first.';
+
+function actionReply(type: ConciergeActionType, card: ConciergeCard): string {
+  const approval = 'Nothing happens until you approve it.';
+  if (type === 'directions') return `I can open directions to ${card.name}. ${approval}`;
+  if (type === 'website') return `I can open the website for ${card.name}. A website is not a verified menu. ${approval}`;
+  if (type === 'save') return `I can save ${card.name} on this device. ${approval}`;
+  const booking = card.actions.find((a) => a.type === 'book_table');
+  const label = booking && 'label' in booking ? booking.label : 'the booking provider';
+  return `I can open ${label} for ${card.name}. You book with ${label}; Bytspot does not make or confirm the booking. ${approval}`;
+}
+
+function missingActionReply(type: ConciergeActionType, card: ConciergeCard): string {
+  if (type === 'book_table') return `Bytspot has no hand-checked OpenTable or Resy link for ${card.name}, so Concierge cannot book a table there.`;
+  if (type === 'website') return `Bytspot has no website it can open for ${card.name}.`;
+  return `That action is not available for ${card.name}.`;
+}
+
 type LocalPlan = Omit<ConciergePlan, 'query' | 'rail' | 'mode'> & {
   search: ConciergeSearch; blocked: boolean; exclusions: string[]; messages: string[]; locationConfirmed: boolean;
+  action: ConciergeActionRequest | null;
 };
 
 /** Useful no-key fallback. Unknown text stays search text, never implicit GPS
@@ -153,8 +245,13 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
   let needsLocation = false, budget = false, menu = false, openNow = false, firstStop = false, blocked = false;
   let locationConfirmed = false;
   let exclusions: string[] = [], messages: string[] = [];
+  let action: ConciergeActionRequest | null = null;
   for (const message of input.messages.filter((m) => m.role === 'user')) {
     let text = message.content.trim();
+    action = null;
+    // An act on shown results keeps the earlier search; it is never search text or location consent.
+    const requested = messages.length ? conciergeActionRequest(text) : null;
+    if (requested) { action = requested; continue; }
     if (CONFIRM_LOCATION.test(text)) {
       needsLocation = false;
       locationConfirmed = true;
@@ -236,7 +333,7 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
   }
   return {
     search: conciergeSearchSchema.parse({ ...intent, query: conciergeSearchSchema.shape.query.safeParse(intent.query).success ? intent.query : 'restaurant', location: input.location, radius }),
-    needsLocation, budget, menu, openNow, firstStop, blocked, exclusions, messages, locationConfirmed,
+    needsLocation, budget, menu, openNow, firstStop, blocked, exclusions, messages, locationConfirmed, action,
   };
 }
 
@@ -295,8 +392,9 @@ export async function withDeadline<T>(work: Promise<T>, milliseconds: number): P
   } finally { if (timer) clearTimeout(timer); }
 }
 
-function result(status: ConciergeResponse['status'], reply: string, cards: ConciergeCard[] = [], refinements: string[] = []): ConciergeResponse {
-  return conciergeDiscoverOutput.parse({ version: 1, status, reply, cards, refinements });
+function result(status: ConciergeResponse['status'], reply: string, cards: ConciergeCard[] = [], refinements: string[] = [],
+  proposal: ConciergeResponse['proposal'] = null): ConciergeResponse {
+  return conciergeDiscoverOutput.parse({ version: 1, status, reply, cards, refinements, proposal });
 }
 
 export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
@@ -359,6 +457,13 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
         && !matchesExclusions(p.name, p.primaryType ?? '') && withinSearch(search.location, { lat: p.lat, lng: p.lng }, search.radius))
       .map((p) => ({ ...p, placeId: googleIdentity(p.placeId)! }))
       .sort((a, b) => distanceMeters(search.location, a) - distanceMeters(search.location, b) || a.placeId.localeCompare(b.placeId));
+    // Only hand-checked links become a booking action. A failed lookup offers none.
+    let bookings = new Map<string, TableBookingLink>();
+    const bookingIds = [...new Set([...venues.map((v) => v.googlePlaceId), ...places.map((p) => p.placeId)]
+      .filter((id): id is string => id !== null))];
+    if (dependencies.tableBookings && bookingIds.length) {
+      try { bookings = await withDeadline(dependencies.tableBookings(bookingIds), 1000); } catch { bookings = new Map(); }
+    }
     const cards: ConciergeCard[] = [];
     const seenIds = new Set<string>();
     const seenPlaces = new Set<string>();
@@ -385,11 +490,15 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       if (stale && p) reasons.push('Cached place information; opening status unverified');
       else if (p?.isOpen === true) reasons.push('Open now according to Google');
       if (rating !== null) reasons.push(`${rating.toFixed(1)} stars on Google${stale ? ' (cached)' : ''}`);
+      const websiteUrl = stale ? null : conciergeWebsiteURL(p?.websiteUri);
+      const booking = conciergeActionSchema.safeParse({ type: 'book_table', ...(placeId ? bookings.get(placeId) : undefined) });
+      const actions: ConciergeAction[] = [{ type: 'directions' }, ...(websiteUrl ? [{ type: 'website' as const }] : []),
+        ...(placeId && booking.success ? [booking.data] : []), { type: 'save' }];
       cards.push({ id, kind: v ? 'venue' : 'place', placeId, name: spot.name, address: typeof spot.address === 'string' ? spot.address : '',
         lat: spot.lat, lng: spot.lng, category, rating, isOpen: stale || typeof p?.isOpen !== 'boolean' ? null : p.isOpen,
         photoUrl: null, crowd: null, reasons, capability: 'details',
         source: v ? 'bytspot' : stale ? 'google-stale' : 'google', rail: actualRail,
-        menuEvidence, websiteUrl: stale ? null : conciergeWebsiteURL(p?.websiteUri) });
+        menuEvidence, websiteUrl, actions });
     }
     // Bytspot always owns a shared identity, including name+75m matches used by Discover.
     for (const venue of venues) append(venue, places.find((p) => sameSpot(venue, p)) ?? null);
@@ -415,7 +524,22 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     if (!selected.length) return result(failed || stale || menuFailed ? 'unavailable' : 'empty',
       `${failed || stale || menuFailed ? 'I could not verify matching places nearby. Please try again.' : `No matching places were found within ${search.radius} m of your supplied location.`} ${caveats}`,
       [], ['Coffee nearby', 'Restaurants nearby']);
+    const refinements = ['Closer', 'Coffee nearby', 'Restaurants nearby'];
+    const requested = plan.action;
+    if (requested) {
+      if (requested.type === 'unsupported') return result('ready', `Concierge cannot do that for you. ${SUPPORTED_ACTIONS} ${caveats}`, selected, refinements);
+      const target = resolveActionTarget(requested.target, selected);
+      const prompt = ACTION_PROMPTS[requested.type];
+      const choices = selected.map((_, index) => `${prompt} the ${['first', 'second', 'third'][index]} one`);
+      if (target === 'ambiguous' || target === null) return result('ready',
+        `${target === null ? 'I could not match that to a place shown.' : 'Which place?'} Say “first”, “second” or “third”. ${caveats}`, selected, choices);
+      if (!target.actions.some((a) => a.type === requested.type)) {
+        return result('ready', `${missingActionReply(requested.type, target)} ${SUPPORTED_ACTIONS} ${caveats}`, selected, refinements);
+      }
+      return result('ready', `${actionReply(requested.type, target)} ${caveats}`, selected, refinements,
+        { type: requested.type, cardId: target.id });
+    }
     return result('ready', `Here are nearby place listings within ${search.radius} m of your supplied location. Details only; availability is not guaranteed. ${caveats}`,
-      selected, ['Closer', 'Coffee nearby', 'Restaurants nearby']);
+      selected, refinements);
   };
 }

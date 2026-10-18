@@ -9,6 +9,7 @@ import { DISCOVERY_RAILS } from './discoveryTaxonomy';
 import { conciergePlacesSearch, discoveryBounds } from './conciergePlaces';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
 import { findMenuEvidence } from './menuEvidence';
+import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from './tableBookingLinks';
 import { createDishPhotoIdentifier, DISH_PHOTO_TIMEOUT_MS, type DishPhotoDependencies } from './conciergeDishPhoto';
 
 const CATEGORY_TERMS: Record<string, string[]> = {
@@ -157,5 +158,16 @@ Confidence high only when the dish is visually unambiguous. Order candidates fro
 
 export const identifyConciergeDish = createDishPhotoIdentifier({ classify: conciergeDishClassifier });
 
+/** The same admin-checked list the venue screen and Plan items use. */
+export async function conciergeTableBookings(placeIds: string[]): Promise<Map<string, TableBookingLink>> {
+  await ensureTableBookingLinks();
+  const links = new Map<string, TableBookingLink>();
+  for (const id of placeIds) {
+    const link = tableBookingLinkFor(id);
+    if (link) links.set(id, link);
+  }
+  return links;
+}
+
 export const discoverConcierge = createConciergeDiscovery({ venues: conciergeVenues, places: conciergePlacesSearch,
-  reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence });
+  reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence, tableBookings: conciergeTableBookings });

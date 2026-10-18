@@ -4,7 +4,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
-  planConcierge, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
+  conciergeActionRequest, planConcierge, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
 } from './conciergeDiscovery';
 import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
@@ -546,4 +546,101 @@ test('all canonical aliases and thirteen rails match the shared taxonomy', () =>
   assert.equal(discoveryRail('unknown'), 'explore');
   assert.equal(discoveryRail('__proto__'), 'explore');
   assert.equal(discoveryRail(null), 'explore');
+});
+
+function threeCoffees(over: Partial<ConciergeDependencies> = {}) {
+  return service({ places: async () => ({ source: 'google', places: [
+    place({ placeId: 'p0', name: 'Real Coffee', websiteUri: 'https://real.example.com' }),
+    place({ placeId: 'p1', name: 'Second Cup', lat: 40.002 }),
+    place({ placeId: 'p2', name: 'Third Roast', lat: 40.003 }),
+  ] }), ...over });
+}
+const opentable = { provider: 'opentable' as const, label: 'OpenTable', url: 'https://www.opentable.com/r/real-coffee' };
+
+test('cards list only supported actions derived from server facts', async () => {
+  const response = await threeCoffees({ tableBookings: async () => new Map([['p1', opentable]]) })(input('coffee'));
+  assert.deepEqual(response.cards.map((c) => c.actions.map((a) => a.type)),
+    [['directions', 'website', 'save'], ['directions', 'book_table', 'save'], ['directions', 'save']]);
+  assert.deepEqual(response.cards[1].actions[1], { type: 'book_table', ...opentable });
+  assert.equal(response.proposal, null);
+  for (const link of [{ ...opentable, url: 'https://evil.example.com/r' }, { ...opentable, provider: 'resy' as const },
+    { ...opentable, url: 'http://www.opentable.com/r' }]) {
+    const forged = await threeCoffees({ tableBookings: async () => new Map([['p1', link as typeof opentable]]) })(input('coffee'));
+    assert.ok(forged.cards.every((c) => c.actions.every((a) => a.type !== 'book_table')));
+  }
+  const failed = await threeCoffees({ tableBookings: async () => { throw new Error('private'); } })(input('coffee'));
+  assert.equal(failed.status, 'ready');
+  assert.ok(failed.cards.every((c) => c.actions.every((a) => a.type !== 'book_table')));
+  assert.doesNotMatch(failed.reply, /private/);
+});
+
+test('an action request keeps the earlier search and proposes exactly one approvable action', async () => {
+  let searches = 0;
+  const discover = threeCoffees({ venues: async (search) => { searches++; assert.equal(search.query, 'coffee'); return []; },
+    tableBookings: async () => new Map([['p1', opentable]]) });
+  const cases: Array<[string, string, string, RegExp]> = [
+    ['Directions to the second one', 'directions', 'gp:p1', /directions to Second Cup/],
+    ['open the website for Real Coffee', 'website', 'gp:p0', /website for Real Coffee/],
+    ['book a table at the second one', 'book_table', 'gp:p1', /open OpenTable for Second Cup.*does not make or confirm/],
+    ['save Third Roast', 'save', 'gp:p2', /save Third Roast on this device/],
+    ['save the last one', 'save', 'gp:p2', /save Third Roast/],
+  ];
+  for (const [text, type, cardId, reply] of cases) {
+    const response = await discover(input('coffee', text));
+    assert.deepEqual(response.proposal, { type, cardId }, text);
+    assert.match(response.reply, reply);
+    assert.match(response.reply, /Nothing happens until you approve it/);
+    assert.equal(response.cards.length, 3);
+    assert.equal(conciergeDiscoverOutput.safeParse(response).success, true);
+  }
+  assert.equal(searches, cases.length);
+});
+
+test('unsupported, unavailable, ambiguous and unmatched actions never produce a proposal', async () => {
+  const discover = threeCoffees();
+  for (const text of ['order the first one', 'pay for it', 'call the second one', 'buy tickets there', 'add it to my plan', 'check me in']) {
+    const response = await discover(input('coffee', text));
+    assert.equal(response.proposal, null, text);
+    assert.match(response.reply, /^Concierge cannot do that for you/);
+  }
+  const noLink = await discover(input('coffee', 'book a table at the first one'));
+  assert.equal(noLink.proposal, null);
+  assert.match(noLink.reply, /no hand-checked OpenTable or Resy link for Real Coffee/);
+  const noSite = await discover(input('coffee', 'website for the third one'));
+  assert.equal(noSite.proposal, null);
+  assert.match(noSite.reply, /no website it can open for Third Roast/);
+  const ambiguous = await discover(input('coffee', 'save it'));
+  assert.equal(ambiguous.proposal, null);
+  assert.match(ambiguous.reply, /^Which place\?/);
+  assert.deepEqual(ambiguous.refinements, ['Save the first one', 'Save the second one', 'Save the third one']);
+  for (const choice of ambiguous.refinements) assert.equal(conciergeActionRequest(choice)?.type, 'save');
+  const unmatched = await discover(input('coffee', 'directions to Nowhere Diner'));
+  assert.equal(unmatched.proposal, null);
+  assert.match(unmatched.reply, /could not match that to a place shown/);
+});
+
+test('action words without a prior search, or inside a new search, stay ordinary search text', () => {
+  assert.equal(planConcierge(input('save money on coffee')).action, null);
+  assert.equal(planConcierge(input('coffee', 'find a place to order pizza nearby')).action, null);
+  assert.equal(planConcierge(input('coffee', 'pizza')).action, null);
+  assert.deepEqual(planConcierge(input('coffee', 'how do I get there')).action, { type: 'directions', target: 'it' });
+  assert.equal(planConcierge(input('coffee', 'Directions to the second one')).search.query, 'coffee');
+  const latest = planConcierge(input('coffee', 'save the first one', 'closer'));
+  assert.equal(latest.action, null);
+  assert.equal(latest.search.query, 'coffee');
+  assert.ok(latest.search.radius <= 800);
+});
+
+test('the output contract rejects proposals and actions the cards do not support', async () => {
+  const response = await threeCoffees()(input('coffee'));
+  const parse = (over: object) => conciergeDiscoverOutput.safeParse({ ...response, ...over }).success;
+  assert.equal(parse({ proposal: { type: 'directions', cardId: 'gp:p0' } }), true);
+  assert.equal(parse({ proposal: { type: 'directions', cardId: 'gp:forged' } }), false);
+  assert.equal(parse({ proposal: { type: 'website', cardId: 'gp:p1' } }), false);
+  assert.equal(parse({ proposal: { type: 'order', cardId: 'gp:p0' } }), false);
+  assert.equal(parse({ proposal: { type: 'directions', cardId: 'gp:p0' }, status: 'empty' }), false);
+  const card = (actions: unknown[]) => ({ ...response, cards: [{ ...response.cards[1], actions }, ...response.cards.slice(2)] });
+  assert.equal(conciergeDiscoverOutput.safeParse(card([{ type: 'website' }])).success, false);
+  assert.equal(conciergeDiscoverOutput.safeParse(card([{ type: 'save' }, { type: 'save' }])).success, false);
+  assert.equal(conciergeDiscoverOutput.safeParse(card([{ type: 'pay' }])).success, false);
 });

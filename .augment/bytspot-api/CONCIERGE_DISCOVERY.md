@@ -32,6 +32,7 @@ Objects reject unknown fields, including legacy client-supplied `venues`. Null c
 | `status` | `ready`, `needs_location`, `unavailable`, or `empty` |
 | `cards` | Array of 0–3 cards |
 | `refinements` | String array, currently at most 3 entries (schema permits 4) |
+| `proposal` | Null, or `{ type, cardId }` for one action that the guest must approve (Phase 6) |
 
 Each card contains exactly:
 
@@ -51,6 +52,9 @@ Each card contains exactly:
 | `capability` | Always `details` |
 | `source` | `bytspot`, `google`, or `google-stale` |
 | `rail` | One of the 13 shared discovery rail strings below |
+| `websiteUrl` | Public https website or null; a handoff, not menu evidence |
+| `menuEvidence` | 0–3 reviewed menu entries (Phase 4) |
+| `actions` | 1–4 supported actions for this card (Phase 6) |
 
 Rails: `explore`, `eat_drink`, `shop_style`, `experience`, `social`, `events`, `wellness`, `create_learn`, `nightlife`, `stay`, `move`, `celebrate`, `services`. Canonical category aliases mirror the read-only beta discovery-taxonomy contract v1. Google primary-type aliases are mapped additionally. Unknown categories remain visible under `explore`. Rails never grant capabilities.
 
@@ -111,6 +115,15 @@ Validation executed on October 17, 2026:
 - Retention: Bytspot does not write the photo to the database, object storage or logs. The photo is sent to OpenAI for this request only; clients must show this disclosure before upload.
 - Rate limits: 6 per minute and 40 per day per user.
 - The guest confirms or types a dish name. The client then sends that name through the unchanged `concierge.discover` text flow, so dish matches keep the same menu-evidence rules.
+
+## Guest-approved actions (Phase 6)
+
+- Closed set: `directions`, `website`, `book_table`, `save`. The server adds each one only from facts: `directions` and `save` on every card, `website` only with a `websiteUrl`, and `book_table` only with an admin hand-checked OpenTable or Resy link for the card's `placeId` (`{ type, provider, label, url }`). A failed link lookup (1 s limit) offers no booking action.
+- No action is a booking, order, payment, call, ticket, Plan write or check-in. `book_table` opens the provider; Bytspot does not make or confirm the booking.
+- A user message after a search that asks to act on a shown result (for example "Directions to the second one", "save Real Coffee", "book a table at the first one") is not search text. The earlier search runs again, and the message is resolved against the returned cards by position (first/second/third/last), by a unique name match, or by "it" when only one card is shown. The model planner never sees these messages and cannot select actions.
+- Result: `status: ready`, the same cards, and `proposal: { type, cardId }` with a fixed reply that ends "Nothing happens until you approve it." The output schema rejects a proposal for a card or action that is not in the response.
+- No proposal when the request is unsupported (order, pay, call, tickets, Plan, check-in, rides), the card does not have that action, the target is ambiguous or no shown card matches. The reply says which actions are supported, or asks "first", "second" or "third" with matching refinements.
+- Clients must show an approval step before every action, including card buttons, and run at most one action per approval. A `book_table` handoff may record `places.bookingTap` with `surface: concierge`.
 
 ## Deliberately deferred
 

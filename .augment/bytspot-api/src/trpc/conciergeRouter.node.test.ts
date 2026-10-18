@@ -27,7 +27,7 @@ test('new route validates input and returns the agreed location-required wire sh
   await assert.rejects(() => caller.discover({ messages: Array(11).fill({ role: 'user', content: 'coffee' }) }), { code: 'BAD_REQUEST' });
   await assert.rejects(() => caller.discover({ ...missingLocation, location: { lat: 91, lng: 0 } }), { code: 'BAD_REQUEST' });
   const response = await caller.discover(missingLocation);
-  assert.deepEqual(response, { version: 1, status: 'needs_location', reply: 'Share or choose a location to find real places nearby.', cards: [], refinements: [] });
+  assert.deepEqual(response, { version: 1, status: 'needs_location', reply: 'Share or choose a location to find real places nearby.', cards: [], refinements: [], proposal: null });
   resetLocalRateLimitForTests();
 });
 

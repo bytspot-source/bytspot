@@ -217,7 +217,7 @@ model BookingLinkTap {
   id        String   @id @default(cuid())
   venueId   String   @map("venue_id")
   userId    String?  @map("user_id")
-  /// "venue" (the venue screen) or "plan" (a Plan item).
+  /// "venue" (the venue screen), "plan" (a Plan item) or "concierge" (an approved Concierge action).
   surface   String
   createdAt DateTime @default(now()) @map("created_at")
 

@@ -1,6 +1,7 @@
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { conciergeDiscoverInput, conciergeDiscoverOutput } from '../services/conciergeDiscovery';
-import { discoverConcierge } from '../services/conciergeDiscoveryAdapters';
+import { discoverConcierge, identifyConciergeDish } from '../services/conciergeDiscoveryAdapters';
+import { conciergeIdentifyDishInput, conciergeIdentifyDishOutput } from '../services/conciergeDishPhoto';
 import { config } from '../config';
 
 /** Separate from legacy chat: no client-provided venues, model prose or supply. */
@@ -16,5 +17,19 @@ export const conciergeDiscoveryRouter = router({
         cards: [], refinements: [],
       };
       return discoverConcierge(input);
+    }),
+
+  /** Suggests dish names only. The photo is not stored; the guest confirms a name before any search. */
+  identifyDish: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 6, label: 'concierge-identify-dish' }))
+    .use(rateLimitMiddleware({ windowMs: 86_400_000, max: 40, label: 'concierge-identify-dish-daily' }))
+    .input(conciergeIdentifyDishInput)
+    .output(conciergeIdentifyDishOutput)
+    .mutation(({ input }) => {
+      if (!config.conciergeDiscoveryEnabled || !config.conciergePhotoEnabled) return {
+        version: 1 as const, status: 'unavailable' as const,
+        reply: 'Photo search is not enabled yet. Type the dish name to search nearby.', candidates: [],
+      };
+      return identifyConciergeDish(input);
     }),
 });

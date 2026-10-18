@@ -49,3 +49,31 @@ test('discover has its own per-user 20-per-minute rate limit', async () => {
   await assert.rejects(() => caller.discover(missingLocation), { code: 'TOO_MANY_REQUESTS' });
   resetLocalRateLimitForTests();
 });
+
+test('identifyDish is authenticated, flag-gated and rate limited without calling the provider for invalid photos', async () => {
+  resetLocalRateLimitForTests();
+  const originalPhoto = config.conciergePhotoEnabled;
+  try {
+    const procedures = appRouter._def.procedures as unknown as Record<string, { _def: { type: string } }>;
+    assert.equal(procedures['concierge.identifyDish']._def.type, 'mutation');
+    const invalid = { image: 'data:image/png;base64,AAAA' };
+    await assert.rejects(() => appRouter.createCaller({ user: null, clientRateLimitKey: 'dish-anon' }).concierge.identifyDish(invalid), { code: 'UNAUTHORIZED' });
+
+    const caller = conciergeDiscoveryRouter.createCaller({ ...member, user: { ...member.user!, userId: 'concierge-dish-test' } });
+    Object.assign(config, { conciergePhotoEnabled: false });
+    const disabled = await caller.identifyDish(invalid);
+    assert.equal(disabled.status, 'unavailable');
+    assert.deepEqual(disabled.candidates, []);
+    Object.assign(config, { conciergePhotoEnabled: true, conciergeDiscoveryEnabled: false });
+    assert.equal((await caller.identifyDish(invalid)).status, 'unavailable');
+
+    Object.assign(config, { conciergePhotoEnabled: true, conciergeDiscoveryEnabled: true });
+    assert.equal((await caller.identifyDish(invalid)).status, 'invalid_photo');
+    await assert.rejects(() => caller.identifyDish({ image: invalid.image, extra: true } as never), { code: 'BAD_REQUEST' });
+    for (let n = 0; n < 2; n++) await caller.identifyDish(invalid);
+    await assert.rejects(() => caller.identifyDish(invalid), { code: 'TOO_MANY_REQUESTS' });
+  } finally {
+    Object.assign(config, { conciergePhotoEnabled: originalPhoto });
+    resetLocalRateLimitForTests();
+  }
+});

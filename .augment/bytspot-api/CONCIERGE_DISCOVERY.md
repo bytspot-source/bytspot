@@ -99,6 +99,19 @@ Validation executed on October 17, 2026:
 - `npm test`: **1,076 passed, 0 failed, 47 skipped**, exit 0. Database-dependent skipped tests are not counted as passing.
 - Companion iOS work: native-root/taxonomy gates, web type-check/lint, 534 web tests, and App Store bundle/purity checks passed locally. Swift/XCTest run on the PR's macOS CI; physical-device TestFlight verification is still required.
 
+## Dish photo identification (Phase 5)
+
+`concierge.identifyDish` (protected mutation) suggests dish names for a guest's food photo. It never searches, books or stores anything.
+
+- Disabled unless **both** `CONCIERGE_DISCOVERY_ENABLED=true` and `CONCIERGE_PHOTO_ENABLED=true` (default `false`).
+- Input: `{ image: "data:image/jpeg;base64,..." }`, at most 600,000 decoded bytes and 4096 px per side. Clients resize and re-encode before upload.
+- The server accepts only JPEG, validates its segment structure and removes EXIF/GPS/XMP/ICC/comment segments before the provider call. Malformed files fail closed as `invalid_photo`.
+- One `gpt-4o-mini` call (`detail: low`, `store: false`, no retries, 12 s timeout) returns strict JSON. Names are re-validated and deduplicated; at most three are returned. Replies are fixed server text.
+- Output: `{ version: 1, status: identified|uncertain|not_food|invalid_photo|unavailable, reply, candidates: [{ name, confidence }] }`.
+- Retention: Bytspot does not write the photo to the database, object storage or logs. The photo is sent to OpenAI for this request only; clients must show this disclosure before upload.
+- Rate limits: 6 per minute and 40 per day per user.
+- The guest confirms or types a dish name. The client then sends that name through the unchanged `concierge.discover` text flow, so dish matches keep the same menu-evidence rules.
+
 ## Deliberately deferred
 
-Photo upload/identification, verified menu/review evidence, budget ranking, event-session inventory, vendor bookable requests, Plan writes and cross-category itineraries are not implemented in Release A. The thirteen rails classify **place listings**, not guaranteed inventory across every rail. An authorized operator must approve pilot activation; nothing has been deployed or enabled by this implementation.
+Budget ranking, event-session inventory, vendor bookable requests, Plan writes and cross-category itineraries are not implemented in Release A. The thirteen rails classify **place listings**, not guaranteed inventory across every rail. An authorized operator must approve pilot activation; nothing has been deployed or enabled by this implementation.

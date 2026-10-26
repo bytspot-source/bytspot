@@ -370,6 +370,7 @@ model Party {
   planItems       PlanItem[]
   encounterOptIns PartyEncounterOptIn[]
   performers      PartyPerformer[]
+  sellerInvites   PartySellerInvite[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -571,6 +572,11 @@ model PartyCheckout {
   platformFeeBps       Int?      @map("platform_fee_bps")
   platformFeeCents     Int?      @map("platform_fee_cents")
   hostNetCents         Int?      @map("host_net_cents")
+  /// Set when the session is sold by a business the host asked rather than
+  /// one the host is on the team of: that business is owed the session
+  /// portion less its fee, and hostNetCents covers only the ticket portion.
+  sellerId             String?   @map("seller_id")
+  sellerNetCents       Int?      @map("seller_net_cents")
   currency             String    @default("usd")
   status               String    @default("creating")
   reservationExpiresAt DateTime  @map("reservation_expires_at")
@@ -1267,6 +1273,37 @@ enum VendorMediaKind {
 /// met is derived from these records on every read, because a stored list is a
 /// claim that goes stale the moment a location is paused — and a stale tick
 /// tells a vendor they are live when they are not.
+enum PartySellerInviteState {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+  REMOVED
+}
+
+/// A host asking a business to sell on one Party. ACCEPTED is the grant
+/// vendor/partySessions reads: without it, a business may only sell on a
+/// Party whose host holds a live seat there. One row per Party and business;
+/// asking again after a cancel or a removal reopens the same row.
+model PartySellerInvite {
+  id                String                 @id @default(cuid())
+  partyId           String                 @map("party_id")
+  sellerId          String                 @map("seller_id")
+  state             PartySellerInviteState @default(PENDING)
+  note              String?
+  respondedByUserId String?                @map("responded_by_user_id")
+  respondedAt       DateTime?              @map("responded_at")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
+
+  party  Party        @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  seller VendorSeller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, sellerId])
+  @@index([sellerId, state])
+  @@map("party_seller_invites")
+}
+
 model VendorSeller {
   id           String             @id @default(cuid())
   legalName    String?            @map("legal_name")
@@ -1306,6 +1343,7 @@ model VendorSeller {
   endpoints     VendorWebhookEndpoint[]
   windows       VendorAvailabilityWindow[]
   partySessions PartySession[]
+  partyInvites  PartySellerInvite[]
   offers        Offer[]
   media         VendorMedia[]
   patches       VendorPatch[]

@@ -49,14 +49,17 @@ beforeEach(() => {
   prisma.$transaction = async (callback: any) => callback({ partySession, partySessionClaim, partyCheckout });
 });
 
-test('A business may only sell into a Party its own host runs', async () => {
-  // The host holds no seat here, so this business has no standing to hang a
-  // table on their night. The seat is a condition of the Party query, so an
-  // unheld one simply does not match.
+test('A business may only sell into a Party its own host runs, or one whose host asked it and it accepted', async () => {
+  // Without a seat or an accepted ask, this business has no standing to hang
+  // a table on the night. Both are conditions of the Party query, so a Party
+  // offering neither simply does not match.
   let query: any;
   party.findFirst = async (input: any) => { query = input; return null; };
   await assert.rejects(() => authorPartySession('seller-1', 'party-1', draft()), SessionPartyNotFound);
-  assert.deepEqual(query.where.host, { vendorSeats: { some: { sellerId: 'seller-1', state: 'ACTIVE' } } });
+  assert.deepEqual(query.where.OR, [
+    { host: { vendorSeats: { some: { sellerId: 'seller-1', state: 'ACTIVE' } } } },
+    { sellerInvites: { some: { sellerId: 'seller-1', state: 'ACCEPTED' } } },
+  ]);
 });
 
 test('A Party a business cannot sell into is not found, not forbidden', async () => {
@@ -71,11 +74,12 @@ test('A Party a business cannot sell into is not found, not forbidden', async ()
   assert.equal(reads, 2);
 });
 
-test('A seat that is only invited is not yet a seat', async () => {
+test('A seat that is only invited is not yet a seat, and an ask not yet accepted is not a grant', async () => {
   let query: any;
   party.findFirst = async (input: any) => { query = input; return null; };
   await assert.rejects(() => authorPartySession('seller-1', 'party-1', draft()), SessionPartyNotFound);
-  assert.equal(query.where.host.vendorSeats.some.state, 'ACTIVE');
+  assert.equal(query.where.OR[0].host.vendorSeats.some.state, 'ACTIVE');
+  assert.equal(query.where.OR[1].sellerInvites.some.state, 'ACCEPTED');
 });
 
 test('Supply is arranged before the night is announced, but not after it is called off', async () => {

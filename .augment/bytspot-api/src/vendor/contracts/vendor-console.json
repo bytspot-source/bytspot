@@ -399,6 +399,13 @@
         "requiresCapability": "PUBLISH"
       },
       {
+        "id": "parties",
+        "label": "Party requests",
+        "icon": "party.popper.fill",
+        "standardOnly": true,
+        "requiresCapability": "SCHEDULE"
+      },
+      {
         "id": "availability",
         "label": "Availability",
         "icon": "clock.fill",

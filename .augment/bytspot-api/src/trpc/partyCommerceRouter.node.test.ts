@@ -69,7 +69,7 @@ test('purchases retain pending, paid, expired and refund states without promotin
   };
   const result = await signedIn().events.commerce.mine({ kind: 'purchases' });
   assert.deepEqual(query.where, { userId: 'commerce-a' });
-  for (const field of ['checkoutUrl', 'stripeSessionId', 'hostNetCents', 'platformFeeCents']) {
+  for (const field of ['checkoutUrl', 'stripeSessionId', 'hostNetCents', 'platformFeeCents', 'sellerId', 'sellerNetCents']) {
     assert.equal(query.select[field], undefined);
   }
   assert.deepEqual(result.purchases?.map((p) => p.status), statuses);

@@ -96,6 +96,7 @@ import { adminSafetyRouter } from './adminSafetyRouter';
 import { safetyRouter } from './safetyRouter';
 import { salesRouter } from './salesRouter';
 import { mapReportsRouter } from './mapReportsRouter';
+import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -785,15 +786,14 @@ const venuesRouter = router({
       const entryFilter = input?.entryType;
       const cacheKey = entryFilter ? `venues:all:${entryFilter}` : 'venues:all';
       const venues = await cached(cacheKey, 30, async () => {
-        const rows = await db.venue.findMany({
+        const rows = await withLatestCrowd(await db.venue.findMany({
           where: entryFilter ? { discoverable: true, entryType: entryFilter } : { discoverable: true },
           include: {
-            crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 },
             parking: true,
             media: { where: { venue: { controlledAt: { not: null } } }, select: { id: true, kind: true, position: true } },
           },
           orderBy: { name: 'asc' },
-        });
+        }));
         return rows.map((v) => {
           const curated = curatedVenueMedia(v, v.media);
           return {
@@ -861,13 +861,11 @@ const venuesRouter = router({
     .input(z.object({ slug: z.string() }))
     .query(async ({ input }) => {
       const venue = await cached(`venue:${input.slug}`, 15, async () => {
-        return db.venue.findFirst({
+        const found = await db.venue.findFirst({
           where: { slug: input.slug, discoverable: true },
-          include: {
-            crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 24 },
-            parking: true,
-          },
+          include: { parking: true },
         });
+        return found && { ...found, crowdLevels: await recentCrowd(found.id, 24) };
       });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
       return {
@@ -1543,8 +1541,8 @@ const adminRouter = router({
       const [totalUsers, newToday, totalCheckins, topVenues, betaLeadCount, recentBetaLeads] = await Promise.all([
         db.user.count(),
         db.user.count({ where: { createdAt: { gte: today } } }),
-        db.crowdLevel.count(),
-        db.crowdLevel.groupBy({
+        db.checkIn.count(),
+        db.checkIn.groupBy({
           by: ['venueId'],
           _count: { venueId: true },
           orderBy: { _count: { venueId: 'desc' } },

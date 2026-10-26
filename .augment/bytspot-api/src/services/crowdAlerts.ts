@@ -14,6 +14,7 @@ import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { sendVenueCrowdAlert } from './notificationDelivery';
 import { isLiveOccupancySource } from './typicalOccupancy';
+import { withLatestCrowd } from './latestCrowd';
 
 const prevKey = (venueId: string) => `crowd:prev:${venueId}`;
 
@@ -28,19 +29,10 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
   const redis = getRedis();
   const alerts: { venue: string; type: string }[] = [];
 
-  const venues = await db.venue.findMany({
+  const venues = await withLatestCrowd(await db.venue.findMany({
     where: { discoverable: true },
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      crowdLevels: {
-        orderBy: { recordedAt: 'desc' },
-        take: 1,
-        select: { level: true, label: true, source: true },
-      },
-    },
-  });
+    select: { id: true, name: true, slug: true },
+  }));
 
   for (const venue of venues) {
     const current = venue.crowdLevels[0];

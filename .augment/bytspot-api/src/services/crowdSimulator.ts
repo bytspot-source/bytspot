@@ -11,6 +11,7 @@ import { db } from '../lib/db';
 import { crowdEmitter } from '../routes/venues';
 import { getRedis } from '../lib/redis';
 import { runCrowdAlerts } from './crowdAlerts';
+import { pruneTypicalCrowd } from './latestCrowd';
 import {
   TYPICAL_LABELS,
   typicalJitter,
@@ -48,6 +49,13 @@ export async function runCrowdSimulation(): Promise<SimulationResult> {
   });
 
   await db.crowdLevel.createMany({ data: inserts });
+
+  try {
+    const pruned = await pruneTypicalCrowd(now);
+    if (pruned) console.log(`[crowd-sim] Pruned ${pruned} typical occupancy rows past retention`);
+  } catch (err: any) {
+    console.error('[crowd-sim] prune failed:', err?.message);
+  }
 
   const redis = getRedis();
   if (redis) {

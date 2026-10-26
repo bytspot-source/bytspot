@@ -221,6 +221,9 @@ test('Recommendations share one Google search per pool and say when Google is do
   const originalFetch = globalThis.fetch;
   const venue = db.venue as unknown as { findMany: (args: unknown) => Promise<unknown[]> };
   const originalFindMany = venue.findMany;
+  const prisma = db as unknown as { $queryRaw: (...args: unknown[]) => Promise<unknown[]> };
+  const originalQueryRaw = prisma.$queryRaw;
+  prisma.$queryRaw = async () => [];
   (config as { googlePlacesApiKey: string }).googlePlacesApiKey = 'test-key';
   const bodies: Record<string, any>[] = [];
   globalThis.fetch = (async (_url: string, init: RequestInit) => {
@@ -241,7 +244,7 @@ test('Recommendations share one Google search per pool and say when Google is do
     assert.ok(bodies.every((b) => b.rankPreference === 'POPULARITY'));
 
     globalThis.fetch = (async () => new Response('denied', { status: 403 })) as typeof fetch;
-    venue.findMany = async () => [{ ...bytspotVenue({ lat: 41.0001, lng: -75.0 }), crowdLevels: [] }];
+    venue.findMany = async () => [bytspotVenue({ lat: 41.0001, lng: -75.0 })];
     const down = await caller.recommend({ lat: 41.0, lng: -75.0, vibe: 'coffee' });
     assert.equal(down.placesSource, 'unavailable');
     assert.deepEqual(down.forYou.map((i) => i.slug), ['closers']);
@@ -249,5 +252,6 @@ test('Recommendations share one Google search per pool and say when Google is do
     (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
     globalThis.fetch = originalFetch;
     venue.findMany = originalFindMany;
+    prisma.$queryRaw = originalQueryRaw;
   }
 });

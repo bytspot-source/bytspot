@@ -5,6 +5,7 @@ import { cached } from '../lib/redis';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
+import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
 
 const router = Router();
 
@@ -15,17 +16,11 @@ crowdEmitter.setMaxListeners(200); // allow many concurrent SSE clients
 /** GET /venues — list all venues with latest crowd level */
 router.get('/venues', async (_req, res) => {
   const venues = await cached('venues:all', 30, async () => {
-    const rows = await db.venue.findMany({
+    const rows = await withLatestCrowd(await db.venue.findMany({
       where: { discoverable: true },
-      include: {
-        crowdLevels: {
-          orderBy: { recordedAt: 'desc' },
-          take: 1,
-        },
-        parking: true,
-      },
+      include: { parking: true },
       orderBy: { name: 'asc' },
-    });
+    }));
 
     return rows.map((v) => ({
       id: v.id,
@@ -180,16 +175,12 @@ router.get('/venues/:slug', async (req, res) => {
   const { slug } = req.params;
 
   const venue = await cached(`venue:${slug}`, 15, async () => {
-    return db.venue.findFirst({
+    const found = await db.venue.findFirst({
       where: { slug, discoverable: true },
-      include: {
-        crowdLevels: {
-          orderBy: { recordedAt: 'desc' },
-          take: 24, // last 24 readings for trend chart
-        },
-        parking: true,
-      },
+      include: { parking: true },
     });
+    // last 24 readings for trend chart
+    return found && { ...found, crowdLevels: await recentCrowd(found.id, 24) };
   });
 
   if (!venue) {
@@ -232,11 +223,11 @@ router.get('/venues/crowd/stream', async (req, res) => {
 
   // Send initial snapshot so client has data immediately
   try {
-    const rows = await db.venue.findMany({
+    const rows = await withLatestCrowd(await db.venue.findMany({
       where: { discoverable: true },
-      include: { crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1 } },
+      select: { id: true },
       orderBy: { name: 'asc' },
-    });
+    }));
     const snapshot = rows.map((v) => ({
       id: v.id,
       crowd: v.crowdLevels[0]

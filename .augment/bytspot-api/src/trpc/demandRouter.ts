@@ -7,9 +7,8 @@ import { ASK_INTENT, supplyFor } from '../vendor/demandFeed';
 import { sellableSlots } from '../vendor/availability';
 import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
-import { acceptOffer, NotYours, OfferExpired, OfferGone, PaymentRequired, SlotTaken } from '../vendor/acceptOffer';
+import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
 import { notifyAskSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
-import { NotPayable, PaymentsUnavailable, PayoutNotReady, startOfferCheckout } from '../vendor/offerCheckout';
 import { patchForAsk } from '../vendor/patches';
 
 /**
@@ -507,38 +506,6 @@ export const demandRouter = router({
         }
         if (error instanceof SlotTaken) {
           throw new TRPCError({ code: 'CONFLICT', message: new SlotTaken().message });
-        }
-        if (error instanceof PaymentRequired) {
-          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: error.message });
-        }
-        throw error;
-      }
-    }),
-
-  /**
-   * Pay for an offer the seller asked to be paid in the app.
-   *
-   * Returns a hosted checkout URL. The table is committed when the payment is
-   * confirmed, and refunded in full if it is gone by then.
-   */
-  payOffer: protectedProcedure
-    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 40, label: 'demand-pay' }))
-    .input(z.object({ offerId: z.string().trim().min(1).max(64) }))
-    .mutation(async ({ ctx, input }) => {
-      try {
-        return await startOfferCheckout({ offerId: input.offerId, userId: ctx.user.userId });
-      } catch (error) {
-        if (error instanceof OfferGone || error instanceof NotYours) {
-          throw new TRPCError({ code: 'NOT_FOUND', message: 'That offer is no longer available.' });
-        }
-        if (error instanceof OfferExpired) {
-          throw new TRPCError({ code: 'CONFLICT', message: error.message });
-        }
-        if (error instanceof NotPayable || error instanceof PayoutNotReady) {
-          throw new TRPCError({ code: 'PRECONDITION_FAILED', message: error.message });
-        }
-        if (error instanceof PaymentsUnavailable) {
-          throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: error.message });
         }
         throw error;
       }

@@ -20,6 +20,16 @@ export type ProviderResolution =
 export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'providerIdentity' | 'user' | 'userIdentityHash' | 'userEmail'>;
 
 /**
+ * A display name the app passed alongside the token. Apple puts the member's
+ * name in the authorization response, never in the ID token, and only on the
+ * first authorization. It is display-only, never identity proof.
+ */
+export function suppliedDisplayName(value: string | null | undefined): string | undefined {
+  const clean = (value ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 100);
+  return clean || undefined;
+}
+
+/**
  * Resolves a verified provider subject to exactly one user. An existing
  * account with the same email is never joined here: the caller must have the
  * member prove control of it first (see services/providerLink.ts), or a
@@ -28,13 +38,22 @@ export type ProviderIdentityDatabase = Pick<typeof db, '$transaction' | 'provide
 export async function resolveProviderIdentity(
   identity: VerifiedProviderIdentity,
   database: ProviderIdentityDatabase = db,
-  { ref }: { ref?: string } = {},
+  { ref, suppliedName }: { ref?: string; suppliedName?: string } = {},
 ): Promise<ProviderResolution> {
+  const name = identity.name ?? suppliedDisplayName(suppliedName);
+  if (name !== identity.name) identity = { ...identity, name };
   const existing = await database.providerIdentity.findUnique({
     where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
     include: { user: { select: { id: true, email: true, name: true } } },
   });
-  if (existing) return { user: existing.user, isNewUser: false };
+  if (existing) {
+    // Fills a name the account never got; a name the member set is kept.
+    if (!existing.user.name?.trim() && name) {
+      const user = await database.user.update({ where: { id: existing.user.id }, data: { name }, select: { id: true, email: true, name: true } });
+      return { user, isNewUser: false };
+    }
+    return { user: existing.user, isNewUser: false };
+  }
 
   if (!identity.email) {
     throw new TRPCError({

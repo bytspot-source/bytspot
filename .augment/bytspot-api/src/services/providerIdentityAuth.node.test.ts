@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { hashEmail } from '../lib/contactHash';
-import { resolveProviderIdentity, type ProviderIdentityDatabase } from './providerIdentityAuth';
+import { resolveProviderIdentity, suppliedDisplayName, type ProviderIdentityDatabase } from './providerIdentityAuth';
 import { attachProviderIdentity, maskEmail, type ProviderLinkDatabase } from './providerLink';
 
 const identity = { provider: 'google' as const, subject: 'google-subject', email: 'person@example.test', name: 'Person' };
 const linkedUser = { id: 'linked-user', email: 'person@example.test', name: 'Person' };
 
-type FakeDatabase = ProviderIdentityDatabase & { emailLookups: () => number; identityHashRows: () => unknown[]; createdUsers: () => any[] };
+type FakeDatabase = ProviderIdentityDatabase & { emailLookups: () => number; identityHashRows: () => unknown[]; createdUsers: () => any[]; updatedUsers: () => any[] };
 
 function database({ existing = null, emailOwner = null, extraEmailOwner = null, transactionError = null, concurrent = null }: {
   existing?: unknown;
@@ -21,6 +21,7 @@ function database({ existing = null, emailOwner = null, extraEmailOwner = null, 
   let emailLookups = 0;
   const identityHashRows: unknown[] = [];
   const createdUsers: any[] = [];
+  const updatedUsers: any[] = [];
   const db = {
     providerIdentity: {
       findUnique: async () => {
@@ -32,6 +33,7 @@ function database({ existing = null, emailOwner = null, extraEmailOwner = null, 
     user: {
       findUnique: async () => { emailLookups += 1; return emailOwner; },
       create: async ({ data }: { data: unknown }) => { createdUsers.push(data); return linkedUser; },
+      update: async ({ where, data }: { where: { id: string }; data: { name: string } }) => { updatedUsers.push({ where, data }); return { ...linkedUser, ...data }; },
     },
     userEmail: {
       findUnique: async () => extraEmailOwner,
@@ -52,6 +54,7 @@ function database({ existing = null, emailOwner = null, extraEmailOwner = null, 
     emailLookups: () => emailLookups,
     identityHashRows: () => identityHashRows,
     createdUsers: () => createdUsers,
+    updatedUsers: () => updatedUsers,
   }) as FakeDatabase;
 }
 
@@ -136,4 +139,31 @@ test('A provider mapping is created from verified token claims only', async () =
 test('A concurrent first sign-in recovers only through the same provider subject', async () => {
   const db = database({ transactionError: new Error('unique constraint'), concurrent: { user: linkedUser } });
   assert.deepEqual(await resolveProviderIdentity(identity, db), { user: linkedUser, isNewUser: false });
+});
+
+test('An Apple account gets the name the app passed, since the ID token never carries it', async () => {
+  const apple = { provider: 'apple' as const, subject: 'apple-subject', email: 'ama@example.test' };
+  const created = database();
+  await resolveProviderIdentity(apple, created, { suppliedName: '  Ama Owusu ' });
+  assert.equal(created.createdUsers()[0].name, 'Ama Owusu');
+
+  // An account created without a name is filled on the next sign-in that carries one.
+  const unnamed = database({ existing: { user: { ...linkedUser, name: null } } });
+  const result = await resolveProviderIdentity(apple, unnamed, { suppliedName: 'Ama Owusu' });
+  assert.deepEqual(unnamed.updatedUsers(), [{ where: { id: 'linked-user' }, data: { name: 'Ama Owusu' } }]);
+  assert.equal('user' in result && result.user.name, 'Ama Owusu');
+
+  // A name the member already has is never replaced, and no name means no write.
+  const named = database({ existing: { user: linkedUser } });
+  await resolveProviderIdentity(apple, named, { suppliedName: 'Someone Else' });
+  await resolveProviderIdentity(apple, unnamed, {});
+  assert.deepEqual(named.updatedUsers(), []);
+  assert.equal(unnamed.updatedUsers().length, 1);
+});
+
+test('A supplied name is display text only: trimmed, bounded and free of control characters', () => {
+  assert.equal(suppliedDisplayName('  Kojo\u202e Mensah\n '), 'Kojo Mensah');
+  assert.equal(suppliedDisplayName('   '), undefined);
+  assert.equal(suppliedDisplayName(undefined), undefined);
+  assert.equal(suppliedDisplayName('x'.repeat(140))?.length, 100);
 });

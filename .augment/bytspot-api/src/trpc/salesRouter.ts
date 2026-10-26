@@ -246,6 +246,23 @@ export const salesRouter = router({
       return { saleId: sale.id, state: input.outcome };
     }),
 
+  /**
+   * Removes a sold, cancelled or ended sale from the seller's list, with its
+   * requests and photo. An open sale must be closed first so no buyer loses a
+   * meet point without the sale reading as closed. Reports keep their snapshot.
+   */
+  delete: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'sales-delete' }))
+    .input(saleId)
+    .mutation(async ({ ctx, input }) => {
+      const sale = await ownSale(ctx.user.userId, input.saleId);
+      if (saleState(sale) === 'open') {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Mark the sale sold or cancel it before deleting it.' });
+      }
+      await db.privateSale.deleteMany({ where: { id: sale.id, sellerId: ctx.user.userId } });
+      return { saleId: sale.id, deleted: true as const };
+    }),
+
   /** The seller's sales, newest first, with who asked for the meet point and their membership limits. */
   mine: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'sales-mine' }))

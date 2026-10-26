@@ -237,3 +237,21 @@ test('closing a sale is final and repeatable', async () => {
   sale.findFirst = async () => ({ ...openSale(), status: 'sold' });
   assert.deepEqual(await seller().sales.close({ saleId: 'sale-1', outcome: 'cancelled' }), { saleId: 'sale-1', state: 'sold' });
 });
+
+test('a seller deletes only their own sold, cancelled or ended sale', async () => {
+  let deleted: any = null;
+  sale.deleteMany = async ({ where }: any) => { deleted = where; return { count: 1 }; };
+  await assert.rejects(() => seller().sales.delete({ saleId: 'sale-1' }), { code: 'PRECONDITION_FAILED' });
+  assert.equal(deleted, null, 'an open sale is never deleted');
+
+  for (const closed of [{ status: 'sold' }, { status: 'cancelled' }, { windowEnd: new Date(Date.now() - hour) }]) {
+    deleted = null;
+    sale.findFirst = async ({ where }: any) => { saleWhere = where; return { ...openSale(), ...closed }; };
+    assert.deepEqual(await seller().sales.delete({ saleId: 'sale-1' }), { saleId: 'sale-1', deleted: true });
+    assert.deepEqual(saleWhere, { id: 'sale-1', sellerId: 'seller-id' });
+    assert.deepEqual(deleted, { id: 'sale-1', sellerId: 'seller-id' });
+  }
+
+  sale.findFirst = async () => null;
+  await assert.rejects(() => buyer().sales.delete({ saleId: 'sale-1' }), { code: 'NOT_FOUND' });
+});

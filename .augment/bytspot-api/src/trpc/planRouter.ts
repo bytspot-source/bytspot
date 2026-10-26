@@ -35,6 +35,10 @@ import { dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined } from '
  */
 
 const PROPOSED_PLAN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** A confirmed Plan with a start and no stated end is over this long after it starts. */
+export const PLAN_DEFAULT_LENGTH_MS = 12 * 60 * 60 * 1000;
+/** Clock skew a client may carry when it sends a start of "now". */
+const PAST_START_GRACE_MS = 60 * 1000;
 
 const PARTICIPANT_RESPONSES = ['accepted', 'maybe', 'declined'] as const;
 
@@ -93,6 +97,19 @@ export function itemIsBooked(item: ItemRecord, bookedPartyIds?: ReadonlySet<stri
   return false;
 }
 
+/** When a confirmed Plan is over: its stated end, else a default length after its start. */
+export function planEffectiveEnd(plan: { startsAt: Date | null; endsAt: Date | null }): Date | null {
+  if (plan.endsAt) return plan.endsAt;
+  return plan.startsAt ? new Date(plan.startsAt.getTime() + PLAN_DEFAULT_LENGTH_MS) : null;
+}
+
+/** When the Plan and its invite link stop working, or null when nothing ends it. */
+export function planClosesAt(plan: PlanRecord): Date | null {
+  if (plan.lifecycle === 'proposed') return plan.expiresAt;
+  if (plan.lifecycle === 'confirmed') return planEffectiveEnd(plan);
+  return null;
+}
+
 /** A proposed Plan that ran out of time is expired on read; there is no sweep. */
 export function isProposedPlanExpired(plan: PlanRecord, now: Date): boolean {
   return plan.lifecycle === 'proposed' && plan.expiresAt !== null && now >= plan.expiresAt;
@@ -110,7 +127,8 @@ export function planDisplayState(plan: PlanRecord, items: ItemRecord[], now: Dat
   // "booked" merely by being stored that way.
   if (plan.lifecycle !== 'confirmed') return 'proposed';
 
-  if (plan.endsAt && now >= plan.endsAt) return 'completed';
+  const end = planEffectiveEnd(plan);
+  if (end && now >= end) return 'completed';
   if (plan.startsAt && now >= plan.startsAt) return 'active';
 
   // A reference the user resolves themselves is not something Bytspot booked,
@@ -310,7 +328,10 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
     joinToken: plan.creatorUserId === viewerUserId ? plan.joinToken : undefined,
     startsAt: plan.startsAt,
     endsAt: plan.endsAt,
+    expiresAt: planClosesAt(plan),
     areaLabel: plan.areaLabel,
+    latitude: plan.latitude,
+    longitude: plan.longitude,
     partySize: plan.partySize,
     needs: plan.needs,
     lifecycle: plan.lifecycle,
@@ -390,6 +411,25 @@ async function loadPlanForCreator(planId: string, userId: string, tx: TxClient =
   const plan = await tx.plan.findUnique({ where: { id: planId }, include: planInclude });
   if (!plan || plan.deletedAt || plan.creatorUserId !== userId) throw planNotFound();
   return plan;
+}
+
+function isPlanOver(plan: { startsAt: Date | null; endsAt: Date | null }, now: Date): boolean {
+  const end = planEffectiveEnd(plan);
+  return Boolean(end && now >= end);
+}
+
+function assertStartNotPast(startsAt: Date | null | undefined, now: Date) {
+  if (startsAt && startsAt.getTime() < now.getTime() - PAST_START_GRACE_MS) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot start in the past.' });
+  }
+}
+
+/** A coordinate pair is all or nothing, and Null Island is a failed fix, not a place. */
+function assertLocation(latitude: number | null | undefined, longitude: number | null | undefined) {
+  if ((latitude === undefined) !== (longitude === undefined) || (latitude === null) !== (longitude === null)) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'Send latitude and longitude together.' });
+  }
+  if (latitude === 0 && longitude === 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'That location is not valid.' });
 }
 
 /** The creator may only reshape a Plan that is still going somewhere. */
@@ -688,6 +728,7 @@ export const planRouter = router({
       if (input.startsAt && input.endsAt && input.endsAt <= input.startsAt) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
       }
+      assertLocation(input.latitude, input.longitude);
       const { bookableSelections } = input;
       const planInput = normalizedPlanPayload(input);
       const bookableCreationHash = createHash('sha256').update(JSON.stringify({
@@ -707,6 +748,7 @@ export const planRouter = router({
           // silently discarding selections. Matching retries write nothing.
           return result;
         }
+        assertStartNotPast(input.startsAt, new Date());
         const supplies = await resolveBookableSelections(tx, ctx.user.userId, bookableSelections, new Date());
         const plan = await tx.plan.create({ data: {
           ...planInput, idempotencyKey: input.idempotencyKey, creatorUserId: ctx.user.userId,
@@ -741,8 +783,11 @@ export const planRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
       }
       const key = { creatorUserId_idempotencyKey: { creatorUserId: ctx.user.userId, idempotencyKey: input.idempotencyKey } };
+      assertLocation(input.latitude, input.longitude);
       const existing = await db.plan.findUnique({ where: key });
       if (existing) return existingPlanResult(existing);
+      // After the idempotent read: a retry of a Plan that has since started still returns it.
+      assertStartNotPast(input.startsAt, new Date());
 
       const expiresAt = input.startsAt ?? new Date(Date.now() + PROPOSED_PLAN_TTL_MS);
       try {
@@ -1040,7 +1085,7 @@ export const planRouter = router({
           plan.deletedAt ||
           plan.lifecycle === 'cancelled' ||
           isProposedPlanExpired(plan, now) ||
-          (plan.lifecycle === 'confirmed' && plan.endsAt && now >= plan.endsAt)
+          (plan.lifecycle === 'confirmed' && isPlanOver(plan, now))
         ) {
           throw planNotFound();
         }
@@ -1275,6 +1320,45 @@ export const planRouter = router({
       const updated = await db.plan.updateMany({ where: { id: plan.id, deletedAt: null }, data: { needs } });
       if (updated.count === 0) throw planNotFound();
       return { needs, openNeeds: openNeeds({ ...plan, needs }, plan.items) };
+    }),
+
+  /** Time, size and place, set after creation. Omitted keeps a field; null clears it. */
+  update: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-update' }))
+    .input(z.object({
+      planId: z.string().min(1),
+      startsAt: z.coerce.date().nullable().optional(),
+      endsAt: z.coerce.date().nullable().optional(),
+      partySize: z.number().int().min(1).max(200).nullable().optional(),
+      areaLabel: z.string().trim().min(1).max(80).nullable().optional(),
+      latitude: z.number().min(-90).max(90).nullable().optional(),
+      longitude: z.number().min(-180).max(180).nullable().optional(),
+    }).strict())
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+      assertLocation(input.latitude, input.longitude);
+      if (input.startsAt !== undefined) assertStartNotPast(input.startsAt, now);
+      return serializableTransaction(async (tx) => {
+        const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
+        assertPlanMutable(plan, now);
+        const startsAt = input.startsAt === undefined ? plan.startsAt : input.startsAt;
+        const endsAt = input.endsAt === undefined ? plan.endsAt : input.endsAt;
+        if (startsAt && endsAt && endsAt <= startsAt) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
+        }
+        const data: Prisma.PlanUpdateInput = {};
+        if (input.startsAt !== undefined) {
+          data.startsAt = input.startsAt;
+          // A proposed Plan waits until its start, or a week from now once it has none.
+          if (plan.lifecycle === 'proposed') data.expiresAt = input.startsAt ?? new Date(now.getTime() + PROPOSED_PLAN_TTL_MS);
+        }
+        if (input.endsAt !== undefined) data.endsAt = input.endsAt;
+        if (input.partySize !== undefined) data.partySize = input.partySize;
+        if (input.areaLabel !== undefined) data.areaLabel = input.areaLabel;
+        if (input.latitude !== undefined) { data.latitude = input.latitude; data.longitude = input.longitude; }
+        await tx.plan.update({ where: { id: plan.id }, data });
+        return { id: plan.id };
+      }, 'Another change to this Plan is in flight. Try again.');
     }),
 
   /**

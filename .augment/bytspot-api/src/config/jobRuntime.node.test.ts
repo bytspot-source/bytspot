@@ -26,7 +26,7 @@ const productionDatabase = { NODE_ENV: 'production', DATABASE_URL: 'postgresql:/
 test('The server still refuses to start in production without JWT_SECRET', () => {
   const result = loadConfig({ ...productionDatabase, CONTACT_HASH_SALT: 'a-real-salt' }, 'console.log("started");');
   assert.equal(result.status, 1);
-  assert.match(result.output, /JWT_SECRET: Required/);
+  assert.match(result.output, /JWT_SECRET: Invalid input: expected string, received undefined/);
 });
 
 test('A scheduled job boots with only a database, without the API secrets', () => {

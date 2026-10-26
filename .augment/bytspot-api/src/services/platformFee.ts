@@ -45,6 +45,21 @@ export function splitTicketAmount(amountCents: number, feeBps: number): { feeCen
 }
 
 /**
+ * A checkout whose session is sold by a business the host asked. Each side
+ * nets its own portion, the fee rounded down on each, so neither is owed less
+ * than its share would round to alone.
+ */
+export function splitHostAndSellerAmount(
+  ticketCents: number,
+  sessionCents: number,
+  feeBps: number,
+): { feeCents: number; hostNetCents: number; sellerNetCents: number } {
+  const ticket = splitTicketAmount(ticketCents, feeBps);
+  const session = splitTicketAmount(sessionCents, feeBps);
+  return { feeCents: ticket.feeCents + session.feeCents, hostNetCents: ticket.hostNetCents, sellerNetCents: session.hostNetCents };
+}
+
+/**
  * Split an offer paid in the app into Bytspot's fee and the seller's net.
  *
  * The minimum applies only when the rate is non-zero, so a zero rate set by an

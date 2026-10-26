@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { partyCommerceRouter } from './partyCommerceRouter';
 import { partyLineupRouter } from './partyLineupRouter';
+import { partySellerInvitesRouter } from './partySellerInvitesRouter';
 import { partySessionAuthoringRouter } from './partySessionAuthoringRouter';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
@@ -91,6 +92,7 @@ export const eventsRouter = router({
   recap: partyRecapRouter,
   sessions: partySessionsRouter,
   sessionAuthoring: partySessionAuthoringRouter,
+  sellerInvites: partySellerInvitesRouter,
   commerce: partyCommerceRouter,
   lineup: partyLineupRouter,
   publish: partyPublish,

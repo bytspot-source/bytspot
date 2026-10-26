@@ -589,6 +589,51 @@ export async function sendVendorInviteEmail(to: string, invite: VendorInviteNoti
   }
 }
 
+export interface PartySellerInviteNotice {
+  legalName: string;
+  hostName: string;
+  partyTitle: string;
+  startsAt: Date;
+  venueName: string;
+  note: string | null;
+  consoleUrl: string;
+}
+
+/**
+ * A host asked a business to sell at their Party. Logged, not thrown: the
+ * request waits in the console whether or not this lands.
+ */
+export async function sendPartySellerInviteEmail(to: string, invite: PartySellerInviteNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  const when = invite.startsAt.toLocaleString('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `${invite.hostName} wants ${invite.legalName} at ${invite.partyTitle}`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">A party wants you selling</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            ${escapeHtml(invite.hostName)} asked ${escapeHtml(invite.legalName)} to sell tables at ${escapeHtml(invite.partyTitle)}, ${escapeHtml(when)} at ${escapeHtml(invite.venueName)}.
+          </p>
+          ${invite.note ? `<p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0;">“${escapeHtml(invite.note)}”</p>` : ''}
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 24px;">
+            Accept in Party requests to add your tables. You set every price and unit; sales settle to your business as usual.
+          </p>
+          <a href="${escapeHtml(invite.consoleUrl)}" style="display: inline-block; background: #fff; color: #0d0d0d; font-weight: 600; text-decoration: none; padding: 12px 20px; border-radius: 10px;">Open the console</a>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendPartySellerInviteEmail failed:', err?.message);
+  }
+}
+
 export interface GuestOfferNotice {
   where: string;
   when: string;

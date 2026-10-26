@@ -14,11 +14,10 @@ import { liveClaimWhere, validateSessions, type SessionDraft, type SessionIssue 
  *
  * Who may attach to which Party is the whole question, and the answer is
  * narrow on purpose. A vendor may author on a Party whose host holds a live
- * seat at that same business. That is the launch segment exactly — the
- * promoter running the night is the business selling the tables — and it
- * refuses the case nobody has designed yet, where a third-party vendor hangs
- * a $900 table on a stranger's Party. Opening that up needs a grant the host
- * issues, and there is no such grant, so this does not pretend to have one.
+ * seat at that same business — the promoter running the night is the business
+ * selling the tables — or on one whose host asked this business and it
+ * accepted (vendor/partySellerInvites). Nothing else lets a third-party vendor
+ * hang a $900 table on a stranger's Party.
  */
 
 const MAX_SESSIONS_PER_PARTY = 40;
@@ -124,7 +123,10 @@ async function sellablePartyFor(sellerId: string, partyId: string) {
     where: {
       id: partyId,
       status: { not: 'cancelled' },
-      host: { vendorSeats: { some: { sellerId, state: 'ACTIVE' } } },
+      OR: [
+        { host: { vendorSeats: { some: { sellerId, state: 'ACTIVE' } } } },
+        { sellerInvites: { some: { sellerId, state: 'ACCEPTED' } } },
+      ],
     },
     select: { id: true, hostUserId: true },
   });

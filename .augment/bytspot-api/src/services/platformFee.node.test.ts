@@ -51,3 +51,15 @@ test('a booking fee is the rate, with a minimum that never takes more than half'
   // A zero rate means no fee at all, minimum included.
   assert.deepEqual(splitBookingAmount(5_000, 0, 100), { feeCents: 0, sellerNetCents: 5_000 });
 });
+
+test('a table from a business the host asked is netted apart from the door, and nothing is lost', async () => {
+  const { splitHostAndSellerAmount } = await import('./platformFee');
+  // $25 door + $400 table at 10%: the host nets the door, the business the table.
+  assert.deepEqual(splitHostAndSellerAmount(2_500, 40_000, 1_000), { feeCents: 4_250, hostNetCents: 2_250, sellerNetCents: 36_000 });
+  // A table bought alone owes the host nothing.
+  assert.deepEqual(splitHostAndSellerAmount(0, 40_000, 1_000), { feeCents: 4_000, hostNetCents: 0, sellerNetCents: 36_000 });
+  for (const [door, table, bps] of [[999, 12_345, 1_250], [1, 1, 3_000], [0, 99, 777]]) {
+    const split = splitHostAndSellerAmount(door, table, bps);
+    assert.equal(split.feeCents + split.hostNetCents + split.sellerNetCents, door + table);
+  }
+});

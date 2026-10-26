@@ -5,7 +5,7 @@ import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
 import { alertGuestOfDecision, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
-import { currentPlatformFeeBps, effectiveFeeBps, splitTicketAmount } from '../services/platformFee';
+import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
@@ -1873,7 +1873,15 @@ export const partyTicketsRouter = router({
       // is no Connect destination yet, so Bytspot holds the whole charge and
       // owes the host net. See STRIPE_CAPITAL_CASH_FLOW.md.
       const ticketFeeBps = effectiveFeeBps(party.platformFeeBps, await currentPlatformFeeBps());
-      const { feeCents, hostNetCents } = splitTicketAmount(reservation.amountCents, ticketFeeBps);
+      // A session from a business the host asked is owed to that business;
+      // one from the host's own team stays inside the host's net, as before.
+      const invitedSellerId = reservation.sessionId && partySession
+        && (await db.vendorSeat.count({ where: { userId: party.hostUserId, sellerId: partySession.sellerId, state: 'ACTIVE' } })) === 0
+        ? partySession.sellerId
+        : null;
+      const { feeCents, hostNetCents, sellerNetCents } = invitedSellerId
+        ? splitHostAndSellerAmount(reservation.amountCents - reservation.sessionAmountCents, reservation.sessionAmountCents, ticketFeeBps)
+        : { ...splitTicketAmount(reservation.amountCents, ticketFeeBps), sellerNetCents: null };
       const stripe = new Stripe(config.stripeSecretKey);
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -1911,6 +1919,7 @@ export const partyTicketsRouter = router({
           ticketTierName: reservation.ticketTierName ?? '', sessionId: reservation.sessionId ?? '',
           idempotencyKey: input.idempotencyKey,
           platformFeeBps: String(ticketFeeBps), platformFeeCents: String(feeCents), hostNetCents: String(hostNetCents),
+          sellerId: invitedSellerId ?? '', sellerNetCents: sellerNetCents === null ? '' : String(sellerNetCents),
         },
         success_url: `${partyShareUrl(party.id)}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${partyShareUrl(party.id)}?checkout=cancelled`,
@@ -1920,7 +1929,7 @@ export const partyTicketsRouter = router({
         where: { id: reservation.id },
         data: {
           stripeSessionId: session.id, checkoutUrl: session.url, status: 'pending',
-          platformFeeBps: ticketFeeBps, platformFeeCents: feeCents, hostNetCents,
+          platformFeeBps: ticketFeeBps, platformFeeCents: feeCents, hostNetCents, sellerId: invitedSellerId, sellerNetCents,
           reservationExpiresAt: session.expires_at ? new Date(session.expires_at * 1000) : reservation.reservationExpiresAt,
         },
       });

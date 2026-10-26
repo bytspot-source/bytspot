@@ -36,7 +36,7 @@ const unavailable = () => new TRPCError({ code: 'NOT_FOUND', message: SALE_UNAVA
 // Same envelope the party media upload accepts: JPEG, PNG or WebP, at most 600 KB.
 const photoDataUri = z.string().max(900_000);
 
-function photoUrl(photo: { id: string } | null | undefined): string | null {
+export function photoUrl(photo: { id: string } | null | undefined): string | null {
   return photo ? `${config.publicApiUrl}/media/sales/${encodeURIComponent(photo.id)}` : null;
 }
 
@@ -51,7 +51,7 @@ function parsePhoto(dataUri: string) {
  * reports, sold by a suspended account, or between two members where either
  * blocked the other also reads as NOT_FOUND.
  */
-async function liveSale(id: string, viewerId?: string | null, now = new Date()) {
+export async function liveSale(id: string, viewerId?: string | null, now = new Date()) {
   const sale = await db.privateSale.findFirst({
     where: { id, status: 'open', windowEnd: { gt: now }, moderationHiddenAt: null, seller: { deletedAt: null, suspendedAt: null } },
     include: { seller: { select: { name: true } }, photo: { select: { id: true } } },
@@ -82,7 +82,7 @@ async function limitsFor(userId: string) {
   return saleLimits(user?.membershipTier);
 }
 
-function firstName(name: string | null | undefined): string {
+export function firstName(name: string | null | undefined): string {
   return name?.trim().split(/\s+/)[0] || 'Seller';
 }
 

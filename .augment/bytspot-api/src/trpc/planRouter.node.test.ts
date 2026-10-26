@@ -6,7 +6,7 @@ import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, itemDestination, itemIsBooked, usePlaceLocationResolverForTest, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { PLAN_DEFAULT_LENGTH_MS, capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, planClosesAt, itemDestination, itemIsBooked, usePlaceLocationResolverForTest, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
 import { useTableBookingLinksForTest } from '../services/tableBookingLinks';
 
@@ -227,6 +227,101 @@ test('A Plan that starts is given its own start as the deadline', async () => {
     () => caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner', startsAt, endsAt: new Date(startsAt.getTime() - 1000) }),
     { code: 'BAD_REQUEST' },
   );
+});
+
+test('A Plan cannot be created already over, but an idempotent retry still returns it', async () => {
+  const past = new Date(Date.now() - 10 * 60 * 1000);
+  await assert.rejects(
+    () => caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner', startsAt: past }),
+    { code: 'BAD_REQUEST', message: 'A Plan cannot start in the past.' },
+  );
+  await assert.rejects(
+    () => caller().plans.createWithBookables({ idempotencyKey, title: 'Friday', intent: 'Dinner', startsAt: past, bookableSelections: [] }),
+    { code: 'BAD_REQUEST', message: 'A Plan cannot start in the past.' },
+  );
+  plan.findUnique = async () => ({ id: 'plan-existing', deletedAt: null });
+  assert.deepEqual(await caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner', startsAt: past }), { id: 'plan-existing' });
+});
+
+test('A Plan location is a whole coordinate pair, never Null Island', async () => {
+  await assert.rejects(
+    () => caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner', latitude: 33.78 }),
+    { code: 'BAD_REQUEST', message: 'Send latitude and longitude together.' },
+  );
+  await assert.rejects(
+    () => caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner', latitude: 0, longitude: 0 }),
+    { code: 'BAD_REQUEST', message: 'That location is not valid.' },
+  );
+  let seeded: any = null;
+  plan.create = async ({ data }: any) => { seeded = data; return { id: 'plan-1' }; };
+  await caller().plans.create({ idempotencyKey, title: 'Friday', intent: 'Dinner', areaLabel: 'Midtown', latitude: 33.78, longitude: -84.38 });
+  assert.deepEqual([seeded.areaLabel, seeded.latitude, seeded.longitude], ['Midtown', 33.78, -84.38]);
+});
+
+test('The creator can set time, size and place after creation; omitted keeps and null clears', async () => {
+  const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  let written: any = null;
+  plan.findUnique = async () => planFixture();
+  plan.update = async ({ data }: any) => { written = data; return { id: 'plan-1' }; };
+  assert.deepEqual(
+    await caller().plans.update({ planId: 'plan-1', startsAt, partySize: 6, areaLabel: 'Old Fourth Ward', latitude: 33.77, longitude: -84.36 }),
+    { id: 'plan-1' },
+  );
+  // A proposed Plan now waits until its new start rather than the old deadline.
+  assert.equal(written.expiresAt.getTime(), startsAt.getTime());
+  assert.deepEqual([written.partySize, written.areaLabel, written.latitude, written.longitude], [6, 'Old Fourth Ward', 33.77, -84.36]);
+  assert.equal('endsAt' in written, false);
+
+  await caller().plans.update({ planId: 'plan-1', startsAt: null, latitude: null, longitude: null });
+  assert.equal(written.startsAt, null);
+  assert.ok(written.expiresAt.getTime() > Date.now() + 6 * 24 * 60 * 60 * 1000, 'Clearing the time restores the week-long wait.');
+  assert.deepEqual([written.latitude, written.longitude], [null, null]);
+  assert.equal('areaLabel' in written, false);
+
+  // A confirmed Plan has no proposal deadline to move.
+  plan.findUnique = async () => planFixture({ lifecycle: 'confirmed', expiresAt: null });
+  await caller().plans.update({ planId: 'plan-1', startsAt });
+  assert.equal('expiresAt' in written, false);
+});
+
+test('Updating a Plan refuses a past start, a backwards end, a half location, a guest and a dead Plan', async () => {
+  const startsAt = new Date(Date.now() + 60 * 60 * 1000);
+  plan.findUnique = async () => planFixture({ startsAt });
+  await assert.rejects(() => caller().plans.update({ planId: 'plan-1', startsAt: new Date(Date.now() - 10 * 60 * 1000) }),
+    { code: 'BAD_REQUEST', message: 'A Plan cannot start in the past.' });
+  // The end is checked against the stored start when only the end is sent.
+  await assert.rejects(() => caller().plans.update({ planId: 'plan-1', endsAt: new Date(startsAt.getTime() - 1000) }),
+    { code: 'BAD_REQUEST', message: 'A Plan cannot end before it starts.' });
+  await assert.rejects(() => caller().plans.update({ planId: 'plan-1', longitude: -84.38 }),
+    { code: 'BAD_REQUEST', message: 'Send latitude and longitude together.' });
+  await assert.rejects(() => guest().plans.update({ planId: 'plan-1', partySize: 3 }), { code: 'NOT_FOUND' });
+  plan.findUnique = async () => planFixture({ expiresAt: new Date(Date.now() - 1000) });
+  await assert.rejects(() => caller().plans.update({ planId: 'plan-1', partySize: 3 }), { code: 'CONFLICT', message: 'This Plan expired.' });
+  plan.findUnique = async () => planFixture({ lifecycle: 'cancelled' });
+  await assert.rejects(() => caller().plans.update({ planId: 'plan-1', partySize: 3 }), { code: 'CONFLICT', message: 'This Plan was cancelled.' });
+});
+
+test('A confirmed Plan with no stated end finishes a default length after it starts, and says when it closes', async () => {
+  const startsAt = new Date('2026-09-03T19:00:00Z');
+  const confirmed = { lifecycle: 'confirmed', startsAt, endsAt: null, expiresAt: null, needs: [] };
+  assert.equal(planDisplayState(confirmed, [], new Date(startsAt.getTime() + PLAN_DEFAULT_LENGTH_MS - 1)), 'active');
+  assert.equal(planDisplayState(confirmed, [], new Date(startsAt.getTime() + PLAN_DEFAULT_LENGTH_MS)), 'completed');
+  assert.equal(planClosesAt(confirmed)?.getTime(), startsAt.getTime() + PLAN_DEFAULT_LENGTH_MS);
+  assert.equal(planClosesAt({ ...confirmed, startsAt: null }), null);
+  const deadline = new Date('2026-09-10T00:00:00Z');
+  assert.equal(planClosesAt({ ...confirmed, lifecycle: 'proposed', expiresAt: deadline }), deadline);
+  assert.equal(planClosesAt({ ...confirmed, lifecycle: 'cancelled' }), null);
+
+  // The join link closes at the same moment.
+  plan.findUnique = async () => planFixture({ lifecycle: 'confirmed', expiresAt: null, startsAt: new Date(Date.now() - PLAN_DEFAULT_LENGTH_MS - 1000) });
+  await assert.rejects(() => stranger().plans.joinByToken({ token: 'tok-secret' }), { code: 'NOT_FOUND' });
+
+  // Participants are told when it closes and where it is.
+  const closes = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  plan.findUnique = async () => planFixture({ expiresAt: closes, latitude: 33.78, longitude: -84.38 });
+  const shown = await caller().plans.get({ planId: 'plan-1' });
+  assert.equal(new Date(shown.expiresAt as any).getTime(), closes.getTime());
+  assert.deepEqual([shown.latitude, shown.longitude], [33.78, -84.38]);
 });
 
 test('An expired or cancelled Plan refuses every reshaping call', async () => {

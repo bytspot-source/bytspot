@@ -3,6 +3,7 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import { captureError } from '../lib/observability';
 import { isInAppBrowserUA } from './partyLanding';
+import { planEffectiveEnd } from '../trpc/planRouter';
 
 const planLandingRouter = Router();
 
@@ -61,13 +62,14 @@ function firstName(name: string | null | undefined): string {
 // stranger with the link may only ever see the friend's first name, the
 // title, and the rough when/where the creator chose to share.
 function planLinkClosed(
-  plan: { lifecycle: string; endsAt: Date | null; expiresAt: Date | null; deletedAt: Date | null },
+  plan: { lifecycle: string; startsAt: Date | null; endsAt: Date | null; expiresAt: Date | null; deletedAt: Date | null },
   now: Date,
 ): boolean {
   if (plan.deletedAt || plan.lifecycle === 'cancelled') return true;
   // A proposed Plan that ran out of time is expired on read; there is no sweep.
   if (plan.lifecycle === 'proposed' && plan.expiresAt && now >= plan.expiresAt) return true;
-  if (plan.lifecycle === 'confirmed' && plan.endsAt && now >= plan.endsAt) return true;
+  const end = planEffectiveEnd(plan);
+  if (plan.lifecycle === 'confirmed' && end && now >= end) return true;
   return false;
 }
 

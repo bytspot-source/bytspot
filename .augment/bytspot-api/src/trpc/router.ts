@@ -181,8 +181,8 @@ function countConfirmedReferrals(userId: string) {
 }
 
 /** auth.appleSignIn and auth.googleSignIn after the token is verified. */
-async function providerSignIn(identity: VerifiedProviderIdentity, clientKey: string, ref?: string) {
-  const result = await resolveProviderIdentity(identity, undefined, { ref });
+async function providerSignIn(identity: VerifiedProviderIdentity, clientKey: string, ref?: string, suppliedName?: string) {
+  const result = await resolveProviderIdentity(identity, undefined, { ref, suppliedName });
   if ('linkTo' in result) return startProviderLink(identity, result.linkTo, clientKey);
   const deletion = await applyDeletionPolicyOnSignIn(result.user.id);
   if (deletion === 'purge-pending') {
@@ -329,7 +329,7 @@ const authRouter = router({
       ref: z.string().max(100).optional(),
     }))
     .mutation(async ({ ctx, input }) => (
-      providerSignIn(await verifiedProviderIdentity('apple', input.identityToken), ctx.clientRateLimitKey, input.ref)
+      providerSignIn(await verifiedProviderIdentity('apple', input.identityToken), ctx.clientRateLimitKey, input.ref, input.name)
     )),
 
   /** Verifies a Google ID token for the configured native iOS OAuth audience. */

@@ -28,6 +28,8 @@ const row = {
 beforeEach(() => {
   venue.findMany = async () => [row];
   venue.findFirst = async () => row;
+  prisma.$queryRaw = async () => [];
+  (db.crowdLevel as any).findMany = async () => [];
   prisma.$queryRawUnsafe = async () => [{
     id: row.id, name: row.name, slug: row.slug, address: row.address,
     lat: row.lat, lng: row.lng, category: row.category, image_url: row.imageUrl,

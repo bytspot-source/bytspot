@@ -12,6 +12,7 @@ import { db } from '../lib/db';
 import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
 import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
+import { withLatestCrowd } from '../services/latestCrowd';
 import {
   RECOMMEND_POOLS, rankRecommendations, radiusForWalk, recommendCell, searchRadiusFor, vibeProfile,
   type RecommendPlace, type RecommendPool, type RecommendVenue,
@@ -301,13 +302,10 @@ async function recommendVenues(lat: number, lng: number, radius: number): Promis
   const dLat = radius / 111_320;
   const dLng = radius / (111_320 * Math.max(0.1, Math.cos((lat * Math.PI) / 180)));
   try {
-    const rows = await db.venue.findMany({
+    const rows = await withLatestCrowd(await db.venue.findMany({
       where: { discoverable: true, lat: { gte: lat - dLat, lte: lat + dLat }, lng: { gte: lng - dLng, lte: lng + dLng } },
-      select: {
-        id: true, slug: true, name: true, address: true, lat: true, lng: true, category: true, imageUrl: true, googlePlaceId: true,
-        crowdLevels: { orderBy: { recordedAt: 'desc' }, take: 1, select: { level: true, label: true, source: true, recordedAt: true } },
-      },
-    });
+      select: { id: true, slug: true, name: true, address: true, lat: true, lng: true, category: true, imageUrl: true, googlePlaceId: true },
+    }));
     const now = Date.now();
     return rows.map((v) => {
       const c = v.crowdLevels[0];

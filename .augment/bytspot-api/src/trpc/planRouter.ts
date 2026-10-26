@@ -16,7 +16,7 @@ import { planFeasibility } from '../services/planFeasibility';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 import { resolvePlaceLocation } from './placesRouter';
-import { dispatchPlanItemAdded } from '../services/planAlerts';
+import { dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined } from '../services/planAlerts';
 
 /**
  * Plan — the control plane.
@@ -1026,10 +1026,12 @@ export const planRouter = router({
     .mutation(async ({ ctx, input }) => {
       const now = new Date();
       await ensureTableBookingLinks();
+      let seatedPlanId: string | null = null;
       // Reading the cap and then writing against it has to say Serializable out
       // loud, exactly as invite does: concurrent joins could each pass a stale
       // cap check and push the Plan past MAX_PLAN_PARTICIPANTS.
-      return serializableTransaction(async (tx) => {
+      const joined = await serializableTransaction(async (tx) => {
+        seatedPlanId = null;
         const plan = await tx.plan.findUnique({ where: { joinToken: input.token }, include: planInclude });
         // A closed or unknown link is indistinguishable from a Plan that never
         // existed — the same wall a non-participant hits everywhere else.
@@ -1079,8 +1081,11 @@ export const planRouter = router({
           id: 'pending', planId: plan.id, userId: ctx.user.userId, role: 'guest',
           status: 'invited', respondedAt: null, createdAt: now, updatedAt: now,
         } as LoadedPlan['participants'][number]);
+        seatedPlanId = plan.id;
         return serializePlan(plan, now, ctx.user.userId, granted);
       }, 'Another change to this Plan is in flight. Try again.');
+      if (seatedPlanId) dispatchPlanJoined({ planId: seatedPlanId, joinerUserId: ctx.user.userId });
+      return joined;
     }),
 
   /** Soft removal only: retain all supply/history and the create key. Never
@@ -1166,7 +1171,9 @@ export const planRouter = router({
       // Reading a limit and then writing against it has to say Serializable
       // out loud: two concurrent invites to different users would both pass a
       // stale cap check and push the Plan past MAX_PLAN_PARTICIPANTS.
-      return serializableTransaction(async (tx) => {
+      let seated = false;
+      const result = await serializableTransaction(async (tx) => {
+        seated = false;
         const fresh = await loadPlanForCreator(plan.id, ctx.user.userId, tx);
         assertPlanMutable(fresh, now);
 
@@ -1190,6 +1197,7 @@ export const planRouter = router({
             where: { planId_userId: { planId: fresh.id, userId: input.userId } },
             data: { status: 'invited', respondedAt: null },
           });
+          seated = true;
           return { status: 'invited' as const };
         }
 
@@ -1197,6 +1205,7 @@ export const planRouter = router({
           const created = await tx.planParticipant.create({
             data: { planId: fresh.id, userId: input.userId, role: 'guest', status: 'invited' },
           });
+          seated = true;
           return { status: created.status };
         } catch (error) {
           // A concurrent invite of the same person raced us. Let Serializable
@@ -1207,6 +1216,8 @@ export const planRouter = router({
           throw error;
         }
       }, 'Another change to this Plan is in flight. Try again.');
+      if (seated) dispatchPlanInvited({ planId: plan.id, inviterUserId: ctx.user.userId, inviteeUserId: input.userId });
+      return result;
     }),
 
   /** A participant answers only for themselves. */

@@ -2,10 +2,12 @@
  * Plan activity pushes. Someone added to a shared Plan; everyone else on it is
  * told, never the person who did it. A burst of adds is one push per Plan per
  * participant per coalescing window, so building a Plan does not page anyone.
+ * An invited member is told once per Plan, and the creator is told once per
+ * person who joins from the link.
  */
 
 import { db } from '../lib/db';
-import { claimNotificationSend, planUrl, usersPermitting } from './scheduledPushes';
+import { claimNotificationSend, planUrl, sendOnce, usersPermitting } from './scheduledPushes';
 import { deliverPushNotification } from './notificationDelivery';
 
 export const PLAN_ADD_COALESCE_MS = 2 * 60 * 1000;
@@ -72,4 +74,67 @@ export async function alertPlanItemAdded(input: {
 /** A push is a courtesy on top of a completed write; it must never fail it. */
 export function dispatchPlanItemAdded(input: Parameters<typeof alertPlanItemAdded>[0]): void {
   void alertPlanItemAdded(input).catch(() => {});
+}
+
+export function planInvitedCopy(input: { inviterName: string | null; planTitle: string }) {
+  const who = input.inviterName?.trim() || 'Someone';
+  const plan = input.planTitle.trim() || 'a Plan';
+  return { title: 'Plan invite', body: `${who} invited you to ${plan}` };
+}
+
+export function planJoinedCopy(input: { joinerName: string | null; planTitle: string }) {
+  const who = input.joinerName?.trim() || 'Someone';
+  const plan = input.planTitle.trim() || 'your Plan';
+  return { title: plan, body: `${who} joined ${plan}` };
+}
+
+async function openPlanTitle(planId: string): Promise<{ title: string; creatorUserId: string } | null> {
+  const plan = await db.plan.findUnique({
+    where: { id: planId },
+    select: { title: true, creatorUserId: true, deletedAt: true, cancelledAt: true },
+  });
+  if (!plan || plan.deletedAt || plan.cancelledAt) return null;
+  return { title: plan.title, creatorUserId: plan.creatorUserId };
+}
+
+async function displayName(userId: string): Promise<string | null> {
+  const user = await db.user.findUnique({ where: { id: userId }, select: { name: true } }).catch(() => null);
+  return user?.name ?? null;
+}
+
+export async function alertPlanInvited(input: { planId: string; inviterUserId: string; inviteeUserId: string }): Promise<number> {
+  if (input.inviteeUserId === input.inviterUserId) return 0;
+  const plan = await openPlanTitle(input.planId);
+  if (!plan) return 0;
+  const copy = planInvitedCopy({ inviterName: await displayName(input.inviterUserId), planTitle: plan.title });
+  return sendOnce({
+    userIds: [input.inviteeUserId],
+    categories: ['reminders'],
+    dedupeKey: `plan.invited:${input.planId}`,
+    ...copy,
+    url: planUrl(input.planId),
+    type: 'plan.invited',
+  });
+}
+
+export async function alertPlanJoined(input: { planId: string; joinerUserId: string }): Promise<number> {
+  const plan = await openPlanTitle(input.planId);
+  if (!plan || plan.creatorUserId === input.joinerUserId) return 0;
+  const copy = planJoinedCopy({ joinerName: await displayName(input.joinerUserId), planTitle: plan.title });
+  return sendOnce({
+    userIds: [plan.creatorUserId],
+    categories: ['reminders'],
+    dedupeKey: `plan.joined:${input.planId}:${input.joinerUserId}`,
+    ...copy,
+    url: planUrl(input.planId),
+    type: 'plan.joined',
+  });
+}
+
+export function dispatchPlanInvited(input: Parameters<typeof alertPlanInvited>[0]): void {
+  void alertPlanInvited(input).catch(() => {});
+}
+
+export function dispatchPlanJoined(input: Parameters<typeof alertPlanJoined>[0]): void {
+  void alertPlanJoined(input).catch(() => {});
 }

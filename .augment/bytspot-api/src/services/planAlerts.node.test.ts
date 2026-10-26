@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { alertPlanItemAdded, planItemAddedCopy, PLAN_ADD_COALESCE_MS } from './planAlerts';
+import { alertPlanInvited, alertPlanItemAdded, alertPlanJoined, planInvitedCopy, planItemAddedCopy, planJoinedCopy, PLAN_ADD_COALESCE_MS } from './planAlerts';
 
 const now = new Date('2026-10-18T18:00:00Z');
 let sends: { userId: string; dedupeKey: string; sentAt: Date }[];
@@ -70,5 +70,35 @@ test('A deleted Plan and an empty add notify nobody', async () => {
   assert.equal(await add('creator', [], now), 0);
   (db.plan as any).findUnique = async () => ({ title: 'Gone', deletedAt: now, cancelledAt: null, participants });
   assert.equal(await add('creator', ['Dinner'], now), 0);
+  assert.deepEqual(addressed, []);
+});
+
+test('An invited member is told who invited them, once per Plan', async () => {
+  (db.plan as any).findUnique = async () => ({ title: 'Friday Out', creatorUserId: 'creator', deletedAt: null, cancelledAt: null });
+  assert.deepEqual(planInvitedCopy({ inviterName: 'Ada', planTitle: 'Friday Out' }), { title: 'Plan invite', body: 'Ada invited you to Friday Out' });
+  assert.equal(await alertPlanInvited({ planId: 'plan-1', inviterUserId: 'creator', inviteeUserId: 'friend' }), 1);
+  assert.deepEqual(addressed, [['friend']]);
+  // Removed and re-invited, or invited twice: still one push.
+  assert.equal(await alertPlanInvited({ planId: 'plan-1', inviterUserId: 'creator', inviteeUserId: 'friend' }), 0);
+  assert.equal(await alertPlanInvited({ planId: 'plan-1', inviterUserId: 'creator', inviteeUserId: 'creator' }), 0);
+});
+
+test('The creator is told once for each person who joins from the link, never for themselves', async () => {
+  (db.plan as any).findUnique = async () => ({ title: 'Friday Out', creatorUserId: 'creator', deletedAt: null, cancelledAt: null });
+  assert.equal(planJoinedCopy({ joinerName: null, planTitle: 'Friday Out' }).body, 'Someone joined Friday Out');
+  assert.equal(await alertPlanJoined({ planId: 'plan-1', joinerUserId: 'friend' }), 1);
+  assert.equal(await alertPlanJoined({ planId: 'plan-1', joinerUserId: 'friend' }), 0);
+  assert.equal(await alertPlanJoined({ planId: 'plan-1', joinerUserId: 'other' }), 1);
+  assert.equal(await alertPlanJoined({ planId: 'plan-1', joinerUserId: 'creator' }), 0);
+  assert.deepEqual(addressed, [['creator'], ['creator']]);
+});
+
+test('Invites and joins on a cancelled Plan, or to someone with reminders off, notify nobody', async () => {
+  (db.plan as any).findUnique = async () => ({ title: 'Gone', creatorUserId: 'creator', deletedAt: null, cancelledAt: now });
+  assert.equal(await alertPlanInvited({ planId: 'plan-1', inviterUserId: 'creator', inviteeUserId: 'friend' }), 0);
+  assert.equal(await alertPlanJoined({ planId: 'plan-1', joinerUserId: 'friend' }), 0);
+  (db.plan as any).findUnique = async () => ({ title: 'Friday Out', creatorUserId: 'creator', deletedAt: null, cancelledAt: null });
+  prefs = { friend: { push: { reminders: false } } };
+  assert.equal(await alertPlanInvited({ planId: 'plan-1', inviterUserId: 'creator', inviteeUserId: 'friend' }), 0);
   assert.deepEqual(addressed, []);
 });

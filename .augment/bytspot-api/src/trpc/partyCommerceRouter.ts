@@ -46,7 +46,7 @@ export const partyCommerceRouter = router({
       cursor: z.string().min(1).max(128).optional(),
       partyId: z.string().min(1).max(128).optional(),
       limit: z.number().int().min(1).max(50).default(25),
-    }).strict().optional().default({}))
+    }).strict().prefault({}))
     .query(async ({ ctx, input }) => {
       const now = new Date();
       const page = {

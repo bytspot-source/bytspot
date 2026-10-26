@@ -1422,7 +1422,7 @@ const providersRouter = router({
   saveHostProgress: protectedProcedure
     .input(z.object({
       currentStep: z.number(),
-      onboardingData: z.record(z.unknown()),
+      onboardingData: z.record(z.string(), z.unknown()),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.user.userId;

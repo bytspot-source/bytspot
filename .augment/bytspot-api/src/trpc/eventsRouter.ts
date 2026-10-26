@@ -269,7 +269,7 @@ export const eventsRouter = router({
     .input(z.object({
       category: z.string().optional(),
       limit: z.number().min(1).max(50).optional().default(20),
-    }).optional().default({}))
+    }).prefault({}))
     .query(async ({ input }) => {
       const { category, limit } = input;
 

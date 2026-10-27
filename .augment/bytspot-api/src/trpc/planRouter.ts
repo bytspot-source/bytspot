@@ -333,6 +333,7 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
     latitude: plan.latitude,
     longitude: plan.longitude,
     partySize: plan.partySize,
+    budgetCents: plan.budgetCents,
     needs: plan.needs,
     lifecycle: plan.lifecycle,
     state: planDisplayState(plan, plan.items, now, bookedPartyIds),
@@ -1338,7 +1339,7 @@ export const planRouter = router({
       return { needs, openNeeds: openNeeds({ ...plan, needs }, plan.items) };
     }),
 
-  /** Time, size and place, set after creation. Omitted keeps a field; null clears it. */
+  /** Time, size, budget and place, set after creation. Omitted keeps a field; null clears it. */
   update: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'plan-update' }))
     .input(z.object({
@@ -1346,6 +1347,7 @@ export const planRouter = router({
       startsAt: z.coerce.date().nullable().optional(),
       endsAt: z.coerce.date().nullable().optional(),
       partySize: z.number().int().min(1).max(200).nullable().optional(),
+      budgetCents: z.number().int().min(0).max(10_000_000).nullable().optional(),
       areaLabel: z.string().trim().min(1).max(80).nullable().optional(),
       latitude: z.number().min(-90).max(90).nullable().optional(),
       longitude: z.number().min(-180).max(180).nullable().optional(),
@@ -1371,6 +1373,7 @@ export const planRouter = router({
         }
         if (input.endsAt !== undefined) data.endsAt = input.endsAt;
         if (input.partySize !== undefined) data.partySize = input.partySize;
+        if (input.budgetCents !== undefined) data.budgetCents = input.budgetCents;
         if (input.areaLabel !== undefined) data.areaLabel = input.areaLabel;
         if (input.latitude !== undefined) { data.latitude = input.latitude; data.longitude = input.longitude; }
         await tx.plan.update({ where: { id: plan.id }, data });

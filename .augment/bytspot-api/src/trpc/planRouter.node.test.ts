@@ -278,6 +278,13 @@ test('The creator can set time, size and place after creation; omitted keeps and
   assert.deepEqual([written.latitude, written.longitude], [null, null]);
   assert.equal('areaLabel' in written, false);
 
+  await caller().plans.update({ planId: 'plan-1', budgetCents: 40_000 });
+  assert.equal(written.budgetCents, 40_000);
+  await caller().plans.update({ planId: 'plan-1', budgetCents: null });
+  assert.equal(written.budgetCents, null);
+  assert.equal('partySize' in written, false);
+  await assert.rejects(() => caller().plans.update({ planId: 'plan-1', budgetCents: -1 }), { code: 'BAD_REQUEST' });
+
   // A confirmed Plan has no proposal deadline to move.
   plan.findUnique = async () => planFixture({ lifecycle: 'confirmed', expiresAt: null });
   await caller().plans.update({ planId: 'plan-1', startsAt });

@@ -7,6 +7,8 @@ import Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
 import partyStripeWebhookRouter, { partyCheckoutMetadata, PartyCheckoutValidationError, reconcilePartyCheckoutPayment } from './partyStripeWebhook';
+import { chargeHoldReason, payoutDueAt, reversalOwedCents, runPartyPayouts } from '../services/partyPayouts';
+import { hostCanSellPaidTickets, partySellsPaidTickets } from '../services/hostPayouts';
 
 const partyCheckout = db.partyCheckout as any;
 const partyGuest = db.partyGuest as any;
@@ -452,3 +454,261 @@ test('A missing Party requirement still fails closed', async () => {
   await reconcilePartyCheckoutPayment(session(), 'checkout-1', 'party-1', 'user-1', new Date());
   assert.equal(checkoutUpdate.data.status, 'refund-required');
 });
+
+test('A confirmed payment records the charge it was paid by, for the payout later', async () => {
+  let checkoutUpdate: any;
+  partyCheckout.updateMany = async (input: any) => { checkoutUpdate = input; return { count: 1 }; };
+  await reconcilePartyCheckoutPayment(session({ payment_intent: 'pi_party_1' }), 'checkout-1', 'party-1', 'user-1', new Date());
+  assert.equal(checkoutUpdate.data.paymentIntentId, 'pi_party_1');
+});
+
+// ─── Host payouts ───────────────────────────────────────
+
+type PayoutRow = { checkoutId: string; recipient: string; status: string; updatedAt?: Date; stripeTransferId?: string | null; detail?: string | null; destination?: string | null; amountCents?: number };
+
+function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.Charge>; sellerActive?: boolean; sellerStored?: string; transferError?: string; reversalError?: string; claimError?: unknown } = {}) {
+  const rows: (PayoutRow & { reversedCents?: number; checkedAt?: Date })[] = [];
+  const transfers: any[] = [];
+  const reversals: any[] = [];
+  const checkout = {
+    id: 'checkout-1', partyId: 'party-1', currency: 'usd', hostNetCents: 2250, sellerId: 'seller-1', sellerNetCents: 900,
+    paymentIntentId: 'pi_party_1', stripeSessionId: 'cs_test_1',
+    party: { hostUserId: 'host-1', startsAt: new Date('2026-10-30T22:00:00Z'), endsAt: new Date('2026-10-31T03:00:00Z') },
+    payouts: [] as { recipient: string; status: string }[],
+  };
+  let lastQuery: any;
+  partyCheckout.findMany = async (input: any) => {
+    if (input.distinct) return [{ sellerId: checkout.sellerId }];
+    lastQuery = input;
+    checkout.payouts = rows.map(({ recipient, status, updatedAt }) => ({ recipient, status, updatedAt: updatedAt ?? new Date(0) }));
+    return [checkout];
+  };
+  const key = (where: any) => where.checkoutId_recipient;
+  const find = (where: any) => rows.find((row) => row.checkoutId === key(where).checkoutId && row.recipient === key(where).recipient);
+  prisma.partyPayoutTransfer = {
+    findUnique: async ({ where }: any) => find(where) ?? null,
+    create: async ({ data }: any) => {
+      if (options.claimError) throw options.claimError;
+      if (find({ checkoutId_recipient: data })) throw Object.assign(new Error('unique'), { code: 'P2002' });
+      rows.push({ status: 'pending', ...data }); return data;
+    },
+    update: async ({ where, data }: any) => Object.assign(find(where)!, data),
+    upsert: async ({ where, create, update }: any) => { const row = find(where); if (row) return Object.assign(row, update); rows.push({ ...create }); return create; },
+    findMany: async () => rows
+      .filter((row) => row.status === 'paid' && row.stripeTransferId)
+      .map((row, index) => ({ id: `row-${index}`, reversedCents: 0, amountCents: 0, ...row, checkout: { paymentIntentId: 'pi_party_1', stripeSessionId: null } })),
+  };
+  const baseUpdate = prisma.partyPayoutTransfer.update;
+  prisma.partyPayoutTransfer.update = async (input: any) => {
+    if (input.where.id) {
+      const row = rows.find((_, index) => `row-${index}` === input.where.id || (rows[index] as any).id === input.where.id)!;
+      return Object.assign(row, input.data);
+    }
+    return baseUpdate(input);
+  };
+  const host = { stripeAccountId: 'acct_host', status: options.hostStatus, last4: '6789', detail: null as string | null };
+  const accountReads: string[] = [];
+  prisma.hostPayoutAccount = {
+    findUnique: async () => (options.hostStatus ? { ...host } : null),
+    findMany: async ({ where }: any) => (options.hostStatus && host.status !== 'active' && where.status.not === 'active' ? [{ userId: 'host-1' }] : []),
+    update: async ({ data }: any) => Object.assign(host, data),
+  };
+  const seller = { id: 'seller-1', payoutReference: 'acct_seller', payoutStatus: options.sellerStored ?? (options.sellerActive === false ? 'pending' : 'active') };
+  prisma.vendorSeller = {
+    findMany: async ({ where }: any) => (where.id.in.includes('seller-1') ? [{ ...seller }] : []),
+    update: async ({ data }: any) => Object.assign(seller, data),
+  };
+  // Stripe's view: what onboarding on Stripe's pages has made true.
+  const stripeSays = { host: options.hostStatus === 'active', seller: options.sellerActive !== false };
+  const charge: any = { id: 'ch_party_1', amount: 4500, status: 'succeeded', refunded: false, amount_refunded: 0, disputed: false, ...options.charge };
+  const stripe = {
+    accounts: {
+      retrieve: async (id: string) => {
+        accountReads.push(id);
+        const enabled = id === 'acct_seller' ? stripeSays.seller : stripeSays.host;
+        return { payouts_enabled: enabled, details_submitted: true, requirements: { currently_due: [] }, external_accounts: { data: [] } };
+      },
+    },
+    paymentIntents: { retrieve: async () => ({ latest_charge: charge }) },
+    checkout: { sessions: { retrieve: async () => ({ payment_intent: 'pi_party_1' }) } },
+    transfers: {
+      list: async () => ({ data: transfers.map((t) => ({ ...t })) }),
+      createReversal: async (id: string, params: any, opts: any) => {
+        if (options.reversalError) throw new Error(options.reversalError);
+        reversals.push({ id, ...params, idempotencyKey: opts.idempotencyKey });
+        return { id: `trr_${reversals.length}` };
+      },
+      create: async (params: any, opts: any) => { if (options.transferError) throw new Error(options.transferError); const t = { id: `tr_${transfers.length + 1}`, ...params, idempotencyKey: opts.idempotencyKey, reversed: false }; transfers.push(t); return t; },
+    },
+  } as unknown as Stripe;
+  return { rows, transfers, reversals, charge, stripe, stripeSays, host, seller, accountReads, query: () => lastQuery };
+}
+
+async function withPayoutsOn<T>(run: () => Promise<T>): Promise<T> {
+  const previous = { on: config.partyPayoutsEnabled, delay: config.partyPayoutDelayHours };
+  (config as any).partyPayoutsEnabled = true;
+  (config as any).partyPayoutDelayHours = 48;
+  try { return await run(); } finally {
+    (config as any).partyPayoutsEnabled = previous.on;
+    (config as any).partyPayoutDelayHours = previous.delay;
+  }
+}
+
+test('A sale is paid out 48 hours after the party ends, or after start plus six hours with no end', () => {
+  assert.equal(payoutDueAt({ startsAt: new Date('2026-10-30T22:00:00Z'), endsAt: new Date('2026-10-31T03:00:00Z') }, 48).toISOString(), '2026-11-02T03:00:00.000Z');
+  assert.equal(payoutDueAt({ startsAt: new Date('2026-10-30T22:00:00Z'), endsAt: null }, 48).toISOString(), '2026-11-02T04:00:00.000Z');
+});
+
+test('Host and business are each paid once from the sale\'s charge, and Bytspot keeps the rest', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'active' });
+  const now = new Date('2026-11-02T04:00:00Z');
+  const result = await runPartyPayouts({ stripe: harness.stripe, now });
+  assert.deepEqual(result, { paid: 2, held: 0, failed: 0, waiting: 0, reversed: 0, alerts: [] });
+  assert.deepEqual(harness.transfers.map((t) => [t.destination, t.amount, t.source_transaction, t.transfer_group, t.idempotencyKey]), [
+    ['acct_host', 2250, 'ch_party_1', 'party-checkout:checkout-1', 'party-payout:checkout-1:host'],
+    ['acct_seller', 900, 'ch_party_1', 'party-checkout:checkout-1', 'party-payout:checkout-1:seller'],
+  ]);
+  assert.ok(harness.rows.every((row) => row.status === 'paid' && row.stripeTransferId));
+  // Only parties over by the delay are selected.
+  assert.deepEqual(harness.query().where.party.OR[0], { endsAt: { lte: new Date('2026-10-31T04:00:00Z') } });
+  // A second run sends nothing more.
+  assert.deepEqual(await runPartyPayouts({ stripe: harness.stripe, now }), { paid: 0, held: 0, failed: 0, waiting: 0, reversed: 0, alerts: [] });
+  assert.equal(harness.transfers.length, 2);
+}));
+
+test('A retried transfer whose first attempt reached Stripe is not sent twice', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'active', sellerActive: false });
+  harness.transfers.push({ id: 'tr_earlier', metadata: { recipient: 'host' }, reversed: false });
+  harness.rows.push({ checkoutId: 'checkout-1', recipient: 'host', status: 'failed' });
+  const result = await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.equal(result.paid, 1);
+  assert.equal(harness.transfers.length, 1);
+  assert.equal(harness.rows[0].stripeTransferId, 'tr_earlier');
+}));
+
+test('A refunded or disputed sale is held for a person, never paid automatically', () => withPayoutsOn(async () => {
+  assert.equal(chargeHoldReason({ status: 'succeeded', refunded: false, amount_refunded: 500, disputed: false }), 'This charge was refunded.');
+  assert.equal(chargeHoldReason({ status: 'succeeded', refunded: false, amount_refunded: 0, disputed: true }), 'The guest disputed this charge.');
+  assert.equal(chargeHoldReason(null), 'Stripe has no charge for this sale.');
+  const harness = payoutHarness({ hostStatus: 'active', charge: { disputed: true } });
+  const result = await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.deepEqual(result, { paid: 0, held: 2, failed: 0, waiting: 0, reversed: 0, alerts: [] });
+  assert.equal(harness.transfers.length, 0);
+  assert.ok(harness.rows.every((row) => row.status === 'held' && row.detail === 'The guest disputed this charge.'));
+}));
+
+test('A recipient without a working payout account waits, and the sale stays owed', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'pending', sellerActive: false });
+  const result = await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.deepEqual(result, { paid: 0, held: 0, failed: 0, waiting: 2, reversed: 0, alerts: [] });
+  assert.equal(harness.transfers.length, 0);
+  assert.equal(harness.rows.length, 0);
+}));
+
+test('Nothing moves while party payouts are off', async () => {
+  const harness = payoutHarness({ hostStatus: 'active' });
+  (config as any).partyPayoutsEnabled = false;
+  assert.deepEqual(await runPartyPayouts({ stripe: harness.stripe }), { paid: 0, held: 0, failed: 0, waiting: 0, reversed: 0, alerts: [] });
+  assert.equal(harness.transfers.length, 0);
+});
+
+test('Only paid parties need a payout account to publish, and only once payouts are on', async () => {
+  assert.equal(partySellsPaidTickets([{ name: 'Free', priceCents: 0 }]), false);
+  assert.equal(partySellsPaidTickets([{ name: 'Free', priceCents: 0 }, { name: 'VIP', priceCents: 2500 }]), true);
+  assert.equal(partySellsPaidTickets(null), false);
+  payoutHarness({});
+  (config as any).partyPayoutsEnabled = false;
+  assert.equal(await hostCanSellPaidTickets('host-1'), true);
+  await withPayoutsOn(async () => {
+    assert.equal(await hostCanSellPaidTickets('host-1'), false);
+    payoutHarness({ hostStatus: 'active' });
+    assert.equal(await hostCanSellPaidTickets('host-1'), true);
+  });
+});
+
+test('A refund after payout takes back the refunded share; a dispute takes back all of it', () => withPayoutsOn(async () => {
+  assert.equal(reversalOwedCents(2250, { amount: 4500, amount_refunded: 2250, disputed: false }), 1125);
+  assert.equal(reversalOwedCents(2250, { amount: 4500, amount_refunded: 4500, disputed: false }), 2250);
+  assert.equal(reversalOwedCents(2250, { amount: 4500, amount_refunded: 0, disputed: true }), 2250);
+  assert.equal(reversalOwedCents(2250, { amount: 4500, amount_refunded: 0, disputed: false }), 0);
+
+  const harness = payoutHarness({ hostStatus: 'active' });
+  const now = new Date('2026-11-02T04:00:00Z');
+  await runPartyPayouts({ stripe: harness.stripe, now });
+  assert.equal(harness.reversals.length, 0);
+
+  // Half refunded later in the Stripe dashboard.
+  harness.charge.amount_refunded = 2250;
+  const later = new Date('2026-11-03T04:00:00Z');
+  const result = await runPartyPayouts({ stripe: harness.stripe, now: later });
+  assert.equal(result.reversed, 2);
+  assert.deepEqual(harness.reversals.map((r) => [r.id, r.amount, r.idempotencyKey]), [
+    ['tr_1', 1125, 'party-payout-reversal:tr_1:1125'],
+    ['tr_2', 450, 'party-payout-reversal:tr_2:450'],
+  ]);
+  assert.ok(harness.rows.every((row) => row.status === 'paid'));
+
+  // Then refunded in full: only the remainder is taken back, and the share is marked reversed.
+  harness.charge.amount_refunded = 4500;
+  harness.rows.forEach((row) => { row.checkedAt = undefined; });
+  await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-04T04:00:00Z') });
+  assert.deepEqual(harness.reversals.slice(2).map((r) => [r.id, r.amount]), [['tr_1', 1125], ['tr_2', 450]]);
+  assert.ok(harness.rows.every((row) => row.status === 'reversed' && row.reversedCents === row.amountCents));
+}));
+
+test('A failed payout or reversal is reported once, not every hour', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'active', sellerActive: false, transferError: 'Insufficient funds in Stripe account.' });
+  const now = new Date('2026-11-03T00:00:00Z');
+  const first = await runPartyPayouts({ stripe: harness.stripe, now });
+  assert.equal(first.failed, 1);
+  assert.equal(first.alerts.length, 1);
+  assert.match(first.alerts[0], /Could not pay \$22\.50 to the host of sale checkout-1/);
+  // Within six hours the failed share is left alone, so it cannot crowd out others.
+  harness.rows[0].updatedAt = now as any;
+  const soon = await runPartyPayouts({ stripe: harness.stripe, now: new Date(now.getTime() + 60 * 60 * 1000) });
+  assert.equal(soon.failed, 0);
+  assert.equal(harness.query().where.OR[0].AND[1].payouts.none.updatedAt.gt.toISOString(), '2026-11-02T19:00:00.000Z');
+  // After that it is retried, and still reported only the first time.
+  const second = await runPartyPayouts({ stripe: harness.stripe, now: new Date(now.getTime() + 7 * 60 * 60 * 1000) });
+  assert.equal(second.failed, 1);
+  assert.deepEqual(second.alerts, []);
+
+  const reversing = payoutHarness({ hostStatus: 'active', sellerActive: false, reversalError: 'Connected account balance is too low.' });
+  await runPartyPayouts({ stripe: reversing.stripe, now });
+  reversing.charge.disputed = true;
+  const failedReversal = await runPartyPayouts({ stripe: reversing.stripe, now: new Date('2026-11-04T00:00:00Z') });
+  assert.equal(failedReversal.alerts.length, 1);
+  assert.match(failedReversal.alerts[0], /Could not take back \$22\.50 from the host/);
+  reversing.rows.forEach((row) => { row.checkedAt = undefined; });
+  const again = await runPartyPayouts({ stripe: reversing.stripe, now: new Date('2026-11-05T00:00:00Z') });
+  assert.deepEqual(again.alerts, []);
+  assert.equal(reversing.rows[0].status, 'paid');
+}));
+
+test('A host or business who finishes Stripe onboarding after a sale is paid on the next run', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'pending', sellerActive: false, sellerStored: 'pending' });
+  const now = new Date('2026-11-03T00:00:00Z');
+  assert.equal((await runPartyPayouts({ stripe: harness.stripe, now })).paid, 0);
+  // Both finish on Stripe's pages; nothing in Bytspot has asked since.
+  harness.stripeSays.host = true;
+  harness.stripeSays.seller = true;
+  const result = await runPartyPayouts({ stripe: harness.stripe, now });
+  assert.equal(harness.host.status, 'active');
+  assert.equal(harness.seller.payoutStatus, 'active');
+  assert.deepEqual(harness.query().where.OR[1].sellerId, { in: ['seller-1'] });
+  assert.equal(result.paid, 2);
+}));
+
+test('No transfer is sent without a claimed row, and an earlier transfer is found even without one', () => withPayoutsOn(async () => {
+  const broken = payoutHarness({ hostStatus: 'active', sellerActive: false, claimError: new Error('connection reset') });
+  const result = await runPartyPayouts({ stripe: broken.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.equal(result.failed, 1);
+  assert.equal(broken.transfers.length, 0);
+
+  // A transfer made a day ago, whose row was lost: the group lookup finds it.
+  const lost = payoutHarness({ hostStatus: 'active', sellerActive: false });
+  lost.transfers.push({ id: 'tr_lost', metadata: { recipient: 'host' }, reversed: false });
+  await runPartyPayouts({ stripe: lost.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.equal(lost.transfers.length, 1);
+  assert.equal(lost.rows[0].stripeTransferId, 'tr_lost');
+}));

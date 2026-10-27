@@ -3,7 +3,8 @@
  * told, never the person who did it. A burst of adds is one push per Plan per
  * participant per coalescing window, so building a Plan does not page anyone.
  * An invited member is told once per Plan, and the creator is told once per
- * person who joins from the link.
+ * person who joins from the link. A change of time or place is coalesced the
+ * same way as adds; confirming and cancelling are told once per Plan.
  */
 
 import { db } from '../lib/db';
@@ -13,6 +14,9 @@ import { deliverPushNotification } from './notificationDelivery';
 export const PLAN_ADD_COALESCE_MS = 2 * 60 * 1000;
 
 const KEY_PREFIX = 'plan.item_added:';
+const CHANGED_KEY_PREFIX = 'plan.changed:';
+
+export type PlanChange = 'time' | 'place' | 'time_and_place';
 
 export function planItemAddedCopy(input: { actorName: string | null; itemTitles: readonly string[]; planTitle: string }) {
   const who = input.actorName?.trim() || 'Someone';
@@ -22,36 +26,31 @@ export function planItemAddedCopy(input: { actorName: string | null; itemTitles:
   return { title: plan, body: `${who} added ${what} to ${plan}` };
 }
 
-export async function alertPlanItemAdded(input: {
+/**
+ * One push per Plan per participant per coalescing window for `keyPrefix`.
+ * The bucket key makes two racing sends in the same window collide on the
+ * unique index; the lookup covers sends either side of a boundary.
+ */
+async function sendCoalesced(input: {
   planId: string;
+  keyPrefix: string;
+  userIds: readonly string[];
+  now: Date;
+  type: string;
+  copy: (actorName: string | null) => { title: string; body: string };
   actorUserId: string;
-  itemTitles: readonly string[];
-  now?: Date;
 }): Promise<number> {
-  if (input.itemTitles.length === 0) return 0;
-  const now = input.now ?? new Date();
-  const plan = await db.plan.findUnique({
-    where: { id: input.planId },
-    select: {
-      title: true, deletedAt: true, cancelledAt: true,
-      participants: { where: { status: { notIn: ['declined', 'removed'] } }, select: { userId: true } },
-    },
-  });
-  if (!plan || plan.deletedAt || plan.cancelledAt) return 0;
-  const others = plan.participants.map((p) => p.userId).filter((id) => id !== input.actorUserId);
-  const permitted = await usersPermitting(others, ['reminders']);
+  const permitted = await usersPermitting(input.userIds, ['reminders']);
   if (permitted.length === 0) return 0;
 
-  const since = new Date(now.getTime() - PLAN_ADD_COALESCE_MS);
+  const since = new Date(input.now.getTime() - PLAN_ADD_COALESCE_MS);
   const recent = await db.notificationSend.findMany({
-    where: { userId: { in: permitted }, dedupeKey: { startsWith: `${KEY_PREFIX}${input.planId}:` }, sentAt: { gt: since } },
+    where: { userId: { in: permitted }, dedupeKey: { startsWith: `${input.keyPrefix}${input.planId}:` }, sentAt: { gt: since } },
     select: { userId: true },
   });
   const recentlyTold = new Set(recent.map((row) => row.userId));
-  // The bucket key makes two racing adds in the same window collide on the
-  // unique index; the lookup above covers adds either side of a boundary.
-  const bucket = Math.floor(now.getTime() / PLAN_ADD_COALESCE_MS);
-  const dedupeKey = `${KEY_PREFIX}${input.planId}:${bucket}`;
+  const bucket = Math.floor(input.now.getTime() / PLAN_ADD_COALESCE_MS);
+  const dedupeKey = `${input.keyPrefix}${input.planId}:${bucket}`;
   const claimed: string[] = [];
   for (const userId of permitted) {
     if (recentlyTold.has(userId)) continue;
@@ -59,16 +58,47 @@ export async function alertPlanItemAdded(input: {
   }
   if (claimed.length === 0) return 0;
 
-  const actor = await db.user.findUnique({ where: { id: input.actorUserId }, select: { name: true } }).catch(() => null);
-  const copy = planItemAddedCopy({ actorName: actor?.name ?? null, itemTitles: input.itemTitles, planTitle: plan.title });
   await deliverPushNotification({
     userIds: claimed,
     category: 'reminders',
-    ...copy,
+    ...input.copy(await displayName(input.actorUserId)),
     url: planUrl(input.planId),
-    type: 'plan.item_added',
+    type: input.type,
   });
   return claimed.length;
+}
+
+/** Everyone still on the Plan except the person who acted. */
+async function planAudience(planId: string, actorUserId: string, opts: { allowCancelled?: boolean } = {}) {
+  const plan = await db.plan.findUnique({
+    where: { id: planId },
+    select: {
+      title: true, deletedAt: true, cancelledAt: true,
+      participants: { where: { status: { notIn: ['declined', 'removed'] } }, select: { userId: true } },
+    },
+  });
+  if (!plan || plan.deletedAt || (plan.cancelledAt && !opts.allowCancelled)) return null;
+  return { title: plan.title, others: plan.participants.map((p) => p.userId).filter((id) => id !== actorUserId) };
+}
+
+export async function alertPlanItemAdded(input: {
+  planId: string;
+  actorUserId: string;
+  itemTitles: readonly string[];
+  now?: Date;
+}): Promise<number> {
+  if (input.itemTitles.length === 0) return 0;
+  const plan = await planAudience(input.planId, input.actorUserId);
+  if (!plan || plan.others.length === 0) return 0;
+  return sendCoalesced({
+    planId: input.planId,
+    keyPrefix: KEY_PREFIX,
+    userIds: plan.others,
+    now: input.now ?? new Date(),
+    type: 'plan.item_added',
+    actorUserId: input.actorUserId,
+    copy: (actorName) => planItemAddedCopy({ actorName, itemTitles: input.itemTitles, planTitle: plan.title }),
+  });
 }
 
 /** A push is a courtesy on top of a completed write; it must never fail it. */
@@ -137,4 +167,57 @@ export function dispatchPlanInvited(input: Parameters<typeof alertPlanInvited>[0
 
 export function dispatchPlanJoined(input: Parameters<typeof alertPlanJoined>[0]): void {
   void alertPlanJoined(input).catch(() => {});
+}
+
+export function planChangedCopy(input: { actorName: string | null; planTitle: string; change: PlanChange }) {
+  const who = input.actorName?.trim() || 'Someone';
+  const plan = input.planTitle.trim() || 'your Plan';
+  const body = input.change === 'time'
+    ? `${who} changed the time of ${plan}`
+    : input.change === 'place'
+      ? `${who} changed where ${plan} is`
+      : `${who} changed the time and place of ${plan}`;
+  return { title: plan, body };
+}
+
+export function planDecidedCopy(input: { actorName: string | null; planTitle: string; decision: 'confirmed' | 'cancelled' }) {
+  const who = input.actorName?.trim() || 'Someone';
+  const plan = input.planTitle.trim() || 'your Plan';
+  return { title: plan, body: `${who} ${input.decision} ${plan}` };
+}
+
+export async function alertPlanChanged(input: { planId: string; actorUserId: string; change: PlanChange; now?: Date }): Promise<number> {
+  const plan = await planAudience(input.planId, input.actorUserId);
+  if (!plan || plan.others.length === 0) return 0;
+  return sendCoalesced({
+    planId: input.planId,
+    keyPrefix: CHANGED_KEY_PREFIX,
+    userIds: plan.others,
+    now: input.now ?? new Date(),
+    type: 'plan.changed',
+    actorUserId: input.actorUserId,
+    copy: (actorName) => planChangedCopy({ actorName, planTitle: plan.title, change: input.change }),
+  });
+}
+
+export async function alertPlanDecided(input: { planId: string; actorUserId: string; decision: 'confirmed' | 'cancelled' }): Promise<number> {
+  const plan = await planAudience(input.planId, input.actorUserId, { allowCancelled: input.decision === 'cancelled' });
+  if (!plan || plan.others.length === 0) return 0;
+  const copy = planDecidedCopy({ actorName: await displayName(input.actorUserId), planTitle: plan.title, decision: input.decision });
+  return sendOnce({
+    userIds: plan.others,
+    categories: ['reminders'],
+    dedupeKey: `plan.${input.decision}:${input.planId}`,
+    ...copy,
+    url: planUrl(input.planId),
+    type: `plan.${input.decision}`,
+  });
+}
+
+export function dispatchPlanChanged(input: Parameters<typeof alertPlanChanged>[0]): void {
+  void alertPlanChanged(input).catch(() => {});
+}
+
+export function dispatchPlanDecided(input: Parameters<typeof alertPlanDecided>[0]): void {
+  void alertPlanDecided(input).catch(() => {});
 }

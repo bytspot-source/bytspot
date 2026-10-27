@@ -214,6 +214,26 @@ export async function alertGuestsOfRecap(input: {
 }
 
 /**
+ * The host set or changed where to arrive. Reaches confirmed guests only, the
+ * same set that can already see the destination, and never names the place.
+ */
+export async function alertGuestsOfArrivalUpdate(input: {
+  partyId: string;
+  partyTitle: string | null;
+  firstSet: boolean;
+}): Promise<NotificationDeliveryResult> {
+  const title = input.partyTitle?.trim() || 'the Party';
+  return send({
+    audience: { kind: 'confirmed-guests', partyId: input.partyId },
+    title: input.firstSet ? 'Arrival details are ready' : 'Arrival details changed',
+    body: input.firstSet
+      ? `The host added where to arrive for ${title}.`
+      : `The host changed where to arrive for ${title}.`,
+    type: 'party.arrival_updated',
+  });
+}
+
+/**
  * Party alerts are a courtesy on top of a completed mutation. A push failure
  * must never turn a successful RSVP into an error for the member who made it.
  */

@@ -43,7 +43,7 @@ import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
 import { curatedVenueMedia } from '../services/venueMedia';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
-import { currentPlatformFeeBps, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE } from '../services/platformFee';
+import { currentPlatformFeeBps, defaultFeeBps, FEE_SCOPES, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE, VENDOR_BOOKING_FEE_SCOPE } from '../services/platformFee';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { claimPackedAlert, entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
@@ -1490,18 +1490,18 @@ const adminRouter = router({
   /** admin.platformFee query — the live rate plus recent changes. */
   platformFee: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-platform-fee' }))
-    .input(z.object({ scope: z.string().min(1).max(64).default(PARTY_TICKET_FEE_SCOPE) }).default({ scope: PARTY_TICKET_FEE_SCOPE }))
+    .input(z.object({ scope: z.enum(FEE_SCOPES).default(PARTY_TICKET_FEE_SCOPE) }).default({ scope: PARTY_TICKET_FEE_SCOPE }))
     .query(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.platformFee' });
       const [current, history] = await Promise.all([
-        currentPlatformFeeBps(input.scope),
+        currentPlatformFeeBps(input.scope, defaultFeeBps(input.scope)),
         db.platformFeeSetting.findMany({
           where: { scope: input.scope }, orderBy: { createdAt: 'desc' }, take: 20,
           select: { feeBps: true, note: true, setByUserId: true, createdAt: true },
         }),
       ]);
-      return { scope: input.scope, currentFeeBps: current, maxFeeBps: MAX_FEE_BPS, history };
+      return { scope: input.scope, currentFeeBps: current, defaultFeeBps: defaultFeeBps(input.scope), maxFeeBps: MAX_FEE_BPS, history };
     }),
 
   /**
@@ -1513,18 +1513,19 @@ const adminRouter = router({
   setPlatformFee: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin-set-platform-fee' }))
     .input(z.object({
-      scope: z.string().min(1).max(64).default(PARTY_TICKET_FEE_SCOPE),
+      scope: z.enum(FEE_SCOPES).default(PARTY_TICKET_FEE_SCOPE),
       feeBps: z.number().int().min(0).max(MAX_FEE_BPS),
       note: z.string().max(280).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.setPlatformFee' });
-      const previousFeeBps = await currentPlatformFeeBps(input.scope);
+      const previousFeeBps = await currentPlatformFeeBps(input.scope, defaultFeeBps(input.scope));
       await db.platformFeeSetting.create({
         data: { scope: input.scope, feeBps: input.feeBps, note: input.note ?? null, setByUserId: ctx.user.userId },
       });
-      return { scope: input.scope, previousFeeBps, currentFeeBps: input.feeBps, appliesTo: 'parties published from now on' };
+      const appliesTo = input.scope === VENDOR_BOOKING_FEE_SCOPE ? 'business ticket checkouts started from now on' : 'parties published from now on';
+      return { scope: input.scope, previousFeeBps, currentFeeBps: input.feeBps, appliesTo };
     }),
 
   /** admin.stats query — JWT auth + admin group membership required */

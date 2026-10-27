@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clampFeeBps, effectiveFeeBps, MAX_FEE_BPS, splitTicketAmount } from './platformFee';
+import { config } from '../config';
+import { db } from '../lib/db';
+import { clampFeeBps, currentPlatformFeeBps, defaultFeeBps, effectiveFeeBps, FEE_SCOPES, MAX_FEE_BPS, splitTicketAmount, VENDOR_BOOKING_FEE_SCOPE } from './platformFee';
 
 test('a party keeps the rate it was published with when the market rate moves', () => {
   // Host published at 10%, Bytspot later moved the market rate to 25%.
@@ -61,5 +63,20 @@ test('a table from a business the host asked is netted apart from the door, and 
   for (const [door, table, bps] of [[999, 12_345, 1_250], [1, 1, 3_000], [0, 99, 777]]) {
     const split = splitHostAndSellerAmount(door, table, bps);
     assert.equal(split.feeCents + split.hostNetCents + split.sellerNetCents, door + table);
+  }
+});
+
+test('each scope falls back to its own default until an admin sets a rate', async () => {
+  assert.deepEqual([...FEE_SCOPES], ['party-ticket', 'vendor-booking']);
+  assert.equal(defaultFeeBps('party-ticket'), config.defaultPlatformFeeBps);
+  assert.equal(defaultFeeBps(VENDOR_BOOKING_FEE_SCOPE), config.vendorBookingFeeBps);
+  const original = (db.platformFeeSetting as any).findFirst;
+  try {
+    (db.platformFeeSetting as any).findFirst = async () => null;
+    assert.equal(await currentPlatformFeeBps(VENDOR_BOOKING_FEE_SCOPE, defaultFeeBps(VENDOR_BOOKING_FEE_SCOPE)), config.vendorBookingFeeBps);
+    (db.platformFeeSetting as any).findFirst = async ({ where }: any) => (where.scope === VENDOR_BOOKING_FEE_SCOPE ? { feeBps: 1_200 } : null);
+    assert.equal(await currentPlatformFeeBps(VENDOR_BOOKING_FEE_SCOPE, defaultFeeBps(VENDOR_BOOKING_FEE_SCOPE)), 1_200);
+  } finally {
+    (db.platformFeeSetting as any).findFirst = original;
   }
 });

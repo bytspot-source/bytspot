@@ -3,6 +3,13 @@ import { config } from '../config';
 
 export const PARTY_TICKET_FEE_SCOPE = 'party-ticket';
 export const VENDOR_BOOKING_FEE_SCOPE = 'vendor-booking';
+export const FEE_SCOPES = [PARTY_TICKET_FEE_SCOPE, VENDOR_BOOKING_FEE_SCOPE] as const;
+export type FeeScope = (typeof FEE_SCOPES)[number];
+
+/** The rate a scope falls back to before any admin has set one. */
+export function defaultFeeBps(scope: FeeScope): number {
+  return scope === VENDOR_BOOKING_FEE_SCOPE ? config.vendorBookingFeeBps : config.defaultPlatformFeeBps;
+}
 /// A fee is a share of a sale, so anything at or above 100% is not a fee.
 export const MAX_FEE_BPS = 5_000;
 

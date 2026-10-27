@@ -200,7 +200,7 @@ test('travel measures the sequence the Plan states, not the one the clock sugges
   ];
   assert.equal(verdictFor('travel', legs, plan()), 'breaks');
   const detail = planFeasibility(legs, plan()).checks.find((c) => c.check === 'travel')!.detail;
-  assert.match(detail, /The table starts before The room is over/);
+  assert.match(detail, /The table starts before The room ends/);
 });
 
 test('a sequence whose times agree with it is still judged in Plan order', () => {
@@ -224,7 +224,7 @@ test('travel will not call it a fit when a leg it measured from never said how l
   ];
   assert.equal(verdictFor('travel', legs, plan()), 'unknown');
   const detail = planFeasibility(legs, plan()).checks.find((c) => c.check === 'travel')!.detail;
-  assert.match(detail, /Coffee does not say how long it runs/);
+  assert.equal(detail, 'This only works if you leave Coffee right away. We don\'t know how long it lasts.');
 });
 
 test('travel still fits when every leg it measured from stated its length', () => {
@@ -262,4 +262,24 @@ test('the solver does not reorder or mutate the legs it is given', () => {
   const before = JSON.parse(JSON.stringify(legs));
   planFeasibility(legs, plan());
   assert.deepEqual(JSON.parse(JSON.stringify(legs)), before);
+});
+
+const detailFor = (check: CheckName, legs: PlanLeg[], constraints: PlanConstraints = plan()) =>
+  planFeasibility(legs, constraints).checks.find((c) => c.check === check)!.detail;
+
+test('details are short everyday sentences a guest can read at a glance', () => {
+  // 01:00Z on Oct 1 is 9:00 PM the evening before in Atlanta.
+  assert.equal(detailFor('overlap', [
+    leg({ title: 'Dinner', startsAt: at('00:00'), durationMins: 120 }),
+    leg({ title: 'Show', startsAt: at('01:00'), durationMins: 60 }),
+  ], plan({ startsAt: null, endsAt: null })), 'Dinner runs until 10:00 PM, but Show starts at 9:00 PM.');
+  assert.equal(detailFor('capacity', [
+    leg({ title: 'Tiny bar', seats: 2 }),
+    leg({ title: 'Patio', seats: 3 }),
+  ]), "Tiny bar (2 left) and Patio (3 left) can't fit 4 people.");
+  assert.equal(detailFor('budget', [leg({ priceCents: 15_000 })]), '$600.00 for 4 people is over your $400.00 budget.');
+  assert.equal(detailFor('budget', [leg({ priceCents: 1_000 }), leg()]),
+    '$40.00 so far of your $400.00 budget, but 1 stop has no price yet.');
+  assert.equal(detailFor('window', [leg()], plan({ endsAt: null })), "This Plan doesn't have a start and end time yet.");
+  assert.equal(detailFor('capacity', [], plan()), 'Add a stop to check your Plan.');
 });

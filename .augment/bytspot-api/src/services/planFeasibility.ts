@@ -68,7 +68,17 @@ const unknown = (check: CheckName, detail: string, itemIds: string[] = []): Chec
   ({ check, verdict: 'unknown', detail, itemIds });
 
 const clockLabel = (at: Date) =>
-  at.toISOString().slice(11, 16);
+  new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(at);
+
+/** "A", "A and B", "A, B and C". */
+function nameList(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+const stops = (count: number) => (count === 1 ? '1 stop' : `${count} stops`);
+const hasHave = (count: number) => (count === 1 ? 'has' : 'have');
+const people = (count: number) => (count === 1 ? '1 person' : `${count} people`);
 
 /** Minutes a leg occupies, or null when its length was never stated. */
 function endOf(leg: PlanLeg): Date | null {
@@ -83,11 +93,11 @@ function placed(leg: PlanLeg): boolean {
 /** Every leg inside the Plan's window. */
 function checkWindow(legs: readonly PlanLeg[], plan: PlanConstraints): CheckResult {
   if (!plan.startsAt || !plan.endsAt) {
-    return unknown('window', 'This Plan has no start and end time yet, so nothing can be checked against it.');
+    return unknown('window', 'This Plan doesn\'t have a start and end time yet.');
   }
   const timed = legs.filter((leg) => leg.startsAt);
   if (timed.length === 0) {
-    return unknown('window', 'None of these have a stated time, so none can be placed in the window.');
+    return unknown('window', 'None of your stops have a time yet.');
   }
 
   const outside = timed.filter((leg) => {
@@ -97,18 +107,18 @@ function checkWindow(legs: readonly PlanLeg[], plan: PlanConstraints): CheckResu
     return end !== null && end > plan.endsAt!;
   });
   if (outside.length > 0) {
-    const names = outside.map((leg) => leg.title).join(', ');
-    return breaks('window', `${names} falls outside the time you set for this Plan.`,
+    const names = nameList(outside.map((leg) => leg.title));
+    return breaks('window', `${names} ${outside.length === 1 ? 'is' : 'are'} outside your Plan's time.`,
       outside.map((leg) => leg.itemId));
   }
 
   const untimed = legs.filter((leg) => !leg.startsAt);
   if (untimed.length > 0) {
     return unknown('window',
-      `${untimed.map((leg) => leg.title).join(', ')} has no stated time, so only the rest could be checked.`,
+      `${nameList(untimed.map((leg) => leg.title))} ${hasHave(untimed.length)} no time yet, so we checked the rest.`,
       untimed.map((leg) => leg.itemId));
   }
-  return fits('window', 'Everything here sits inside the time you set.');
+  return fits('window', 'Every stop fits your Plan\'s time.');
 }
 
 /** No two legs claiming the same minutes. */
@@ -122,7 +132,7 @@ function checkOverlap(legs: readonly PlanLeg[]): CheckResult {
     .sort((a, b) => a.start.getTime() - b.start.getTime());
 
   if (spans.length < 2) {
-    return unknown('overlap', 'Fewer than two of these state both a time and a length, so nothing can be compared.');
+    return unknown('overlap', 'We need the time and length of at least 2 stops to check this.');
   }
 
   for (let i = 1; i < spans.length; i += 1) {
@@ -130,7 +140,7 @@ function checkOverlap(legs: readonly PlanLeg[]): CheckResult {
     const after = spans[i];
     if (after.start < before.end) {
       return breaks('overlap',
-        `${before.leg.title} is still going at ${clockLabel(before.end)} when ${after.leg.title} starts at ${clockLabel(after.start)}.`,
+        `${before.leg.title} runs until ${clockLabel(before.end)}, but ${after.leg.title} starts at ${clockLabel(after.start)}.`,
         [before.leg.itemId, after.leg.itemId]);
     }
   }
@@ -138,10 +148,10 @@ function checkOverlap(legs: readonly PlanLeg[]): CheckResult {
   const unmeasured = legs.length - spans.length;
   if (unmeasured > 0) {
     return unknown('overlap',
-      `The ones with both a time and a length do not clash, but ${unmeasured} of these state neither.`,
+      `No overlaps so far, but ${stops(unmeasured)} ${hasHave(unmeasured)} no time or length yet.`,
       legs.filter((leg) => endOf(leg) === null).map((leg) => leg.itemId));
   }
-  return fits('overlap', 'Nothing here runs into anything else.');
+  return fits('overlap', 'None of your stops overlap.');
 }
 
 /**
@@ -158,7 +168,7 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
   const ordered = legs.filter((leg) => leg.startsAt && placed(leg));
 
   if (ordered.length < 2) {
-    return unknown('travel', 'Fewer than two of these state both a place and a time, so no journey can be measured.');
+    return unknown('travel', 'We need the time and place of at least 2 stops to check this.');
   }
 
   let compared = 0;
@@ -181,7 +191,7 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
     // group could not have covered anyway.
     if (availableMins < 0) {
       return breaks('travel',
-        `${to.title} starts before ${from.title} is over, but it comes after it in this Plan.`,
+        `${to.title} starts before ${from.title} ends, but it's listed after it.`,
         [from.itemId, to.itemId]);
     }
     const metres = distanceMeters(
@@ -193,7 +203,7 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
     if (availableMins < neededMins) {
       const miles = (metres / 1609.344).toFixed(1);
       return breaks('travel',
-        `${miles} miles between ${from.title} and ${to.title}, with ${Math.max(0, Math.round(availableMins))} minutes to cover it.`,
+        `${from.title} to ${to.title} is ${miles} miles, with only ${Math.max(0, Math.round(availableMins))} minutes to get there.`,
         [from.itemId, to.itemId]);
     }
   }
@@ -201,7 +211,7 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
   const unplaceable = legs.length - ordered.length;
   if (unplaceable > 0) {
     return unknown('travel',
-      `The ${compared === 1 ? 'one journey' : `${compared} journeys`} that could be measured leave enough time, but ${unplaceable} of these have no stated place or time.`,
+      `There's time for the ${compared === 1 ? 'trip' : `${compared} trips`} we could check, but ${stops(unplaceable)} ${hasHave(unplaceable)} no time or place yet.`,
       legs.filter((leg) => !leg.startsAt || !placed(leg)).map((leg) => leg.itemId));
   }
 
@@ -211,28 +221,28 @@ function checkTravel(legs: readonly PlanLeg[]): CheckResult {
   // may not be possible at all. Reporting a fit here would be a guess wearing
   // a tick.
   if (assumedImmediateDeparture.length > 0) {
-    const names = [...new Set(assumedImmediateDeparture.map((leg) => leg.title))].join(', ');
+    const titles = [...new Set(assumedImmediateDeparture.map((leg) => leg.title))];
     return unknown('travel',
-      `There is time to get between these only if the group leaves the moment they arrive: ${names} ${assumedImmediateDeparture.length === 1 ? 'does not say' : 'do not say'} how long it runs.`,
+      `This only works if you leave ${nameList(titles)} right away. We don't know how long ${titles.length === 1 ? 'it lasts' : 'they last'}.`,
       [...new Set(assumedImmediateDeparture.map((leg) => leg.itemId))]);
   }
-  return fits('travel', 'There is time to get between all of these.');
+  return fits('travel', 'There\'s enough time to get between your stops.');
 }
 
 /** The whole Plan against the ceiling the group named. */
 function checkBudget(legs: readonly PlanLeg[], plan: PlanConstraints): CheckResult {
   if (plan.budgetCents === null) {
-    return unknown('budget', 'No budget was set for this Plan, so there is nothing to check against.');
+    return unknown('budget', 'No budget was set for this Plan.');
   }
   if (!plan.partySize || plan.partySize < 1) {
     // Prices are per person. Without a head count the total is unknowable, and
     // quietly pricing it for one would understate it for everyone else.
-    return unknown('budget', 'No party size was set, so a per-person price cannot be totalled.');
+    return unknown('budget', 'Add your group size to add up the cost.');
   }
 
   const priced = legs.filter((leg) => leg.priceCents !== null);
   if (priced.length === 0) {
-    return unknown('budget', 'None of these state a price, so nothing can be totalled.');
+    return unknown('budget', 'None of your stops have a price yet.');
   }
 
   const total = priced.reduce((sum, leg) => sum + leg.priceCents! * plan.partySize!, 0);
@@ -240,7 +250,7 @@ function checkBudget(legs: readonly PlanLeg[], plan: PlanConstraints): CheckResu
 
   if (total > plan.budgetCents) {
     return breaks('budget',
-      `${money(total)} for ${plan.partySize} is over the ${money(plan.budgetCents)} you set.`,
+      `${money(total)} for ${people(plan.partySize)} is over your ${money(plan.budgetCents)} budget.`,
       priced.map((leg) => leg.itemId));
   }
 
@@ -249,36 +259,36 @@ function checkBudget(legs: readonly PlanLeg[], plan: PlanConstraints): CheckResu
     // The known total fitting is not the Plan fitting. An unpriced leg can take
     // it over on its own, so this stays unknown however much room is left.
     return unknown('budget',
-      `${money(total)} so far against ${money(plan.budgetCents)}, but ${unpriced} of these have no stated price.`,
+      `${money(total)} so far of your ${money(plan.budgetCents)} budget, but ${stops(unpriced)} ${hasHave(unpriced)} no price yet.`,
       legs.filter((leg) => leg.priceCents === null).map((leg) => leg.itemId));
   }
-  return fits('budget', `${money(total)} for ${plan.partySize} is within the ${money(plan.budgetCents)} you set.`);
+  return fits('budget', `${money(total)} for ${people(plan.partySize)}, within your ${money(plan.budgetCents)} budget.`);
 }
 
 /** Room for everyone coming. */
 function checkCapacity(legs: readonly PlanLeg[], plan: PlanConstraints): CheckResult {
   if (!plan.partySize || plan.partySize < 1) {
-    return unknown('capacity', 'No party size was set, so there is nothing to seat.');
+    return unknown('capacity', 'Add your group size to check this.');
   }
   const seated = legs.filter((leg) => leg.seats !== null);
   if (seated.length === 0) {
-    return unknown('capacity', 'None of these count seats, so there is nothing to check.');
+    return unknown('capacity', 'None of your stops say how many people they fit.');
   }
 
   const tooSmall = seated.filter((leg) => leg.seats! < plan.partySize!);
   if (tooSmall.length > 0) {
-    const names = tooSmall.map((leg) => `${leg.title} (${leg.seats} left)`).join(', ');
-    return breaks('capacity', `${names} cannot take ${plan.partySize}.`,
+    const names = nameList(tooSmall.map((leg) => `${leg.title} (${leg.seats} left)`));
+    return breaks('capacity', `${names} can't fit ${people(plan.partySize)}.`,
       tooSmall.map((leg) => leg.itemId));
   }
 
   const uncounted = legs.length - seated.length;
   if (uncounted > 0) {
     return unknown('capacity',
-      `The ones that count seats can take ${plan.partySize}, but ${uncounted} of these do not.`,
+      `The stops that list space can fit ${people(plan.partySize)}, but ${stops(uncounted)} don't say.`,
       legs.filter((leg) => leg.seats === null).map((leg) => leg.itemId));
   }
-  return fits('capacity', `Everything here can take ${plan.partySize}.`);
+  return fits('capacity', `Every stop can fit ${people(plan.partySize)}.`);
 }
 
 /** Roll the five checks into one answer. */
@@ -286,7 +296,7 @@ export function planFeasibility(legs: readonly PlanLeg[], plan: PlanConstraints)
   if (legs.length === 0) {
     // An empty Plan is not a working Plan. There is simply nothing to judge,
     // and saying it fits would be an endorsement of nothing.
-    const empty = (check: CheckName) => unknown(check, 'This Plan has nothing in it yet.');
+    const empty = (check: CheckName) => unknown(check, 'Add a stop to check your Plan.');
     return {
       verdict: 'unknown',
       checks: [empty('window'), empty('overlap'), empty('travel'), empty('budget'), empty('capacity')],

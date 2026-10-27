@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
 import { z } from 'zod';
 import { config } from '../config';
-import { alertGuestOfDecision, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
+import { alertGuestOfDecision, alertGuestsOfArrivalUpdate, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
@@ -1557,7 +1557,7 @@ export const partyArrivalRouter = router({
   bindDestination: protectedProcedure
     .input(z.object({ partyId: z.string().min(1).max(128), venueId: z.string().min(1).max(128) }))
     .mutation(async ({ ctx, input }) => {
-      const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' }, select: { id: true, venueName: true } });
+      const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' }, select: { id: true, title: true, venueName: true, arrivalVenueId: true } });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
       const venue = await db.venue.findUnique({ where: { id: input.venueId }, select: { id: true, name: true, address: true } });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Registered arrival venue not found.' });
@@ -1569,6 +1569,9 @@ export const partyArrivalRouter = router({
         data: { arrivalVenueId: venue.id },
       });
       if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'The Party changed before its arrival destination could be saved.' });
+      if (party.arrivalVenueId !== venue.id) {
+        dispatchPartyAlert(alertGuestsOfArrivalUpdate({ partyId: party.id, partyTitle: party.title, firstSet: party.arrivalVenueId === null }));
+      }
       return { partyId: party.id, venue: { id: venue.id, name: venue.name, address: venue.address } };
     }),
 
@@ -1584,7 +1587,7 @@ export const partyArrivalRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'party-arrival-bind-place' }))
     .input(z.object({ partyId: z.string().min(1).max(128), placeId: z.string().min(1).max(256) }))
     .mutation(async ({ ctx, input }) => {
-      const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' }, select: { id: true } });
+      const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published' }, select: { id: true, title: true, arrivalVenueId: true } });
       if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
 
       const venueSelect = { id: true, name: true, address: true, lat: true, lng: true };
@@ -1633,6 +1636,9 @@ export const partyArrivalRouter = router({
         data: { arrivalVenueId: venue.id },
       });
       if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'The Party changed before its arrival destination could be saved.' });
+      if (party.arrivalVenueId !== venue.id) {
+        dispatchPartyAlert(alertGuestsOfArrivalUpdate({ partyId: party.id, partyTitle: party.title, firstSet: party.arrivalVenueId === null }));
+      }
       return { partyId: party.id, venue: { id: venue.id, name: venue.name, address: venue.address } };
     }),
 

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { alertPlanInvited, alertPlanItemAdded, alertPlanJoined, planInvitedCopy, planItemAddedCopy, planJoinedCopy, PLAN_ADD_COALESCE_MS } from './planAlerts';
+import { alertPlanChanged, alertPlanDecided, alertPlanInvited, alertPlanItemAdded, alertPlanJoined, planChangedCopy, planInvitedCopy, planItemAddedCopy, planJoinedCopy, PLAN_ADD_COALESCE_MS } from './planAlerts';
+import { planChangeOf } from '../trpc/planRouter';
 
 const now = new Date('2026-10-18T18:00:00Z');
 let sends: { userId: string; dedupeKey: string; sentAt: Date }[];
@@ -101,4 +102,37 @@ test('Invites and joins on a cancelled Plan, or to someone with reminders off, n
   prefs = { friend: { push: { reminders: false } } };
   assert.equal(await alertPlanInvited({ planId: 'plan-1', inviterUserId: 'creator', inviteeUserId: 'friend' }), 0);
   assert.deepEqual(addressed, []);
+});
+
+test('A change of time or place tells everyone else on the Plan, coalesced like adds', async () => {
+  assert.equal(planChangedCopy({ actorName: 'Ada', planTitle: 'Friday Out', change: 'time' }).body, 'Ada changed the time of Friday Out');
+  assert.equal(planChangedCopy({ actorName: null, planTitle: 'Friday Out', change: 'time_and_place' }).body, 'Someone changed the time and place of Friday Out');
+  currentTime = now;
+  assert.equal(await alertPlanChanged({ planId: 'plan-1', actorUserId: 'creator', change: 'time', now }), 2);
+  assert.deepEqual(addressed, [['friend', 'other']]);
+  currentTime = new Date(now.getTime() + 30 * 1000);
+  assert.equal(await alertPlanChanged({ planId: 'plan-1', actorUserId: 'creator', change: 'place', now: currentTime }), 0);
+  // A change is its own news: an add in the same window is still told.
+  assert.equal(await add('creator', ['Dinner'], currentTime), 2);
+});
+
+test('Confirming and cancelling are told once per Plan, and a cancel still reaches people', async () => {
+  (db.plan as any).findUnique = async () => ({ title: 'Friday Out', deletedAt: null, cancelledAt: null, participants });
+  assert.equal(await alertPlanDecided({ planId: 'plan-1', actorUserId: 'creator', decision: 'confirmed' }), 2);
+  assert.equal(await alertPlanDecided({ planId: 'plan-1', actorUserId: 'creator', decision: 'confirmed' }), 0);
+  (db.plan as any).findUnique = async () => ({ title: 'Friday Out', deletedAt: null, cancelledAt: now, participants });
+  assert.equal(await alertPlanDecided({ planId: 'plan-1', actorUserId: 'creator', decision: 'cancelled' }), 2);
+  assert.ok(sends.every((s) => s.userId !== 'creator'));
+  // A cancelled Plan has no further time or place news.
+  assert.equal(await alertPlanChanged({ planId: 'plan-1', actorUserId: 'creator', change: 'time', now }), 0);
+});
+
+test('Only a real change of time or place counts; party size alone is not news', () => {
+  const before = { startsAt: new Date('2026-10-30T23:00:00Z'), endsAt: null, areaLabel: 'Midtown', latitude: 33.78, longitude: -84.38 };
+  assert.equal(planChangeOf(before, {}), null);
+  assert.equal(planChangeOf(before, { startsAt: new Date('2026-10-30T23:00:00Z'), areaLabel: 'Midtown' }), null);
+  assert.equal(planChangeOf(before, { startsAt: new Date('2026-10-31T00:00:00Z') }), 'time');
+  assert.equal(planChangeOf(before, { endsAt: new Date('2026-10-31T02:00:00Z') }), 'time');
+  assert.equal(planChangeOf(before, { areaLabel: 'Buckhead' }), 'place');
+  assert.equal(planChangeOf(before, { startsAt: null, latitude: 33.8 }), 'time_and_place');
 });

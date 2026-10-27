@@ -16,7 +16,7 @@ import { planFeasibility } from '../services/planFeasibility';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 import { resolvePlaceLocation } from './placesRouter';
-import { dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined } from '../services/planAlerts';
+import { dispatchPlanChanged, dispatchPlanDecided, dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined, type PlanChange } from '../services/planAlerts';
 
 /**
  * Plan — the control plane.
@@ -433,6 +433,20 @@ function assertLocation(latitude: number | null | undefined, longitude: number |
 }
 
 /** The creator may only reshape a Plan that is still going somewhere. */
+type PlanWhenWhere = {
+  startsAt: Date | null; endsAt: Date | null;
+  areaLabel: string | null; latitude: number | null; longitude: number | null;
+};
+
+/** What the other people on a Plan would notice. Party size alone is not news. */
+export function planChangeOf(before: PlanWhenWhere, input: Partial<PlanWhenWhere>): PlanChange | null {
+  const sameTime = (a: Date | null, b: Date | null | undefined) => b === undefined || (a?.getTime() ?? null) === (b?.getTime() ?? null);
+  const same = <T>(a: T, b: T | undefined) => b === undefined || a === b;
+  const time = !sameTime(before.startsAt, input.startsAt) || !sameTime(before.endsAt, input.endsAt);
+  const place = !same(before.areaLabel, input.areaLabel) || !same(before.latitude, input.latitude) || !same(before.longitude, input.longitude);
+  return time && place ? 'time_and_place' : time ? 'time' : place ? 'place' : null;
+}
+
 function assertPlanMutable(plan: LoadedPlan, now: Date) {
   if (plan.deletedAt) throw planNotFound();
   if (plan.lifecycle === 'cancelled') throw new TRPCError({ code: 'CONFLICT', message: 'This Plan was cancelled.' });
@@ -1174,6 +1188,7 @@ export const planRouter = router({
         if (current.lifecycle === 'confirmed') return { id: plan.id, lifecycle: 'confirmed' };
         throw new TRPCError({ code: 'CONFLICT', message: 'This Plan was cancelled.' });
       }
+      dispatchPlanDecided({ planId: plan.id, actorUserId: ctx.user.userId, decision: 'confirmed' });
       return { id: plan.id, lifecycle: 'confirmed' };
     }),
 
@@ -1189,6 +1204,7 @@ export const planRouter = router({
         data: { lifecycle: 'cancelled', cancelledAt: new Date() },
       });
       if (cancelled.count === 0) await loadPlanForCreator(plan.id, ctx.user.userId);
+      else dispatchPlanDecided({ planId: plan.id, actorUserId: ctx.user.userId, decision: 'cancelled' });
       return { id: plan.id, lifecycle: 'cancelled' };
     }),
 
@@ -1338,7 +1354,8 @@ export const planRouter = router({
       const now = new Date();
       assertLocation(input.latitude, input.longitude);
       if (input.startsAt !== undefined) assertStartNotPast(input.startsAt, now);
-      return serializableTransaction(async (tx) => {
+      let change = null as PlanChange | null;
+      const result = await serializableTransaction(async (tx) => {
         const plan = await loadPlanForCreator(input.planId, ctx.user.userId, tx);
         assertPlanMutable(plan, now);
         const startsAt = input.startsAt === undefined ? plan.startsAt : input.startsAt;
@@ -1357,8 +1374,11 @@ export const planRouter = router({
         if (input.areaLabel !== undefined) data.areaLabel = input.areaLabel;
         if (input.latitude !== undefined) { data.latitude = input.latitude; data.longitude = input.longitude; }
         await tx.plan.update({ where: { id: plan.id }, data });
+        change = planChangeOf(plan, input);
         return { id: plan.id };
       }, 'Another change to this Plan is in flight. Try again.');
+      if (change) dispatchPlanChanged({ planId: result.id, actorUserId: ctx.user.userId, change });
+      return result;
     }),
 
   /**

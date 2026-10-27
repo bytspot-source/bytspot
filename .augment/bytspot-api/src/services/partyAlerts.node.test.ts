@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { alertHostOfCircleTicketPurchase, partyAlertRecipient, partyAlertRecipients, partyAlertUrl } from './partyAlerts';
+import { alertGuestsOfArrivalUpdate, alertHostOfCircleTicketPurchase, partyAlertRecipient, partyAlertRecipients, partyAlertUrl } from './partyAlerts';
 import { DEFAULT_PUSH_PREFERENCES, permitsCategory } from './iosPushDevices';
 import { isAllowedBytspotUrl } from './notificationDelivery';
 
@@ -101,4 +101,16 @@ test('the recap alert reaches every confirmed guest and stops at the door', asyn
   // An unpublished or withdrawn Party still addresses nobody.
   party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'draft' });
   assert.deepEqual(await partyAlertRecipients({ kind: 'confirmed-guests', partyId: 'party-1' }), []);
+});
+
+test('an arrival update reaches confirmed guests only and never names the place', async () => {
+  party.findUnique = async () => ({ hostUserId: 'usr_host', status: 'published' });
+  let guestQuery: any;
+  (db.partyGuest as any).findMany = async (input: any) => { guestQuery = input; return [{ userId: 'usr_guest' }]; };
+  let addressed: string[] = [];
+  (db.iOSPushDevice as any).findMany = async ({ where }: any) => { addressed = where.userId.in; return []; };
+  const result = await alertGuestsOfArrivalUpdate({ partyId: 'party-1', partyTitle: 'Rooftop', firstSet: false });
+  assert.equal(result.targetedUsers, 1);
+  assert.deepEqual(guestQuery.where, { partyId: 'party-1', accessGranted: true });
+  assert.deepEqual(addressed, ['usr_guest']);
 });

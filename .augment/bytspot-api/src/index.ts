@@ -21,6 +21,7 @@ import partyMediaRouter from './routes/partyMedia';
 import partyLandingRouter from './routes/partyLanding'; // server-rendered share-link page (link previews need real HTML)
 import planLandingRouter from './routes/planLanding';   // server-rendered Plan invite page for non-members
 import saleLandingRouter from './routes/saleLanding';   // server-rendered Private Sale share page
+import hostPayoutLandingRouter from './routes/hostPayoutLanding';   // where Stripe onboarding returns a host
 import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
 import mapReportsRouter from './routes/mapReports';     // SSE stream (map/reports/stream) of Traffic Intel reports
 import { placesPhotoRouter } from './routes/placesPhoto';
@@ -107,6 +108,7 @@ app.use(partyMediaRouter);
 app.use(partyLandingRouter);
 app.use(planLandingRouter);
 app.use(saleLandingRouter);
+app.use(hostPayoutLandingRouter);
 app.use(placesPhotoRouter);
 app.use(diagnosticsRouter);
 app.use(mapReportsRouter);

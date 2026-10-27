@@ -109,7 +109,10 @@ export async function reconcilePartyCheckoutPayment(session: Stripe.Checkout.Ses
     const requiresRefund = current.status === 'expired' || guest.status === 'declined' || current.reservationExpiresAt <= paymentOccurredAt || !membershipEligible || paidAfterClose;
     const updated = await tx.partyCheckout.updateMany({
       where: { id: current.id, status: { in: ['creating', 'pending', 'expired'] } },
-      data: { stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt },
+      data: {
+        stripeSessionId: session.id, status: requiresRefund ? 'refund-required' : 'completed', completedAt: paymentOccurredAt,
+        paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id ?? null,
+      },
     });
     if (updated.count !== 1) throw new Error('Party Checkout completion could not be recorded.');
     if (requiresRefund) {

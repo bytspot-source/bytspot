@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { config } from '../config';
 import { alertGuestOfDecision, alertGuestsOfArrivalUpdate, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
+import { hostCanSellPaidTickets, partySellsPaidTickets } from '../services/hostPayouts';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
@@ -686,6 +687,9 @@ export const partyPublish = protectedProcedure
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
     if (party.status === 'published' && party.passCode) return { id: party.id, shareUrl: partyShareUrl(party.id), passCode: party.passCode };
     if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be published from its current state.' });
+    if (partySellsPaidTickets(party.ticketTiers) && !(await hostCanSellPaidTickets(ctx.user.userId))) {
+      throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Set up payouts before publishing a party with paid tickets. Free parties do not need payouts.' });
+    }
     // Snapshot the Official Host identity so later profile edits never
     // rewrite an already-shared pass. The profile remains the source of truth
     // for the next party.
@@ -1275,16 +1279,21 @@ export const partyControlRouter = router({
   /**
    * The fee a host would be charged if they published now. Surfaced before
    * publish so nobody sells a ticket without having been told the rate.
-   * `payoutsEnabled` is false while no Connect rail exists: a host can be told
-   * the split honestly, but must not be told the money is on its way.
+   * `payoutsEnabled` is true only when party payouts are on and this host's
+   * Stripe account can receive them: until then a host can be told the split
+   * honestly, but must not be told the money is on its way.
    */
-  ticketFeeQuote: protectedProcedure.query(async () => {
+  ticketFeeQuote: protectedProcedure.query(async ({ ctx }) => {
     const feeBps = await currentPlatformFeeBps();
+    const payout = config.partyPayoutsEnabled
+      ? await db.hostPayoutAccount.findUnique({ where: { userId: ctx.user.userId }, select: { status: true } })
+      : null;
     return {
       feeBps,
       feePercent: feeBps / 100,
       hostSharePercent: (10_000 - feeBps) / 100,
-      payoutsEnabled: false,
+      payoutsEnabled: payout?.status === 'active',
+      payoutDelayHours: config.partyPayoutDelayHours,
       note: 'This rate is locked to your party when you publish. Later changes to the platform rate do not affect a party that is already live.',
     };
   }),
@@ -1875,9 +1884,8 @@ export const partyTicketsRouter = router({
 
       if (reservation.checkoutUrl && reservation.status === 'pending') return { url: reservation.checkoutUrl };
       // The party's frozen rate, so a mid-sale rate change cannot alter what
-      // this host was promised. The split is recorded, not transferred: there
-      // is no Connect destination yet, so Bytspot holds the whole charge and
-      // owes the host net. See STRIPE_CAPITAL_CASH_FLOW.md.
+      // this host was promised. Bytspot holds the whole charge; the recorded
+      // split is paid out by transfer after the party ends (partyPayouts).
       const ticketFeeBps = effectiveFeeBps(party.platformFeeBps, await currentPlatformFeeBps());
       // A session from a business the host asked is owed to that business;
       // one from the host's own team stays inside the host's net, as before.

@@ -74,6 +74,10 @@ services:
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
+      # Host payouts: paid parties need a payout account to publish, and the
+      # bytspot-party-payouts job sends transfers. Off until set to true.
+      - key: PARTY_PAYOUTS_ENABLED
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       # APNs signing key: upload the .p8 as a Render Secret File (Dashboard →
@@ -172,6 +176,33 @@ services:
         sync: false
       - key: SENTRY_DSN
         sync: false
+
+  # ─── Party payouts: host and business shares, after the party ends ─────────
+  # Sends nothing unless PARTY_PAYOUTS_ENABLED=true. Each transfer is keyed per
+  # sale and recipient, so an overlapping or retried run never pays twice.
+  - type: cron
+    name: bytspot-party-payouts
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    schedule: "23 * * * *"
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: node dist/scripts/sendPartyPayouts.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BYTSPOT_RUNTIME
+        value: job
+      - key: DATABASE_URL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: PARTY_PAYOUTS_ENABLED
+        sync: false
+      - key: PARTY_PAYOUT_DELAY_HOURS
+        value: "48"
 
   # ─── Reminders: a Party or Plan approaching, and the feedback prompt after ─
   # Each push is claimed once per member, so an overlapping or retried run

@@ -58,7 +58,7 @@ function humanize(reason: string): string {
   return reason.replace(/[._]/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 }
 
-function last4Of(account: Stripe.Account): string | undefined {
+export function last4Of(account: Stripe.Account): string | undefined {
   const external = account.external_accounts?.data?.[0] as { last4?: string } | undefined;
   return external?.last4;
 }

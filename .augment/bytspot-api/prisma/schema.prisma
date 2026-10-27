@@ -84,6 +84,7 @@ model User {
   bookingLinkTaps       BookingLinkTap[]
   paymentHandles        SellerPaymentHandle[]
   privateSales          PrivateSale[]         @relation("privateSaleSeller")
+  hostPayoutAccount     HostPayoutAccount?
   privateSaleRequests   PrivateSaleRequest[]  @relation("privateSaleBuyer")
   blocks                UserBlock[]           @relation("userBlocker")
   blockedBy             UserBlock[]           @relation("userBlocked")
@@ -577,6 +578,9 @@ model PartyCheckout {
   /// portion less its fee, and hostNetCents covers only the ticket portion.
   sellerId             String?   @map("seller_id")
   sellerNetCents       Int?      @map("seller_net_cents")
+  /// Recorded when Stripe confirms payment, so the payout can name the charge
+  /// it is paid from and check it was not refunded or disputed first.
+  paymentIntentId      String?   @map("payment_intent_id")
   currency             String    @default("usd")
   status               String    @default("creating")
   reservationExpiresAt DateTime  @map("reservation_expires_at")
@@ -588,12 +592,63 @@ model PartyCheckout {
   guest   PartyGuest    @relation(fields: [partyGuestId], references: [id], onDelete: Cascade)
   user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   session PartySession? @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  payouts PartyPayoutTransfer[]
 
   @@unique([partyId, userId, idempotencyKey])
   @@index([partyId, ticketTierName, status, reservationExpiresAt])
   @@index([sessionId, status, reservationExpiresAt])
   @@index([partyGuestId, updatedAt(sort: Desc)])
   @@map("party_checkouts")
+}
+
+/// A host's Stripe Express account, the same hosted onboarding businesses use.
+/// No bank detail reaches Bytspot: the host enters it on Stripe's pages, and
+/// `last4` is display text Stripe hands back.
+model HostPayoutAccount {
+  id              String             @id @default(cuid())
+  userId          String             @unique @map("user_id")
+  stripeAccountId String             @unique @map("stripe_account_id")
+  status          VendorPayoutStatus @default(pending)
+  last4           String?
+  detail          String?
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("host_payout_accounts")
+}
+
+/// One transfer out of one party sale: the host's ticket share, or the share
+/// owed to a business the host asked to sell a table. Sent after the party
+/// ends, from the charge it was paid by.
+model PartyPayoutTransfer {
+  id               String    @id @default(cuid())
+  checkoutId       String    @map("checkout_id")
+  partyId          String    @map("party_id")
+  /// `host` or `seller`. One of each at most per sale.
+  recipient        String
+  recipientUserId  String?   @map("recipient_user_id")
+  sellerId         String?   @map("seller_id")
+  /// The Stripe account paid. Null while a sale is held before any was chosen.
+  destination      String?
+  amountCents      Int       @map("amount_cents")
+  currency         String    @default("usd")
+  /// pending | paid | held | failed. `held` waits for a person: the charge
+  /// was refunded or disputed, so nothing is sent automatically.
+  status           String    @default("pending")
+  stripeTransferId String?   @unique @map("stripe_transfer_id")
+  detail           String?
+  paidAt           DateTime? @map("paid_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  checkout PartyCheckout @relation(fields: [checkoutId], references: [id], onDelete: Cascade)
+
+  @@unique([checkoutId, recipient])
+  @@index([status, updatedAt])
+  @@index([recipientUserId])
+  @@map("party_payout_transfers")
 }
 
 // ─── Premium Mobility ───────────────────────────────────

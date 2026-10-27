@@ -1,6 +1,7 @@
 import type Stripe from 'stripe';
 import { config } from '../config';
 import { db } from '../lib/db';
+import { last4Of, statusFrom } from '../vendor/payout';
 import { refreshHostPayout } from './hostPayouts';
 
 /**
@@ -28,6 +29,10 @@ const HOUR_MS = 60 * 60 * 1000;
 /** Card disputes can be opened up to 120 days after payment. */
 export const REVERSAL_WINDOW_DAYS = 120;
 const RECHECK_EVERY_MS = 6 * HOUR_MS;
+/** A failed share waits this long before the next try, so it cannot crowd out others. */
+const RETRY_FAILED_MS = 6 * HOUR_MS;
+/** Payout accounts not yet active, re-read from Stripe per run. */
+const ACCOUNT_REFRESH_LIMIT = 50;
 const REVERSAL_FAILED = 'Reversal failed: ';
 
 export type Recipient = 'host' | 'seller';
@@ -93,9 +98,9 @@ function short(error: unknown): string {
 }
 
 /**
- * One transfer, exactly once. The row is claimed first; the Stripe call
- * carries an idempotency key, and a retry looks for a transfer already made
- * under this sale's group before making another.
+ * One transfer, exactly once. The row is claimed first and nothing is sent
+ * without it. Before any send, the sale's transfer group is searched for a
+ * transfer already made, since Stripe forgets idempotency keys after a day.
  */
 async function sendShare(stripe: Stripe, input: {
   checkoutId: string; partyId: string; recipient: Recipient; recipientUserId: string | null; sellerId: string | null;
@@ -105,21 +110,24 @@ async function sendShare(stripe: Stripe, input: {
   const existing = await db.partyPayoutTransfer.findUnique({ where: key, select: { status: true } });
   if (existing && SETTLED.includes(existing.status)) return 'settled';
   if (!existing) {
-    await db.partyPayoutTransfer.create({
-      data: {
-        checkoutId: input.checkoutId, partyId: input.partyId, recipient: input.recipient,
-        recipientUserId: input.recipientUserId, sellerId: input.sellerId,
-        destination: input.destination, amountCents: input.amountCents, currency: input.currency,
-      },
-    }).catch(() => undefined);
+    try {
+      await db.partyPayoutTransfer.create({
+        data: {
+          checkoutId: input.checkoutId, partyId: input.partyId, recipient: input.recipient,
+          recipientUserId: input.recipientUserId, sellerId: input.sellerId,
+          destination: input.destination, amountCents: input.amountCents, currency: input.currency,
+        },
+      });
+    } catch (error) {
+      if ((error as { code?: string })?.code !== 'P2002') return 'failed';
+      const raced = await db.partyPayoutTransfer.findUnique({ where: key, select: { status: true } });
+      if (!raced || SETTLED.includes(raced.status)) return 'settled';
+    }
   }
   const transferGroup = `party-checkout:${input.checkoutId}`;
   try {
-    let transfer: Stripe.Transfer | undefined;
-    if (existing) {
-      const prior = await stripe.transfers.list({ transfer_group: transferGroup, limit: 10 });
-      transfer = prior.data.find((item) => item.metadata?.recipient === input.recipient && !item.reversed);
-    }
+    const prior = await stripe.transfers.list({ transfer_group: transferGroup, limit: 10 });
+    let transfer = prior.data.find((item) => item.metadata?.recipient === input.recipient);
     transfer ??= await stripe.transfers.create({
       amount: input.amountCents,
       currency: input.currency,
@@ -228,6 +236,49 @@ async function holdShares(input: {
   return held;
 }
 
+/**
+ * Accounts that finish onboarding on Stripe's pages are only seen as active
+ * once read back. Hosts' and owed businesses' accounts that are not active yet
+ * are re-read here, oldest first, so their owed sales are picked up.
+ */
+async function refreshWaitingAccounts(stripe: Stripe, owedSellerIds: string[]): Promise<Map<string, string>> {
+  const hosts = await db.hostPayoutAccount.findMany({
+    where: { status: { not: 'active' } },
+    orderBy: { updatedAt: 'asc' },
+    take: ACCOUNT_REFRESH_LIMIT,
+    select: { userId: true },
+  });
+  for (const host of hosts) await refreshHostPayout(host.userId, stripe);
+
+  const activeSellers = new Map<string, string>();
+  if (owedSellerIds.length === 0) return activeSellers;
+  const sellers = await db.vendorSeller.findMany({
+    where: { id: { in: owedSellerIds }, payoutReference: { not: null } },
+    orderBy: { updatedAt: 'asc' },
+    select: { id: true, payoutReference: true, payoutStatus: true },
+  });
+  let refreshed = 0;
+  for (const seller of sellers) {
+    let status = seller.payoutStatus;
+    if (status !== 'active' && refreshed < ACCOUNT_REFRESH_LIMIT) {
+      refreshed++;
+      try {
+        const account = await stripe.accounts.retrieve(seller.payoutReference!);
+        const read = statusFrom(account);
+        status = read.status;
+        await db.vendorSeller.update({
+          where: { id: seller.id },
+          data: { payoutStatus: read.status, payoutLast4: last4Of(account) ?? null, payoutDetail: read.detail ?? null },
+        });
+      } catch {
+        // Unreachable Stripe keeps the stored status.
+      }
+    }
+    if (status === 'active') activeSellers.set(seller.id, seller.payoutReference!);
+  }
+  return activeSellers;
+}
+
 export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit?: number }): Promise<PartyPayoutRunResult> {
   const result: PartyPayoutRunResult = { paid: 0, held: 0, failed: 0, waiting: 0, reversed: 0, alerts: [] };
   if (!config.partyPayoutsEnabled) return result;
@@ -235,21 +286,34 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
   const delayMs = config.partyPayoutDelayHours * 60 * 60 * 1000;
   const endedBy = new Date(now.getTime() - delayMs);
   const startedBy = new Date(endedBy.getTime() - DEFAULT_PARTY_LENGTH_MS);
+  const retryBefore = new Date(now.getTime() - RETRY_FAILED_MS);
+  const due = {
+    status: 'completed',
+    platformFeeBps: { not: null },
+    party: { OR: [{ endsAt: { lte: endedBy } }, { endsAt: null, startsAt: { lte: startedBy } }] },
+  };
+  const owedTo = (recipient: Recipient) => ({
+    AND: [
+      { payouts: { none: { recipient, status: { in: SETTLED } } } },
+      { payouts: { none: { recipient, status: 'failed', updatedAt: { gt: retryBefore } } } },
+    ],
+  });
 
+  const owedSellers = await db.partyCheckout.findMany({
+    where: { ...due, sellerId: { not: null }, sellerNetCents: { gt: 0 }, ...owedTo('seller') },
+    distinct: ['sellerId'],
+    select: { sellerId: true },
+  });
+  const activeSellers = await refreshWaitingAccounts(input.stripe, owedSellers.map((row) => row.sellerId!).filter(Boolean));
+
+  // Only shares that can be paid now are selected, so sales waiting on a
+  // recipient's onboarding, or on a recent failure, cannot crowd them out.
   const checkouts = await db.partyCheckout.findMany({
     where: {
-      status: 'completed',
-      platformFeeBps: { not: null },
-      party: { OR: [{ endsAt: { lte: endedBy } }, { endsAt: null, startsAt: { lte: startedBy } }] },
+      ...due,
       OR: [
-        // A host who has not finished onboarding is not selected, so an
-        // owed sale cannot crowd out ones that can be paid.
-        {
-          hostNetCents: { gt: 0 },
-          party: { host: { hostPayoutAccount: { is: { status: 'active' } } } },
-          payouts: { none: { recipient: 'host', status: { in: SETTLED } } },
-        },
-        { sellerId: { not: null }, sellerNetCents: { gt: 0 }, payouts: { none: { recipient: 'seller', status: { in: SETTLED } } } },
+        { hostNetCents: { gt: 0 }, party: { host: { hostPayoutAccount: { is: { status: 'active' } } } }, ...owedTo('host') },
+        { sellerId: { in: [...activeSellers.keys()] }, sellerNetCents: { gt: 0 }, ...owedTo('seller') },
       ],
     },
     orderBy: { completedAt: 'asc' },
@@ -258,12 +322,11 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
       id: true, partyId: true, currency: true, hostNetCents: true, sellerId: true, sellerNetCents: true,
       paymentIntentId: true, stripeSessionId: true,
       party: { select: { hostUserId: true, startsAt: true, endsAt: true } },
-      payouts: { select: { recipient: true, status: true } },
+      payouts: { select: { recipient: true, status: true, updatedAt: true } },
     },
   });
 
   const hostReady = new Map<string, string | null>();
-  const sellerReady = new Map<string, string | null>();
   const hostDestination = async (userId: string) => {
     if (!hostReady.has(userId)) {
       const view = await refreshHostPayout(userId, input.stripe);
@@ -274,16 +337,12 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
     }
     return hostReady.get(userId) ?? null;
   };
-  const sellerDestination = async (sellerId: string) => {
-    if (!sellerReady.has(sellerId)) {
-      const seller = await db.vendorSeller.findUnique({ where: { id: sellerId }, select: { payoutReference: true, payoutStatus: true } });
-      sellerReady.set(sellerId, seller?.payoutStatus === 'active' ? seller.payoutReference : null);
-    }
-    return sellerReady.get(sellerId) ?? null;
-  };
+  const sellerDestination = async (sellerId: string) => activeSellers.get(sellerId) ?? null;
 
   for (const checkout of checkouts) {
-    const settled = new Set(checkout.payouts.filter((row) => SETTLED.includes(row.status)).map((row) => row.recipient));
+    const settled = new Set(checkout.payouts
+      .filter((row) => SETTLED.includes(row.status) || (row.status === 'failed' && row.updatedAt > retryBefore))
+      .map((row) => row.recipient));
     const shares: { recipient: Recipient; recipientUserId: string | null; sellerId: string | null; amountCents: number; currency: string }[] = [];
     if ((checkout.hostNetCents ?? 0) > 0 && !settled.has('host')) {
       shares.push({ recipient: 'host', recipientUserId: checkout.party.hostUserId, sellerId: null, amountCents: checkout.hostNetCents!, currency: checkout.currency });
@@ -319,7 +378,7 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
       if (outcome === 'paid') result.paid++;
       else if (outcome === 'failed' || outcome === 'failed-again') result.failed++;
       if (outcome === 'failed') {
-        result.alerts.push(`Could not pay ${dollars(share.amountCents)} to the ${share.recipient} of sale ${checkout.id}. It will be retried every hour.`);
+        result.alerts.push(`Could not pay ${dollars(share.amountCents)} to the ${share.recipient} of sale ${checkout.id}. It will be retried every 6 hours.`);
       }
     }
   }

@@ -689,7 +689,7 @@ export async function sendPayoutAlertEmail(to: string, problems: string[]): Prom
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
         <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 16px;">Payouts that need attention</h1>
         <ul style="color: #ccc; font-size: 15px; line-height: 1.5; padding-left: 20px; margin: 0;">${items}</ul>
-        <p style="color: #555; font-size: 13px; margin-top: 32px;">Look these up in the Stripe dashboard. Failed payouts are retried every hour.</p>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">Look these up in the Stripe dashboard. Failed payouts are retried every 6 hours.</p>
       </div>
     `,
   });

@@ -464,9 +464,9 @@ test('A confirmed payment records the charge it was paid by, for the payout late
 
 // ─── Host payouts ───────────────────────────────────────
 
-type PayoutRow = { checkoutId: string; recipient: string; status: string; stripeTransferId?: string | null; detail?: string | null; destination?: string | null; amountCents?: number };
+type PayoutRow = { checkoutId: string; recipient: string; status: string; updatedAt?: Date; stripeTransferId?: string | null; detail?: string | null; destination?: string | null; amountCents?: number };
 
-function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.Charge>; sellerActive?: boolean; transferError?: string; reversalError?: string } = {}) {
+function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.Charge>; sellerActive?: boolean; sellerStored?: string; transferError?: string; reversalError?: string; claimError?: unknown } = {}) {
   const rows: (PayoutRow & { reversedCents?: number; checkedAt?: Date })[] = [];
   const transfers: any[] = [];
   const reversals: any[] = [];
@@ -477,12 +477,21 @@ function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.C
     payouts: [] as { recipient: string; status: string }[],
   };
   let lastQuery: any;
-  partyCheckout.findMany = async (input: any) => { lastQuery = input; checkout.payouts = rows.map(({ recipient, status }) => ({ recipient, status })); return [checkout]; };
+  partyCheckout.findMany = async (input: any) => {
+    if (input.distinct) return [{ sellerId: checkout.sellerId }];
+    lastQuery = input;
+    checkout.payouts = rows.map(({ recipient, status, updatedAt }) => ({ recipient, status, updatedAt: updatedAt ?? new Date(0) }));
+    return [checkout];
+  };
   const key = (where: any) => where.checkoutId_recipient;
   const find = (where: any) => rows.find((row) => row.checkoutId === key(where).checkoutId && row.recipient === key(where).recipient);
   prisma.partyPayoutTransfer = {
     findUnique: async ({ where }: any) => find(where) ?? null,
-    create: async ({ data }: any) => { if (find({ checkoutId_recipient: data })) throw new Error('unique'); rows.push({ status: 'pending', ...data }); return data; },
+    create: async ({ data }: any) => {
+      if (options.claimError) throw options.claimError;
+      if (find({ checkoutId_recipient: data })) throw Object.assign(new Error('unique'), { code: 'P2002' });
+      rows.push({ status: 'pending', ...data }); return data;
+    },
     update: async ({ where, data }: any) => Object.assign(find(where)!, data),
     upsert: async ({ where, create, update }: any) => { const row = find(where); if (row) return Object.assign(row, update); rows.push({ ...create }); return create; },
     findMany: async () => rows
@@ -497,14 +506,29 @@ function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.C
     }
     return baseUpdate(input);
   };
+  const host = { stripeAccountId: 'acct_host', status: options.hostStatus, last4: '6789', detail: null as string | null };
+  const accountReads: string[] = [];
   prisma.hostPayoutAccount = {
-    findUnique: async () => (options.hostStatus ? { stripeAccountId: 'acct_host', status: options.hostStatus, last4: '6789', detail: null } : null),
-    update: async ({ data }: any) => ({ stripeAccountId: 'acct_host', ...data }),
+    findUnique: async () => (options.hostStatus ? { ...host } : null),
+    findMany: async ({ where }: any) => (options.hostStatus && host.status !== 'active' && where.status.not === 'active' ? [{ userId: 'host-1' }] : []),
+    update: async ({ data }: any) => Object.assign(host, data),
   };
-  prisma.vendorSeller = { findUnique: async () => ({ payoutReference: 'acct_seller', payoutStatus: options.sellerActive === false ? 'pending' : 'active' }) };
+  const seller = { id: 'seller-1', payoutReference: 'acct_seller', payoutStatus: options.sellerStored ?? (options.sellerActive === false ? 'pending' : 'active') };
+  prisma.vendorSeller = {
+    findMany: async ({ where }: any) => (where.id.in.includes('seller-1') ? [{ ...seller }] : []),
+    update: async ({ data }: any) => Object.assign(seller, data),
+  };
+  // Stripe's view: what onboarding on Stripe's pages has made true.
+  const stripeSays = { host: options.hostStatus === 'active', seller: options.sellerActive !== false };
   const charge: any = { id: 'ch_party_1', amount: 4500, status: 'succeeded', refunded: false, amount_refunded: 0, disputed: false, ...options.charge };
   const stripe = {
-    accounts: { retrieve: async () => ({ payouts_enabled: options.hostStatus === 'active', details_submitted: true, requirements: { currently_due: [] }, external_accounts: { data: [] } }) },
+    accounts: {
+      retrieve: async (id: string) => {
+        accountReads.push(id);
+        const enabled = id === 'acct_seller' ? stripeSays.seller : stripeSays.host;
+        return { payouts_enabled: enabled, details_submitted: true, requirements: { currently_due: [] }, external_accounts: { data: [] } };
+      },
+    },
     paymentIntents: { retrieve: async () => ({ latest_charge: charge }) },
     checkout: { sessions: { retrieve: async () => ({ payment_intent: 'pi_party_1' }) } },
     transfers: {
@@ -517,7 +541,7 @@ function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.C
       create: async (params: any, opts: any) => { if (options.transferError) throw new Error(options.transferError); const t = { id: `tr_${transfers.length + 1}`, ...params, idempotencyKey: opts.idempotencyKey, reversed: false }; transfers.push(t); return t; },
     },
   } as unknown as Stripe;
-  return { rows, transfers, reversals, charge, stripe, query: () => lastQuery };
+  return { rows, transfers, reversals, charge, stripe, stripeSays, host, seller, accountReads, query: () => lastQuery };
 }
 
 async function withPayoutsOn<T>(run: () => Promise<T>): Promise<T> {
@@ -639,7 +663,13 @@ test('A failed payout or reversal is reported once, not every hour', () => withP
   assert.equal(first.failed, 1);
   assert.equal(first.alerts.length, 1);
   assert.match(first.alerts[0], /Could not pay \$22\.50 to the host of sale checkout-1/);
-  const second = await runPartyPayouts({ stripe: harness.stripe, now });
+  // Within six hours the failed share is left alone, so it cannot crowd out others.
+  harness.rows[0].updatedAt = now as any;
+  const soon = await runPartyPayouts({ stripe: harness.stripe, now: new Date(now.getTime() + 60 * 60 * 1000) });
+  assert.equal(soon.failed, 0);
+  assert.equal(harness.query().where.OR[0].AND[1].payouts.none.updatedAt.gt.toISOString(), '2026-11-02T19:00:00.000Z');
+  // After that it is retried, and still reported only the first time.
+  const second = await runPartyPayouts({ stripe: harness.stripe, now: new Date(now.getTime() + 7 * 60 * 60 * 1000) });
   assert.equal(second.failed, 1);
   assert.deepEqual(second.alerts, []);
 
@@ -653,4 +683,32 @@ test('A failed payout or reversal is reported once, not every hour', () => withP
   const again = await runPartyPayouts({ stripe: reversing.stripe, now: new Date('2026-11-05T00:00:00Z') });
   assert.deepEqual(again.alerts, []);
   assert.equal(reversing.rows[0].status, 'paid');
+}));
+
+test('A host or business who finishes Stripe onboarding after a sale is paid on the next run', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'pending', sellerActive: false, sellerStored: 'pending' });
+  const now = new Date('2026-11-03T00:00:00Z');
+  assert.equal((await runPartyPayouts({ stripe: harness.stripe, now })).paid, 0);
+  // Both finish on Stripe's pages; nothing in Bytspot has asked since.
+  harness.stripeSays.host = true;
+  harness.stripeSays.seller = true;
+  const result = await runPartyPayouts({ stripe: harness.stripe, now });
+  assert.equal(harness.host.status, 'active');
+  assert.equal(harness.seller.payoutStatus, 'active');
+  assert.deepEqual(harness.query().where.OR[1].sellerId, { in: ['seller-1'] });
+  assert.equal(result.paid, 2);
+}));
+
+test('No transfer is sent without a claimed row, and an earlier transfer is found even without one', () => withPayoutsOn(async () => {
+  const broken = payoutHarness({ hostStatus: 'active', sellerActive: false, claimError: new Error('connection reset') });
+  const result = await runPartyPayouts({ stripe: broken.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.equal(result.failed, 1);
+  assert.equal(broken.transfers.length, 0);
+
+  // A transfer made a day ago, whose row was lost: the group lookup finds it.
+  const lost = payoutHarness({ hostStatus: 'active', sellerActive: false });
+  lost.transfers.push({ id: 'tr_lost', metadata: { recipient: 'host' }, reversed: false });
+  await runPartyPayouts({ stripe: lost.stripe, now: new Date('2026-11-03T00:00:00Z') });
+  assert.equal(lost.transfers.length, 1);
+  assert.equal(lost.rows[0].stripeTransferId, 'tr_lost');
 }));

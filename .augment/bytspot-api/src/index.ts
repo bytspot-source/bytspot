@@ -20,6 +20,7 @@ import venuesRouter from './routes/venues';         // SSE stream (venues/crowd/
 import partyMediaRouter from './routes/partyMedia';
 import partyLandingRouter from './routes/partyLanding'; // server-rendered share-link page (link previews need real HTML)
 import planLandingRouter from './routes/planLanding';   // server-rendered Plan invite page for non-members
+import saleLandingRouter from './routes/saleLanding';   // server-rendered Private Sale share page
 import diagnosticsRouter from './routes/diagnostics'; // iOS MetricKit crash/hang reports
 import mapReportsRouter from './routes/mapReports';     // SSE stream (map/reports/stream) of Traffic Intel reports
 import { placesPhotoRouter } from './routes/placesPhoto';
@@ -105,6 +106,7 @@ app.use(venuesRouter); // kept for SSE /venues/crowd/stream
 app.use(partyMediaRouter);
 app.use(partyLandingRouter);
 app.use(planLandingRouter);
+app.use(saleLandingRouter);
 app.use(placesPhotoRouter);
 app.use(diagnosticsRouter);
 app.use(mapReportsRouter);

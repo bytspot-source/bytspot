@@ -47,6 +47,8 @@ const envSchema = z.object({
   // Off until hosts can onboard; while off, paid parties publish as before.
   PARTY_PAYOUTS_ENABLED:  z.enum(['true', 'false']).default('false'),
   PARTY_PAYOUT_DELAY_HOURS: z.coerce.number().int().min(0).max(24 * 30).default(48),
+  // Inbox told when a payout or a reversal fails. Empty: Sentry only.
+  PAYOUT_ALERT_EMAIL:     z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
   ADMIN_USER_IDS:         z.string().default(''),
   ADMIN_BOOTSTRAP_EMAILS: z.string().default(''),
@@ -152,6 +154,7 @@ export const config = {
   vendorBookingFeeMinCents: env.VENDOR_BOOKING_FEE_MIN_CENTS,
   partyPayoutsEnabled: env.PARTY_PAYOUTS_ENABLED === 'true',
   partyPayoutDelayHours: env.PARTY_PAYOUT_DELAY_HOURS,
+  payoutAlertEmail: env.PAYOUT_ALERT_EMAIL,
   frontendUrl: env.FRONTEND_URL,
   conciergeDiscoveryEnabled: env.CONCIERGE_DISCOVERY_ENABLED === 'true',
   conciergePhotoEnabled: env.CONCIERGE_PHOTO_ENABLED === 'true',

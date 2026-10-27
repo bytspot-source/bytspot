@@ -203,6 +203,11 @@ services:
         sync: false
       - key: PARTY_PAYOUT_DELAY_HOURS
         value: "48"
+      # Failed payouts and reversals are emailed here, once each.
+      - key: PAYOUT_ALERT_EMAIL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
 
   # ─── Reminders: a Party or Plan approaching, and the feedback prompt after ─
   # Each push is claimed once per member, so an overlapping or retried run

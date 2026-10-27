@@ -32,6 +32,8 @@ CREATE TABLE "party_payout_transfers" (
     "stripe_transfer_id" TEXT,
     "detail" TEXT,
     "paid_at" TIMESTAMP(3),
+    "reversed_cents" INTEGER NOT NULL DEFAULT 0,
+    "checked_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
@@ -51,6 +53,9 @@ CREATE UNIQUE INDEX "party_payout_transfers_stripe_transfer_id_key" ON "party_pa
 CREATE INDEX "party_payout_transfers_status_updated_at_idx" ON "party_payout_transfers"("status", "updated_at");
 
 -- CreateIndex
+CREATE INDEX "party_payout_transfers_status_paid_at_idx" ON "party_payout_transfers"("status", "paid_at");
+
+-- CreateIndex
 CREATE INDEX "party_payout_transfers_recipient_user_id_idx" ON "party_payout_transfers"("recipient_user_id");
 
 -- CreateIndex
@@ -64,5 +69,6 @@ ALTER TABLE "party_payout_transfers" ADD CONSTRAINT "party_payout_transfers_chec
 
 -- Same bounds the API holds, enforced by the database too.
 ALTER TABLE "party_payout_transfers" ADD CONSTRAINT "party_payout_transfers_recipient_check" CHECK ("recipient" IN ('host', 'seller'));
-ALTER TABLE "party_payout_transfers" ADD CONSTRAINT "party_payout_transfers_status_check" CHECK ("status" IN ('pending', 'paid', 'held', 'failed'));
+ALTER TABLE "party_payout_transfers" ADD CONSTRAINT "party_payout_transfers_status_check" CHECK ("status" IN ('pending', 'paid', 'held', 'failed', 'reversed'));
+ALTER TABLE "party_payout_transfers" ADD CONSTRAINT "party_payout_transfers_reversed_check" CHECK ("reversed_cents" >= 0 AND "reversed_cents" <= "amount_cents");
 ALTER TABLE "party_payout_transfers" ADD CONSTRAINT "party_payout_transfers_amount_check" CHECK ("amount_cents" > 0);

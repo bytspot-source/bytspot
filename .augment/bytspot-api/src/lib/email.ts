@@ -675,3 +675,26 @@ export async function sendGuestOfferEmail(to: string, offer: GuestOfferNotice): 
     console.error('[email] sendGuestOfferEmail failed:', err?.message);
   }
 }
+
+/** Payout problems a person has to look at, one email per run. */
+export async function sendPayoutAlertEmail(to: string, problems: string[]): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a payout alert');
+  const items = problems.map((line) => `<li style="margin: 0 0 8px;">${escapeAlertHtml(line)}</li>`).join('');
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: `Bytspot payouts: ${problems.length} need${problems.length === 1 ? 's' : ''} attention`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 16px;">Payouts that need attention</h1>
+        <ul style="color: #ccc; font-size: 15px; line-height: 1.5; padding-left: 20px; margin: 0;">${items}</ul>
+        <p style="color: #555; font-size: 13px; margin-top: 32px;">Look these up in the Stripe dashboard. Failed payouts are retried every hour.</p>
+      </div>
+    `,
+  });
+}
+
+function escapeAlertHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+}

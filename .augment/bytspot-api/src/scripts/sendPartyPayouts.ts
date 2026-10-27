@@ -26,7 +26,16 @@ async function main(): Promise<void> {
   const { initErrorTracking } = await import('../lib/observability');
   initErrorTracking();
   const result = await runPartyPayouts({ stripe: new Stripe(config.stripeSecretKey) });
-  console.log(`[party-payouts] paid ${result.paid}, held ${result.held}, failed ${result.failed}, waiting ${result.waiting}`);
+  console.log(`[party-payouts] paid ${result.paid}, held ${result.held}, failed ${result.failed}, waiting ${result.waiting}, reversed ${result.reversed}`);
+  if (result.alerts.length === 0) return;
+  const { captureError } = await import('../lib/observability');
+  captureError(new Error(`Party payouts need attention: ${result.alerts.length}`), { job: 'party-payouts', alerts: result.alerts.join(' | ').slice(0, 2000) });
+  if (config.payoutAlertEmail) {
+    const { sendPayoutAlertEmail } = await import('../lib/email');
+    await sendPayoutAlertEmail(config.payoutAlertEmail, result.alerts).catch((err) => console.error('[party-payouts] alert email failed', err));
+  } else {
+    console.warn('[party-payouts] PAYOUT_ALERT_EMAIL is not set; problems went to Sentry only');
+  }
 }
 
 async function disconnect(): Promise<void> {

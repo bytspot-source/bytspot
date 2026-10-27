@@ -634,12 +634,17 @@ model PartyPayoutTransfer {
   destination      String?
   amountCents      Int       @map("amount_cents")
   currency         String    @default("usd")
-  /// pending | paid | held | failed. `held` waits for a person: the charge
-  /// was refunded or disputed, so nothing is sent automatically.
+  /// pending | paid | held | failed | reversed. `held` waits for a person: the
+  /// charge was refunded or disputed, so nothing is sent automatically.
+  /// `reversed` was paid, then taken back in full after a refund or dispute.
   status           String    @default("pending")
   stripeTransferId String?   @unique @map("stripe_transfer_id")
   detail           String?
   paidAt           DateTime? @map("paid_at")
+  /// How much of a paid transfer has been taken back after a refund or dispute.
+  reversedCents    Int       @default(0) @map("reversed_cents")
+  /// When the charge behind a paid transfer was last checked for refunds.
+  checkedAt        DateTime? @map("checked_at")
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
@@ -647,6 +652,7 @@ model PartyPayoutTransfer {
 
   @@unique([checkoutId, recipient])
   @@index([status, updatedAt])
+  @@index([status, paidAt])
   @@index([recipientUserId])
   @@map("party_payout_transfers")
 }

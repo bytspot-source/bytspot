@@ -15,10 +15,20 @@ import { refreshHostPayout } from './hostPayouts';
  * A recipient without a working Stripe account is skipped, not failed: the
  * sale stays owed and is paid on the first run after they finish onboarding.
  * A refunded or disputed charge is held for a person to decide.
+ *
+ * Refunds are made in the Stripe dashboard, so a sale can be refunded after
+ * its shares were sent. Each paid share's charge is checked again for
+ * REVERSAL_WINDOW_DAYS, and the refunded part, or all of it on a dispute, is
+ * taken back by transfer reversal. Failures are reported once each.
  */
 
 const DEFAULT_PARTY_LENGTH_MS = 6 * 60 * 60 * 1000;
 const DETAIL_MAX = 200;
+const HOUR_MS = 60 * 60 * 1000;
+/** Card disputes can be opened up to 120 days after payment. */
+export const REVERSAL_WINDOW_DAYS = 120;
+const RECHECK_EVERY_MS = 6 * HOUR_MS;
+const REVERSAL_FAILED = 'Reversal failed: ';
 
 export type Recipient = 'host' | 'seller';
 
@@ -27,6 +37,9 @@ export interface PartyPayoutRunResult {
   held: number;
   failed: number;
   waiting: number;
+  reversed: number;
+  /** New problems a person has to look at. Each is reported once. */
+  alerts: string[];
 }
 
 /** When a party is over: its end, or six hours after it starts, as the share link reads it. */
@@ -47,7 +60,21 @@ export function chargeHoldReason(charge: Pick<Stripe.Charge, 'refunded' | 'amoun
   return null;
 }
 
-const SETTLED = ['paid', 'held'];
+const SETTLED = ['paid', 'held', 'reversed'];
+
+function dollars(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+/**
+ * How much of a paid share should have been taken back: all of it on a
+ * dispute, otherwise the refunded fraction of the charge, rounded to the cent.
+ */
+export function reversalOwedCents(shareCents: number, charge: Pick<Stripe.Charge, 'amount' | 'amount_refunded' | 'disputed'>): number {
+  if (charge.disputed) return shareCents;
+  if (charge.amount <= 0 || charge.amount_refunded <= 0) return 0;
+  return Math.min(shareCents, Math.round(shareCents * charge.amount_refunded / charge.amount));
+}
 
 async function chargeFor(stripe: Stripe, checkout: { paymentIntentId: string | null; stripeSessionId: string | null }): Promise<Stripe.Charge | null> {
   let paymentIntentId = checkout.paymentIntentId;
@@ -73,7 +100,7 @@ function short(error: unknown): string {
 async function sendShare(stripe: Stripe, input: {
   checkoutId: string; partyId: string; recipient: Recipient; recipientUserId: string | null; sellerId: string | null;
   destination: string; amountCents: number; currency: string; chargeId: string;
-}): Promise<'paid' | 'failed' | 'settled'> {
+}): Promise<'paid' | 'failed' | 'failed-again' | 'settled'> {
   const key = { checkoutId_recipient: { checkoutId: input.checkoutId, recipient: input.recipient } };
   const existing = await db.partyPayoutTransfer.findUnique({ where: key, select: { status: true } });
   if (existing && SETTLED.includes(existing.status)) return 'settled';
@@ -108,7 +135,73 @@ async function sendShare(stripe: Stripe, input: {
     return 'paid';
   } catch (error) {
     await db.partyPayoutTransfer.update({ where: key, data: { status: 'failed', detail: short(error) } }).catch(() => undefined);
-    return 'failed';
+    return existing?.status === 'failed' ? 'failed-again' : 'failed';
+  }
+}
+
+/**
+ * Takes back what a refund or dispute says a paid share no longer owes.
+ * Keyed by the total owed, so a retry never reverses the same amount twice.
+ */
+async function reverseRefunded(stripe: Stripe, now: Date, result: PartyPayoutRunResult, limit: number): Promise<void> {
+  const rows = await db.partyPayoutTransfer.findMany({
+    where: {
+      status: 'paid',
+      stripeTransferId: { not: null },
+      paidAt: { gte: new Date(now.getTime() - REVERSAL_WINDOW_DAYS * 24 * HOUR_MS) },
+      OR: [{ checkedAt: null }, { checkedAt: { lte: new Date(now.getTime() - RECHECK_EVERY_MS) } }],
+    },
+    orderBy: { checkedAt: { sort: 'asc', nulls: 'first' } },
+    take: limit,
+    select: {
+      id: true, checkoutId: true, recipient: true, amountCents: true, reversedCents: true, stripeTransferId: true, detail: true,
+      checkout: { select: { paymentIntentId: true, stripeSessionId: true } },
+    },
+  });
+
+  const charges = new Map<string, Stripe.Charge | null>();
+  for (const row of rows) {
+    if (!charges.has(row.checkoutId)) {
+      try {
+        charges.set(row.checkoutId, await chargeFor(stripe, row.checkout));
+      } catch {
+        continue;
+      }
+    }
+    const charge = charges.get(row.checkoutId);
+    if (!charge) {
+      await db.partyPayoutTransfer.update({ where: { id: row.id }, data: { checkedAt: now } });
+      continue;
+    }
+    const owed = reversalOwedCents(row.amountCents, charge);
+    const delta = owed - row.reversedCents;
+    if (delta <= 0) {
+      await db.partyPayoutTransfer.update({ where: { id: row.id }, data: { checkedAt: now } });
+      continue;
+    }
+    const reason = charge.disputed ? 'The guest disputed this charge.' : 'This charge was refunded.';
+    try {
+      await stripe.transfers.createReversal(row.stripeTransferId!, {
+        amount: delta,
+        metadata: { checkoutId: row.checkoutId, recipient: row.recipient },
+      }, { idempotencyKey: `party-payout-reversal:${row.stripeTransferId}:${owed}` });
+      await db.partyPayoutTransfer.update({
+        where: { id: row.id },
+        data: {
+          reversedCents: owed, checkedAt: now,
+          status: owed >= row.amountCents ? 'reversed' : 'paid',
+          detail: `${reason} ${dollars(owed)} of ${dollars(row.amountCents)} taken back.`,
+        },
+      });
+      result.reversed++;
+    } catch (error) {
+      const detail = `${REVERSAL_FAILED}${short(error)}`.slice(0, DETAIL_MAX);
+      if (!row.detail?.startsWith(REVERSAL_FAILED)) {
+        result.alerts.push(`Could not take back ${dollars(delta)} from the ${row.recipient} of sale ${row.checkoutId} (transfer ${row.stripeTransferId}): ${short(error)}`);
+      }
+      await db.partyPayoutTransfer.update({ where: { id: row.id }, data: { checkedAt: now, detail } }).catch(() => undefined);
+      result.failed++;
+    }
   }
 }
 
@@ -136,7 +229,7 @@ async function holdShares(input: {
 }
 
 export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit?: number }): Promise<PartyPayoutRunResult> {
-  const result: PartyPayoutRunResult = { paid: 0, held: 0, failed: 0, waiting: 0 };
+  const result: PartyPayoutRunResult = { paid: 0, held: 0, failed: 0, waiting: 0, reversed: 0, alerts: [] };
   if (!config.partyPayoutsEnabled) return result;
   const now = input.now ?? new Date();
   const delayMs = config.partyPayoutDelayHours * 60 * 60 * 1000;
@@ -224,8 +317,12 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
         destination, amountCents: share.amountCents, currency: share.currency, chargeId: charge.id,
       });
       if (outcome === 'paid') result.paid++;
-      else if (outcome === 'failed') result.failed++;
+      else if (outcome === 'failed' || outcome === 'failed-again') result.failed++;
+      if (outcome === 'failed') {
+        result.alerts.push(`Could not pay ${dollars(share.amountCents)} to the ${share.recipient} of sale ${checkout.id}. It will be retried every hour.`);
+      }
     }
   }
+  await reverseRefunded(input.stripe, now, result, input.limit ?? 100);
   return result;
 }

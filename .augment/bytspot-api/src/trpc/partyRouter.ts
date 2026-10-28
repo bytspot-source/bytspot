@@ -19,6 +19,7 @@ import { handoffUrl } from './mobilityRouter';
 import { resolvePlaceCore } from './placesRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 import { isBlockedBetween } from '../services/safety';
+import { MAX_REQUEST_NOTES_PER_TICKET } from '../services/partyRequestNotes';
 
 const maxAlbumImages = 6;
 const partyKinds = ['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up'] as const;
@@ -31,7 +32,11 @@ const hostFormats = ['rooftop', 'house', 'pool', 'lounge', 'patio', 'room', 'gar
 const hostAgeRules = ['all-ages', '18-plus', '21-plus'] as const;
 
 const httpsUrl = z.string().url().refine((value) => new URL(value).protocol === 'https:', 'Official destinations must use HTTPS.');
-const ticketTierInput = z.object({ name: z.string().trim().min(1).max(100), priceCents: z.number().int().min(0).max(10_000_000), quantity: z.number().int().min(1).max(10_000), requiredMembershipTier: z.enum(tiers) });
+const ticketTierInput = z.object({
+  name: z.string().trim().min(1).max(100), priceCents: z.number().int().min(0).max(10_000_000), quantity: z.number().int().min(1).max(10_000), requiredMembershipTier: z.enum(tiers),
+  /// Notes to the lineup this ticket includes. Paid tiers only.
+  requestNotes: z.number().int().min(0).max(MAX_REQUEST_NOTES_PER_TICKET).optional(),
+});
 const hostDestinationsInput = z.object({
   musicUrl: httpsUrl.optional(),
   merchUrl: httpsUrl.optional(),
@@ -203,6 +208,11 @@ const draftInput = z.object({
   if (input.accessMode !== 'paid-ticket' && hasPaidTier) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ticketTiers'], message: 'Only paid Parties can include paid ticket tiers.' });
   }
+  input.ticketTiers.forEach((tier, index) => {
+    if ((tier.requestNotes ?? 0) > 0 && tier.priceCents === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ticketTiers', index, 'requestNotes'], message: 'Only paid ticket tiers can include requests to the lineup.' });
+    }
+  });
 });
 
 const mediaInput = z.object({

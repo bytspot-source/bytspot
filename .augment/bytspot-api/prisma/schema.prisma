@@ -81,6 +81,7 @@ model User {
   circleMemberships     SocialCircleMember[]
   partyEncounterOptIns  PartyEncounterOptIn[]
   confirmedPartyCredits PartyPerformer[]      @relation("performerConfirmation")
+  partyRequestNotes     PartyRequestNote[]
   bookingLinkTaps       BookingLinkTap[]
   paymentHandles        SellerPaymentHandle[]
   privateSales          PrivateSale[]         @relation("privateSaleSeller")
@@ -372,6 +373,7 @@ model Party {
   encounterOptIns PartyEncounterOptIn[]
   performers      PartyPerformer[]
   sellerInvites   PartySellerInvite[]
+  requestNotes    PartyRequestNote[]
 
   @@unique([hostUserId, idempotencyKey])
   @@index([hostUserId, status])
@@ -400,11 +402,43 @@ model PartyPerformer {
 
   party         Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
   confirmedUser User? @relation("performerConfirmation", fields: [confirmedUserId], references: [id], onDelete: Cascade)
+  requestNotes  PartyRequestNote[]
 
   @@index([partyId, status])
   @@index([invitedUserId, status, createdAt])
   @@index([confirmedUserId])
   @@map("party_performers")
+}
+
+// A note a ticketed guest sends to one performer on the lineup, as a perk of a
+// ticket tier that includes requests. Nothing reaches the stage screen until
+// the performer or the host accepts it.
+model PartyRequestNote {
+  id              String    @id @default(cuid())
+  partyId         String    @map("party_id")
+  performerId     String    @map("performer_id")
+  senderUserId    String    @map("sender_user_id")
+  idempotencyKey  String    @map("idempotency_key")
+  body            String
+  /// The sender's first name as it read when sent. Null when they chose to stay anonymous.
+  senderName      String?   @map("sender_name")
+  status          String    @default("sent") // sent | accepted | played | dismissed
+  decidedByUserId String?   @map("decided_by_user_id")
+  acceptedAt      DateTime? @map("accepted_at")
+  playedAt        DateTime? @map("played_at")
+  version         Int       @default(0)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  party     Party          @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  performer PartyPerformer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+  sender    User           @relation(fields: [senderUserId], references: [id], onDelete: Cascade)
+
+  @@unique([senderUserId, idempotencyKey])
+  @@index([partyId, status, acceptedAt])
+  @@index([partyId, senderUserId])
+  @@index([performerId, status])
+  @@map("party_request_notes")
 }
 
 // The platform's cut, adjustable at any time to steady the market. Rows are

@@ -233,6 +233,20 @@ export async function alertGuestsOfArrivalUpdate(input: {
   });
 }
 
+/** A performer or the host accepted a guest's request note. Reaches that guest only. */
+export async function alertGuestOfRequestAccepted(input: {
+  partyId: string;
+  guestUserId: string;
+  performerName: string;
+}): Promise<NotificationDeliveryResult> {
+  return send({
+    audience: { kind: 'guest', partyId: input.partyId, userId: input.guestUserId },
+    title: 'Request accepted',
+    body: `${input.performerName.trim() || 'The lineup'} accepted your request.`,
+    type: 'party.request.accepted',
+  });
+}
+
 /**
  * Party alerts are a courtesy on top of a completed mutation. A push failure
  * must never turn a successful RSVP into an error for the member who made it.

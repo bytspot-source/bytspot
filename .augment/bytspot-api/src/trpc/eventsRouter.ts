@@ -5,6 +5,7 @@
  */
 import { z } from 'zod';
 import { partyCommerceRouter } from './partyCommerceRouter';
+import { partyRequestsRouter } from './partyRequestsRouter';
 import { partyLineupRouter } from './partyLineupRouter';
 import { partySellerInvitesRouter } from './partySellerInvitesRouter';
 import { partySessionAuthoringRouter } from './partySessionAuthoringRouter';
@@ -95,6 +96,7 @@ export const eventsRouter = router({
   sellerInvites: partySellerInvitesRouter,
   commerce: partyCommerceRouter,
   lineup: partyLineupRouter,
+  requests: partyRequestsRouter,
   publish: partyPublish,
   invite: partyInvite,
   pass: partyPassRouter,

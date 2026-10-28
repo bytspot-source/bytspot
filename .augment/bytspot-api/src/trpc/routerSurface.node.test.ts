@@ -21,6 +21,8 @@ test('Party commerce, performers and authoring are mounted without replacing leg
   for (const path of [
     'events.sessions.list', 'events.sessionAuthoring.access', 'events.sessionAuthoring.list',
     'events.sessionAuthoring.upsert', 'events.sessionAuthoring.withdraw', 'events.commerce.mine',
+    'events.requests.eligibility', 'events.requests.send', 'events.requests.mine', 'events.requests.inbox',
+    'events.requests.decide', 'events.requests.screen',
   ]) assert.ok(procedures[path], `Missing procedure: ${path}`);
   assert.ok(Object.keys(procedures).some((path) => path.startsWith('events.lineup.')));
 });

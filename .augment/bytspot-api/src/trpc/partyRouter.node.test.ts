@@ -184,6 +184,23 @@ test('Party draft creation accepts iOS standard templates and Black tier', async
   }));
 });
 
+test('Only paid ticket tiers can include requests to the lineup', async () => {
+  const tierCaller = () => createCaller({ user: { userId: 'request-tier-user', email: 'tiers@bytspot.com' }, clientRateLimitKey: 'test-party-client' });
+  const paidParty = { ...draftInput, templateId: 'pop-up' as const, accessMode: 'paid-ticket' as const, templateConfig: { kind: 'pop-up' as const, locationDisclosure: 'public' } };
+  await assert.doesNotReject(() => tierCaller().events.drafts.create({
+    ...paidParty, ticketTiers: [{ name: 'VIP', priceCents: 4000, quantity: 10, requiredMembershipTier: 'green' as const, requestNotes: 3 }],
+  }));
+  await assert.rejects(() => tierCaller().events.drafts.create({
+    ...paidParty, ticketTiers: [
+      { name: 'VIP', priceCents: 4000, quantity: 10, requiredMembershipTier: 'green' as const },
+      { name: 'Comp', priceCents: 0, quantity: 10, requiredMembershipTier: 'green' as const, requestNotes: 1 },
+    ],
+  }), { code: 'BAD_REQUEST', message: /Only paid ticket tiers can include requests/ });
+  await assert.rejects(() => tierCaller().events.drafts.create({
+    ...paidParty, ticketTiers: [{ name: 'VIP', priceCents: 4000, quantity: 10, requiredMembershipTier: 'green' as const, requestNotes: 6 }],
+  }), { code: 'BAD_REQUEST' });
+});
+
 test('Party draft creation enforces the Host Studio taxonomy instead of trusting its tags', async () => {
   // Dedicated user: party-draft-create allows 10 calls per user per minute and
   // the shared test user's budget is spent by the drafts tests above.

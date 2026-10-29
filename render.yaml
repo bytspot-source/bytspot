@@ -102,6 +102,8 @@ services:
         sync: false
       - key: CONTACT_HASH_SALT
         sync: false
+      - key: CONTACT_HASH_PEPPER
+        sync: false
       # Set in the dashboard already; declared here so the runtime contract is
       # readable from the repo rather than only from Render.
       - key: REDIS_URL

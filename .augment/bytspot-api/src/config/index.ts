@@ -90,6 +90,11 @@ const envSchema = z.object({
   // will never match member identity hashes. The dev default is public in
   // this repo, so production refuses to start with it (checked below).
   CONTACT_HASH_SALT:      z.string().default(isDev ? 'dev-contact-salt-change-me' : ''),
+  // Server-only key. The salt above ships inside the app and website, so a
+  // salted hash alone can be reversed by trying every phone number. Contact
+  // and identity hashes are keyed again with this before they are stored, and
+  // vendor sign-in codes are keyed with it. Never sent to a client.
+  CONTACT_HASH_PEPPER:    z.string().default(isDev ? 'dev-contact-pepper-change-me' : ''),
   // S3-compatible media bucket (R2, S3, MinIO). Unset keeps stills in Postgres
   // and refuses video. All four of bucket + keys must be set before writes leave
   // the database; endpoint/region have safe defaults for R2.
@@ -129,6 +134,11 @@ const env = parseResult.data;
 // of silently degrading the privacy guarantee.
 if (!isDev && !isJobRuntime && env.NODE_ENV !== 'test' && (!env.CONTACT_HASH_SALT || env.CONTACT_HASH_SALT === 'dev-contact-salt-change-me')) {
   console.error('\n❌ FATAL: CONTACT_HASH_SALT must be set to a private value in production (it must match the iOS BytspotContactHashSalt).\n');
+  process.exit(1);
+}
+
+if (!isDev && !isJobRuntime && env.NODE_ENV !== 'test' && (env.CONTACT_HASH_PEPPER.length < 32 || env.CONTACT_HASH_PEPPER === env.CONTACT_HASH_SALT)) {
+  console.error('\n❌ FATAL: CONTACT_HASH_PEPPER must be a private value of at least 32 characters in production, different from CONTACT_HASH_SALT.\n');
   process.exit(1);
 }
 
@@ -185,6 +195,10 @@ export const config = {
   get contactHashSalt(): string {
     if (!env.CONTACT_HASH_SALT) throw new Error('CONTACT_HASH_SALT is not configured in this runtime (job mode does not hash contacts).');
     return env.CONTACT_HASH_SALT;
+  },
+  get contactHashPepper(): string {
+    if (!env.CONTACT_HASH_PEPPER) throw new Error('CONTACT_HASH_PEPPER is not configured in this runtime (job mode does not hash contacts).');
+    return env.CONTACT_HASH_PEPPER;
   },
   mediaS3Endpoint: env.MEDIA_S3_ENDPOINT.replace(/\/$/, ''),
   mediaS3Region: env.MEDIA_S3_REGION,

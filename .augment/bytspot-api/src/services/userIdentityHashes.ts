@@ -1,5 +1,5 @@
 import { db } from '../lib/db';
-import { hashEmail } from '../lib/contactHash';
+import { keyContactHash, storedEmailHash } from '../lib/contactHash';
 
 /**
  * Recompute the salted identity hashes for a member's own verified
@@ -30,7 +30,7 @@ export async function refreshUserIdentityHashes(
     const rows: { hashedIdentity: string; kind: string }[] = [];
     const extras = await database.userEmail.findMany({ where: { userId }, select: { email: true } });
     for (const email of [identifiers.email, ...extras.map((extra) => extra.email)]) {
-      const emailHash = hashEmail(email);
+      const emailHash = storedEmailHash(email);
       if (emailHash && !rows.some((row) => row.hashedIdentity === emailHash)) rows.push({ hashedIdentity: emailHash, kind: 'email' });
     }
 
@@ -73,7 +73,7 @@ export async function backfillUserIdentityHashes(batchSize = 500): Promise<void>
       });
       if (users.length === 0) break;
       const rows = users.flatMap((user) => {
-        const emailHash = hashEmail(user.email);
+        const emailHash = storedEmailHash(user.email);
         return emailHash ? [{ userId: user.id, hashedIdentity: emailHash, kind: 'email' }] : [];
       });
       if (rows.length > 0) {
@@ -91,4 +91,56 @@ export async function backfillUserIdentityHashes(batchSize = 500): Promise<void>
   } catch (error) {
     console.error(`[identity-hashes] backfill failed after ${processed} member(s):`, error instanceof Error ? error.message : error);
   }
+}
+
+export type RekeyDatabase = Pick<typeof db, '$transaction' | 'contactHash' | 'userIdentityHash'>;
+
+/**
+ * One-shot startup pass: rows written before CONTACT_HASH_PEPPER hold the
+ * client's salted hash, which can be reversed by trying every phone number.
+ * Each is replaced by its keyed form. The result equals what a fresh sync
+ * would write, so matching is unchanged. Rows are deleted and re-created in
+ * one transaction with skipDuplicates, so a row that a concurrent sync already
+ * wrote, or a second instance running the same pass, cannot collide.
+ */
+export async function rekeyStoredContactHashes(batchSize = 500, database: RekeyDatabase = db): Promise<{ contacts: number; identities: number }> {
+  const done = { contacts: 0, identities: 0 };
+  try {
+    for (;;) {
+      const rows = await database.contactHash.findMany({
+        where: { keyed: false }, select: { id: true, userId: true, hashedContact: true, createdAt: true }, orderBy: { id: 'asc' }, take: batchSize,
+      });
+      if (rows.length === 0) break;
+      await database.$transaction([
+        database.contactHash.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } }),
+        database.contactHash.createMany({
+          data: rows.map((row) => ({ userId: row.userId, hashedContact: keyContactHash(row.hashedContact), createdAt: row.createdAt, keyed: true })),
+          skipDuplicates: true,
+        }),
+      ]);
+      done.contacts += rows.length;
+      if (rows.length < batchSize) break;
+    }
+    for (;;) {
+      const rows = await database.userIdentityHash.findMany({
+        where: { keyed: false }, select: { id: true, userId: true, hashedIdentity: true, kind: true, createdAt: true }, orderBy: { id: 'asc' }, take: batchSize,
+      });
+      if (rows.length === 0) break;
+      await database.$transaction([
+        database.userIdentityHash.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } }),
+        database.userIdentityHash.createMany({
+          data: rows.map((row) => ({ userId: row.userId, hashedIdentity: keyContactHash(row.hashedIdentity), kind: row.kind, createdAt: row.createdAt, keyed: true })),
+          skipDuplicates: true,
+        }),
+      ]);
+      done.identities += rows.length;
+      if (rows.length < batchSize) break;
+    }
+    if (done.contacts + done.identities > 0) {
+      console.log(`[contact-hashes] rekeyed ${done.contacts} contact hash(es) and ${done.identities} identity hash(es)`);
+    }
+  } catch (error) {
+    console.error('[contact-hashes] rekey failed:', error instanceof Error ? error.message : error);
+  }
+  return done;
 }

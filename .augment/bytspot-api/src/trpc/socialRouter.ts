@@ -8,6 +8,7 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, publicProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { blockedUserIds, isBlockedBetween } from '../services/safety';
+import { keyContactHash } from '../lib/contactHash';
 
 const surfaceInput = z.string().max(40).optional();
 // Clients send only salted SHA-256 hex digests of normalized contact
@@ -472,7 +473,7 @@ export const socialRouter = router({
       hashes: z.array(hashedContactInput).max(5000),
     }))
     .mutation(async ({ ctx, input }) => {
-      const hashes = [...new Set(input.hashes)];
+      const hashes = [...new Set(input.hashes.map(keyContactHash))];
       await db.$transaction([
         db.contactHash.deleteMany({ where: { userId: ctx.user.userId, hashedContact: { notIn: hashes } } }),
         db.contactHash.createMany({

@@ -51,12 +51,12 @@ export type ChallengeVerdict =
  * only reversible by someone who already has the key.
  */
 export function hashEmailForChallenge(email: string): string {
-  return createHmac('sha256', config.contactHashSalt).update(email.toLowerCase()).digest('hex');
+  return createHmac('sha256', config.contactHashPepper).update(email.toLowerCase()).digest('hex');
 }
 
 /** Hashed with the same keyed construction, so a dump of Redis reveals no codes. */
 function hashCode(challengeId: string, code: string): string {
-  return createHmac('sha256', config.contactHashSalt).update(`${challengeId}:${code}`).digest('hex');
+  return createHmac('sha256', config.contactHashPepper).update(`${challengeId}:${code}`).digest('hex');
 }
 
 function constantTimeEqual(a: string, b: string): boolean {

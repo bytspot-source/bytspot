@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { hashEmail } from '../lib/contactHash';
+import { storedEmailHash } from '../lib/contactHash';
 import { resolveProviderIdentity, suppliedDisplayName, type ProviderIdentityDatabase } from './providerIdentityAuth';
 import { attachProviderIdentity, maskEmail, type ProviderLinkDatabase } from './providerLink';
 
@@ -133,7 +133,7 @@ test('A provider mapping is created from verified token claims only', async () =
   // caller's database rather than the module client: untested, it reached real
   // Prisma from every suite and failed silently.
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(db.identityHashRows(), [{ userId: 'linked-user', hashedIdentity: hashEmail(identity.email), kind: 'email' }]);
+  assert.deepEqual(db.identityHashRows(), [{ userId: 'linked-user', hashedIdentity: storedEmailHash(identity.email), kind: 'email' }]);
 });
 
 test('A concurrent first sign-in recovers only through the same provider subject', async () => {

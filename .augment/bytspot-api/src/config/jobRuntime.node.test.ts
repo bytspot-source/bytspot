@@ -29,6 +29,17 @@ test('The server still refuses to start in production without JWT_SECRET', () =>
   assert.match(result.output, /JWT_SECRET: Invalid input: expected string, received undefined/);
 });
 
+test('The server refuses to start in production without a private contact pepper', () => {
+  const base = { ...productionDatabase, JWT_SECRET: 'x'.repeat(40), CONTACT_HASH_SALT: 'a-real-salt' };
+  for (const pepper of [undefined, 'short', 'a-real-salt']) {
+    const result = loadConfig(pepper === undefined ? base : { ...base, CONTACT_HASH_PEPPER: pepper }, 'console.log("started");');
+    assert.equal(result.status, 1, `pepper ${pepper ?? '(unset)'} should be refused`);
+    assert.match(result.output, /CONTACT_HASH_PEPPER must be a private value/);
+  }
+  const ok = loadConfig({ ...base, CONTACT_HASH_PEPPER: 'p'.repeat(64) }, 'console.log("started");');
+  assert.doesNotMatch(ok.output, /CONTACT_HASH_PEPPER/);
+});
+
 test('A scheduled job boots with only a database, without the API secrets', () => {
   const result = loadConfig(
     { ...productionDatabase, BYTSPOT_RUNTIME: 'job' },
@@ -57,7 +68,7 @@ test('The purge job declares its own runtime, so a missing scheduler variable ca
 });
 
 test('A job that reads a secret it was not given fails loudly rather than using an empty one', () => {
-  for (const [field, expected] of [['jwtSecret', /does not sign tokens/], ['contactHashSalt', /does not hash contacts/]] as const) {
+  for (const [field, expected] of [['jwtSecret', /does not sign tokens/], ['contactHashSalt', /does not hash contacts/], ['contactHashPepper', /does not hash contacts/]] as const) {
     const result = loadConfig({ ...productionDatabase, BYTSPOT_RUNTIME: 'job' }, `config.${field};`);
     assert.equal(result.status, 1, `${field} should have thrown`);
     assert.match(result.output, expected);

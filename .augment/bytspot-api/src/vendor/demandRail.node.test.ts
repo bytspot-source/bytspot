@@ -1337,3 +1337,57 @@ test("a bookable's own website shows on its guest card, and clearing it falls ba
     }
   });
 });
+
+test('an ask from a Discover card can name a Plan, and the won table is filed in it', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+
+  await onPrintedPreset(async () => {
+    const planId = await planWithDiningNeed();
+    try {
+      const [card] = await liveCardsAt(ids.location);
+      const slot = card.upcomingSlots[0];
+      const asked = await guest().demand.ask({ windowId: ids.window, partySize: 2, startsAt: new Date(slot.startsAt), planId });
+      assert.equal((await db.demand.findUniqueOrThrow({ where: { id: asked.id } })).planId, planId);
+
+      await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+      await respondToDemand(await seat(), asked.id, { operation: 'OFFER', bookableId: ids.window });
+      const offer = await db.offer.findFirstOrThrow({ where: { demandId: asked.id, state: 'OFFERED' } });
+      await acceptOffer({ offerId: offer.id, userId: ids.user });
+
+      const item = await db.planItem.findUnique({ where: { offerId: offer.id } });
+      assert.equal(item?.planId, planId);
+      assert.equal(item?.needKind, 'dining');
+      assert.equal(item?.status, 'booked');
+    } finally {
+      await db.planItem.deleteMany({ where: { planId } });
+      await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+    }
+  });
+});
+
+test('an ask cannot be filed in a Plan that is not the guest’s or is gone', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+
+  await onPrintedPreset(async () => {
+    const planId = await planWithDiningNeed();
+    const stranger = createCaller({
+      user: { userId: `${ids.user}-stranger`, email: `${ids.user}-stranger@bytspot.test` },
+      clientRateLimitKey: 'rail-stranger',
+    } as Context);
+    try {
+      const [card] = await liveCardsAt(ids.location);
+      const startsAt = new Date(card.upcomingSlots[0].startsAt);
+      await assert.rejects(() => stranger.demand.ask({ windowId: ids.window, partySize: 2, startsAt, planId }), { code: 'NOT_FOUND' });
+
+      await db.plan.update({ where: { id: planId }, data: { lifecycle: 'cancelled' } });
+      await assert.rejects(() => guest().demand.ask({ windowId: ids.window, partySize: 2, startsAt, planId }), { code: 'NOT_FOUND' });
+      assert.equal(await db.demand.count({ where: { planId } }), 0);
+    } finally {
+      await db.demand.deleteMany({ where: { raisedByUserId: { in: [ids.user, `${ids.user}-stranger`] } } });
+    }
+  });
+});

@@ -5,7 +5,7 @@ import { db } from '../lib/db';
 import { categoryForDomain, DEMAND_DEFAULTS, demandCategoryIds } from '../vendor/demand';
 import { ASK_INTENT, supplyFor } from '../vendor/demandFeed';
 import { sellableSlots } from '../vendor/availability';
-import { constraintsFromPlan, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
+import { constraintsFromPlan, needKindForDemandCategory, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
 import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
 import { notifyAskSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
@@ -218,6 +218,8 @@ export const demandRouter = router({
         note: z.string().trim().max(280).optional(),
         /** The patch code the guest scanned to get here, credited if it is this seller's. */
         viaPatch: z.string().trim().max(40).optional(),
+        /** The guest's own Plan an accepted offer is filed in. */
+        planId: z.string().trim().min(1).max(64).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -240,6 +242,21 @@ export const demandRouter = router({
 
       const category = categoryForDomain(window.domain);
       if (!category) throw new TRPCError({ code: 'NOT_FOUND', message: 'This is no longer taking requests.' });
+
+      if (input.planId) {
+        // Someone else's Plan, a deleted one and a cancelled one are all
+        // indistinguishable from one that does not exist.
+        const plan = await db.plan.findFirst({
+          where: { id: input.planId, creatorUserId: ctx.user.userId, deletedAt: null, lifecycle: { not: 'cancelled' } },
+          select: { id: true },
+        });
+        if (!plan) throw new TRPCError({ code: 'NOT_FOUND', message: 'Plan not found.' });
+        // Accepting files the booking under a Plan need. A category with no
+        // need would be booked but never shown in the Plan it was asked for.
+        if (!needKindForDemandCategory(category)) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: "This can't be added to a Plan yet. Ask without a Plan." });
+        }
+      }
 
       const { supply } = await supplyFor(window.sellerId, now);
       const own = supply.find((item) => item.windowId === window.id);
@@ -271,7 +288,7 @@ export const demandRouter = router({
           latitude: window.location.lat,
           longitude: window.location.lng,
         },
-        { note: input.note, targetWindowId: window.id, viaPatchId: await patchForAsk(input.viaPatch, window.sellerId) },
+        { planId: input.planId, note: input.note, targetWindowId: window.id, viaPatchId: await patchForAsk(input.viaPatch, window.sellerId) },
         now,
       );
       // Not awaited: the ask is already in the seller's feed; the email only says so.

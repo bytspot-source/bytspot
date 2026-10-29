@@ -3,7 +3,7 @@ import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
 import { db } from '../lib/db';
-import { hashEmail, hashPhone, normalizeEmail, normalizePhone } from '../lib/contactHash';
+import { hashEmail, hashPhone, keyContactHash, normalizeEmail, normalizePhone } from '../lib/contactHash';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
@@ -200,10 +200,14 @@ test('Contact sync rejects raw contact data and replaces the stored hash set', a
   ];
   const result = await caller().social.syncCloudContact({ source: 'apple', hashes: [hashA, hashB, hashA] });
   assert.deepEqual(result, { synced: 2, matched: 2, mutual: 2 });
-  assert.deepEqual(deleteWhere, { userId: 'me', hashedContact: { notIn: [hashA, hashB] } });
+  // What is stored is keyed with the server-only pepper, never the client hash.
+  const [keyedA, keyedB] = [keyContactHash(hashA), keyContactHash(hashB)];
+  assert.match(keyedA, /^[a-f0-9]{64}$/);
+  assert.notEqual(keyedA, hashA);
+  assert.deepEqual(deleteWhere, { userId: 'me', hashedContact: { notIn: [keyedA, keyedB] } });
   assert.deepEqual(createManyData, [
-    { userId: 'me', hashedContact: hashA },
-    { userId: 'me', hashedContact: hashB },
+    { userId: 'me', hashedContact: keyedA },
+    { userId: 'me', hashedContact: keyedB },
   ]);
 });
 
@@ -507,4 +511,26 @@ test('Venue check-ins and the leaderboard are members-only and name nobody', asy
   user.findMany = async () => [{ id: 'user-1', name: 'Ada' }];
   const ranks = await caller().social.leaderboard({});
   assert.deepEqual(ranks, [{ rank: 1, name: 'Ada', points: 120 }]);
+});
+
+test('Rows stored before the pepper are rekeyed to exactly what a fresh sync would write', async () => {
+  const { rekeyStoredContactHashes } = await import('../services/userIdentityHashes');
+  const createdAt = new Date('2026-01-01T00:00:00Z');
+  const contactRows = [{ id: 'c1', userId: 'me', hashedContact: hashA, createdAt }];
+  const identityRows = [{ id: 'i1', userId: 'friend', hashedIdentity: hashEmail('friend@bytspot.com')!, kind: 'email', createdAt }];
+  const calls: string[] = [];
+  const written: Record<string, any[]> = { contact: [], identity: [] };
+  const table = (name: 'contact' | 'identity', rows: any[]) => ({
+    findMany: async ({ where }: any) => { assert.deepEqual(where, { keyed: false }); return rows.splice(0); },
+    deleteMany: async ({ where }: any) => { calls.push(`${name}:delete:${where.id.in.join(',')}`); return { count: where.id.in.length }; },
+    createMany: async ({ data, skipDuplicates }: any) => { assert.equal(skipDuplicates, true); written[name].push(...data); return { count: data.length }; },
+  });
+  const database: any = { contactHash: table('contact', contactRows), userIdentityHash: table('identity', identityRows), $transaction: async (ops: Promise<unknown>[]) => Promise.all(ops) };
+
+  const done = await rekeyStoredContactHashes(500, database);
+  assert.deepEqual(done, { contacts: 1, identities: 1 });
+  assert.deepEqual(calls, ['contact:delete:c1', 'identity:delete:i1']);
+  assert.deepEqual(written.contact, [{ userId: 'me', hashedContact: keyContactHash(hashA), createdAt, keyed: true }]);
+  // The rekeyed identity matches a newly synced contact for the same email.
+  assert.deepEqual(written.identity, [{ userId: 'friend', hashedIdentity: keyContactHash(hashEmail('friend@bytspot.com')!), kind: 'email', createdAt, keyed: true }]);
 });

@@ -982,13 +982,16 @@ model SocialInvitation {
 }
 
 // ─── Social: Privacy-preserving Contact Graph ─────────
-// Only salted SHA-256 hashes of normalized contact identifiers are stored.
+// Only salted SHA-256 hashes of normalized contact identifiers, keyed again
+// with the server-only CONTACT_HASH_PEPPER, are stored.
 // Raw emails/phone numbers never reach the server (see the shared iOS
 // `BytspotContactHasher` contract).
 model ContactHash {
   id            String   @id @default(cuid())
   userId        String   @map("user_id")
   hashedContact String   @map("hashed_contact")
+  // false only for rows written before CONTACT_HASH_PEPPER; rekeyed at startup.
+  keyed         Boolean  @default(true)
   createdAt     DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1010,6 +1013,8 @@ model UserIdentityHash {
   userId         String   @map("user_id")
   hashedIdentity String   @map("hashed_identity")
   kind           String // email | phone
+  // false only for rows written before CONTACT_HASH_PEPPER; rekeyed at startup.
+  keyed          Boolean  @default(true)
   createdAt      DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

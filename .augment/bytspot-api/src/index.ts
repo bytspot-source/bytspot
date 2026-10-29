@@ -44,7 +44,7 @@ import vendorBandsRouter from './routes/vendorBands';
 import vendorTicketsRouter from './routes/vendorTickets';
 
 import { startCrowdSimulator } from './services/crowdSimulator';
-import { backfillUserIdentityHashes } from './services/userIdentityHashes';
+import { backfillUserIdentityHashes, rekeyStoredContactHashes } from './services/userIdentityHashes';
 import { captureApnsSigningState } from './services/apns';
 
 // Initialised before the app so instrumentation wraps everything below it.
@@ -164,9 +164,9 @@ app.listen(config.port, () => {
   // Start in-process crowd simulation (fresh data every 15 min)
   // Crowd alerts are chained — they run automatically after each simulation
   startCrowdSimulator();
-  // One-shot, best-effort: hash identifiers for members created before the
-  // identity-hash feature so contact discovery covers the full member base.
-  void backfillUserIdentityHashes();
+  // One-shot, best-effort: key rows stored before CONTACT_HASH_PEPPER, then
+  // hash identifiers for members created before the identity-hash feature.
+  void rekeyStoredContactHashes().then(() => backfillUserIdentityHashes());
 });
 
 export default app;

@@ -11,7 +11,7 @@ import { issueRefreshToken } from '../vendor/refreshTokens';
 import { TRPCError } from '@trpc/server';
 import { ProviderLinkRequired, holdPendingLink } from '../services/providerLink';
 import { holdPendingEmail } from '../services/accountEmails';
-import { hashEmail } from '../lib/contactHash';
+import { storedEmailHash } from '../lib/contactHash';
 import bcrypt from 'bcryptjs';
 import { config } from '../config';
 
@@ -523,7 +523,7 @@ test('the emailed code adds the email, and it joins contact discovery', async ()
     assert.deepEqual(result.accountEmail, { email: 'Me@bytspot.com', confirmed: true });
     assert.deepEqual(result.extraEmails.map((extra) => extra.email), ['ama@gmail.com']);
     assert.equal(result.maxExtraEmails, 5);
-    assert.deepEqual(hashes.written.map((row) => row.hashedIdentity).sort(), [hashEmail('Me@bytspot.com'), hashEmail('ama@gmail.com')].sort());
+    assert.deepEqual(hashes.written.map((row) => row.hashedIdentity).sort(), [storedEmailHash('Me@bytspot.com'), storedEmailHash('ama@gmail.com')].sort());
     // Single use.
     await assert.rejects(() => caller().auth.confirmAddEmail({ challengeId: id, code }), { code: 'BAD_REQUEST' });
   } finally {
@@ -582,7 +582,7 @@ test('an extra email can be removed and leaves contact discovery; the account em
     const result = await caller().auth.removeEmail({ email: 'ama@gmail.com' });
     assert.deepEqual(removed, { userId: 'usr_me', email: 'ama@gmail.com' });
     assert.deepEqual(result.extraEmails, []);
-    assert.deepEqual(hashes.written.map((row) => row.hashedIdentity), [hashEmail('Me@bytspot.com')]);
+    assert.deepEqual(hashes.written.map((row) => row.hashedIdentity), [storedEmailHash('Me@bytspot.com')]);
   } finally {
     hashes.restore();
   }

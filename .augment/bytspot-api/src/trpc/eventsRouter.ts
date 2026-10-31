@@ -42,7 +42,24 @@ interface TmEvent {
   priceRanges?: Array<{ min: number; max: number; currency: string }>;
   images?: Array<{ url: string; width: number; ratio: string }>;
   classifications?: Array<{ segment?: { name: string }; genre?: { name: string } }>;
-  _embedded?: { venues?: Array<{ name: string; city?: { name: string }; address?: { line1: string } }> };
+  _embedded?: { venues?: Array<{
+    name: string;
+    city?: { name: string };
+    state?: { stateCode?: string };
+    postalCode?: string;
+    address?: { line1: string };
+    location?: { latitude?: string; longitude?: string };
+  }> };
+}
+
+/** Ticketmaster sends coordinates as strings; anything missing, unparsable or (0,0) is dropped. */
+function venueCoordinates(location?: { latitude?: string; longitude?: string }): { lat: number; lng: number } | null {
+  const lat = Number(location?.latitude);
+  const lng = Number(location?.longitude);
+  if (!location?.latitude?.trim() || !location?.longitude?.trim()) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) return null;
+  return { lat, lng };
 }
 
 export function mapTmEvent(e: TmEvent) {
@@ -58,6 +75,9 @@ export function mapTmEvent(e: TmEvent) {
     id: e.id,
     title: e.name,
     venue: venue?.name ?? 'Atlanta Venue',
+    address: [venue?.address?.line1, venue?.city?.name, [venue?.state?.stateCode, venue?.postalCode].filter(Boolean).join(' ')]
+      .map((part) => part?.trim()).filter(Boolean).join(', ') || null,
+    ...(venueCoordinates(venue?.location) ?? { lat: null, lng: null }),
     date: e.dates?.start?.localDate ?? 'TBD',
     time: e.dates?.start?.localTime?.slice(0, 5) ?? 'TBD',
     category: categoryMap[genre] ?? 'concert',
@@ -284,7 +304,7 @@ export const eventsRouter = router({
         return { events: events.slice(0, limit), source: 'fallback' as const };
       }
 
-      const cacheKey = `events:atl:${category ?? 'all'}:${limit}`;
+      const cacheKey = `events:atl:v2:${category ?? 'all'}:${limit}`;
       const events = await cached(cacheKey, 900, async () => {
         const params = new URLSearchParams({
           apikey: config.ticketmasterApiKey,

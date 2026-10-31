@@ -76,3 +76,23 @@ test('The local fallback rolls its window and fails closed at capacity', () => {
   assert.equal(incrementLocalRateLimit('client-0', 60_000, 0), 2);
   resetLocalRateLimitForTests();
 });
+
+test('The global limiter counts signed-in users by account and everyone else by address', async () => {
+  const jwt = (await import('jsonwebtoken')).default;
+  const { config } = await import('../config');
+  const { globalRateLimitKey } = await import('./context');
+  const bearer = (userId: string) => `Bearer ${jwt.sign({ userId, email: `${userId}@example.com` }, config.jwtSecret)}`;
+  const sharedAddress = '198.51.100.7';
+
+  const a = globalRateLimitKey({ headers: { authorization: bearer('user-a') }, ip: sharedAddress });
+  const b = globalRateLimitKey({ headers: { authorization: bearer('user-b') }, ip: sharedAddress });
+  assert.equal(a, 'user:user-a');
+  assert.notEqual(a, b);
+  assert.equal(globalRateLimitKey({ headers: { authorization: bearer('user-a') }, ip: '203.0.113.9' }), a);
+
+  const signedOut = globalRateLimitKey({ headers: {}, ip: sharedAddress });
+  assert.equal(signedOut, `client:${clientRateLimitKey(sharedAddress)}`);
+  const forged = `Bearer ${jwt.sign({ userId: 'user-a', email: 'x@example.com' }, 'not-the-secret')}`;
+  assert.equal(globalRateLimitKey({ headers: { authorization: forged }, ip: sharedAddress }), signedOut);
+  assert.equal(globalRateLimitKey({ headers: { authorization: 'guest_session' }, ip: sharedAddress }), signedOut);
+});

@@ -10,7 +10,7 @@ import { logAdminBootstrapIds } from './services/adminRbac';
 
 // tRPC
 import { appRouter } from './trpc/router';
-import { createContext } from './trpc/context';
+import { createContext, globalRateLimitKey } from './trpc/context';
 
 // REST Routes — only keep endpoints that have no tRPC equivalent or are used externally
 import healthRouter from './routes/health';        // external monitoring / Render health checks
@@ -72,12 +72,13 @@ app.use('/vendor/bookables', express.json({ limit: '4mb' }));
 app.use('/admin/venues', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '1mb' }));
 
-// Global rate limiting: 300 requests per 15 min per IP
+// Global rate limiting: 300 requests per 15 min per signed-in account, or per IP when signed out
 // (tRPC procedures have their own per-endpoint limits for expensive ops)
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 300,
+    keyGenerator: globalRateLimitKey,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many requests, please try again later' },

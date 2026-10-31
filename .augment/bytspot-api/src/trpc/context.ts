@@ -3,6 +3,7 @@ import { createHmac } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
+import { rateLimitSubject } from './trpc';
 
 /**
  * Creates the tRPC context from the Express request.
@@ -16,21 +17,26 @@ export function clientRateLimitKey(ipAddress: string | undefined, secret = confi
   return createHmac('sha256', secret).update(normalized).digest('hex');
 }
 
+/** The signed-in user a request's Bearer token proves, or null. */
+export function bearerUser(header: string | undefined): AuthPayload | null {
+  if (!header?.startsWith('Bearer ')) return null;
+  try {
+    return jwt.verify(header.slice(7), config.jwtSecret) as AuthPayload;
+  } catch {
+    return null; /* invalid token — user stays null */
+  }
+}
+
+/** Global limiter key: signed-in users by account, so people behind one shared
+ *  address (a home network, a carrier gateway) do not use up each other's allowance. */
+export function globalRateLimitKey(req: { headers: { authorization?: string }; ip?: string }): string {
+  return rateLimitSubject(bearerUser(req.headers.authorization)?.userId, clientRateLimitKey(req.ip));
+}
+
 export async function createContext({
   req,
 }: trpcExpress.CreateExpressContextOptions) {
-  let user: AuthPayload | null = null;
-
-  const header = req.headers.authorization;
-  if (header?.startsWith('Bearer ')) {
-    try {
-      const token = header.slice(7);
-      user = jwt.verify(token, config.jwtSecret) as AuthPayload;
-    } catch {
-      /* invalid token — user stays null */
-    }
-  }
-
+  const user = bearerUser(req.headers.authorization);
   return { user, clientRateLimitKey: clientRateLimitKey(req.ip) };
 }
 

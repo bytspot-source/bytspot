@@ -20,6 +20,7 @@ import { resolvePlaceCore } from './placesRouter';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 import { isBlockedBetween } from '../services/safety';
 import { MAX_REQUEST_NOTES_PER_TICKET } from '../services/partyRequestNotes';
+import { musicInput, musicListing, musicSetTimeProblem, storedMusic } from '../services/partyMusic';
 
 const maxAlbumImages = 6;
 const partyKinds = ['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up'] as const;
@@ -144,6 +145,8 @@ const draftInput = z.object({
   templateConfig: z.object({ kind: z.enum(templateConfigKinds) }).passthrough(),
   /// Approval doors only: list on Discover with the location withheld.
   showOnDiscover: z.boolean().optional(),
+  /// Null or absent means the host declares no music.
+  music: musicInput.nullish(),
   source: z.literal('host-studio'),
 }).superRefine((input, ctx) => {
   // The same pairing the database enforces, refused here so the host is told
@@ -154,6 +157,10 @@ const draftInput = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: [hasLat ? 'lng' : 'lat'], message: 'A location needs both a latitude and a longitude.' });
   } else if (hasLat && input.lat === 0 && input.lng === 0) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lat'], message: 'A location of 0, 0 is an unresolved placeholder, not a venue.' });
+  }
+  if (input.music?.setStartsAt) {
+    const problem = musicSetTimeProblem(new Date(input.music.setStartsAt), { startsAt: new Date(input.startsAt), endsAt: input.endsAt ? new Date(input.endsAt) : null });
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['music', 'setStartsAt'], message: problem });
   }
   if (input.endsAt) {
     const startsAt = Date.parse(input.startsAt);
@@ -247,7 +254,8 @@ function isUniqueConstraint(error: unknown): boolean {
 
 type PartyContent = Pick<Prisma.PartyUncheckedCreateInput,
   'templateId' | 'title' | 'tagline' | 'startsAt' | 'endsAt' | 'venueName' | 'lat' | 'lng' | 'locationDisclosure' | 'capacity' | 'accessMode' |
-  'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig' | 'showOnDiscover'>;
+  'requiredMembershipTier' | 'hostDestinations' | 'audienceCircleIds' | 'itinerary' | 'ticketTiers' | 'cohosts' | 'templateConfig' | 'showOnDiscover' |
+  'musicKind' | 'musicGenres' | 'musicSetStartsAt'>;
 
 /**
  * Run of Show slice 1: hosts may set an explicit end; otherwise the last
@@ -271,6 +279,7 @@ function partyContent(input: z.infer<typeof draftInput>): PartyContent {
     // An open door is on Discover by definition; the flag only means something
     // for a door that needs approval.
     showOnDiscover: input.accessMode === 'private-approval' && input.showOnDiscover === true,
+    ...storedMusic(input.music),
   };
 }
 
@@ -996,6 +1005,7 @@ export const partyInvite = publicProcedure
       scheduledDate: party.startsAt.toISOString(),
       endsAt: party.endsAt?.toISOString() ?? null,
       runOfShow: runOfShow(party.startsAt, party.itinerary),
+      music: musicListing(party),
       locationLabel: party.locationDisclosure === 'public' && !discoverStranger ? party.venueName : null,
       locationDisclosure: party.locationDisclosure,
       ...(discoverStranger ? { latitude: null, longitude: null } : publicArrivalCoordinate(party)),
@@ -1426,8 +1436,30 @@ export const partyControlRouter = router({
         closedAt: party.closedAt?.toISOString() ?? null,
         door: party.accessMode === 'private-approval' ? 'approval' as const : 'open' as const,
         showOnDiscover: discoverListing(party),
+        music: musicListing(party),
         feedback,
       };
+    }),
+
+  /**
+   * The host's music declaration after publish. Null clears it, which takes
+   * the Party off every music surface. The set time must fall inside the
+   * Party as it is stored now.
+   */
+  setMusic: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-set-music' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), music: musicInput.nullable() }).strict())
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      const stored = storedMusic(input.music);
+      const problem = musicSetTimeProblem(stored.musicSetStartsAt, party);
+      if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });
+      const updated = await db.party.updateMany({
+        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', startsAt: party.startsAt, endsAt: party.endsAt },
+        data: stored,
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'CONFLICT', message: 'This Party changed. Refresh and try again.' });
+      return { partyId: party.id, music: musicListing(stored) };
     }),
 
   /**

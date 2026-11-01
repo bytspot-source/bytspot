@@ -336,6 +336,12 @@ model Party {
   templateConfig         Json      @map("template_config")
   status                 String    @default("draft")
   admissionPaused        Boolean   @default(false) @map("admission_paused")
+  /// Host-declared music: live | dj | both. Null means the host said nothing
+  /// about music, so the Party reaches no music surface. Genres come from a
+  /// fixed list, at most two; the set time falls inside the Party.
+  musicKind              String?   @map("music_kind")
+  musicGenres            String[]  @default([]) @map("music_genres")
+  musicSetStartsAt       DateTime? @map("music_set_starts_at")
   // Host override for when the share link stops resolving. Null means the
   // default policy: the link dies when the party ends (endsAt, falling back
   // to startsAt + 6h when the host set no end time).

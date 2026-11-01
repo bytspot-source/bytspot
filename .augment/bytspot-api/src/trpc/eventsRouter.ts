@@ -17,6 +17,7 @@ import { capabilityForAccessMode } from '../services/bookableProjection';
 import { distanceMeters } from '../services/checkinProof';
 import { boundingBoxWhere } from '../services/geoBox';
 import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membershipTier';
+import { matchesMusicWindow, musicEntry, musicListing, musicWindowInput, musicWindowWhere } from '../services/partyMusic';
 
 const METERS_PER_MILE = 1609.344;
 
@@ -142,6 +143,9 @@ export const eventsRouter = router({
       lng: z.number().min(-180).max(180),
       radiusMiles: z.number().min(0.5).max(50).optional().default(10),
       limit: z.number().min(1).max(50).optional().default(20),
+      /// Music surfaces only: parties open to anyone that declare music and
+      /// overlap this window. Accepted performers ride along.
+      music: musicWindowInput.optional(),
     }))
     .query(async ({ ctx, input }) => {
       // 0/0 is the placeholder an unresolved location produces, not a place
@@ -174,6 +178,7 @@ export const eventsRouter = router({
           { OR: [withinBox, { lat: null, arrivalVenue: withinBox }] },
           // Open to everyone, or scoped to a circle this caller is in.
           { OR: [{ audienceCircleIds: { isEmpty: true } }, ...(userCircleIds.length > 0 ? [{ audienceCircleIds: { hasSome: userCircleIds } }] : [])] },
+          ...(input.music ? musicWindowWhere(input.music) : []),
         ],
       };
       // The box admits rows the exact radius will reject, so one bounded read
@@ -184,7 +189,10 @@ export const eventsRouter = router({
       // reaching it truncates the answer rather than corrupting it.
       const PAGE_SIZE = 200;
       const MAX_PAGES = 5;
-      type NearbyFacts = DiscoverablePartyFacts & { venueName: string; templateConfig: unknown };
+      type NearbyFacts = DiscoverablePartyFacts & {
+        venueName: string; templateConfig: unknown; ticketTiers: unknown;
+        musicKind: string | null; musicGenres: string[]; musicSetStartsAt: Date | null;
+      };
       const kept: { party: NearbyFacts; distanceMiles: number }[] = [];
       let cursor: string | undefined;
       for (let page = 0; page < MAX_PAGES && kept.length < input.limit; page += 1) {
@@ -195,7 +203,8 @@ export const eventsRouter = router({
             closedAt: true, endsAt: true, startsAt: true, accessMode: true,
             requiredMembershipTier: true, audienceCircleIds: true,
             templateId: true, templateConfig: true, locationDisclosure: true, shareLinkExpiresAt: true,
-            showOnDiscover: true, venueName: true, lat: true, lng: true,
+            showOnDiscover: true, venueName: true, lat: true, lng: true, ticketTiers: true,
+            musicKind: true, musicGenres: true, musicSetStartsAt: true,
             arrivalVenue: { select: { lat: true, lng: true } },
           },
           orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
@@ -218,6 +227,10 @@ export const eventsRouter = router({
           longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
           venueName: p.venueName,
           templateConfig: p.templateConfig,
+          ticketTiers: p.ticketTiers,
+          musicKind: p.musicKind,
+          musicGenres: p.musicGenres,
+          musicSetStartsAt: p.musicSetStartsAt,
         }));
         const eligible = filterDiscoverableParties(facts, {
           userTier,
@@ -227,6 +240,7 @@ export const eventsRouter = router({
           approvalOptIn: true,
         });
         for (const party of eligible) {
+          if (input.music && !matchesMusicWindow(party, input.music)) continue;
           const distance = partyDistanceMiles(input.lat, input.lng, party.latitude, party.longitude);
           if (distance !== null && distance <= input.radiusMiles) kept.push({ party, distanceMiles: distance });
         }
@@ -249,6 +263,20 @@ export const eventsRouter = router({
         ? await db.partyMedia.findMany({ where: { partyId: { in: answering.map((row) => row.party.id) }, kind: 'cover' }, select: { id: true, partyId: true } })
         : [];
       const coverMap = new Map(covers.map((media) => [media.partyId, partyMediaUrl(media.id)]));
+      // Credits only after the performer accepted, and only on music surfaces.
+      const credits = input.music && answering.length > 0
+        ? await db.partyPerformer.findMany({
+          where: { partyId: { in: answering.map((row) => row.party.id) }, status: 'accepted', confirmedUser: { deletedAt: null } },
+          select: { partyId: true, displayName: true, role: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        })
+        : [];
+      const creditMap = new Map<string, { displayName: string; role: string }[]>();
+      for (const credit of credits) {
+        const list = creditMap.get(credit.partyId) ?? [];
+        if (list.length < 4) list.push({ displayName: credit.displayName, role: credit.role });
+        creditMap.set(credit.partyId, list);
+      }
       const parties = answering
         .map(({ party, distanceMiles: distance }) => {
           const door = discoverDoor(party);
@@ -283,6 +311,9 @@ export const eventsRouter = router({
             // price a guest can pay, and the card has to say bottles are extra.
             sessionsFrom: sessionFloors.get(party.id) ?? null,
             coverURL: coverMap.get(party.id) ?? null,
+            music: musicListing(party),
+            entry: musicEntry(party.accessMode, party.ticketTiers),
+            ...(input.music ? { performers: creditMap.get(party.id) ?? [] } : {}),
           };
         });
       return { parties };

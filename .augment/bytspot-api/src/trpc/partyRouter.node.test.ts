@@ -132,6 +132,25 @@ test('showOnDiscover is stored only for an approval door, and defaults off', asy
   assert.deepEqual(written.map((data) => data.showOnDiscover), [true, false, false]);
 });
 
+test('Draft music is stored only as declared, and the set must fall inside the Party', async () => {
+  const written: any[] = [];
+  party.create = async ({ data }: any) => { written.push(data); return { id: 'party-1' }; };
+  const host = createCaller({ user: { userId: 'music-host', email: 'music@bytspot.com' }, clientRateLimitKey: 'test-party-music' });
+  const startsAt = new Date(draftInput.startsAt);
+  const setStartsAt = new Date(startsAt.getTime() + 45 * 60 * 1000).toISOString();
+  await host.events.drafts.create({ ...draftInput, idempotencyKey: '00000000-0000-4000-8000-0000000000b1', music: { kind: 'both', genres: ['jazz', 'live-band'], setStartsAt } });
+  await host.events.drafts.create({ ...draftInput, idempotencyKey: '00000000-0000-4000-8000-0000000000b2' });
+  assert.deepEqual(written.map(({ musicKind, musicGenres, musicSetStartsAt }) => ({ musicKind, musicGenres, musicSetStartsAt })), [
+    { musicKind: 'both', musicGenres: ['jazz', 'live-band'], musicSetStartsAt: new Date(setStartsAt) },
+    { musicKind: null, musicGenres: [], musicSetStartsAt: null },
+  ]);
+
+  const early = new Date(startsAt.getTime() - 60_000).toISOString();
+  await assert.rejects(() => host.events.drafts.create({ ...draftInput, idempotencyKey: '00000000-0000-4000-8000-0000000000b3', music: { kind: 'dj', genres: ['house'], setStartsAt: early } }), { code: 'BAD_REQUEST', message: /before the Party/ });
+  await assert.rejects(() => host.events.drafts.create({ ...draftInput, idempotencyKey: '00000000-0000-4000-8000-0000000000b4', music: { kind: 'dj', genres: ['house', 'house'] } }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => host.events.drafts.create({ ...draftInput, idempotencyKey: '00000000-0000-4000-8000-0000000000b5', music: { kind: 'dj', genres: [] } }), { code: 'BAD_REQUEST' });
+});
+
 test('Draft retries do not update content after publishing wins the race', async () => {
   const publishedParty = { ...partyDraft, status: 'published', passCode: 'BYT-EXISTING' };
   party.findUnique = async () => partyDraft;

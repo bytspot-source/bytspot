@@ -229,7 +229,7 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
     capacity: 80, confirmed: 41, spacesRemaining: 39, pending: 6, checkedIn: 12,
     shareUrl: 'https://bytspot.app/party/party-1', passCode: 'BYT-EXISTING',
     shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true, closedAt: null,
-    door: 'open', showOnDiscover: true, feedback: { count: 0, average: null },
+    door: 'open', showOnDiscover: true, startsAt: publishedParty.startsAt.toISOString(), endsAt: partyEndsAt.toISOString(), music: null, feedback: { count: 0, average: null },
   });
 
   // Missing pass codes stay null — Control retrieves the issued code, it never mints a new one.
@@ -267,6 +267,38 @@ test('setShowOnDiscover is host-only and only means something for an approval do
 
   party.findFirst = async () => publishedParty;
   await assert.rejects(() => caller().events.control.setShowOnDiscover({ partyId: 'party-1', show: true }), { code: 'BAD_REQUEST' });
+});
+
+test('setMusic is host-only, keeps the set inside the Party, and null clears it', async () => {
+  const publicCaller = createCaller({ user: null, clientRateLimitKey: 'test-control-anon' });
+  const music = { kind: 'dj' as const, genres: ['afrobeats' as const, 'amapiano' as const] };
+  await assert.rejects(() => publicCaller.events.control.setMusic({ partyId: 'party-1', music }), { code: 'UNAUTHORIZED' });
+  party.findFirst = async ({ where }: any) => where.hostUserId === 'host-user' ? publishedParty : null;
+  await assert.rejects(() => caller(guestContext).events.control.setMusic({ partyId: 'party-1', music }), { code: 'NOT_FOUND' });
+
+  let written: any;
+  party.updateMany = async (args: any) => { written = args; return { count: 1 }; };
+  const setStartsAt = new Date(publishedParty.startsAt.getTime() + 30 * 60 * 1000).toISOString();
+  const result = await caller().events.control.setMusic({ partyId: 'party-1', music: { ...music, setStartsAt } });
+  assert.deepEqual(result, { partyId: 'party-1', music: { kind: 'dj', genres: ['afrobeats', 'amapiano'], setStartsAt } });
+  assert.deepEqual(written.data, { musicKind: 'dj', musicGenres: ['afrobeats', 'amapiano'], musicSetStartsAt: new Date(setStartsAt) });
+  // The write is pinned to the times the set was checked against.
+  assert.equal(written.where.hostUserId, 'host-user');
+  assert.deepEqual(written.where.startsAt, publishedParty.startsAt);
+  assert.deepEqual(written.where.endsAt, publishedParty.endsAt);
+
+  const tooEarly = new Date(publishedParty.startsAt.getTime() - 60_000).toISOString();
+  await assert.rejects(() => caller().events.control.setMusic({ partyId: 'party-1', music: { ...music, setStartsAt: tooEarly } }), { code: 'BAD_REQUEST', message: /before the Party/ });
+  const afterEnd = new Date(partyEndsAt.getTime() + 60_000).toISOString();
+  await assert.rejects(() => caller().events.control.setMusic({ partyId: 'party-1', music: { ...music, setStartsAt: afterEnd } }), { code: 'BAD_REQUEST', message: /before the Party ends/ });
+  await assert.rejects(() => caller().events.control.setMusic({ partyId: 'party-1', music: { kind: 'dj', genres: ['jazz', 'house', 'latin'] } as any }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => caller().events.control.setMusic({ partyId: 'party-1', music: { kind: 'karaoke', genres: ['jazz'] } as any }), { code: 'BAD_REQUEST' });
+
+  assert.deepEqual(await caller().events.control.setMusic({ partyId: 'party-1', music: null }), { partyId: 'party-1', music: null });
+  assert.deepEqual(written.data, { musicKind: null, musicGenres: [], musicSetStartsAt: null });
+
+  party.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.control.setMusic({ partyId: 'party-1', music }), { code: 'CONFLICT' });
 });
 
 test('Guest list projects person fields and infers source from ticket tier', async () => {

@@ -1638,6 +1638,58 @@ test('events.nearby answers with parties a guest can actually reach', async () =
   assert.equal(found.hostType, null);
 });
 
+test('events.nearby music window lists only public parties that declare matching music, with accepted credits', async () => {
+  const soon = new Date(Date.now() + 60 * 60 * 1000);
+  const rows = [
+    nearbyParty({ id: 'p-dj', musicKind: 'dj', musicGenres: ['afrobeats'], musicSetStartsAt: soon, accessMode: 'paid-ticket', ticketTiers: [{ priceCents: 2500 }, { priceCents: 1500 }] }),
+    nearbyParty({ id: 'p-both', musicKind: 'both', musicGenres: ['jazz', 'live-band'], musicSetStartsAt: null }),
+    nearbyParty({ id: 'p-silent', musicKind: null, musicGenres: [] }),
+    nearbyParty({ id: 'p-live-house', musicKind: 'live', musicGenres: ['house'] }),
+    nearbyParty({ id: 'p-approval', musicKind: 'dj', musicGenres: ['afrobeats'], accessMode: 'private-approval', templateId: 'private-party', locationDisclosure: 'after-approval', showOnDiscover: true }),
+    nearbyParty({ id: 'p-circle', musicKind: 'dj', musicGenres: ['afrobeats'], audienceCircleIds: ['circle-1'] }),
+    nearbyParty({ id: 'p-tomorrow', musicKind: 'dj', musicGenres: ['afrobeats'], startsAt: new Date(Date.now() + 30 * 60 * 60 * 1000), endsAt: new Date(Date.now() + 34 * 60 * 60 * 1000) }),
+  ];
+  nearbyFixture(rows);
+  (db.socialCircleMember as any).findMany = async () => [{ circleId: 'circle-1' }];
+  let creditWhere: any;
+  (db.partyPerformer as any).findMany = async ({ where }: any) => {
+    creditWhere = where;
+    return [{ partyId: 'p-dj', displayName: 'DJ Kofi', role: 'dj' }];
+  };
+  let partyWhere: any;
+  party.findMany = async ({ where }: any) => { partyWhere = where; return rows; };
+  const tonight = { from: new Date().toISOString(), until: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString() };
+
+  const { parties } = await nearby().events.nearby({ ...MIDTOWN, music: { ...tonight, kinds: ['dj'], genres: ['afrobeats', 'jazz'] } });
+  // A party with both kinds answers a DJ filter; silent, approval, circle,
+  // wrong-genre and outside-the-window parties never do.
+  assert.deepEqual(parties.map((p) => p.id).sort(), ['p-both', 'p-dj']);
+  const dj = parties.find((p) => p.id === 'p-dj') as any;
+  const both = parties.find((p) => p.id === 'p-both') as any;
+  assert.deepEqual(dj.music, { kind: 'dj', genres: ['afrobeats'], setStartsAt: soon.toISOString() });
+  assert.deepEqual(dj.entry, { kind: 'ticket', fromCents: 1500 });
+  assert.deepEqual(dj.performers, [{ displayName: 'DJ Kofi', role: 'dj' }]);
+  assert.deepEqual(both.performers, []);
+  assert.deepEqual(both.entry, { kind: 'free', fromCents: null });
+  assert.equal(creditWhere.status, 'accepted');
+  assert.deepEqual(creditWhere.confirmedUser, { deletedAt: null });
+  // The same rule is in the query, so ineligible rows take no page slot.
+  const clauses = JSON.stringify(partyWhere.AND);
+  assert.match(clauses, /"musicKind":\{"in":\["dj","both"\]\}/);
+  assert.match(clauses, /"accessMode":\{"not":"private-approval"\}/);
+  assert.match(clauses, /"musicGenres":\{"hasSome":\["afrobeats","jazz"\]\}/);
+
+  await assert.rejects(() => nearby().events.nearby({ ...MIDTOWN, music: { from: tonight.until, until: tonight.from } }), { code: 'BAD_REQUEST' });
+  await assert.rejects(() => nearby().events.nearby({ ...MIDTOWN, music: { from: tonight.from, until: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString() } }), { code: 'BAD_REQUEST' });
+});
+
+test('events.nearby without a music window carries the music declaration but no credits', async () => {
+  nearbyFixture([nearbyParty({ musicKind: 'live', musicGenres: ['gospel'], musicSetStartsAt: null })]);
+  const [row] = (await nearby().events.nearby(MIDTOWN)).parties as any[];
+  assert.deepEqual(row.music, { kind: 'live', genres: ['gospel'], setStartsAt: null });
+  assert.equal('performers' in row, false);
+});
+
 test('events.nearby carries the Host Studio category and type, and only a valid pair', async () => {
   nearbyFixture([
     nearbyParty({ id: 'p-tagged', templateConfig: { kind: 'listening-party', hostCategory: 'music', hostType: 'listening' } }),

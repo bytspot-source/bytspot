@@ -229,7 +229,7 @@ test('Summary derives counts from PartyGuest rows in the iOS shape', async () =>
     capacity: 80, confirmed: 41, spacesRemaining: 39, pending: 6, checkedIn: 12,
     shareUrl: 'https://bytspot.app/party/party-1', passCode: 'BYT-EXISTING',
     shareLinkExpiresAt: partyEndsAt.toISOString(), shareLinkExpired: false, shareLinkExpiryIsDefault: true, closedAt: null,
-    door: 'open', showOnDiscover: true, music: null, feedback: { count: 0, average: null },
+    door: 'open', showOnDiscover: true, startsAt: publishedParty.startsAt.toISOString(), endsAt: partyEndsAt.toISOString(), music: null, feedback: { count: 0, average: null },
   });
 
   // Missing pass codes stay null — Control retrieves the issued code, it never mints a new one.

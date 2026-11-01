@@ -159,7 +159,8 @@ const draftInput = z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lat'], message: 'A location of 0, 0 is an unresolved placeholder, not a venue.' });
   }
   if (input.music?.setStartsAt) {
-    const problem = musicSetTimeProblem(new Date(input.music.setStartsAt), { startsAt: new Date(input.startsAt), endsAt: input.endsAt ? new Date(input.endsAt) : null });
+    // Checked against the end the Party will actually be stored with.
+    const problem = musicSetTimeProblem(new Date(input.music.setStartsAt), { startsAt: new Date(input.startsAt), endsAt: derivedEndsAt(input) });
     if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['music', 'setStartsAt'], message: problem });
   }
   if (input.endsAt) {
@@ -1436,6 +1437,8 @@ export const partyControlRouter = router({
         closedAt: party.closedAt?.toISOString() ?? null,
         door: party.accessMode === 'private-approval' ? 'approval' as const : 'open' as const,
         showOnDiscover: discoverListing(party),
+        startsAt: party.startsAt.toISOString(),
+        endsAt: party.endsAt?.toISOString() ?? null,
         music: musicListing(party),
         feedback,
       };

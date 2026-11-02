@@ -92,3 +92,9 @@ test('has its own per-user 10-per-minute rate limit', async () => {
   for (let n = 0; n < 10; n++) await caller.plan(ask);
   await assert.rejects(() => caller.plan(ask), { code: 'TOO_MANY_REQUESTS' });
 });
+
+test('concierge.plan answers unavailable when planning runs past the hard limit', async () => {
+  openAll();
+  const out = await createConciergePlanRouter({ engineFor: () => ({ handle: () => new Promise(() => {}) }), timeoutMs: 5 }).createCaller(member).plan(ask);
+  assert.deepEqual(out, { version: 1, status: 'unavailable', reply: 'That took too long to plan. Try again, or ask for fewer stops. Nothing was made up.', result: null });
+});

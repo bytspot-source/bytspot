@@ -14,12 +14,13 @@ Budget, schedule feasibility and honesty rules are enforced in code (`core/`). F
 
 | Port | Wraps | Behaviour |
 |---|---|---|
-| Places | `services/conciergePlaces.ts` (`conciergePlacesSearch`: Google Places, Redis cache, `cachedWithStale`) + `conciergeReconcilePlaces` | Stale results stay `google-stale` (open/closed null). Admin-hidden places dropped. `priceCents` always null (no real price source). |
+| Places | `services/conciergePlaces.ts` (`conciergePlacesSearch`: Google Places, Redis cache, `cachedWithStale`) + `conciergeReconcilePlaces` | Stale results stay `google-stale` (open/closed null). Admin-hidden places dropped. Saved preferences (`user_preferences.avoid`, `price_ceiling`) applied through `services/preferenceFit.ts`; a `preferences` notice says how many were left out. `priceCents` always null (no real price source). |
 | Events | `trpc/eventsRouter.ts` `nearby` (Bytspot parties, all gates) + `mapTmEvent` | Never calls `events.list` (it serves FALLBACK_EVENTS). Failure → `{ events: [], source: 'unavailable' }`. Parties carry `party:<id>` for `plans.createWithBookables`; no prices. |
 | Crowd | `services/typicalOccupancy.ts` `typicalCrowd` | Typical only, at the plan hour in Atlanta. Always labelled "(typical, not live)". |
 | Routing | `services/checkinProof.ts` distance; `trpc/mobilityRouter.ts` `handoffUrl` | Travel is an estimate. Uber/Lyft are hand-off links, no fares. |
 | Bookables | `services/tableBookingLinks.ts` (`ensureTableBookingLinks`, `tableBookingLinkFor`) | OpenTable/Resy links, availability never checked. |
 | People | `SocialCircle`/`SocialCircleMember`, `services/safety.ts` `blockedUserIds` | Caller's own circles, blocked users removed, other members' preferences not shared. |
+| Scheduler | `services/itinerary.ts` `buildItinerary` + `trpc/placesRouter.ts` `resolvePlaceHours` | Same timeline as `plans.itinerary`: 45 mph travel floor, buffer, typical lengths, opening hours. A stop known to be closed blocks booking. Falls back to `core/schedule.ts` if it fails. |
 | Final check | `services/planFeasibility.ts` + `services/planLegs.ts` `PlanLeg` | Runs on every proposal; a `breaks` or a failure to run blocks booking. |
 
 ## Prime Path

@@ -35,6 +35,41 @@ export interface EngineOptions {
    * alternates where nothing can be featured; it cannot override a prime.
    */
   ranker?: NeedRanker;
+  /**
+   * Host timeline (bytspot-api wires services/itinerary with Google opening
+   * hours). When set it places every stop; the built-in scheduler is the
+   * fallback when it is absent or fails.
+   */
+  scheduler?: (request: ScheduleRequest) => Promise<HostScheduledStop[]>;
+  /**
+   * Time budget for one request, in ms. Once spent, the tool loop stops and
+   * no further model picks are asked for; the plan is finished with what was found.
+   */
+  timeBudgetMs?: number;
+}
+
+export interface ScheduleRequest {
+  window: { startsAt: string | null; endsAt: string | null };
+  stops: Array<{
+    id: string; title: string; needKind: string; placeId: string | null; latitude: number; longitude: number;
+    /** Stated by the supply only; null lets the host use its typical length. */
+    durationMins: number | null;
+    fixedStartsAt: string | null;
+    /** Who states `fixedStartsAt`: a Bytspot party or an outside event. */
+    fixedBy: 'party' | 'event' | null;
+  }>;
+}
+
+/** One stop as the host placed it, in the order given. `closed` is true only when known hours say so. */
+export interface HostScheduledStop {
+  id: string;
+  startsAt: string | null;
+  endsAt: string | null;
+  durationMins: number;
+  travelMinsBefore: number | null;
+  fixed: boolean;
+  hoursIssue: string | null;
+  closed: boolean;
 }
 
 /** Model's final pick (structured output "plan_selection"). Ids only — facts come from the ledger. */
@@ -59,11 +94,14 @@ class Ledger {
   readonly discoveredNeeds = new Set<string>();
   /** Head count of a group the guest named (people skill), including the guest. */
   groupSize: number | null = null;
+  /** Places left out by the guest's saved preferences, across every search. */
+  leftOut = 0;
   readonly notices: Notice[] = [];
   record(skill: string, input: unknown, output: unknown) {
     if (skill === 'discovery') {
       const out = output as Awaited<ReturnType<typeof discoverySkill.run>>;
       this.discoveredNeeds.add((input as { needKind: string }).needKind);
+      this.leftOut += out.leftOut;
       for (const c of out.candidates) this.candidates.set(c.id, c);
       if (out.status === 'unavailable' && out.message) this.notices.push({ code: 'provider_unavailable', message: out.message });
       if (out.status === 'stale' && out.message) this.notices.push({ code: 'provider_stale', message: out.message });
@@ -109,6 +147,8 @@ export class ByttSiEngine {
   private readonly skills: readonly Skill[];
   private readonly finalCheck: EngineOptions['finalCheck'];
   readonly ranker: NeedRanker | undefined;
+  private readonly scheduler: EngineOptions['scheduler'];
+  private readonly timeBudgetMs: number | undefined;
 
   constructor(options: EngineOptions) {
     this.llm = options.llm;
@@ -119,6 +159,8 @@ export class ByttSiEngine {
     this.skills = options.skills ?? SKILLS;
     this.finalCheck = options.finalCheck;
     this.ranker = options.ranker;
+    this.scheduler = options.scheduler;
+    this.timeBudgetMs = options.timeBudgetMs;
   }
 
   async handle(request: ConciergeRequest): Promise<ConciergeResult> {
@@ -149,6 +191,8 @@ export class ByttSiEngine {
   private async propose(request: ConciergeRequest): Promise<ConciergeResult> {
     const notices: Notice[] = [];
     const meta = { provider: this.llm.name, steps: 0, toolCalls: [] as string[] };
+    const startedAt = Date.now();
+    const outOfTime = () => this.timeBudgetMs !== undefined && Date.now() - startedAt >= this.timeBudgetMs;
     const contextLine = `Now: ${request.now} (America/New_York). Area: ${request.areaLabel ?? 'not given (default Midtown Atlanta)'}.`;
 
     // 1. Understand: intent, preferences, context, budget.
@@ -185,9 +229,11 @@ export class ByttSiEngine {
     ];
     const tools = this.skills.map(toToolDefinition);
     let capped = false;
+    let timedOut = false;
     try {
       for (let step = 0; ; step += 1) {
         if (step >= (mode === 'quick' ? Math.min(3, this.maxSteps) : this.maxSteps)) { capped = true; break; }
+        if (outOfTime()) { timedOut = true; break; }
         const reply = await this.llm.chat({ messages, tools, toolChoice: 'auto' });
         meta.steps += 1;
         if (!reply.toolCalls.length) break;
@@ -202,6 +248,7 @@ export class ByttSiEngine {
       notices.push({ code: 'assistant_unavailable', message: 'The concierge assistant stopped responding; this plan was finished with fixed rules.' });
     }
     if (capped) notices.push({ code: 'step_cap', message: `Stopped after ${this.maxSteps} assistant steps; planned with what was found.` });
+    if (timedOut) notices.push({ code: 'step_cap', message: 'Stopped searching to answer in time; planned with what was found.' });
 
     // Code-side guarantee: every stop kind the guest asked for was actually searched.
     if (mode === 'plan') {
@@ -212,6 +259,11 @@ export class ByttSiEngine {
       }
     }
     notices.push(...ledger.notices);
+    if (ledger.leftOut > 0) {
+      notices.push({ code: 'preferences', message: `Left out ${ledger.leftOut} ${ledger.leftOut === 1 ? 'place' : 'places'} that match your saved Leave Out or Highest price. Places with no listed price are kept.` });
+    }
+    // Past the time budget, no further model calls: picks fall to the ranker or fixed rules.
+    if (outOfTime()) llmUp = false;
 
     if (mode === 'quick') return this.quick(request, constraints, ledger, messages, notices, meta, llmUp);
 
@@ -458,14 +510,20 @@ export class ByttSiEngine {
       seen.add(candidate.id);
       picked.push({ candidate, startsAt: item.startsAt, durationMins: item.durationMins });
     }
-    const travel = await travelBetween(this.ports, picked.map((p) => p.candidate));
-    const schedule = scheduleStops({ startsAt: constraints.startsAt, endsAt: constraints.endsAt }, picked.map((p) => ({
-      id: p.candidate.id, title: p.candidate.name,
-      durationMins: p.candidate.durationMins ?? p.durationMins ?? DEFAULT_DURATION_MINS[p.candidate.needKind] ?? 90,
-      fixedStartsAt: p.candidate.startsAt, preferredStartsAt: p.startsAt,
-    })), travel);
-    if (picked.some((p, i) => p.startsAt && !p.candidate.startsAt && schedule[i].timeSource === 'scheduled')) {
-      notices.push({ code: 'schedule_adjusted', message: 'Some suggested times did not leave room for travel or fall in your window, so they were moved.' });
+    const hosted = await this.hostSchedule(picked, constraints);
+    let schedule: Array<{ startsAt: string | null; durationMins: number | null; timeSource: ProposedPlanItem['timeSource']; travelMinsBefore: number | null }>;
+    if (hosted) {
+      schedule = hosted.map((h) => ({ startsAt: h.startsAt, durationMins: h.durationMins, timeSource: h.fixed ? 'fixed' : 'scheduled', travelMinsBefore: h.travelMinsBefore }));
+    } else {
+      const travel = await travelBetween(this.ports, picked.map((p) => p.candidate));
+      schedule = scheduleStops({ startsAt: constraints.startsAt, endsAt: constraints.endsAt }, picked.map((p) => ({
+        id: p.candidate.id, title: p.candidate.name,
+        durationMins: p.candidate.durationMins ?? p.durationMins ?? DEFAULT_DURATION_MINS[p.candidate.needKind] ?? 90,
+        fixedStartsAt: p.candidate.startsAt, preferredStartsAt: p.startsAt,
+      })), travel);
+      if (picked.some((p, i) => p.startsAt && !p.candidate.startsAt && schedule[i].timeSource === 'scheduled')) {
+        notices.push({ code: 'schedule_adjusted', message: 'Some suggested times did not leave room for travel or fall in your window, so they were moved.' });
+      }
     }
 
     const items: ProposedPlanItem[] = [];
@@ -494,10 +552,29 @@ export class ByttSiEngine {
         priceCents: candidate.priceCents, priceBasis: candidate.priceBasis,
         capability: bookable ? (bookable.capability === 'request' ? 'request' : 'book') : 'details',
         crowd: candidate.crowd, booking, primePath: null,
+        hours: hosted?.[position].hoursIssue ? { note: hosted[position].hoursIssue!, closed: hosted[position].closed } : null,
         rides: (this.ports.routing.rideLinks ?? rideLinks)({ latitude: candidate.latitude, longitude: candidate.longitude, name: candidate.name, address: candidate.address }),
       });
     }
     return items;
+  }
+
+  /** The host's timeline for these stops, or null to use the built-in scheduler. */
+  private async hostSchedule(picked: Array<{ candidate: Candidate; startsAt: string | null }>, constraints: PlanConstraints): Promise<HostScheduledStop[] | null> {
+    if (!this.scheduler || !picked.length) return null;
+    // Without a Plan start, the model's first suggested time anchors the evening.
+    const anchor = constraints.startsAt ?? (picked[0].candidate.startsAt ? null : picked[0].startsAt);
+    try {
+      const out = await this.scheduler({
+        window: { startsAt: anchor, endsAt: constraints.endsAt },
+        stops: picked.map(({ candidate: c }) => ({
+          id: c.id, title: c.name, needKind: c.needKind, placeId: c.placeId, latitude: c.latitude, longitude: c.longitude,
+          durationMins: c.durationMins, fixedStartsAt: c.startsAt,
+          fixedBy: c.startsAt ? (c.bookableId?.startsWith('party:') ? 'party' : 'event') : null,
+        })),
+      });
+      return out.length === picked.length && out.every((h, i) => h.id === picked[i].candidate.id) ? out : null;
+    } catch { return null; }
   }
 
   private finalizePlan(constraints: PlanConstraints, items: ProposedPlanItem[], ledger: Ledger, selection: PlanSelection, notices: Notice[], meta: ProposedPlan['meta'], ranking: ProposedPlan['ranking'], sizeSource: ProposedPlan['partySizeSource']): ProposedPlan {
@@ -509,10 +586,12 @@ export class ByttSiEngine {
       { check: 'budget' as const, verdict: budget.verdict, detail: budget.detail },
       capacityCheck(constraints.partySize, items.map((i) => ({ title: i.title, seats: ledger.candidates.get(i.candidateId)?.capacity ?? null }))),
     ];
-    const verdict = overallVerdict(checks);
+    const closed = items.filter((i) => i.hours?.closed);
+    const verdict = closed.length ? 'breaks' : overallVerdict(checks);
 
     if (budget.verdict === 'breaks') notices.push({ code: 'over_budget', message: `Over budget: ${budget.detail} Edit a stop or raise the budget before booking.` });
     for (const c of checks) if (c.verdict === 'breaks' && c.check !== 'budget') notices.push({ code: 'schedule_infeasible', message: c.detail });
+    for (const i of items) if (i.hours) notices.push({ code: 'opening_hours', message: `${i.title}: ${i.hours.note}` });
     if (!items.length) notices.push({ code: 'no_options', message: "I couldn't find verified options for this yet. Try a different area, time or budget." });
     if (items.some((i) => i.crowd?.source === 'typical')) notices.push({ code: 'typical_not_live', message: 'Crowd levels marked typical are usual patterns, not live counts.' });
     if (items.some((i) => i.booking.some((b) => b.kind === 'deeplink'))) notices.push({ code: 'deeplink_only', message: 'OpenTable/Resy links open the provider; table availability was not checked.' });

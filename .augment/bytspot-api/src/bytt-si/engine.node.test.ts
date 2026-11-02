@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { conciergeResultSchema, type ProposedPlan, type QuickAnswer } from './types';
 import { assertPartial, codes } from './testing/assert';
 import { discoverBoth, FRIDAY_MESSAGE, fridayIntent, fridaySelection, NOW, setup } from './testing/helpers';
+import { createBackendScheduler } from './backend/schedule';
 
 const window = (plan: ProposedPlan, check: string) => plan.feasibility.checks.find((c) => c.check === check)!.verdict;
 
@@ -205,5 +206,42 @@ describe('bytt-si engine: Bytspot events and the final check', () => {
     const plan = await engine.handle({ message: FRIDAY_MESSAGE, now: NOW }) as ProposedPlan;
     assert.equal(plan.actions.book.available, false);
     assert.ok(plan.notices.some((n) => n.code === 'final_check' && /couldn't run/.test(n.message)));
+  });
+});
+
+describe('bytt-si engine: host timeline, saved preferences and time budget', () => {
+  it('uses the host scheduler for times and blocks booking when known hours say a stop is closed', async () => {
+    const { engine } = setup({ structured: { intent: [fridayIntent()], plan_selection: [fridaySelection()] }, chat: [discoverBoth] }, {}, {
+      scheduler: createBackendScheduler({ hoursFor: async (id) => (id === 'SAMPLE_bar_rooftop' ? [{ open: { day: 5, hour: 11, minute: 0 }, close: { day: 5, hour: 17, minute: 0 } }] : null) }),
+    });
+    const plan = await engine.handle({ message: FRIDAY_MESSAGE, now: NOW }) as ProposedPlan;
+    conciergeResultSchema.parse(plan);
+    assert.deepEqual(plan.items.map((i) => i.timeSource), ['scheduled', 'scheduled']);
+    assert.equal(plan.items[0].startsAt, '2026-11-07T00:00:00.000Z');
+    assert.deepEqual(plan.items[1].hours, { note: 'Closed at 8:41 PM.', closed: true });
+    assert.ok(plan.notices.some((n) => n.code === 'opening_hours' && n.message === 'SAMPLE Rooftop Lounge: Closed at 8:41 PM.'));
+    assertPartial(plan, { status: 'needs_changes', feasibility: { verdict: 'breaks' }, actions: { book: { available: false } } });
+  });
+  it('falls back to the built-in scheduler when the host scheduler fails', async () => {
+    const { engine } = setup({ structured: { intent: [fridayIntent()], plan_selection: [fridaySelection()] }, chat: [discoverBoth] }, {}, {
+      scheduler: async () => { throw new Error('down'); },
+    });
+    const plan = await engine.handle({ message: FRIDAY_MESSAGE, now: NOW }) as ProposedPlan;
+    assert.deepEqual(plan.items.map((i) => i.startsAt), ['2026-11-06T19:00:00-05:00', '2026-11-06T20:45:00-05:00']);
+    assert.ok(plan.items.every((i) => i.hours === null));
+  });
+  it('says how many places saved preferences left out', async () => {
+    const { engine, ports } = setup({ structured: { intent: [fridayIntent()], plan_selection: [fridaySelection()] }, chat: [discoverBoth] });
+    const search = ports.places.search.bind(ports.places);
+    ports.places.search = async (q) => ({ ...(await search(q)), leftOut: 2 });
+    const plan = await engine.handle({ message: FRIDAY_MESSAGE, now: NOW }) as ProposedPlan;
+    assert.ok(plan.notices.some((n) => n.code === 'preferences' && n.message.startsWith('Left out 4 places that match your saved Leave Out or Highest price.')));
+  });
+  it('stops calling the model once the time budget is spent and still returns a plan', async () => {
+    const { engine, llm } = setup({ structured: { intent: [fridayIntent()], plan_selection: [fridaySelection()] }, chat: [discoverBoth] }, {}, { timeBudgetMs: 0 });
+    const plan = await engine.handle({ message: FRIDAY_MESSAGE, now: NOW }) as ProposedPlan;
+    assert.deepEqual(llm.calls.map((c) => c.kind === 'structured' ? c.name : 'chat'), ['intent']);
+    assert.ok(plan.notices.some((n) => n.code === 'step_cap' && /answer in time/.test(n.message)));
+    assert.deepEqual(plan.items.map((i) => i.title), ['SAMPLE Southern Kitchen', 'SAMPLE Rooftop Lounge'], 'nearest per need, by fixed rules');
   });
 });

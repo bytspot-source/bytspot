@@ -7,10 +7,12 @@ import { config } from '../../config';
 import { db } from '../../lib/db';
 import { conciergeReconcilePlaces } from '../../services/conciergeDiscoveryAdapters';
 import { conciergePlacesSearch } from '../../services/conciergePlaces';
+import { normalizePreferences } from '../../services/preferenceFit';
 import { blockedUserIds } from '../../services/safety';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../../services/tableBookingLinks';
 import type { Context } from '../../trpc/context';
 import { eventsRouter } from '../../trpc/eventsRouter';
+import { resolvePlaceHours } from '../../trpc/placesRouter';
 import { createEngine, type ByttSiEngine } from '../engine';
 import { OpenAIProvider } from '../llm/openai';
 import { primePathNeedRanker } from './primePath';
@@ -22,11 +24,20 @@ import { backendFinalCheck } from './finalCheck';
 import { createBackendPeoplePort } from './people';
 import { createBackendPlacesPort } from './places';
 import { createBackendRoutingPort } from './routing';
+import { createBackendScheduler } from './schedule';
+
+/** Engine time budget: past it, no further model calls are made. */
+export const CONCIERGE_PLAN_TIME_BUDGET_MS = 25_000;
 
 /** Ports for one signed-in request. Events go through eventsRouter so its membership, circle and block gates apply. */
 export function createBackendPorts(ctx: Context): Ports {
   return {
-    places: createBackendPlacesPort({ search: conciergePlacesSearch, reconcile: conciergeReconcilePlaces }),
+    places: createBackendPlacesPort({
+      search: conciergePlacesSearch, reconcile: conciergeReconcilePlaces,
+      preferences: async () => normalizePreferences(ctx.user
+        ? await db.userPreference.findUnique({ where: { userId: ctx.user.userId }, select: { avoid: true, priceCeiling: true } })
+        : null),
+    }),
     events: createBackendEventsPort({
       nearbyParties: async ({ lat, lng, radiusMiles }) => (await eventsRouter.createCaller(ctx).nearby({ lat, lng, radiusMiles, limit: 20 })).parties,
       ticketmaster: () => ticketmasterEventsNoFallback({ apiKey: config.ticketmasterApiKey }),
@@ -56,5 +67,7 @@ export function createBackendEngine(ctx: Context): ByttSiEngine | null {
     ports: createBackendPorts(ctx),
     finalCheck: backendFinalCheck,
     ranker: BACKEND_RANKER,
+    scheduler: createBackendScheduler({ hoursFor: resolvePlaceHours }),
+    timeBudgetMs: CONCIERGE_PLAN_TIME_BUDGET_MS,
   });
 }

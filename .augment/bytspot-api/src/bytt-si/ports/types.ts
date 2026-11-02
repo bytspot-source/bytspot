@@ -24,7 +24,8 @@ export interface PlaceRecord {
 }
 export type PlacesSource = 'google' | 'google-stale' | 'none' | 'unavailable';
 export interface PlacesPort {
-  search(query: { query: string; needKind: string; latitude: number; longitude: number; radiusMeters: number }): Promise<{ places: PlaceRecord[]; source: PlacesSource }>;
+  /** `leftOut` counts places dropped by the guest's saved preferences (Leave Out, Highest price). */
+  search(query: { query: string; needKind: string; latitude: number; longitude: number; radiusMeters: number }): Promise<{ places: PlaceRecord[]; source: PlacesSource; leftOut?: number }>;
 }
 
 export interface EventRecord {

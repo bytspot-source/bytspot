@@ -30,10 +30,18 @@ export interface ConciergePlanDependencies {
   /** Null when the engine cannot run (no model key): the route says so instead of guessing. */
   engineFor(ctx: Context): { handle(request: ConciergeRequest): Promise<ConciergeResult> } | null;
   now?: () => Date;
+  /** Hard limit for one request; past it the route answers unavailable. */
+  timeoutMs?: number;
 }
+
+/** Above the engine's own time budget plus one in-flight model call. */
+export const CONCIERGE_PLAN_TIMEOUT_MS = 50_000;
 
 const NOT_ENABLED = 'Concierge plans are not enabled yet. You can browse places in Discover.';
 const UNAVAILABLE = 'Concierge plans are unavailable right now. Nothing was made up.';
+const TIMED_OUT = 'That took too long to plan. Try again, or ask for fewer stops. Nothing was made up.';
+
+const TIMEOUT = Symbol('timeout');
 
 /**
  * BYTT-SI: one request in, a proposed Plan (or a quick answer with "Make it a
@@ -52,12 +60,17 @@ export function createConciergePlanRouter(deps: ConciergePlanDependencies) {
         if (!conciergePlanOpenTo(ctx.user.userId)) return { version: 1 as const, status: 'unavailable' as const, reply: NOT_ENABLED, result: null };
         const engine = deps.engineFor(ctx);
         if (!engine) return { version: 1 as const, status: 'unavailable' as const, reply: UNAVAILABLE, result: null };
-        const result = await engine.handle({
-          message: input.message,
-          now: (deps.now?.() ?? new Date()).toISOString(),
-          userId: ctx.user.userId,
-          ...(input.location ? { latitude: input.location.lat, longitude: input.location.lng } : {}),
-        });
+        let timer: NodeJS.Timeout | undefined;
+        const result = await Promise.race([
+          engine.handle({
+            message: input.message,
+            now: (deps.now?.() ?? new Date()).toISOString(),
+            userId: ctx.user.userId,
+            ...(input.location ? { latitude: input.location.lat, longitude: input.location.lng } : {}),
+          }),
+          new Promise<typeof TIMEOUT>((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), deps.timeoutMs ?? CONCIERGE_PLAN_TIMEOUT_MS); }),
+        ]).finally(() => clearTimeout(timer));
+        if (result === TIMEOUT) return { version: 1 as const, status: 'unavailable' as const, reply: TIMED_OUT, result: null };
         return { version: 1 as const, status: 'ok' as const, reply: null, result };
       }),
   });

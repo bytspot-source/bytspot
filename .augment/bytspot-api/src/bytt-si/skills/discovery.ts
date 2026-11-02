@@ -54,7 +54,11 @@ const input = z.object({
   endsAt: isoDateTime.optional(),
   maxResults: z.number().int().min(1).max(10).default(5),
 });
-const output = z.object({ status: statusSchema, message: z.string().nullable(), candidates: z.array(candidateSchema) });
+const output = z.object({
+  status: statusSchema, message: z.string().nullable(), candidates: z.array(candidateSchema),
+  /** Places the guest's saved preferences left out of this search. */
+  leftOut: z.number().int().min(0),
+});
 
 export const discoverySkill = defineSkill({
   name: 'discovery',
@@ -68,6 +72,7 @@ export const discoverySkill = defineSkill({
     const candidates: Candidate[] = [];
     let status: z.infer<typeof statusSchema> = 'ok';
     const messages: string[] = [];
+    let leftOut = 0;
 
     if (args.needKind === 'event' || args.needKind === 'nightlife') {
       try {
@@ -90,6 +95,7 @@ export const discoverySkill = defineSkill({
     if (args.needKind !== 'event') {
       try {
         const found = await ports.places.search({ query: args.query, needKind: args.needKind, latitude, longitude, radiusMeters });
+        leftOut = found.leftOut ?? 0;
         if (found.source === 'unavailable') { status = 'unavailable'; messages.push(`Place search is unavailable right now, so I can't suggest ${args.needKind} spots.`); }
         else if (found.source === 'google-stale') { if (status === 'ok') status = 'stale'; messages.push('Place results are cached and may be out of date; open/closed is not shown.'); }
         for (const p of found.places) {
@@ -109,6 +115,6 @@ export const discoverySkill = defineSkill({
 
     candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
     if (status === 'ok' && candidates.length === 0) status = 'none';
-    return { status, message: messages.join(' ') || null, candidates: candidates.slice(0, args.maxResults) };
+    return { status, message: messages.join(' ') || null, candidates: candidates.slice(0, args.maxResults), leftOut };
   },
 });

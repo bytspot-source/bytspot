@@ -91,6 +91,8 @@ export interface ProposedPlanItem {
    * - listed: no prime and no model suggestion; first alternate in order.
    */
   primePath: ItemRanking | null;
+  /** Known opening hours that conflict with this stop's time; null when they fit or are unknown. */
+  hours: { note: string; closed: boolean } | null;
 }
 
 export interface ItemRanking {
@@ -108,7 +110,8 @@ export type NoticeCode =
   | 'provider_unavailable' | 'provider_stale' | 'assistant_unavailable' | 'dropped_unverified_item'
   | 'budget_repaired' | 'over_budget' | 'price_unknown' | 'price_estimate'
   | 'schedule_adjusted' | 'schedule_infeasible' | 'typical_not_live' | 'deeplink_only'
-  | 'step_cap' | 'text_replaced' | 'no_options' | 'assumption' | 'final_check' | 'prime_path';
+  | 'step_cap' | 'text_replaced' | 'no_options' | 'assumption' | 'final_check' | 'prime_path'
+  | 'preferences' | 'opening_hours';
 export interface Notice { code: NoticeCode; message: string }
 
 export interface BudgetSummary {
@@ -180,6 +183,7 @@ const itemSchema = z.object({
     note: z.string().nullable(),
     alternates: z.array(z.object({ candidateId: z.string(), title: z.string(), ranked: z.boolean() }).strict()),
   }).strict().refine((r) => (r.status === 'prime') === (r.reason !== null), 'Only a prime carries the Prime Path reason line').nullable(),
+  hours: z.object({ note: z.string(), closed: z.boolean() }).strict().nullable(),
 }).strict();
 export const proposedPlanSchema = planConstraintsSchema.extend({
   kind: z.literal('plan'), status: z.enum(['proposed', 'needs_changes']), lifecycle: z.literal('proposed'),

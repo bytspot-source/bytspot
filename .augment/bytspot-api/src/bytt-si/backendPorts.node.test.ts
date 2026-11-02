@@ -12,6 +12,8 @@ import { backendFinalCheck, proposalLegs } from './backend/finalCheck';
 import { createBackendPeoplePort } from './backend/people';
 import { createBackendPlacesPort } from './backend/places';
 import { createBackendRoutingPort } from './backend/routing';
+import { createBackendScheduler } from './backend/schedule';
+import type { OpeningPeriod } from '../services/itinerary';
 import { assertPartial, codes } from './testing/assert';
 import { discoverBoth, FRIDAY_MESSAGE, fridayIntent, fridaySelection, NOW, setup } from './testing/helpers';
 import type { ProposedPlan } from './types';
@@ -46,6 +48,28 @@ describe('bytt-si backend PlacesPort (conciergePlaces.ts)', () => {
   it('drops places an admin hid from discovery', async () => {
     const port = createBackendPlacesPort({ search: async () => ({ places: [place(), place({ placeId: 'hidden', name: 'Hidden' })], source: 'google' }), reconcile: async () => ({ hiddenPlaceIds: ['hidden'] }) });
     assert.deepEqual((await port.search(query)).places.map((p) => p.placeId), ['gp1']);
+  });
+  it('applies saved preferences: avoided types and listed prices over the ceiling are left out, unlisted prices kept', async () => {
+    let reads = 0;
+    const port = createBackendPlacesPort({
+      search: async () => ({ places: [
+        place(), place({ placeId: 'club', types: ['night_club'], primaryType: 'night_club' }),
+        place({ placeId: 'pricey', priceLevel: 'PRICE_LEVEL_VERY_EXPENSIVE' }), place({ placeId: 'unlisted', priceLevel: null }),
+      ], source: 'google' }),
+      reconcile: async () => ({ hiddenPlaceIds: [] }),
+      preferences: async () => { reads += 1; return { avoid: ['nightclubs'], priceCeiling: 2 }; },
+    });
+    const out = await port.search(query);
+    assert.deepEqual(out.places.map((p) => p.placeId), ['gp1', 'unlisted']);
+    assert.equal(out.leftOut, 2);
+    await port.search(query);
+    assert.equal(reads, 1, 'saved preferences are read once per request');
+  });
+  it('applies no preferences when they cannot be read', async () => {
+    const port = createBackendPlacesPort({ search: async () => ({ places: [place({ types: ['night_club'] })], source: 'google' }), reconcile: async () => ({ hiddenPlaceIds: [] }), preferences: async () => { throw new Error('db'); } });
+    const out = await port.search(query);
+    assert.equal(out.places.length, 1);
+    assert.equal(out.leftOut, 0);
   });
   it('is unavailable (empty) when search or reconciliation fails', async () => {
     const down = createBackendPlacesPort({ search: async () => { throw new Error('x'); }, reconcile: async () => ({ hiddenPlaceIds: [] }) });
@@ -173,5 +197,29 @@ describe('bytt-si backend final check (planFeasibility.ts)', () => {
     assert.equal(result.checks.find((c) => c.check === 'budget')!.verdict, 'breaks');
     assert.equal(result.verdict, 'breaks');
     assert.ok(codes(plan.notices).length >= 0);
+  });
+});
+
+/** Friday 11:00–17:00 only: closed for the evening. */
+const DAYTIME_FRIDAY: OpeningPeriod[] = [{ open: { day: 5, hour: 11, minute: 0 }, close: { day: 5, hour: 17, minute: 0 } }];
+
+describe('bytt-si backend scheduler (services/itinerary)', () => {
+  const stop = (id: string, over: Record<string, unknown> = {}) => ({
+    id, title: id, needKind: 'dining', placeId: id, latitude: 33.7845, longitude: -84.3838, durationMins: null, fixedStartsAt: null, fixedBy: null, ...over,
+  });
+  it('times stops like plans.itinerary: typical lengths, 45 mph floor plus buffer, and a party start kept', async () => {
+    const schedule = createBackendScheduler({ hoursFor: async () => null });
+    const out = await schedule({ window: { startsAt: '2026-11-06T19:00:00-05:00', endsAt: '2026-11-06T23:30:00-05:00' }, stops: [
+      stop('dinner'),
+      stop('party', { needKind: 'event', placeId: null, latitude: 33.7818, longitude: -84.3825, fixedStartsAt: '2026-11-06T22:00:00-05:00', fixedBy: 'party' }),
+    ] });
+    assertPartial(out[0], { startsAt: '2026-11-07T00:00:00.000Z', endsAt: '2026-11-07T01:30:00.000Z', durationMins: 90, travelMinsBefore: null, fixed: false, closed: false });
+    assertPartial(out[1], { startsAt: '2026-11-07T03:00:00.000Z', durationMins: 120, travelMinsBefore: 1, fixed: true, hoursIssue: null });
+  });
+  it('reports a stop its known hours say is closed', async () => {
+    const schedule = createBackendScheduler({ hoursFor: async (id) => (id === 'bar' ? DAYTIME_FRIDAY : null) });
+    const out = await schedule({ window: { startsAt: '2026-11-06T19:00:00-05:00', endsAt: '2026-11-06T23:30:00-05:00' }, stops: [stop('dinner'), stop('bar', { needKind: 'drinks' })] });
+    assert.equal(out[0].hoursIssue, null);
+    assertPartial(out[1], { closed: true, hoursIssue: 'Closed at 8:40 PM.' });
   });
 });

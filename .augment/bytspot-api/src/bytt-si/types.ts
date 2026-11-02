@@ -140,6 +140,12 @@ export interface ProposedPlan extends PlanConstraints {
   meta: { provider: string; steps: number; toolCalls: string[] };
   /** Who made the final pick per need: the Prime Path ranker, or the model (no ranker). */
   ranking: 'prime_path' | 'model';
+  /**
+   * Where partySize came from: the guest said it, the named group's count
+   * (people skill), or assumed 2. 'assumed' blocks booking (reason
+   * 'party_size_unconfirmed') until the guest confirms the size.
+   */
+  partySizeSource: 'stated' | 'group' | 'assumed';
 }
 
 export interface QuickAnswer {
@@ -188,6 +194,7 @@ export const proposedPlanSchema = planConstraintsSchema.extend({
   }).strict(),
   meta: metaSchema,
   ranking: z.enum(['prime_path', 'model']),
+  partySizeSource: z.enum(['stated', 'group', 'assumed']),
 }).strict();
 export const quickAnswerResultSchema = z.object({
   kind: z.literal('quick_answer'), answer: z.string(), notices: z.array(noticeSchema),

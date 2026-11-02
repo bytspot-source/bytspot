@@ -40,17 +40,15 @@ export function parseMoneyAndParty(message: string): { perPersonCents: number | 
   };
 }
 
-export function normalizeConstraints(parsed: ParsedIntent | null, request: ConciergeRequest): { constraints: PlanConstraints; notices: Notice[] } {
+export function normalizeConstraints(parsed: ParsedIntent | null, request: ConciergeRequest): { constraints: PlanConstraints; notices: Notice[]; perPersonCents: number | null } {
   const notices: Notice[] = [];
   const code = parseMoneyAndParty(request.message);
   const partySize = code.partySize ?? parsed?.partySize ?? null;
   const perPerson = code.perPersonCents ?? (code.totalCents === null ? parsed?.budgetPerPersonCents ?? null : null);
   const total = code.totalCents ?? (code.perPersonCents === null ? parsed?.budgetTotalCents ?? null : null);
   let budgetCents: number | null = total;
-  if (budgetCents === null && perPerson !== null) {
-    if (partySize) budgetCents = perPerson * partySize;
-    else notices.push({ code: 'assumption', message: 'Tell me how many people to check the per-person budget.' });
-  }
+  // With no party size the engine resolves one (named group, else an assumed 2) and sets the total then.
+  if (budgetCents === null && perPerson !== null && partySize) budgetCents = perPerson * partySize;
 
   let latitude = request.latitude ?? null; let longitude = request.longitude ?? null;
   let areaLabel = parsed?.areaLabel ?? request.areaLabel ?? null;
@@ -70,6 +68,7 @@ export function normalizeConstraints(parsed: ParsedIntent | null, request: Conci
   }
   return {
     notices,
+    perPersonCents: perPerson,
     constraints: {
       intent: parsed?.intent ?? 'night out',
       startsAt, endsAt, areaLabel, latitude, longitude, partySize, budgetCents,

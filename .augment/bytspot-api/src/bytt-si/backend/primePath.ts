@@ -77,7 +77,9 @@ function dropReason(c: PrimePathCandidate, ctx: { partySize: number; goingCount:
 export const primePathNeedRanker: NeedRanker = {
   name: 'prime_path',
   rank(input: NeedRankingInput): NeedRanking {
-    const ctx = { partySize: Math.max(1, input.partySize), goingCount: Math.max(1, input.goingCount) };
+    const partySize = Math.max(1, input.partySize);
+    // Never more people committed than are in the party.
+    const ctx = { partySize, goingCount: Math.min(Math.max(1, input.goingCount), partySize) };
     const mapped = input.options.map((option) => ({ option, supply: primePathCandidateFor(option, input.window) }));
     const supply = mapped.flatMap((m) => (m.supply ? [m.supply] : []));
     const ranked = rankPrimePath(supply, ctx);

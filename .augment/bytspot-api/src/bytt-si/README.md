@@ -60,8 +60,11 @@ Per need, the item carries `primePath`:
 `alternates` is the decline auto-promotion order (ranked first). Paths that fail a
 hard filter (seats < party, minimum party > committed, not confirmable) are
 dropped, not demoted, and a `prime_path` notice says why. For an unsaved proposal
-`goingCount` is 1 (only the requester has committed) and `partySize` is the stated
-party, or 1 if none was given. Budget, schedule and the final `planFeasibility`
+`goingCount` is 1 (only the requester has committed, and never more than the
+party). `partySize` is the stated size, else the head count of a group the guest
+named (people skill), else an assumed 2. An assumed size adds the notice "Assumed 2
+people. Change the group size to update.", sets `partySizeSource: 'assumed'` and
+`status: 'needs_changes'`, and blocks booking with reason `party_size_unconfirmed`. Budget, schedule and the final `planFeasibility`
 check still run after ranking.
 
 ## Route

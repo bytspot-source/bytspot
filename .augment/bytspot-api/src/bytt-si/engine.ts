@@ -57,6 +57,8 @@ class Ledger {
   readonly candidates = new Map<string, Candidate>();
   readonly bookables = new Map<string, BookablesOut>();
   readonly discoveredNeeds = new Set<string>();
+  /** Head count of a group the guest named (people skill), including the guest. */
+  groupSize: number | null = null;
   readonly notices: Notice[] = [];
   record(skill: string, input: unknown, output: unknown) {
     if (skill === 'discovery') {
@@ -69,11 +71,31 @@ class Ledger {
       const out = output as BookablesOut;
       this.bookables.set((input as { placeId: string }).placeId, out);
       if (out.status === 'unavailable') this.notices.push({ code: 'provider_unavailable', message: out.message });
-    } else if (['people', 'routing'].includes(skill)) {
+    } else if (skill === 'people') {
+      const out = output as { status: string; message: string | null; partySizeHint: number | null };
+      // Only a named group is a participant count; "my usual circle" is not who is coming.
+      if ((input as { names?: string[] }).names?.length && out.status !== 'unavailable' && out.partySizeHint) this.groupSize = out.partySizeHint;
+      if (out.status === 'unavailable' && out.message) this.notices.push({ code: 'provider_unavailable', message: out.message });
+    } else if (skill === 'routing') {
       const out = output as { status: string; message: string | null };
       if (out.status === 'unavailable' && out.message) this.notices.push({ code: 'provider_unavailable', message: out.message });
     }
   }
+}
+
+export const ASSUMED_PARTY_SIZE = 2;
+export const PARTY_SIZE_UNCONFIRMED = 'party_size_unconfirmed';
+export const ASSUMED_PARTY_NOTICE = 'Assumed 2 people. Change the group size to update.';
+
+/** Fill a missing party size in place and say where it came from. */
+function resolvePartySize(constraints: PlanConstraints, groupSize: number | null, perPersonCents: number | null, notices: Notice[]): ProposedPlan['partySizeSource'] {
+  let source: ProposedPlan['partySizeSource'] = 'stated';
+  if (constraints.partySize === null) {
+    if (groupSize) { constraints.partySize = Math.min(50, groupSize); source = 'group'; }
+    else { constraints.partySize = ASSUMED_PARTY_SIZE; source = 'assumed'; notices.push({ code: 'assumption', message: ASSUMED_PARTY_NOTICE }); }
+  }
+  if (constraints.budgetCents === null && perPersonCents !== null) constraints.budgetCents = perPersonCents * constraints.partySize;
+  return source;
 }
 
 const dedupe = (notices: Notice[]) => notices.filter((n, i) => notices.findIndex((m) => m.code === n.code && m.message === n.message) === i);
@@ -113,13 +135,13 @@ export class ByttSiEngine {
       return {
         ...plan, status: 'needs_changes', feasibility: final,
         notices: [...plan.notices, { code: 'final_check', message: `Plan check: ${broken}` }],
-        actions: { ...plan.actions, book: { available: false, reason: 'Fix the flagged checks first.' } },
+        actions: { ...plan.actions, book: { available: false, reason: plan.partySizeSource === 'assumed' ? PARTY_SIZE_UNCONFIRMED : 'Fix the flagged checks first.' } },
       };
     } catch {
       return {
         ...plan,
         notices: [...plan.notices, { code: 'final_check', message: "We couldn't run the final plan check right now, so booking is paused." }],
-        actions: { ...plan.actions, book: { available: false, reason: 'The final plan check could not run.' } },
+        actions: { ...plan.actions, book: { available: false, reason: plan.partySizeSource === 'assumed' ? PARTY_SIZE_UNCONFIRMED : 'The final plan check could not run.' } },
       };
     }
   }
@@ -141,9 +163,12 @@ export class ByttSiEngine {
       llmUp = false;
       notices.push({ code: 'assistant_unavailable', message: "The concierge assistant is unavailable right now, so I couldn't build options. Nothing here was made up." });
     }
-    const { constraints, notices: parseNotices } = normalizeConstraints(parsed, request);
+    const { constraints, notices: parseNotices, perPersonCents } = normalizeConstraints(parsed, request);
     notices.push(...parseNotices);
-    if (!llmUp) return this.finalizePlan(constraints, [], new Ledger(), { title: 'Your plan', pitch: '', items: [] }, notices, meta);
+    if (!llmUp) {
+      const sizeSource = resolvePartySize(constraints, null, perPersonCents, notices);
+      return this.finalizePlan(constraints, [], new Ledger(), { title: 'Your plan', pitch: '', items: [] }, notices, meta, 'model', sizeSource);
+    }
 
     const context: SkillContext = {
       ports: this.ports, userId: request.userId ?? null, now: request.now,
@@ -190,10 +215,14 @@ export class ByttSiEngine {
 
     if (mode === 'quick') return this.quick(request, constraints, ledger, messages, notices, meta, llmUp);
 
+    // Party size: stated, else the named group's count, else assume 2 (booking blocked until confirmed).
+    const sizeSource = resolvePartySize(constraints, ledger.groupSize, perPersonCents, notices);
+    context.defaults.partySize = constraints.partySize;
+
     // 3a. With a ranker (Prime Path), the ranker makes the final pick per need.
     if (this.ranker && constraints.needs.some((n) => (DISCOVERY_NEEDS as readonly string[]).includes(n))) {
       const suggestions = llmUp ? await this.select(messages, ledger, constraints, null) : null;
-      return this.rankedPlan(this.ranker, request, constraints, ledger, suggestions, notices, meta, context);
+      return this.rankedPlan(this.ranker, request, constraints, ledger, suggestions, notices, meta, context, sizeSource);
     }
 
     // 3. Compose: the model picks candidate ids; code builds and checks the plan.
@@ -224,7 +253,7 @@ export class ByttSiEngine {
         }
       }
     }
-    return this.finalizePlan(constraints, items, ledger, selection, notices, meta);
+    return this.finalizePlan(constraints, items, ledger, selection, notices, meta, 'model', sizeSource);
   }
 
   /**
@@ -235,11 +264,11 @@ export class ByttSiEngine {
    * the ranker featured nothing, and is labeled a suggestion.
    */
   private async rankedPlan(ranker: NeedRanker, request: ConciergeRequest, constraints: PlanConstraints, ledger: Ledger, suggestions: PlanSelection | null,
-    notices: Notice[], meta: ProposedPlan['meta'], context: SkillContext): Promise<ProposedPlan> {
+    notices: Notice[], meta: ProposedPlan['meta'], context: SkillContext, sizeSource: ProposedPlan['partySizeSource']): Promise<ProposedPlan> {
     const window = { startsAt: constraints.startsAt, endsAt: constraints.endsAt };
-    const partySize = constraints.partySize ?? 1;
-    // Only the requester has committed to an unsaved proposal.
-    const goingCount = 1;
+    const partySize = constraints.partySize ?? ASSUMED_PARTY_SIZE;
+    // Only the requester has committed to an unsaved proposal, and never more than the party.
+    const goingCount = Math.min(1, partySize);
     const used = new Set<string>();
     // First stop: travel is known only from a location the guest actually gave (not the default area centre).
     let from: { latitude: number; longitude: number } | null = request.latitude !== undefined && request.longitude !== undefined ? { latitude: request.latitude, longitude: request.longitude } : null;
@@ -339,7 +368,7 @@ export class ByttSiEngine {
       item.primePath = decision.ranking;
       item.needKind = decision.need; // a party found for "nightlife" is the nightlife stop
     }
-    return this.finalizePlan(constraints, items, ledger, selection, notices, meta, 'prime_path');
+    return this.finalizePlan(constraints, items, ledger, selection, notices, meta, 'prime_path', sizeSource);
   }
 
   private async bookablesFor(placeId: string, ledger: Ledger, constraints: PlanConstraints, notices: Notice[], context: SkillContext) {
@@ -471,7 +500,7 @@ export class ByttSiEngine {
     return items;
   }
 
-  private finalizePlan(constraints: PlanConstraints, items: ProposedPlanItem[], ledger: Ledger, selection: PlanSelection, notices: Notice[], meta: ProposedPlan['meta'], ranking: ProposedPlan['ranking'] = 'model'): ProposedPlan {
+  private finalizePlan(constraints: PlanConstraints, items: ProposedPlanItem[], ledger: Ledger, selection: PlanSelection, notices: Notice[], meta: ProposedPlan['meta'], ranking: ProposedPlan['ranking'], sizeSource: ProposedPlan['partySizeSource']): ProposedPlan {
     const window = { startsAt: constraints.startsAt, endsAt: constraints.endsAt };
     const budget = evaluateBudget(items, constraints.partySize, constraints.budgetCents);
     const checks = [
@@ -500,7 +529,8 @@ export class ByttSiEngine {
       notices.push({ code: 'text_replaced', message: "The assistant's description made a claim the data doesn't support, so it was replaced with a plain summary." });
       summary = fallbackSummary;
     }
-    const status: ProposedPlan['status'] = verdict === 'breaks' || !items.length ? 'needs_changes' : 'proposed';
+    const sizeUnconfirmed = sizeSource === 'assumed';
+    const status: ProposedPlan['status'] = verdict === 'breaks' || !items.length || sizeUnconfirmed ? 'needs_changes' : 'proposed';
     const bookable = items.some((i) => i.booking.length > 0);
     return {
       kind: 'plan', status, lifecycle: 'proposed', ...constraints,
@@ -510,10 +540,13 @@ export class ByttSiEngine {
       actions: {
         edit: { available: true },
         share: { available: items.length > 0, via: 'plans.create' },
-        book: { available: status === 'proposed' && bookable, reason: status !== 'proposed' ? 'Fix the flagged checks first.' : bookable ? null : 'No bookable stops; these are walk-in or details only.' },
+        book: sizeUnconfirmed
+          ? { available: false, reason: PARTY_SIZE_UNCONFIRMED }
+          : { available: status === 'proposed' && bookable, reason: status !== 'proposed' ? 'Fix the flagged checks first.' : bookable ? null : 'No bookable stops; these are walk-in or details only.' },
       },
       meta,
       ranking,
+      partySizeSource: sizeSource,
     };
   }
 

@@ -98,6 +98,7 @@ import { safetyRouter } from './safetyRouter';
 import { salesRouter } from './salesRouter';
 import { mapReportsRouter } from './mapReportsRouter';
 import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
+import { venueParking } from '../services/parkingFreshness';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -813,10 +814,7 @@ const venuesRouter = router({
             crowd: v.crowdLevels[0]
               ? { level: v.crowdLevels[0].level, label: v.crowdLevels[0].label, waitMins: v.crowdLevels[0].waitMins, source: v.crowdLevels[0].source, recordedAt: v.crowdLevels[0].recordedAt instanceof Date ? v.crowdLevels[0].recordedAt.toISOString() : String(v.crowdLevels[0].recordedAt) }
               : null,
-            parking: {
-              totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
-              spots: v.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
-            },
+            parking: venueParking(v.parking),
           };
         });
       });
@@ -869,6 +867,7 @@ const venuesRouter = router({
         return found && { ...found, crowdLevels: await recentCrowd(found.id, 24) };
       });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
+      const parking = venueParking(venue.parking);
       return {
         id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
@@ -885,7 +884,9 @@ const venuesRouter = router({
             : null,
           history: venue.crowdLevels.map((cl) => ({ ...cl, recordedAt: cl.recordedAt instanceof Date ? cl.recordedAt.toISOString() : String(cl.recordedAt) })),
         },
-        parking: venue.parking.map((p) => ({ name: p.name, type: p.type, available: p.available, total: p.totalSpots, pricePerHr: p.pricePerHr })),
+        parking: parking.spots,
+        parkingFreshness: parking.freshness,
+        parkingAsOf: parking.asOf,
       };
     }),
 

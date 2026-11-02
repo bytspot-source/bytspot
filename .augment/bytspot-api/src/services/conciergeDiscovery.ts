@@ -86,6 +86,9 @@ export const conciergeProposedPlanSchema = z.object({
   }).strict()).min(1).max(3),
   /** Needs with no place found; the guest can ask local businesses after saving. */
   openNeeds: z.array(z.string().min(1).max(40)).max(3),
+  /** The named area the stops were searched around; the app saves the Plan there instead of the guest's location. */
+  area: z.object({ label: z.string().min(1).max(80), lat: coordinateSchema.shape.lat, lng: coordinateSchema.shape.lng })
+    .strict().nullable().default(null),
 }).strict();
 export type ConciergeProposedPlan = z.infer<typeof conciergeProposedPlanSchema>;
 export const conciergeDiscoverOutput = z.object({
@@ -576,6 +579,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       title: `${title.charAt(0).toUpperCase()}${title.slice(1)}`.slice(0, 80),
       intent: compact(local.messages[0] ?? title).slice(0, 280) || title,
       needs: wanted.needs.map((need) => need.need), partySize: wanted.partySize, stops, openNeeds,
+      area: areaName ? { label: areaName.slice(0, 80), lat: input.location.lat, lng: input.location.lng } : null,
     };
     // "The first one" after a Proposed Plan means its first stop, in stop order.
     if (action) return answerAction(action, cards, caveats, PLAN_REFINEMENTS);

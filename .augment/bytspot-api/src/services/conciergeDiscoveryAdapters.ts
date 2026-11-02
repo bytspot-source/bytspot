@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import OpenAI from 'openai';
+import { cachedWithStale, gpPost } from '../trpc/placesRouter';
 import { config } from '../config';
 import { db } from '../lib/db';
 import {
@@ -169,5 +171,23 @@ export async function conciergeTableBookings(placeIds: string[]): Promise<Map<st
   return links;
 }
 
+/** One Google text search biased to the guest, for the point of an area a Plan request names. */
+export async function conciergePlanArea(name: string, near: { lat: number; lng: number }): Promise<{ lat: number; lng: number } | null> {
+  if (!config.googlePlacesApiKey) return null;
+  const query = createHash('sha256').update(name.toLowerCase().trim()).digest('hex');
+  const key = `gp:concierge-area:v1:${near.lat.toFixed(2)}:${near.lng.toFixed(2)}:${query}`;
+  const { data } = await cachedWithStale(key, 86_400, async () => {
+    const found = await gpPost<{ places?: Array<{ location?: { latitude?: number; longitude?: number } }> }>('/places:searchText', {
+      textQuery: name, maxResultCount: 1,
+      locationBias: { circle: { center: { latitude: near.lat, longitude: near.lng }, radius: 50_000 } },
+    }, 'places.location');
+    const location = found.places?.[0]?.location;
+    return typeof location?.latitude === 'number' && typeof location?.longitude === 'number'
+      ? { lat: location.latitude, lng: location.longitude } : null;
+  });
+  return data;
+}
+
 export const discoverConcierge = createConciergeDiscovery({ venues: conciergeVenues, places: conciergePlacesSearch,
-  reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence, tableBookings: conciergeTableBookings });
+  reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence, tableBookings: conciergeTableBookings,
+  area: conciergePlanArea });

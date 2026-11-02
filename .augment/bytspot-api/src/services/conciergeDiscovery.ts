@@ -145,7 +145,12 @@ export interface ConciergeDependencies {
   reconcile?(places: RecommendPlace[]): Promise<{ venues: RecommendVenue[]; hiddenPlaceIds: string[] }>;
   plan?(context: ConciergePlanContext, options: { signal: AbortSignal }): Promise<unknown>;
   menuEvidence?(search: ConciergeSearch): Promise<MenuEvidenceResult[]>;
+  /** The point Google gives for an area a Plan request names, searched near the guest. Null when not found. */
+  area?(name: string, near: Coordinate): Promise<Coordinate | null>;
 }
+/** A named area further than this from the guest is not trusted (another city's Midtown). */
+export const PLAN_AREA_MAX_METERS = 80_000;
+export const PLAN_AREA_TIMEOUT_MS = 3000;
 
 type Intent = Pick<ConciergeSearch, 'query' | 'rail' | 'mode'>;
 const CATEGORIES: Array<[RegExp, string]> = [
@@ -262,6 +267,26 @@ export function proposedPlanNeeds(messages: string[]): PlanNeedRequest | null {
   const size = PARTY_SIZE.map((pattern) => pattern.exec(text)?.[1]).find(Boolean);
   const partySize = size ? Number(size) : null;
   return { needs, partySize: partySize !== null && partySize >= 1 && partySize <= 20 ? partySize : null };
+}
+
+const AREA_STOP = /^(?:with|without|but|and|under|open|for|tonight|today|tomorrow|this|then|after|before|not|no|please)$/i;
+
+/** The area a Plan request names ("in Midtown", "near Piedmont Park", "downtown"), or null. Times never count. */
+export function planArea(messages: string[]): string | null {
+  for (const raw of [...messages].reverse()) {
+    const text = nearbyText(raw);
+    const phrase = text.match(/\b(?:in|near|around)\s+(?:the\s+)?([\p{L}][\p{L}\p{N} &'’.-]*)/iu)?.[1];
+    if (phrase) {
+      const kept: string[] = [];
+      for (const word of phrase.split(/\s+/)) { if (AREA_STOP.test(word)) break; kept.push(word); }
+      const name = compact(kept.join(' ').replace(/[.'’-]+$/, ''));
+      if (name && name.length <= 60 && !/^(?:me|here|town|the city|my area)$/i.test(name)
+        && !/^(?:an?|few|the next)\b|\b(?:minutes?|mins?|hours?|hrs?|bit|while)\b/i.test(name)) return name;
+    }
+    const bare = text.match(/\b(?:downtown|midtown|uptown)\b/i)?.[0] ?? BARE_CITY.exec(text)?.[0];
+    if (bare) return bare;
+  }
+  return null;
 }
 
 function listWords(items: string[]): string {
@@ -485,13 +510,32 @@ function result(status: ConciergeResponse['status'], reply: string, cards: Conci
 
 const PLAN_REFINEMENTS = ['Cheaper', 'Quieter', 'Closer'];
 
+/** One approvable proposal for a shown card, or a reply that names why there is none. */
+function answerAction(requested: ConciergeActionRequest, cards: ConciergeCard[], caveats: string, refinements: string[]): ConciergeResponse {
+  if (requested.type === 'unsupported') return result('ready', `Concierge cannot do that for you. ${SUPPORTED_ACTIONS} ${caveats}`, cards, refinements);
+  if (requested.type === 'ride') return result('ready', `${RIDE_REPLY} ${SUPPORTED_ACTIONS} ${caveats}`, cards,
+    cards.map((_, index) => ACTION_CHOICES.add_to_plan(['first', 'second', 'third'][index])));
+  const type = requested.type;
+  const target = resolveActionTarget(requested.target, cards);
+  const choices = cards.map((_, index) => ACTION_CHOICES[type](['first', 'second', 'third'][index]));
+  if (target === 'ambiguous' || target === null) return result('ready',
+    `${target === null ? 'I could not match that to a place shown.' : 'Which place?'} Say “first”, “second” or “third”. ${caveats}`, cards, choices);
+  if (!target.actions.some((a) => a.type === type)) {
+    return result('ready', `${missingActionReply(type, target)} ${SUPPORTED_ACTIONS} ${caveats}`, cards, refinements);
+  }
+  return result('ready', `${actionReply(type, target)} ${caveats}`, cards, refinements, { type, cardId: target.id });
+}
+
 export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
   const discoverOne = createConciergeSearch(dependencies);
   // Each stop is a fixed category search, so no planner call is needed.
   const searchStop = createConciergeSearch({ ...dependencies, plan: undefined });
 
   /** One search per need, the nearest unused card for each, offered as a Plan. Nothing is saved here. */
-  async function proposePlan(input: ConciergeInput & { location: Coordinate }, local: LocalPlan, wanted: PlanNeedRequest): Promise<ConciergeResponse> {
+  async function proposePlan(input: ConciergeInput & { location: Coordinate }, local: LocalPlan, wanted: PlanNeedRequest,
+    areaName: string | null = null): Promise<ConciergeResponse> {
+    const { action } = local;
+    const where = areaName ? `near ${areaName}` : 'nearby';
     const said = local.messages.join(' ');
     const modifiers = [
       local.cheap ? 'cheap' : '', local.quiet ? 'quiet' : '', local.openNow ? 'open now' : '',
@@ -515,7 +559,8 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     });
     const missing = wanted.needs.filter((need) => openNeeds.includes(need.need)).map((need) => need.word);
     const caveats = [
-      'Nothing is saved until you choose Make it a Plan. Stops are the nearest matching listings: details only, availability is not guaranteed, and no times are set.',
+      action ? 'These are the stops from your Proposed Plan: details only, availability is not guaranteed.'
+        : 'Nothing is saved until you choose Make it a Plan. Stops are the nearest matching listings: details only, availability is not guaranteed, and no times are set.',
       local.cheap ? 'Places Google lists above $$ are left out; prices are not verified.' : '',
       local.quiet ? 'Bytspot has no noise data, so quiet is not verified.' : '',
       'Search terms guide discovery, but listing matches do not verify every requested preference.',
@@ -523,7 +568,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     if (!stops.length) {
       const failed = results.some((r) => r.status === 'unavailable');
       return result(failed ? 'unavailable' : 'empty',
-        `${failed ? 'I could not verify matching places nearby. Please try again.' : `I could not find places nearby for ${listWords(missing)}.`} ${caveats}`,
+        `${failed ? `I could not verify matching places ${where}. Please try again.` : `I could not find places ${where} for ${listWords(missing)}.`} ${caveats}`,
         [], ['Coffee nearby', 'Restaurants nearby']);
     }
     const title = listWords(wanted.needs.map((need) => need.word));
@@ -532,17 +577,34 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       intent: compact(local.messages[0] ?? title).slice(0, 280) || title,
       needs: wanted.needs.map((need) => need.need), partySize: wanted.partySize, stops, openNeeds,
     };
-    const gaps = missing.length ? ` I could not find a place for ${listWords(missing)} nearby; after you save the Plan you can ask local businesses.` : '';
-    return result('ready', `Proposed Plan: ${named.join(', then ')}.${gaps} ${caveats}`, cards, PLAN_REFINEMENTS, null, plan);
+    // "The first one" after a Proposed Plan means its first stop, in stop order.
+    if (action) return answerAction(action, cards, caveats, PLAN_REFINEMENTS);
+    const gaps = missing.length ? ` I could not find a place for ${listWords(missing)} ${where}; after you save the Plan you can ask local businesses.` : '';
+    const area = areaName ? ` Searched near ${areaName} as Google places it; distances are from there.` : '';
+    return result('ready', `Proposed Plan: ${named.join(', then ')}.${gaps}${area} ${caveats}`, cards, PLAN_REFINEMENTS, null, plan);
+  }
+
+  async function resolveArea(name: string, near: Coordinate): Promise<Coordinate | null> {
+    if (!dependencies.area || !conciergeSearchSchema.shape.query.safeParse(name).success) return null;
+    try {
+      const point = coordinateSchema.safeParse(await withDeadline(Promise.resolve().then(() => dependencies.area!(name, near)), PLAN_AREA_TIMEOUT_MS));
+      return point.success && withinSearch(near, point.data, PLAN_AREA_MAX_METERS) ? point.data : null;
+    } catch { return null; }
   }
 
   return async (raw: ConciergeInput): Promise<ConciergeResponse> => {
     const input = conciergeDiscoverInput.parse(raw);
     if (!input.location) return discoverOne(input);
     const local = planConcierge(input);
-    if (local.action || local.needsLocation || local.blocked) return discoverOne(input);
+    if (local.blocked) return discoverOne(input);
+    // An act on shown results resolves against the Plan's stops when the earlier request was a Plan.
     const wanted = proposedPlanNeeds(local.messages);
-    return wanted ? proposePlan({ ...input, location: input.location }, local, wanted) : discoverOne(input);
+    if (!wanted) return discoverOne(input);
+    if (!local.needsLocation) return proposePlan({ ...input, location: input.location }, local, wanted);
+    // A Plan in a named area is searched around that area's point, only when Google finds it near the guest.
+    const areaName = planArea(local.messages);
+    const point = areaName ? await resolveArea(areaName, input.location) : null;
+    return point && areaName ? proposePlan({ ...input, location: point }, local, wanted, areaName) : discoverOne(input);
   };
 }
 
@@ -686,21 +748,7 @@ function createConciergeSearch(dependencies: ConciergeDependencies) {
       `${failed || stale || menuFailed ? 'I could not verify matching places nearby. Please try again.' : `No matching places were found within ${search.radius} m of your supplied location.`} ${caveats}`,
       [], ['Coffee nearby', 'Restaurants nearby']);
     const refinements = ['Closer', 'Coffee nearby', 'Restaurants nearby'];
-    const requested = plan.action;
-    if (requested) {
-      if (requested.type === 'unsupported') return result('ready', `Concierge cannot do that for you. ${SUPPORTED_ACTIONS} ${caveats}`, selected, refinements);
-      if (requested.type === 'ride') return result('ready', `${RIDE_REPLY} ${SUPPORTED_ACTIONS} ${caveats}`, selected,
-        selected.map((_, index) => ACTION_CHOICES.add_to_plan(['first', 'second', 'third'][index])));
-      const target = resolveActionTarget(requested.target, selected);
-      const choices = selected.map((_, index) => ACTION_CHOICES[requested.type as ConciergeActionType](['first', 'second', 'third'][index]));
-      if (target === 'ambiguous' || target === null) return result('ready',
-        `${target === null ? 'I could not match that to a place shown.' : 'Which place?'} Say “first”, “second” or “third”. ${caveats}`, selected, choices);
-      if (!target.actions.some((a) => a.type === requested.type)) {
-        return result('ready', `${missingActionReply(requested.type, target)} ${SUPPORTED_ACTIONS} ${caveats}`, selected, refinements);
-      }
-      return result('ready', `${actionReply(requested.type, target)} ${caveats}`, selected, refinements,
-        { type: requested.type, cardId: target.id });
-    }
+    if (plan.action) return answerAction(plan.action, selected, caveats, refinements);
     return result('ready', `Here are nearby place listings within ${search.radius} m of your supplied location. Details only; availability is not guaranteed. ${caveats}`,
       selected, refinements);
   };

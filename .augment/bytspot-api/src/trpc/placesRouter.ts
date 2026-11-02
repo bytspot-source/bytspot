@@ -13,6 +13,7 @@ import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
 import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
 import { withLatestCrowd } from '../services/latestCrowd';
+import { normalizePreferences, preferenceFilterInput } from '../services/preferenceFit';
 import {
   RECOMMEND_POOLS, rankRecommendations, radiusForWalk, recommendCell, searchRadiusFor, vibeProfile,
   type RecommendPlace, type RecommendPool, type RecommendVenue,
@@ -338,6 +339,8 @@ export const placesRouter = router({
       group: z.string().max(40).optional(),
       /** The guest's local hour, for intents with no place type of their own. */
       hour: z.number().int().min(0).max(23).optional(),
+      /** Saved avoid list and price ceiling, sent by the client. */
+      preferences: preferenceFilterInput.optional(),
     }))
     .query(async ({ input }) => {
       const profile = vibeProfile(input.vibe, input.hour);
@@ -366,7 +369,8 @@ export const placesRouter = router({
         placesSource = results.every((r) => !r.ok) ? 'unavailable' : results.some((r) => r.stale) ? 'google-stale' : 'google';
       }
       const venues = await venuesPromise;
-      return { ...rankRecommendations(input, pools, venues), placesSource };
+      const preferences = normalizePreferences(input.preferences);
+      return { ...rankRecommendations({ ...input, preferences }, pools, venues), placesSource };
     }),
 
   nearbySearch: publicProcedure

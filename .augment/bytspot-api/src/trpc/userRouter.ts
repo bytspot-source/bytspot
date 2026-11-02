@@ -6,6 +6,7 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from './trpc';
 import { db } from '../lib/db';
+import { preferenceFilterInput } from '../services/preferenceFit';
 import {
   DELETION_GRACE_DAYS,
   isWithinGracePeriod,
@@ -184,7 +185,7 @@ const preferencesRouter = router({
   /** Get user preferences */
   get: protectedProcedure.query(async ({ ctx }) => {
     const pref = await db.userPreference.findUnique({ where: { userId: ctx.user.userId } });
-    return pref ?? { interests: [], vibes: [], cuisines: [], parking: null, behavior: null };
+    return pref ?? { interests: [], vibes: [], cuisines: [], parking: null, behavior: null, avoid: [], priceCeiling: null };
   }),
 
   /** Update user preferences */
@@ -194,12 +195,15 @@ const preferencesRouter = router({
       vibes: z.array(z.string()).optional(),
       cuisines: z.array(z.string()).optional(),
       parking: z.object({ covered: z.boolean().optional(), evCharging: z.boolean().optional(), security: z.enum(['basic', 'standard', 'premium']).optional() }).optional(),
+      ...preferenceFilterInput.shape,
     }))
     .mutation(async ({ ctx, input }) => {
+      const { avoid, ...rest } = input;
+      const data = { ...rest, ...(avoid ? { avoid: [...new Set(avoid)] } : {}) };
       return db.userPreference.upsert({
         where: { userId: ctx.user.userId },
-        create: { userId: ctx.user.userId, ...input },
-        update: input,
+        create: { userId: ctx.user.userId, ...data },
+        update: data,
       });
     }),
 

@@ -203,6 +203,25 @@ test('A Bytspot venue and its Google listing are one recommendation', () => {
   assert.ok(live.forYou[0].reasons.includes('Busy right now'));
 });
 
+test('Saved avoids and price ceiling leave places out; an unlisted price is kept and said', () => {
+  const pools = {
+    drink: [
+      place({ placeId: 'club', types: ['night_club', 'bar'], primaryType: 'night_club' }),
+      place({ placeId: 'pricey', types: ['wine_bar', 'bar'], primaryType: 'wine_bar', priceLevel: 'PRICE_LEVEL_VERY_EXPENSIVE' }),
+      place({ placeId: 'fits', types: ['bar'], primaryType: 'bar', priceLevel: 'PRICE_LEVEL_MODERATE' }),
+      place({ placeId: 'unlisted', types: ['pub', 'bar'], primaryType: 'pub', priceLevel: null }),
+    ],
+  };
+  assert.equal(rankRecommendations({ ...HERE, vibe: 'drinks' }, pools, []).forYou.length, 4);
+  const r = rankRecommendations({ ...HERE, vibe: 'drinks', preferences: { avoid: ['nightclubs'], priceCeiling: 2 } }, pools, []);
+  assert.deepEqual(r.forYou.map((i) => i.id), ['gp:fits', 'gp:unlisted']);
+  assert.ok(r.forYou[0].reasons.includes('$$ · within your price'));
+  assert.ok(r.forYou[1].reasons.includes('Price not listed'));
+  const venueOnly = rankRecommendations({ ...HERE, vibe: 'drinks', preferences: { avoid: ['nightclubs'], priceCeiling: null } }, {},
+    [bytspotVenue({ id: 'club-venue', category: 'club' }), bytspotVenue({ id: 'bar-venue', category: 'bar', lat: HERE.lat + 0.0012 })]);
+  assert.deepEqual(venueOnly.forYou.map((i) => i.id), ['bar-venue']);
+});
+
 test('Explore lists rated attractions and skips unrated or untyped listings', () => {
   const r = rankRecommendations({ ...HERE, vibe: 'food' }, {
     eat: [place({ placeId: 'rest1' })],

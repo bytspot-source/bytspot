@@ -127,7 +127,10 @@ test('input validation rejects malformed, oversized, non-finite and client-suppl
     { ...valid, location: { lat: NaN, lng: 0 } }, { ...valid, location: { lat: Infinity, lng: 0 } },
     { ...valid, location: { lat: 0 } }, { ...valid, location: null },
     { ...valid, venues: [venue()] }, { ...valid, quizAnswers: { vibe: 'x'.repeat(41) } },
+    { ...valid, preferences: { avoid: ['loud'] } }, { ...valid, preferences: { priceCeiling: 5 } },
+    { ...valid, preferences: { priceCeiling: 0 } }, { ...valid, preferences: { avoid: [], extra: true } },
   ]) assert.equal(conciergeDiscoverInput.safeParse(bad).success, false);
+  assert.equal(conciergeDiscoverInput.safeParse({ ...valid, preferences: { avoid: ['nightclubs', 'busy'], priceCeiling: null } }).success, true);
   assert.equal(conciergeDiscoverInput.safeParse(input('x'.repeat(2000))).success, true);
   assert.equal(conciergeDiscoverInput.safeParse({ ...valid, location: { lat: -90, lng: 180 } }).success, true);
 });
@@ -280,7 +283,8 @@ test('empty, absent provider, outages, partial success and stale are distinct an
 test('budget and menu refinements never assert unverified prices, quality or dietary safety', async () => {
   const response = await service({ places: async () => ({ places: [place()], source: 'google' }) })(input('coffee', 'cheaper', 'vegan menu'));
   assert.equal(response.status, 'ready');
-  assert.match(response.reply, /cannot verify prices/);
+  assert.match(response.reply, /prices are not verified/);
+  assert.ok(response.cards[0].reasons.includes('Price not listed'));
   assert.match(response.reply, /dietary suitability are not verified/);
   assert.equal('price' in response.cards[0], false);
 });
@@ -486,7 +490,7 @@ test('planner timeout aborts and falls back once without losing constraints or e
   assert.equal(searches, 1);
   assert.equal(signals[0]?.aborted, true);
   assert.equal(response.status, 'ready');
-  assert.match(response.reply, /cannot verify prices/);
+  assert.match(response.reply, /prices are not verified/);
   assert.match(response.reply, /dietary suitability/);
   for (const plan of [async () => null, async () => { throw new Error('PRIVATE_PROVIDER_ERROR'); }]) {
     const result = await service({ plan })(input('Find dumplings near me'));
@@ -673,4 +677,51 @@ test('ride requests point to Plan handoffs and never propose a ride', async () =
     assert.match(response.reply, /^Concierge cannot book a ride\. After you add a place to a Plan, the Plan shows Uber and Lyft links/);
     assert.deepEqual(response.refinements, ['Add the first one to my Plan', 'Add the second one to my Plan', 'Add the third one to my Plan']);
   }
+});
+
+test('cheap keeps $ and $$, drops a known higher price, and marks an unlisted one', async () => {
+  const places = [
+    place({ placeId: 'pricey', name: 'Pricey Cafe', priceLevel: 'PRICE_LEVEL_EXPENSIVE' }),
+    place({ placeId: 'cheap', name: 'Cheap Cafe', lat: 40.0011, priceLevel: 'PRICE_LEVEL_INEXPENSIVE' }),
+    place({ placeId: 'unlisted', name: 'Unlisted Cafe', lat: 40.0012 }),
+  ];
+  const response = await service({ places: async () => ({ places, source: 'google' }) })(input('cheap coffee nearby'));
+  assert.deepEqual(response.cards.map((card) => card.id), ['gp:cheap', 'gp:unlisted']);
+  assert.ok(response.cards[0].reasons.includes('$ · within your price'));
+  assert.ok(response.cards[1].reasons.includes('Price not listed'));
+  assert.match(response.reply, /above \$\$ are left out/);
+  // A dollar amount cannot be mapped onto Google's levels, so it filters nothing.
+  const amount = await service({ places: async () => ({ places, source: 'google' }) })(input('coffee under $10 nearby'));
+  assert.equal(amount.cards.length, 3);
+  assert.match(amount.reply, /cannot verify prices/);
+});
+
+test('quiet and saved avoids leave out matching listing types, and say quiet is not verified', async () => {
+  const places = [
+    place({ placeId: 'club', name: 'Loud Club', types: ['night_club', 'bar'], primaryType: 'night_club' }),
+    place({ placeId: 'sports', name: 'Game Bar', lat: 40.0011, types: ['sports_bar', 'bar'], primaryType: 'sports_bar' }),
+    place({ placeId: 'wine', name: 'Wine Room', lat: 40.0012, types: ['wine_bar', 'bar'], primaryType: 'wine_bar' }),
+  ];
+  const quiet = await service({ places: async () => ({ places, source: 'google' }) })(input('bars nearby', 'quieter'));
+  assert.deepEqual(quiet.cards.map((card) => card.id), ['gp:wine']);
+  assert.match(quiet.reply, /no noise data/);
+  assert.match(quiet.reply, /\(2 hidden\)/);
+  const saved = await service({ places: async () => ({ places, source: 'google' }) })({ ...input('bars nearby'), preferences: { avoid: ['bars'] } });
+  assert.equal(saved.status, 'empty');
+  assert.equal(saved.cards.length, 0);
+  // A new request drops an earlier quiet; saved preferences still apply.
+  const fresh = planConcierge(input('bars nearby', 'quieter', 'coffee nearby'));
+  assert.equal(fresh.quiet, false);
+  assert.equal(planConcierge(input('coffee nearby', 'cheaper')).cheap, true);
+});
+
+test('a saved busy avoid uses the venue crowd reading; a saved ceiling merges with cheap as the lower one', async () => {
+  const busy = venue({ id: 'busy-venue', googlePlaceId: null, crowd: { level: 3, label: 'Busy', source: 'typical' } });
+  const calm = venue({ id: 'calm-venue', name: 'Calm Coffee', googlePlaceId: null, lat: 40.0011, crowd: { level: 1, label: 'Chill', source: 'typical' } });
+  const response = await service({ venues: async () => [busy, calm] })({ ...input('coffee nearby'), preferences: { avoid: ['busy'] } });
+  assert.deepEqual(response.cards.map((card) => card.id), ['calm-venue']);
+  const places = [place({ placeId: 'moderate', priceLevel: 'PRICE_LEVEL_MODERATE' })];
+  const strict = await service({ places: async () => ({ places, source: 'google' }) })({ ...input('cheap coffee nearby'), preferences: { priceCeiling: 1 } });
+  assert.equal(strict.cards.length, 0);
+  assert.match(strict.reply, /above \$ are left out/);
 });

@@ -13,9 +13,10 @@ import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, fi
 import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
+import { buildItinerary, type ItineraryStopInput, type TimeSource } from '../services/itinerary';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
-import { resolvePlaceLocation } from './placesRouter';
+import { resolvePlaceHours, resolvePlaceLocation } from './placesRouter';
 import { dispatchPlanChanged, dispatchPlanDecided, dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined, type PlanChange } from '../services/planAlerts';
 
 /**
@@ -191,6 +192,14 @@ export function usePlaceLocationResolverForTest(resolver: typeof resolvePlaceLoc
   return () => { placeLocationResolver = previous; };
 }
 
+let placeHoursResolver = resolvePlaceHours;
+/** Tests only: swap the Google opening-hours lookup. Returns a restore function. */
+export function usePlaceHoursResolverForTest(resolver: typeof resolvePlaceHours): () => void {
+  const previous = placeHoursResolver;
+  placeHoursResolver = resolver;
+  return () => { placeHoursResolver = previous; };
+}
+
 /**
  * The point a ride app is sent to, or null when the item has none it may
  * share. A Party gives one only under the rule its share link obeys: the host
@@ -253,6 +262,73 @@ const planInclude = {
 } satisfies Prisma.PlanInclude;
 
 type LoadedPlan = Prisma.PlanGetPayload<{ include: typeof planInclude }>;
+
+/** A place reference's point while Google's 30-day storage window is open. */
+function placeWithinTtl(item: DestinationSources, now: Date): { lat: number; lng: number } | null {
+  if (item.placeLat == null || item.placeLng == null || !item.placeResolvedAt) return null;
+  const age = now.getTime() - item.placeResolvedAt.getTime();
+  return age >= 0 && age < PLACE_DESTINATION_TTL_MS ? { lat: item.placeLat, lng: item.placeLng } : null;
+}
+
+/**
+ * The supply facts behind each live item, read once for both the Quick check
+ * and the timeline so the two never judge different facts.
+ */
+async function planLegSources(live: LoadedPlan['items'], now: Date = new Date()): Promise<PlanLegSource[]> {
+  const partyIds = [...new Set(live.flatMap((item) => (item.partyId ? [item.partyId] : [])))];
+  const offerIds = [...new Set(live.flatMap((item) => (item.offerId ? [item.offerId] : [])))];
+  const coffeeSpotIds = [...new Set(live.flatMap((item) =>
+    [item.coffeeSpotId, item.coffeeReservation?.coffeeSpotId].filter((id): id is string => !!id)))];
+
+  const [parties, occupancy, offers, coffeeSpots] = await Promise.all([
+    partyIds.length === 0 ? [] : db.party.findMany({
+      where: { id: { in: partyIds } },
+      select: { id: true, startsAt: true, endsAt: true, lat: true, lng: true, capacity: true },
+    }),
+    partyIds.length === 0 ? [] : db.partyGuest.groupBy({
+      by: ['partyId'], where: { partyId: { in: partyIds }, accessGranted: true }, _count: { _all: true },
+    }),
+    offerIds.length === 0 ? [] : db.offer.findMany({
+      where: { id: { in: offerIds } },
+      // capacity comes from the offer, never from its Bookable snapshot.
+      select: { id: true, startsAt: true, durationMins: true, priceCents: true, capacity: true },
+    }),
+    coffeeSpotIds.length === 0 ? [] : db.coffeeSpot.findMany({
+      where: { id: { in: coffeeSpotIds } }, select: { id: true, latitude: true, longitude: true },
+    }),
+  ]);
+
+  const partyMap = new Map(parties.map((party) => [party.id, party]));
+  const grantedMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
+  const offerMap = new Map(offers.map((offer) => [offer.id, offer]));
+  const spotMap = new Map(coffeeSpots.map((spot) => [spot.id, spot]));
+
+  const sources: PlanLegSource[] = live.map((item) => {
+    const party = item.partyId ? partyMap.get(item.partyId) : undefined;
+    const spotId = item.coffeeSpotId ?? item.coffeeReservation?.coffeeSpotId ?? null;
+    const spot = spotId ? spotMap.get(spotId) : undefined;
+    return {
+      id: item.id,
+      position: item.position,
+      createdAt: item.createdAt,
+      needKind: item.needKind,
+      title: item.title,
+      // Seats are read Live — capacity minus guests already granted — so a
+      // room that filled up since it was attached reports what is actually
+      // left rather than what it once held.
+      party: party ? {
+        startsAt: party.startsAt, endsAt: party.endsAt, lat: party.lat, lng: party.lng,
+        capacity: party.capacity === null ? null
+          : Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
+      } : null,
+      offer: (item.offerId && offerMap.get(item.offerId)) || null,
+      coffeeSpot: spot ? { latitude: spot.latitude, longitude: spot.longitude } : null,
+      place: placeWithinTtl(item, now),
+      guestBookedFor: item.guestBookedAt ? item.guestBookedFor : null,
+    };
+  });
+  return sources;
+}
 
 /** The invite-link credential. 192 bits of randomness, url-safe for the path. */
 function newJoinToken(): string {
@@ -375,6 +451,8 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
  *  Nothing else caps that count, so this is the ceiling the endpoint refuses
  *  above. Far beyond any real evening. */
 const FEASIBILITY_MAX_ITEMS = 100;
+/** Google lookups one timeline may cause; stops past this show hours as unknown. */
+const ITINERARY_MAX_HOURS_LOOKUPS = 10;
 
 /** Settle items a previous deploy left unpositioned. Runs in the caller's
  *  transaction: a half-renumbered Plan is worse than an unnumbered one. */
@@ -872,61 +950,47 @@ export const planRouter = router({
         });
       }
 
-      const partyIds = [...new Set(live.flatMap((item) => (item.partyId ? [item.partyId] : [])))];
-      const offerIds = [...new Set(live.flatMap((item) => (item.offerId ? [item.offerId] : [])))];
-      const coffeeSpotIds = [...new Set(live.flatMap((item) =>
-        [item.coffeeSpotId, item.coffeeReservation?.coffeeSpotId].filter((id): id is string => !!id)))];
-
-      const [parties, occupancy, offers, coffeeSpots] = await Promise.all([
-        partyIds.length === 0 ? [] : db.party.findMany({
-          where: { id: { in: partyIds } },
-          select: { id: true, startsAt: true, endsAt: true, lat: true, lng: true, capacity: true },
-        }),
-        partyIds.length === 0 ? [] : db.partyGuest.groupBy({
-          by: ['partyId'], where: { partyId: { in: partyIds }, accessGranted: true }, _count: { _all: true },
-        }),
-        offerIds.length === 0 ? [] : db.offer.findMany({
-          where: { id: { in: offerIds } },
-          // capacity comes from the offer, never from its Bookable snapshot.
-          select: { id: true, startsAt: true, durationMins: true, priceCents: true, capacity: true },
-        }),
-        coffeeSpotIds.length === 0 ? [] : db.coffeeSpot.findMany({
-          where: { id: { in: coffeeSpotIds } }, select: { id: true, latitude: true, longitude: true },
-        }),
-      ]);
-
-      const partyMap = new Map(parties.map((party) => [party.id, party]));
-      const grantedMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
-      const offerMap = new Map(offers.map((offer) => [offer.id, offer]));
-      const spotMap = new Map(coffeeSpots.map((spot) => [spot.id, spot]));
-
-      const sources: PlanLegSource[] = live.map((item) => {
-        const party = item.partyId ? partyMap.get(item.partyId) : undefined;
-        const spotId = item.coffeeSpotId ?? item.coffeeReservation?.coffeeSpotId ?? null;
-        const spot = spotId ? spotMap.get(spotId) : undefined;
-        return {
-          id: item.id,
-          position: item.position,
-          createdAt: item.createdAt,
-          needKind: item.needKind,
-          title: item.title,
-          // Seats are read Live — capacity minus guests already granted — so a
-          // room that filled up since it was attached reports what is actually
-          // left rather than what it once held.
-          party: party ? {
-            startsAt: party.startsAt, endsAt: party.endsAt, lat: party.lat, lng: party.lng,
-            capacity: party.capacity === null ? null
-              : Math.max(0, party.capacity - (grantedMap.get(party.id) ?? 0)),
-          } : null,
-          offer: (item.offerId && offerMap.get(item.offerId)) || null,
-          coffeeSpot: spot ? { latitude: spot.latitude, longitude: spot.longitude } : null,
-        };
-      });
+      const sources = await planLegSources(live);
 
       return planFeasibility(legsForPlan(sources), {
         startsAt: plan.startsAt, endsAt: plan.endsAt,
         partySize: plan.partySize, budgetCents: plan.budgetCents,
       });
+    }),
+
+  /**
+   * A suggested timeline in the Plan's own order: arrive and leave times per
+   * stop, each labelled set or estimated, with opening hours where Google
+   * lists them. It writes nothing; the Quick check stays the judge of facts.
+   */
+  itinerary: protectedProcedure
+    .input(z.object({ planId: z.string().min(1) }))
+    .query(async ({ ctx, input }) => {
+      const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
+      const live = plan.items.filter((item) => item.status !== 'cancelled');
+      if (live.length > FEASIBILITY_MAX_ITEMS) {
+        throw new TRPCError({
+          code: 'PAYLOAD_TOO_LARGE',
+          message: `This Plan holds ${live.length} items. A timeline is built for up to ${FEASIBILITY_MAX_ITEMS}.`,
+        });
+      }
+      const sources = await planLegSources(live);
+      const placeIds = [...new Set(live.flatMap((item) =>
+        item.placeId && !item.partyId && !item.offerId ? [item.placeId] : []))].slice(0, ITINERARY_MAX_HOURS_LOOKUPS);
+      const hours = new Map(await Promise.all(placeIds.map(async (placeId) =>
+        [placeId, await placeHoursResolver(placeId)] as const)));
+      const itemById = new Map(live.map((item) => [item.id, item]));
+      const sourceById = new Map(sources.map((source) => [source.id, source]));
+
+      const stops: ItineraryStopInput[] = legsForPlan(sources).map((leg) => {
+        const source = sourceById.get(leg.itemId)!;
+        const item = itemById.get(leg.itemId)!;
+        const timeSource: TimeSource | null = source.offer?.startsAt ? 'offer'
+          : source.party?.startsAt ? 'party'
+            : source.guestBookedFor ? 'guestBooking' : null;
+        return { leg, timeSource, hours: item.placeId ? hours.get(item.placeId) ?? null : null };
+      });
+      return buildItinerary(stops, { startsAt: plan.startsAt, endsAt: plan.endsAt });
     }),
 
   /**

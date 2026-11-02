@@ -46,6 +46,22 @@ test('a reservation borrows the place of the spot it holds', () => {
   assert.equal(leg.startsAt, null, 'a hold window is not a start time');
 });
 
+test('a place stop states where it is, and a reported booking states when', () => {
+  const leg = legForItem(source({ place: { lat: 33.781, lng: -84.386 }, guestBookedFor: at('2026-10-01T23:30:00Z') }));
+  assert.equal(leg.latitude, 33.781);
+  assert.equal(leg.longitude, -84.386);
+  assert.deepEqual(leg.startsAt, at('2026-10-01T23:30:00Z'));
+  assert.equal(leg.durationMins, null, 'a booking time does not state how long dinner runs');
+});
+
+test('a reported booking never overrides a time the supply states', () => {
+  const leg = legForItem(source({
+    offer: { startsAt: at('2026-10-01T20:00:00Z'), durationMins: 60, priceCents: 0, capacity: 4 },
+    guestBookedFor: at('2026-10-01T23:30:00Z'),
+  }));
+  assert.deepEqual(leg.startsAt, at('2026-10-01T20:00:00Z'));
+});
+
 test('a won offer outranks the projection behind it', () => {
   const leg = legForItem(source({
     offer: { startsAt: at('2026-10-01T20:00:00Z'), durationMins: 90, priceCents: 4500, capacity: 4, lat: 33.75, lng: -84.39 },

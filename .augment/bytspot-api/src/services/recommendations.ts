@@ -7,6 +7,7 @@
  * type, rating, opening state, distance, crowd reading). Nothing is invented.
  */
 import { isLiveOccupancySource } from './typicalOccupancy';
+import { NO_PREFERENCES, preferenceFit, type PreferenceFilter } from './preferenceFit';
 
 /** Google place groups fetched separately, so one category cannot crowd out another. */
 export const RECOMMEND_POOLS = {
@@ -120,6 +121,8 @@ export interface RecommendItem {
 export interface RecommendInput {
   lat: number; lng: number;
   vibe?: string; walk?: string; group?: string; hour?: number;
+  /** Saved avoid list and price ceiling. Avoided or over-ceiling places are left out. */
+  preferences?: PreferenceFilter;
 }
 
 const WALK_METERS_PER_MINUTE = 80;
@@ -196,8 +199,13 @@ export function scoreCandidate(
   const primary = primaryTypeOf(c);
   const crowd = c.venue?.crowd ?? null;
   const isOpen = c.place?.isOpen ?? null;
+  const fit = preferenceFit(
+    { types, primaryType: primary, category: c.venue?.category, priceLevel: c.place?.priceLevel, crowd },
+    input.preferences ?? NO_PREFERENCES,
+  );
+  if (!fit.keep) return null;
 
-  let score = 0;
+  let score = fit.scoreDelta;
   const match = vibeMatch(c, profile);
   score += match;
   if (rating !== null && count > 0) score += (bayesRating(rating, count) - 4.0) * 6;
@@ -227,6 +235,7 @@ export function scoreCandidate(
 
   const reasons: string[] = [];
   if (match > 0 && profile.key !== 'explore') reasons.push(profile.key === 'general' ? `Good for ${profile.label}` : `Fits ${profile.label}`);
+  if (fit.priceReason) reasons.push(fit.priceReason);
   if (gem) reasons.push('Highly rated, less known');
   else if (rating !== null && count >= 10) reasons.push(`${rating.toFixed(1)}★ · ${count.toLocaleString('en-US')} reviews`);
   const crowdText = crowdReason(crowd);

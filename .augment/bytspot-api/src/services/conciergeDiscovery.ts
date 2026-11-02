@@ -5,6 +5,9 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import { distanceMeters, radiusForWalk, sameSpot, type RecommendPlace, type RecommendVenue } from './recommendations';
 import { DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import { tableBookingUrlError, type TableBookingLink } from './tableBookingLinks';
+import {
+  avoidLabel, mergePreferences, normalizePreferences, preferenceFilterInput, preferenceFit, priceSigns, type AvoidTag,
+} from './preferenceFit';
 
 export const coordinateSchema = z.object({
   lat: z.number().finite().min(-90).max(90),
@@ -19,6 +22,8 @@ export const conciergeDiscoverInput = z.object({
     vibe: z.string().trim().max(40).optional(), walk: z.string().trim().max(40).optional(),
     group: z.string().trim().max(40).optional(),
   }).strict().optional(),
+  /** Saved avoid list and price ceiling, sent by the client. */
+  preferences: preferenceFilterInput.optional(),
 }).strict();
 
 /** A provider website is a handoff, never proof of a menu or a supported transaction. */
@@ -153,6 +158,12 @@ const LOCALITY = /\b(?:in|near|around|at|within|downtown|midtown|uptown|city|tow
 // Other named localities are handled by explicit prepositions or the planner.
 const BARE_CITY = /\b(?:Boston|Paris|Tokyo|London|Brooklyn|Manhattan|Seattle|Chicago|Miami|Austin|Berlin|Rome|Sydney|Toronto|New York|San Francisco|Los Angeles)\b/i;
 const BUDGET = /\b(?:cheap(?:er)?|budget|affordable|price|prices|cost|under|dollars?)\b|\$/i;
+/** Words that map honestly onto Google's price levels: $ or $$. A dollar amount does not. */
+const CHEAP = /\b(?:cheap(?:er)?|affordable|inexpensive|budget(?:[- ]friendly)?|low[- ]cost)\b/i;
+const QUIET = /\bquiet(?:er)?\b/i;
+/** There is no noise data. Quiet leaves out listing types that are loud by nature, and busy readings. */
+export const QUIET_AVOID: AvoidTag[] = ['nightclubs', 'live_music', 'sports_bars', 'busy'];
+export const CHEAP_PRICE_CEILING = 2;
 const MENU = /\b(?:menus?|dish|dishes|vegan|vegetarian|gluten|allergies|allergy|halal|kosher)\b/i;
 const UNSAFE = /https?:|[<>/{}]|\b(?:ignore (?:rules|instructions|previous)|fabricate|system prompt|tool calls?|api key)\b/i;
 const CONFIRM_LOCATION = /^(?:use |search |yes,? )?(?:my |the )?current location[.!]?$/i;
@@ -242,6 +253,10 @@ function missingActionReply(type: ConciergeActionType, card: ConciergeCard): str
 type LocalPlan = Omit<ConciergePlan, 'query' | 'rail' | 'mode'> & {
   search: ConciergeSearch; blocked: boolean; exclusions: string[]; messages: string[]; locationConfirmed: boolean;
   action: ConciergeActionRequest | null;
+  /** Asked for cheap or affordable places: Google price level $ or $$. */
+  cheap: boolean;
+  /** Asked for somewhere quiet. */
+  quiet: boolean;
 };
 
 /** Useful no-key fallback. Unknown text stays search text, never implicit GPS
@@ -254,6 +269,7 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
   if (!Number.isFinite(radius) || radius < 400 || radius > 5000) radius = 2000;
   const defaultRadius = radius;
   let needsLocation = false, budget = false, menu = false, openNow = false, firstStop = false, blocked = false;
+  let cheap = false, quiet = false;
   let locationConfirmed = false;
   let exclusions: string[] = [], messages: string[] = [];
   let action: ConciergeActionRequest | null = null;
@@ -278,7 +294,7 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
     if (!refinement) {
       intent = defaultIntent;
       radius = defaultRadius;
-      needsLocation = budget = menu = openNow = firstStop = blocked = locationConfirmed = false;
+      needsLocation = budget = menu = openNow = firstStop = blocked = locationConfirmed = cheap = quiet = false;
       exclusions = [];
       messages = [];
     }
@@ -287,6 +303,8 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
     if (/\b(?:closer|nearest|closest)\b/i.test(text)) radius = Math.max(400, Math.min(800, Math.floor(radius / 2)));
     if (/\bwithin walking distance\b/i.test(text)) radius = Math.min(radius, 1500);
     budget ||= BUDGET.test(text);
+    cheap ||= CHEAP.test(text);
+    quiet ||= QUIET.test(text);
     menu ||= MENU.test(text);
     openNow ||= /\bopen(?: right)? now\b/i.test(text);
     firstStop ||= /\b(?:plan|itinerary|multi.stop|first stop)\b/i.test(text);
@@ -344,7 +362,7 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
   }
   return {
     search: conciergeSearchSchema.parse({ ...intent, query: conciergeSearchSchema.shape.query.safeParse(intent.query).success ? intent.query : 'restaurant', location: input.location, radius }),
-    needsLocation, budget, menu, openNow, firstStop, blocked, exclusions, messages, locationConfirmed, action,
+    needsLocation, budget, menu, openNow, firstStop, blocked, exclusions, messages, locationConfirmed, action, cheap, quiet,
   };
 }
 
@@ -420,6 +438,9 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       'I cannot safely search that request without losing its constraints. Please name a place or type of place you do want nearby.',
       [], ['Restaurants nearby', 'Coffee nearby']);
     const { search } = plan;
+    const filter = mergePreferences(normalizePreferences(input.preferences),
+      { avoid: plan.quiet ? QUIET_AVOID : [], priceCeiling: plan.cheap ? CHEAP_PRICE_CEILING : null });
+    let leftOut = 0;
     const matchesExclusions = (name: string, category: string) => plan.exclusions.some((target) => {
       const terms = words(`${name} ${category.replace(/_/g, ' ')}`);
       return excludedWords(target).some((term) => terms.includes(term));
@@ -481,6 +502,8 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     function append(v: RecommendVenue | null, p: RecommendPlace | null) {
       const spot = v ?? p!;
       if (plan.openNow && (stale || p?.isOpen !== true)) return;
+      const fit = preferenceFit({ types: p?.types, primaryType: p?.primaryType, category: v?.category, priceLevel: p?.priceLevel, crowd: v?.crowd }, filter);
+      if (!fit.keep) { leftOut += 1; return; }
       const id = v ? v.id : `gp:${p!.placeId}`;
       const placeId = p?.placeId ?? v?.googlePlaceId ?? null;
       if (seenIds.has(id) || (placeId && seenPlaces.has(placeId))) return;
@@ -500,6 +523,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       const reasons = [`${Math.round(distanceMeters(search.location, spot))} m away (straight-line)`];
       if (stale && p) reasons.push('Cached place information; opening status unverified');
       else if (p?.isOpen === true) reasons.push('Open now according to Google');
+      if (fit.priceReason) reasons.push(fit.priceReason);
       if (rating !== null) reasons.push(`${rating.toFixed(1)} stars on Google${stale ? ' (cached)' : ''}`);
       const websiteUrl = stale ? null : conciergeWebsiteURL(p?.websiteUri);
       const booking = conciergeActionSchema.safeParse({ type: 'book_table', ...(placeId ? bookings.get(placeId) : undefined) });
@@ -507,7 +531,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
         ...(placeId && booking.success ? [booking.data] : []), { type: 'add_to_plan' }, { type: 'save' }];
       cards.push({ id, kind: v ? 'venue' : 'place', placeId, name: spot.name, address: typeof spot.address === 'string' ? spot.address : '',
         lat: spot.lat, lng: spot.lng, category, rating, isOpen: stale || typeof p?.isOpen !== 'boolean' ? null : p.isOpen,
-        photoUrl: null, crowd: null, reasons, capability: 'details',
+        photoUrl: null, crowd: null, reasons: reasons.slice(0, 3), capability: 'details',
         source: v ? 'bytspot' : stale ? 'google-stale' : 'google', rail: actualRail,
         menuEvidence, websiteUrl, actions });
     }
@@ -521,7 +545,13 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     const caveats = [
       failed ? 'Some discovery sources are unavailable; these results may be incomplete.' : '',
       stale ? 'Google information is cached; opening status is unverified.' : '',
-      plan.budget ? 'I cannot verify prices or promise these are cheaper.' : '',
+      filter.priceCeiling !== null
+        ? `Places Google lists above ${priceSigns(filter.priceCeiling)} are left out. Places with no listed price are kept and marked; prices are not verified.`
+        : plan.budget ? 'I cannot verify prices or promise these are cheaper.' : '',
+      filter.avoid.length
+        ? `Places listed as ${filter.avoid.map(avoidLabel).join(', ')} are left out${leftOut ? ` (${leftOut} hidden)` : ''}, judged by listing type and crowd estimates only.`
+        : '',
+      plan.quiet ? 'Bytspot has no noise data, so quiet is not verified.' : '',
       menuFailed ? 'Reviewed-menu lookup is unavailable; place discovery still works, but dish matches are unconfirmed.' : '',
       selected.some((card) => card.menuEvidence.length)
         ? 'Reviewed menu entries are labeled and linked to their source. A menu listing does not guarantee current availability, dish quality or dietary safety.'

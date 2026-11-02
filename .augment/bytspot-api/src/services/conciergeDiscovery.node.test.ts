@@ -4,7 +4,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
-  conciergeActionRequest, planConcierge, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
+  conciergeActionRequest, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
 } from './conciergeDiscovery';
 import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
@@ -724,4 +724,76 @@ test('a saved busy avoid uses the venue crowd reading; a saved ceiling merges wi
   const strict = await service({ places: async () => ({ places, source: 'google' }) })({ ...input('cheap coffee nearby'), preferences: { priceCeiling: 1 } });
   assert.equal(strict.cards.length, 0);
   assert.match(strict.reply, /above \$ are left out/);
+});
+
+test('a request with two needs proposes a Plan from one nearest card per need, with party size and nothing saved', async () => {
+  const searched: string[] = [];
+  const response = await service({ places: async (search) => {
+    searched.push(search.query);
+    return search.rail === 'eat_drink' && search.query === 'restaurant'
+      ? { source: 'google', places: [place({ placeId: 'kitchen', name: 'Real Kitchen', primaryType: 'restaurant', types: ['restaurant'] })] }
+      : { source: 'google', places: [place({ placeId: 'bar', name: 'Real Bar', primaryType: 'bar', types: ['bar'], lat: 40.002 })] };
+  } })(input('dinner and drinks for 4 tonight'));
+  conciergeDiscoverOutput.parse(response);
+  assert.deepEqual(searched.sort(), ['bar', 'restaurant']);
+  assert.equal(response.status, 'ready');
+  assert.deepEqual(response.cards.map((c) => c.name), ['Real Kitchen', 'Real Bar']);
+  assert.deepEqual(response.proposedPlan, {
+    title: 'Dinner and drinks', intent: 'dinner and drinks for 4 tonight', needs: ['dining', 'nightlife'], partySize: 4,
+    stops: [{ cardId: 'gp:kitchen', needKind: 'dining', title: 'Real Kitchen' }, { cardId: 'gp:bar', needKind: 'nightlife', title: 'Real Bar' }],
+    openNeeds: [],
+  });
+  assert.match(response.reply, /^Proposed Plan: Real Kitchen for dinner, then Real Bar for drinks\. Nothing is saved until you choose Make it a Plan/);
+  assert.ok(response.cards.every((c) => c.capability === 'details' && c.actions.some((a) => a.type === 'add_to_plan')));
+});
+
+test('a need with no place stays open, one place never fills two needs, and nothing found is not a Plan', async () => {
+  const one = [place({ placeId: 'only', name: 'Only Cafe', primaryType: 'cafe', types: ['cafe'] })];
+  const response = await service({ places: async (search) => ({ source: 'google', places: search.query === 'coffee' ? one : [] }) })(input('coffee then a show'));
+  assert.deepEqual(response.proposedPlan?.stops.map((s) => s.needKind), ['coffee']);
+  assert.deepEqual(response.proposedPlan?.openNeeds, ['events']);
+  assert.match(response.reply, /could not find a place for show nearby; after you save the Plan you can ask local businesses/);
+  const shared = await service({ places: async () => ({ source: 'google', places: [place({ placeId: 'both', name: 'Both', primaryType: 'restaurant', types: ['restaurant', 'bar'] })] }) })(input('dinner and drinks'));
+  assert.equal(shared.cards.length <= 1, true);
+  assert.equal(new Set(shared.proposedPlan?.stops.map((s) => s.cardId)).size, shared.proposedPlan?.stops.length);
+  const none = await service()(input('dinner and drinks'));
+  assert.equal(none.status, 'empty');
+  assert.equal(none.proposedPlan, null);
+});
+
+test('plan detection: one need needs the word plan, negated needs and times never count', () => {
+  assert.equal(proposedPlanNeeds(['coffee nearby']), null);
+  assert.equal(proposedPlanNeeds(['Help plan tonight']), null);
+  assert.deepEqual(proposedPlanNeeds(['plan dinner for 2'])?.needs.map((n) => n.need), ['dining']);
+  assert.equal(proposedPlanNeeds(['plan dinner for 2'])?.partySize, 2);
+  assert.equal(proposedPlanNeeds(['dinner, no bars']), null);
+  assert.equal(proposedPlanNeeds(['dinner and drinks for 7pm'])?.partySize, null);
+  assert.equal(proposedPlanNeeds(['dinner and drinks under $60 for 6 of us'])?.partySize, 6);
+  assert.equal(proposedPlanNeeds(['dinner and drinks for 40'])?.partySize, null);
+  assert.deepEqual(proposedPlanNeeds(['drinks after dinner'])?.needs.map((n) => n.need), ['nightlife', 'dining']);
+});
+
+test('a refinement keeps the Plan and carries cheap into every stop search; actions and locations keep the old paths', async () => {
+  const queries: Array<[string, number | null]> = [];
+  const discover = service({ places: async (search) => {
+    queries.push([search.query, search.radius]);
+    return { source: 'google', places: [place({ placeId: search.query.replace(/\W/g, ''), name: `Real ${search.query}`, primaryType: search.query === 'bar' ? 'bar' : 'restaurant', types: [search.query === 'bar' ? 'bar' : 'restaurant'], priceLevel: 'PRICE_LEVEL_INEXPENSIVE' })] };
+  } });
+  const refined = await discover(input('dinner and drinks', 'cheaper'));
+  assert.ok(refined.proposedPlan);
+  assert.match(refined.reply, /above \$\$ are left out/);
+  const action = await discover(input('dinner and drinks', 'directions to the first one'));
+  assert.equal(action.proposedPlan, null);
+  const located = await discover(input('dinner and drinks in Boston'));
+  assert.equal(located.status, 'needs_location');
+  assert.equal(located.proposedPlan, null);
+});
+
+test('the output contract refuses a proposed Plan whose stops are not shown cards', () => {
+  const card = { id: 'gp:a', kind: 'place', placeId: 'a', name: 'A', address: '', lat: 40, lng: -75, category: 'restaurant', rating: null, isOpen: null,
+    photoUrl: null, crowd: null, reasons: [], capability: 'details', source: 'google', rail: 'eat_drink', actions: [{ type: 'add_to_plan' }] };
+  const plan = { title: 'Dinner', intent: 'plan dinner', needs: ['dining'], partySize: null, stops: [{ cardId: 'gp:a', needKind: 'dining', title: 'A' }], openNeeds: [] };
+  assert.ok(conciergeDiscoverOutput.safeParse({ version: 1, reply: 'x', status: 'ready', cards: [card], refinements: [], proposedPlan: plan }).success);
+  assert.equal(conciergeDiscoverOutput.safeParse({ version: 1, reply: 'x', status: 'ready', cards: [card], refinements: [], proposedPlan: { ...plan, stops: [{ ...plan.stops[0], cardId: 'gp:b' }] } }).success, false);
+  assert.equal(conciergeDiscoverOutput.safeParse({ version: 1, reply: 'x', status: 'ready', cards: [card], refinements: [], proposedPlan: { ...plan, needs: ['dining', 'coffee'] } }).success, false);
 });

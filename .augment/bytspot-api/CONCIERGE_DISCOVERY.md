@@ -33,6 +33,7 @@ Objects reject unknown fields, including legacy client-supplied `venues`. Null c
 | `cards` | Array of 0–3 cards |
 | `refinements` | String array, currently at most 3 entries (schema permits 4) |
 | `proposal` | Null, or `{ type, cardId }` for one action that the guest must approve (Phase 6) |
+| `proposedPlan` | Null, or a Proposed Plan built from the shown cards (see Proposed Plan) |
 
 Each card contains exactly:
 
@@ -134,10 +135,18 @@ Validation executed on October 17, 2026:
 - Ride requests ("get me an Uber there") never propose anything. The reply says Concierge cannot book a ride, that a Plan shows Uber and Lyft links for its stops, and offers "Add the … one to my Plan" refinements.
 - After the add, the client offers arrival help for that stop: Apple Maps directions and the Plan's Uber or Lyft links, leaving from the previous Plan stop with a destination, each behind its own approval.
 
+## Proposed Plan
+
+- A request naming two or more needs ("dinner and drinks for 4"), or one need with the word plan ("plan dinner for 2"), is a Plan request. Needs: `coffee`, `dining`, `nightlife`, `events`, at most 3, in the order said. Negated needs ("no bars") do not count. Action requests, location-name requests and blocked requests keep the paths above.
+- One fixed category search per need (same sources, preference filters, cheap/quiet/open now/closer/exclusions, no planner call). The nearest unused card fills each need; a place never fills two. A need with no card is listed in `openNeeds`.
+- `proposedPlan`: `{ title, intent, needs, partySize, stops: [{ cardId, needKind, title }], openNeeds }`. `partySize` only from "for 4", "4 of us/people/guests" or "party of 4" (1–20); a time ("for 7pm") never counts. No time is set. The schema rejects stops that are not shown cards, duplicate stops, a proposal alongside it, or needs that do not match stops plus `openNeeds`.
+- Nothing is saved. The client saves with the existing Plan writes: `plans.create` (title, intent, needs, party size, the guest's search point), then `plans.attach` per stop (a `details` reference with `placeId`). It then reads `plans.feasibility` and `plans.primePath`, and offers `demand.ask` for open needs through published business windows (`inventory.list`).
+- No stop found: `empty` (or `unavailable` if a source failed), no Plan.
+
 ## Deliberately deferred
 
-Budget ranking, event-session inventory, vendor bookable requests, Plan writes and cross-category itineraries are not implemented in Release A. The thirteen rails classify **place listings**, not guaranteed inventory across every rail. An authorized operator must approve pilot activation; nothing has been deployed or enabled by this implementation.
+Budget ranking, event-session inventory, vendor bookable requests, server-side Plan writes and timed itineraries are not implemented in Release A. The thirteen rails classify **place listings**, not guaranteed inventory across every rail. An authorized operator must approve pilot activation; nothing has been deployed or enabled by this implementation.
 
 ## Release B (behind a flag): `concierge.plan`
 
-BYTT-SI proposed Plans. Separate mutation; `concierge.discover` and `concierge.chat` are unchanged. Disabled unless `CONCIERGE_PLAN_ENABLED=true`; when on, open to every signed-in user (no discovery flag or pilot list). Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.
+BYTT-SI proposed Plans. Separate mutation; `concierge.chat` is unchanged, and `concierge.discover` keeps its own deterministic Proposed Plan (above). Disabled unless `CONCIERGE_PLAN_ENABLED=true`; when on, open to every signed-in user (no discovery flag or pilot list). Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.

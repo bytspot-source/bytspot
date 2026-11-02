@@ -75,10 +75,24 @@ export const conciergeCardSchema = z.object({
   actions: z.array(conciergeActionSchema).max(CONCIERGE_ACTIONS.length).default([]),
 }).strict();
 export const conciergeProposalSchema = z.object({ type: z.enum(CONCIERGE_ACTIONS), cardId: z.string().min(1) }).strict();
+/** A Plan Concierge proposes from shown cards. Nothing is saved: the guest's app
+ * creates it with plans.create and attaches each stop as a reference with plans.attach. */
+export const conciergeProposedPlanSchema = z.object({
+  title: z.string().min(1).max(80), intent: z.string().min(1).max(280),
+  needs: z.array(z.string().min(1).max(40)).min(1).max(3),
+  partySize: z.number().int().min(1).max(20).nullable(),
+  stops: z.array(z.object({
+    cardId: z.string().min(1), needKind: z.string().min(1).max(40), title: z.string().min(1).max(120),
+  }).strict()).min(1).max(3),
+  /** Needs with no place found; the guest can ask local businesses after saving. */
+  openNeeds: z.array(z.string().min(1).max(40)).max(3),
+}).strict();
+export type ConciergeProposedPlan = z.infer<typeof conciergeProposedPlanSchema>;
 export const conciergeDiscoverOutput = z.object({
   version: z.literal(1), reply: z.string(), status: z.enum(['ready', 'needs_location', 'unavailable', 'empty']),
   cards: z.array(conciergeCardSchema).max(3), refinements: z.array(z.string()).max(4),
   proposal: conciergeProposalSchema.nullable().default(null),
+  proposedPlan: conciergeProposedPlanSchema.nullable().default(null),
 }).strict().superRefine((response, ctx) => {
   for (const card of response.cards) {
     const types = card.actions.map((a) => a.type);
@@ -88,6 +102,15 @@ export const conciergeDiscoverOutput = z.object({
   const { proposal } = response;
   if (proposal && (response.status !== 'ready' || !response.cards.some((card) => card.id === proposal.cardId
     && card.actions.some((a) => a.type === proposal.type)))) ctx.addIssue({ code: 'custom', message: 'A proposal needs a shown card action' });
+  const planned = response.proposedPlan;
+  if (planned) {
+    const stopIds = planned.stops.map((stop) => stop.cardId);
+    const stated = [...planned.stops.map((stop) => stop.needKind), ...planned.openNeeds];
+    if (response.status !== 'ready' || proposal || new Set(stopIds).size !== stopIds.length
+      || stopIds.some((id) => !response.cards.some((card) => card.id === id))
+      || new Set(stated).size !== stated.length || stated.length !== planned.needs.length
+      || stated.some((need) => !planned.needs.includes(need))) ctx.addIssue({ code: 'custom', message: 'A proposed Plan needs shown cards for its stops' });
+  }
 });
 export type ConciergeInput = z.infer<typeof conciergeDiscoverInput>;
 export type ConciergeResponse = z.infer<typeof conciergeDiscoverOutput>;
@@ -209,6 +232,40 @@ export function conciergeActionRequest(raw: string): ConciergeActionRequest | nu
   if (name && !/^(?:it|that|this|there|them|that one|this one|the place|place|one|my plan|a plan)$/i.test(name)
     && !/^(?:book|reserve|get|go)\b/i.test(name)) return { type, target: { name } };
   return { type, target: 'it' };
+}
+
+/** Plan needs Concierge can propose a stop for, in the vocabulary plans.create and demand use. */
+const PLAN_NEEDS: Array<{ need: string; pattern: RegExp; query: string }> = [
+  { need: 'coffee', pattern: /\b(?:coffee|caf[eé]s?)\b/i, query: 'coffee' },
+  { need: 'dining', pattern: /\b(?:dinner|lunch|brunch|breakfast|restaurants?|dining|food|eat)\b/i, query: 'restaurant' },
+  { need: 'nightlife', pattern: /\b(?:drinks?|bars?|cocktails?|pubs?|nightcap|nightlife|clubs?|dancing)\b/i, query: 'bar' },
+  { need: 'events', pattern: /\b(?:shows?|concerts?|live music|comedy|events?)\b/i, query: 'event venue' },
+];
+const PLAN_WORDS = /\b(?:plan|itinerary|night out|evening out)\b/i;
+const NEGATED = /\b(?:not|no|without|avoid|rather than|anything but|do not|don't|don’t)\s+[^,;.!?]+/gi;
+const PARTY_SIZE = [
+  /\bfor\s+(\d{1,2})\b(?!\s*(?:am|pm|a\.m|p\.m|o'?clock|:|\$|dollars?|minutes?|mins?|hours?|hrs?|each|per|a head))/i,
+  /\b(\d{1,2})\s+(?:of us|people|guests|friends|adults)\b/i,
+  /\bparty of\s+(\d{1,2})\b/i,
+];
+
+export type PlanNeedRequest = { needs: Array<{ need: string; query: string; word: string }>; partySize: number | null };
+
+/** Two or more needs, or one with the word plan, make a Plan request. Negated needs never count. */
+export function proposedPlanNeeds(messages: string[]): PlanNeedRequest | null {
+  const text = messages.join('. ').replace(NEGATED, ' ');
+  const needs = PLAN_NEEDS.map((n) => ({ ...n, match: n.pattern.exec(text) }))
+    .filter((n): n is typeof n & { match: RegExpExecArray } => n.match !== null)
+    .sort((a, b) => a.match.index - b.match.index).slice(0, 3)
+    .map((n) => ({ need: n.need, query: n.query, word: n.match[0].toLowerCase() }));
+  if (needs.length < 2 && !(needs.length === 1 && PLAN_WORDS.test(text))) return null;
+  const size = PARTY_SIZE.map((pattern) => pattern.exec(text)?.[1]).find(Boolean);
+  const partySize = size ? Number(size) : null;
+  return { needs, partySize: partySize !== null && partySize >= 1 && partySize <= 20 ? partySize : null };
+}
+
+function listWords(items: string[]): string {
+  return items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
 
 function normalizedName(text: string): string { return words(text).join(' '); }
@@ -422,11 +479,74 @@ export async function withDeadline<T>(work: Promise<T>, milliseconds: number): P
 }
 
 function result(status: ConciergeResponse['status'], reply: string, cards: ConciergeCard[] = [], refinements: string[] = [],
-  proposal: ConciergeResponse['proposal'] = null): ConciergeResponse {
-  return conciergeDiscoverOutput.parse({ version: 1, status, reply, cards, refinements, proposal });
+  proposal: ConciergeResponse['proposal'] = null, proposedPlan: ConciergeProposedPlan | null = null): ConciergeResponse {
+  return conciergeDiscoverOutput.parse({ version: 1, status, reply, cards, refinements, proposal, proposedPlan });
 }
 
+const PLAN_REFINEMENTS = ['Cheaper', 'Quieter', 'Closer'];
+
 export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
+  const discoverOne = createConciergeSearch(dependencies);
+  // Each stop is a fixed category search, so no planner call is needed.
+  const searchStop = createConciergeSearch({ ...dependencies, plan: undefined });
+
+  /** One search per need, the nearest unused card for each, offered as a Plan. Nothing is saved here. */
+  async function proposePlan(input: ConciergeInput & { location: Coordinate }, local: LocalPlan, wanted: PlanNeedRequest): Promise<ConciergeResponse> {
+    const said = local.messages.join(' ');
+    const modifiers = [
+      local.cheap ? 'cheap' : '', local.quiet ? 'quiet' : '', local.openNow ? 'open now' : '',
+      /\b(?:closer|nearest|closest)\b/i.test(said) ? 'closer' : '', /\bwithin walking distance\b/i.test(said) ? 'within walking distance' : '',
+    ].filter(Boolean).join(' ');
+    const exclusions = local.exclusions.map((target) => `, not ${target}`).join('');
+    const results = await Promise.all(wanted.needs.map((need) => searchStop({
+      location: input.location, quizAnswers: input.quizAnswers, preferences: input.preferences,
+      messages: [{ role: 'user', content: compact(`${need.query} ${modifiers}${exclusions}`) }],
+    })));
+    const cards: ConciergeCard[] = [];
+    const stops: ConciergeProposedPlan['stops'] = [];
+    const openNeeds: string[] = [];
+    const named: string[] = [];
+    wanted.needs.forEach((need, index) => {
+      const card = results[index].cards.find((c) => !cards.some((used) => used.id === c.id || (c.placeId && used.placeId === c.placeId)));
+      if (!card) { openNeeds.push(need.need); return; }
+      cards.push(card);
+      stops.push({ cardId: card.id, needKind: need.need, title: card.name.slice(0, 120) });
+      named.push(`${card.name} for ${need.word}`);
+    });
+    const missing = wanted.needs.filter((need) => openNeeds.includes(need.need)).map((need) => need.word);
+    const caveats = [
+      'Nothing is saved until you choose Make it a Plan. Stops are the nearest matching listings: details only, availability is not guaranteed, and no times are set.',
+      local.cheap ? 'Places Google lists above $$ are left out; prices are not verified.' : '',
+      local.quiet ? 'Bytspot has no noise data, so quiet is not verified.' : '',
+      'Search terms guide discovery, but listing matches do not verify every requested preference.',
+    ].filter(Boolean).join(' ');
+    if (!stops.length) {
+      const failed = results.some((r) => r.status === 'unavailable');
+      return result(failed ? 'unavailable' : 'empty',
+        `${failed ? 'I could not verify matching places nearby. Please try again.' : `I could not find places nearby for ${listWords(missing)}.`} ${caveats}`,
+        [], ['Coffee nearby', 'Restaurants nearby']);
+    }
+    const title = listWords(wanted.needs.map((need) => need.word));
+    const plan: ConciergeProposedPlan = {
+      title: `${title.charAt(0).toUpperCase()}${title.slice(1)}`.slice(0, 80),
+      intent: compact(local.messages[0] ?? title).slice(0, 280) || title,
+      needs: wanted.needs.map((need) => need.need), partySize: wanted.partySize, stops, openNeeds,
+    };
+    const gaps = missing.length ? ` I could not find a place for ${listWords(missing)} nearby; after you save the Plan you can ask local businesses.` : '';
+    return result('ready', `Proposed Plan: ${named.join(', then ')}.${gaps} ${caveats}`, cards, PLAN_REFINEMENTS, null, plan);
+  }
+
+  return async (raw: ConciergeInput): Promise<ConciergeResponse> => {
+    const input = conciergeDiscoverInput.parse(raw);
+    if (!input.location) return discoverOne(input);
+    const local = planConcierge(input);
+    if (local.action || local.needsLocation || local.blocked) return discoverOne(input);
+    const wanted = proposedPlanNeeds(local.messages);
+    return wanted ? proposePlan({ ...input, location: input.location }, local, wanted) : discoverOne(input);
+  };
+}
+
+function createConciergeSearch(dependencies: ConciergeDependencies) {
   return async (raw: ConciergeInput): Promise<ConciergeResponse> => {
     const input = conciergeDiscoverInput.parse(raw);
     if (!input.location) return result('needs_location', 'Share or choose a location to find real places nearby.');

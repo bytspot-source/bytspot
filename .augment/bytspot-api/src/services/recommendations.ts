@@ -143,7 +143,7 @@ export function sameSpot(v: RecommendVenue, p: RecommendPlace): boolean {
 }
 
 /** Pulls thinly reviewed ratings toward 4.0, so 5★ from three people does not beat 4.7★ from nine hundred. */
-function bayesRating(rating: number, count: number): number {
+export function bayesRating(rating: number, count: number): number {
   return (rating * count + 4.0 * 50) / (count + 50);
 }
 

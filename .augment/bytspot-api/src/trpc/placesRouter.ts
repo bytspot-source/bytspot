@@ -14,6 +14,7 @@ import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, 
 import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
 import { withLatestCrowd } from '../services/latestCrowd';
 import { normalizePreferences, preferenceFilterInput } from '../services/preferenceFit';
+import { DISCOVER_RANK_MAX, discoverCandidateInput, rankDiscover } from '../services/discoverRank';
 import type { OpeningPeriod } from '../services/itinerary';
 import {
   RECOMMEND_POOLS, rankRecommendations, radiusForWalk, recommendCell, searchRadiusFor, vibeProfile,
@@ -402,6 +403,28 @@ export const placesRouter = router({
       const venues = await venuesPromise;
       const preferences = normalizePreferences(input.preferences);
       return { ...rankRecommendations({ ...input, preferences }, pools, venues), placesSource };
+    }),
+
+  /**
+   * The order of the Discover deck, from the cards the client is about to
+   * show and the facts it already has. Preference-avoided and over-ceiling
+   * cards come back as `hidden`.
+   */
+  rankDiscover: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'places-rank-discover' }))
+    .input(z.object({
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      vibe: z.string().max(40).optional(),
+      walk: z.string().max(40).optional(),
+      group: z.string().max(40).optional(),
+      hour: z.number().int().min(0).max(23).optional(),
+      preferences: preferenceFilterInput.optional(),
+      candidates: z.array(discoverCandidateInput).max(DISCOVER_RANK_MAX),
+    }))
+    .query(({ input }) => {
+      const { candidates, preferences, ...rest } = input;
+      return rankDiscover({ ...rest, preferences: normalizePreferences(preferences) }, candidates);
     }),
 
   nearbySearch: publicProcedure

@@ -23,7 +23,7 @@ export interface OpeningPeriod {
   close?: { day: number; hour: number; minute: number } | null;
 }
 
-export type TimeSource = 'offer' | 'party' | 'guestBooking';
+export type TimeSource = 'offer' | 'party' | 'guestBooking' | 'event';
 
 export interface ItineraryStopInput {
   leg: PlanLeg;

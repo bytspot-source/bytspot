@@ -1,7 +1,7 @@
 /**
  * Events sub-router — Phase 2: Events API
  * Proxies and caches Ticketmaster Discovery API for Atlanta area events.
- * Falls back to curated static events when API key is not configured.
+ * Returns no events, marked unavailable, when Ticketmaster cannot be reached.
  */
 import { z } from 'zod';
 import { partyCommerceRouter } from './partyCommerceRouter';
@@ -97,15 +97,61 @@ function categoryEmoji(cat: string): string {
   return map[cat] ?? '🎉';
 }
 
-// ─── Static fallback events (used when Ticketmaster key is not set) ──
-const FALLBACK_EVENTS = [
-  { id: 'evt1', title: 'Jazz & Blues Night', venue: 'City Winery Atlanta', date: 'Tonight', time: '8:00 PM', category: 'concert', emoji: '🎷', price: '$25', image: 'https://images.unsplash.com/photo-1415201364774-f6f0bb35f28f?w=600', url: '' },
-  { id: 'evt2', title: 'Rooftop Thursdays', venue: 'Ponce City Market', date: 'Tonight', time: '7:00 PM', category: 'rooftop', emoji: '🌃', price: 'Free', image: 'https://images.unsplash.com/photo-1560448204-603b3fc33ddc?w=600', url: '' },
-  { id: 'evt3', title: 'Happy Hour Specials', venue: 'Stats Brewpub', date: 'Tonight', time: '4–7 PM', category: 'happyhour', emoji: '🍺', price: '$5 drafts', image: 'https://images.unsplash.com/photo-1558642452-9d2a7deb7f62?w=600', url: '' },
-  { id: 'evt4', title: 'Stand-Up Comedy', venue: 'Laughing Skull Lounge', date: 'Tonight', time: '9:30 PM', category: 'comedy', emoji: '😂', price: '$15', image: 'https://images.unsplash.com/photo-1527224538127-2104bb71c51b?w=600', url: '' },
-  { id: 'evt5', title: 'Art Walk Midtown', venue: 'MOCA GA', date: 'Tonight', time: '6:00 PM', category: 'art', emoji: '🎨', price: 'Free', image: 'https://images.unsplash.com/photo-1536924940846-227afb31e2a5?w=600', url: '' },
-  { id: 'evt6', title: 'Sunday Brunch Party', venue: 'The Optimist', date: 'Sunday', time: '11:00 AM', category: 'food', emoji: '🥂', price: '$45', image: 'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=600', url: '' },
-];
+export type EventsListSource = 'ticketmaster' | 'unavailable';
+
+/** A Ticketmaster failure; thrown so the cache does not keep it. */
+class TicketmasterUnavailable extends Error {}
+
+/**
+ * Atlanta events from Ticketmaster. No key, a failed request or an unreadable
+ * reply is `unavailable` with no events: a client is never handed sample
+ * events it would show as tonight's listings.
+ */
+export async function loadAtlantaEvents(
+  input: { category?: string; limit: number },
+  deps: {
+    apiKey: string | undefined;
+    fetch: typeof fetch;
+    cache: <T>(key: string, ttlSeconds: number, load: () => Promise<T>) => Promise<T>;
+  },
+): Promise<{ events: ReturnType<typeof mapTmEvent>[]; source: EventsListSource }> {
+  const { category, limit } = input;
+  if (!deps.apiKey) return { events: [], source: 'unavailable' };
+  const apiKey = deps.apiKey;
+
+  const cacheKey = `events:atl:v2:${category ?? 'all'}:${limit}`;
+  try {
+    const events = await deps.cache(cacheKey, 900, async () => {
+      const params = new URLSearchParams({
+        apikey: apiKey,
+        city: 'Atlanta',
+        stateCode: 'GA',
+        size: String(limit),
+        sort: 'date,asc',
+      });
+      if (category) {
+        const segmentMap: Record<string, string> = {
+          concert: 'Music', comedy: 'Arts & Theatre', art: 'Arts & Theatre',
+          sports: 'Sports', food: 'Miscellaneous',
+        };
+        if (segmentMap[category]) params.set('segmentName', segmentMap[category]);
+      }
+
+      const res = await deps.fetch(`${TM_BASE}/events.json?${params}`, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) {
+        console.error(`[events] Ticketmaster ${res.status}: ${await res.text().catch(() => '')}`);
+        throw new TicketmasterUnavailable();
+      }
+      const data = (await res.json()) as { _embedded?: { events?: TmEvent[] } };
+      const raw: TmEvent[] = data._embedded?.events ?? [];
+      return raw.map(mapTmEvent);
+    });
+    return { events, source: 'ticketmaster' };
+  } catch (err) {
+    if (!(err instanceof TicketmasterUnavailable)) console.error('[events] Ticketmaster request failed:', (err as Error)?.message);
+    return { events: [], source: 'unavailable' };
+  }
+}
 
 export const eventsRouter = router({
   drafts: partyDraftsRouter,
@@ -325,44 +371,6 @@ export const eventsRouter = router({
       category: z.string().optional(),
       limit: z.number().min(1).max(50).optional().default(20),
     }).prefault({}))
-    .query(async ({ input }) => {
-      const { category, limit } = input;
-
-      if (!config.ticketmasterApiKey) {
-        // No API key — return curated fallback
-        let events = FALLBACK_EVENTS;
-        if (category) events = events.filter((e) => e.category === category);
-        return { events: events.slice(0, limit), source: 'fallback' as const };
-      }
-
-      const cacheKey = `events:atl:v2:${category ?? 'all'}:${limit}`;
-      const events = await cached(cacheKey, 900, async () => {
-        const params = new URLSearchParams({
-          apikey: config.ticketmasterApiKey,
-          city: 'Atlanta',
-          stateCode: 'GA',
-          size: String(limit),
-          sort: 'date,asc',
-        });
-        if (category) {
-          const segmentMap: Record<string, string> = {
-            concert: 'Music', comedy: 'Arts & Theatre', art: 'Arts & Theatre',
-            sports: 'Sports', food: 'Miscellaneous',
-          };
-          if (segmentMap[category]) params.set('segmentName', segmentMap[category]);
-        }
-
-        const res = await fetch(`${TM_BASE}/events.json?${params}`, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) {
-          console.error(`[events] Ticketmaster ${res.status}: ${await res.text().catch(() => '')}`);
-          return FALLBACK_EVENTS;
-        }
-        const data = (await res.json()) as { _embedded?: { events?: TmEvent[] } };
-        const raw: TmEvent[] = data._embedded?.events ?? [];
-        return raw.map(mapTmEvent);
-      });
-
-      return { events: events ?? FALLBACK_EVENTS, source: 'ticketmaster' as const };
-    }),
+    .query(({ input }) => loadAtlantaEvents(input, { apiKey: config.ticketmasterApiKey, fetch, cache: cached })),
 });
 

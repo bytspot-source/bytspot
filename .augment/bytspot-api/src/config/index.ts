@@ -70,7 +70,7 @@ const envSchema = z.object({
   CONCIERGE_AUDIENCE: z.enum(['pilot', 'everyone']).default('pilot'),
   // Comma-separated user ids, never emails.
   CONCIERGE_PILOT_USER_IDS: z.string().default(''),
-  // BYTT-SI concierge.plan (proposed Plans). Off by default; also requires discovery and the audience above.
+  // BYTT-SI concierge.plan (proposed Plans). Off by default; when on, open to every signed-in user.
   CONCIERGE_PLAN_ENABLED: z.enum(['true', 'false']).default('false'),
   CONCIERGE_PLAN_MODEL:   z.string().trim().min(1).default('gpt-4o-mini'),
   OPENAI_API_KEY:         z.string().default(''),

@@ -140,4 +140,4 @@ Budget ranking, event-session inventory, vendor bookable requests, Plan writes a
 
 ## Release B (behind a flag): `concierge.plan`
 
-BYTT-SI proposed Plans. Separate mutation; `concierge.discover` and `concierge.chat` are unchanged. Disabled unless `CONCIERGE_PLAN_ENABLED=true` and discovery is open to the user (same audience rules). Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.
+BYTT-SI proposed Plans. Separate mutation; `concierge.discover` and `concierge.chat` are unchanged. Disabled unless `CONCIERGE_PLAN_ENABLED=true`; when on, open to every signed-in user (no discovery flag or pilot list). Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.

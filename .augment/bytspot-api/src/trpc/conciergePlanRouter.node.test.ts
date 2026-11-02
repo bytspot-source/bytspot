@@ -47,15 +47,15 @@ test('the CONCIERGE_PLAN_ENABLED flag defaults OFF and the off reply runs no eng
   assert.equal(fake.built(), 0);
 });
 
-test('the plan flag follows the concierge audience and discovery flag', () => {
-  openAll();
-  Object.assign(config, { conciergeAudience: 'pilot', conciergePilotUserIds: 'plan-test-user' });
-  assert.equal(conciergePlanOpenTo('plan-test-user'), true);
-  assert.equal(conciergePlanOpenTo('someone-else'), false);
-  Object.assign(config, { conciergeDiscoveryEnabled: false });
-  assert.equal(conciergePlanOpenTo('plan-test-user'), false);
-  Object.assign(config, { conciergeDiscoveryEnabled: true, conciergePlanEnabled: false });
-  assert.equal(conciergePlanOpenTo('plan-test-user'), false);
+test('CONCIERGE_PLAN_ENABLED alone opens concierge.plan, regardless of discovery flag or pilot list', async () => {
+  Object.assign(config, { conciergePlanEnabled: true, conciergeDiscoveryEnabled: false, conciergeAudience: 'pilot', conciergePilotUserIds: '' });
+  assert.equal(conciergePlanOpenTo(), true);
+  const fake = fakeEngine();
+  const out = await createConciergePlanRouter({ engineFor: fake.engineFor }).createCaller(member).plan(ask);
+  assert.equal(out.status, 'ok');
+  assert.equal(fake.built(), 1);
+  Object.assign(config, { conciergePlanEnabled: false });
+  assert.equal(conciergePlanOpenTo(), false);
 });
 
 test('when enabled it returns a ProposedPlan that matches the wire contract', async () => {

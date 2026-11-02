@@ -86,3 +86,16 @@ describe('bytt-si system prompt', () => {
     assert.match(SYSTEM_PROMPT, /proposed Plan/);
   });
 });
+
+describe('bytt-si module boundaries', () => {
+  it('runtime code never imports the SAMPLE test fixtures or fakes', () => {
+    const { readdirSync, statSync } = require('node:fs') as typeof import('node:fs');
+    const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
+      const p = join(dir, f);
+      return statSync(p).isDirectory() ? (f === 'testing' ? [] : walk(p)) : [p];
+    });
+    const runtime = walk(__dirname).filter((f) => f.endsWith('.ts') && !f.endsWith('.node.test.ts'));
+    assert.ok(runtime.length > 10);
+    for (const file of runtime) assert.doesNotMatch(readFileSync(file, 'utf8'), /from '[./]*testing\//, file);
+  });
+});

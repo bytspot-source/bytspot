@@ -70,6 +70,9 @@ const envSchema = z.object({
   CONCIERGE_AUDIENCE: z.enum(['pilot', 'everyone']).default('pilot'),
   // Comma-separated user ids, never emails.
   CONCIERGE_PILOT_USER_IDS: z.string().default(''),
+  // BYTT-SI concierge.plan (proposed Plans). Off by default; also requires discovery and the audience above.
+  CONCIERGE_PLAN_ENABLED: z.enum(['true', 'false']).default('false'),
+  CONCIERGE_PLAN_MODEL:   z.string().trim().min(1).default('gpt-4o-mini'),
   OPENAI_API_KEY:         z.string().default(''),
   TICKETMASTER_API_KEY:   z.string().default(''),
   GOOGLE_PLACES_API_KEY:  z.string().default(''),
@@ -170,6 +173,8 @@ export const config = {
   conciergePhotoEnabled: env.CONCIERGE_PHOTO_ENABLED === 'true',
   conciergeAudience: env.CONCIERGE_AUDIENCE,
   conciergePilotUserIds: env.CONCIERGE_PILOT_USER_IDS,
+  conciergePlanEnabled: env.CONCIERGE_PLAN_ENABLED === 'true',
+  conciergePlanModel: env.CONCIERGE_PLAN_MODEL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
   adminUserIds: env.ADMIN_USER_IDS,

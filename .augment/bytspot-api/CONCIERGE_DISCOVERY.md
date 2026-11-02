@@ -137,3 +137,7 @@ Validation executed on October 17, 2026:
 ## Deliberately deferred
 
 Budget ranking, event-session inventory, vendor bookable requests, Plan writes and cross-category itineraries are not implemented in Release A. The thirteen rails classify **place listings**, not guaranteed inventory across every rail. An authorized operator must approve pilot activation; nothing has been deployed or enabled by this implementation.
+
+## Release B (behind a flag): `concierge.plan`
+
+BYTT-SI proposed Plans. Separate mutation; `concierge.discover` and `concierge.chat` are unchanged. Disabled unless `CONCIERGE_PLAN_ENABLED=true` and discovery is open to the user (same audience rules). Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.

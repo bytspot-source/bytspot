@@ -14,6 +14,7 @@ import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, 
 import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
 import { withLatestCrowd } from '../services/latestCrowd';
 import { normalizePreferences, preferenceFilterInput } from '../services/preferenceFit';
+import type { OpeningPeriod } from '../services/itinerary';
 import {
   RECOMMEND_POOLS, rankRecommendations, radiusForWalk, recommendCell, searchRadiusFor, vibeProfile,
   type RecommendPlace, type RecommendPool, type RecommendVenue,
@@ -132,6 +133,36 @@ export async function resolvePlaceLocation(
     return null;
   }
 }
+
+/**
+ * Google's weekly opening periods for a place, cached for a day. Null when
+ * Google lists no hours, the id is malformed, or the lookup fails.
+ */
+export async function resolvePlaceHours(placeId: string): Promise<OpeningPeriod[] | null> {
+  if (!config.googlePlacesApiKey || !/^[A-Za-z0-9_-]{1,255}$/.test(placeId)) return null;
+  try {
+    const hours = await cached(`gp:${CACHE_VERSION}:hours:${placeId}`, 86_400, async () => {
+      const data = await gpGet<Record<string, unknown>>(`/places/${encodeURIComponent(placeId)}`,
+        'id,regularOpeningHours.periods', 2500);
+      const parsed = openingPeriodsSchema.safeParse((data.regularOpeningHours as { periods?: unknown } | undefined)?.periods);
+      return { periods: parsed.success && parsed.data.length > 0 ? parsed.data : null };
+    });
+    return hours.periods;
+  } catch (err) {
+    captureError(err, { provider: 'google-places', operation: 'resolvePlaceHours' });
+    return null;
+  }
+}
+
+const openingPointSchema = z.object({
+  day: z.number().int().min(0).max(6),
+  hour: z.number().int().min(0).max(24),
+  minute: z.number().int().min(0).max(59),
+});
+const openingPeriodsSchema = z.array(z.object({
+  open: openingPointSchema,
+  close: openingPointSchema.nullish(),
+})).max(28);
 
 export async function gpPost<T>(path: string, body: object, fieldMask: string): Promise<T> {
   const res = await fetch(`${GP_BASE}${path}`, {

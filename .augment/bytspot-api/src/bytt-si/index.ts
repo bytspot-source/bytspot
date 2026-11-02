@@ -3,6 +3,7 @@ export * from './llm/index';
 export * from './skills/index';
 export type * from './ports/types';
 export { createEngine, ByttSiEngine, planSelectionSchema, quickAnswerSchema, type EngineOptions, type PlanSelection } from './engine';
+export type { NeedRanker, NeedRanking, NeedRankingInput, RankableOption, DropReason } from './ranking';
 export { loadSystemPrompt } from './prompt/index';
 export { evaluateBudget } from './core/budget';
 export { scheduleStops, scheduleChecks, capacityCheck, overallVerdict, DEFAULT_DURATION_MINS } from './core/schedule';

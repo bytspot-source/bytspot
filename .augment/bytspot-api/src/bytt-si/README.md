@@ -22,6 +22,48 @@ Budget, schedule feasibility and honesty rules are enforced in code (`core/`). F
 | People | `SocialCircle`/`SocialCircleMember`, `services/safety.ts` `blockedUserIds` | Caller's own circles, blocked users removed, other members' preferences not shared. |
 | Final check | `services/planFeasibility.ts` + `services/planLegs.ts` `PlanLeg` | Runs on every proposal; a `breaks` or a failure to run blocks booking. |
 
+## Prime Path
+
+The model understands the request and names the needs. The final pick per need
+is made by the existing Prime Path ranker (`services/primePath.ts`, unchanged,
+including its three commitments) through `backend/primePath.ts`, wired as
+`EngineOptions.ranker` in `createBackendEngine`. The engine itself only knows the
+`NeedRanker` interface (`ranking.ts`); without a ranker it falls back to the v1
+model selection and the plan says `ranking: 'model'`.
+
+Candidate mapping (honest facts only):
+
+| Field | Source |
+|---|---|
+| capability | bookableProjection (`capabilityForAccessMode`, applied by `eventsRouter.nearby`) or the Bytspot bookable row |
+| ownInventory | true only for Bytspot parties and places with a Bytspot bookable (coffee holds are not discovered by BYTT-SI yet) |
+| seats | live `spacesRemaining` for parties (never Typical); bookable capacity for bookables; unknown → 0 and not confirmable |
+| minParty | stated minimum if the supply has one, else 1 |
+| confirmableNow | Mode B, seats > 0, and the party's time overlaps the plan window |
+| travelMinutes | RoutingPort estimate from the previous stop (or a location the guest gave); else null, which sorts last |
+| reliability, continuationValue | 0 (neutral) |
+| price / anything commercial | never an input |
+
+OpenTable/Resy links, Google places and Ticketmaster events are details or deep
+links. Bytspot can't confirm them and has no seat count, so they are **not** fed
+to `rankPrimePath` (that would mean inventing `confirmableNow`/`seats`). They are
+listed after Prime Path's ranked alternates (by travel, unknown last) and can never
+be the prime.
+
+Per need, the item carries `primePath`:
+
+- `prime`: the ranker's pick, with its reason line (`★ Prime Path — fits 4 at 10:00 PM, 6 min away, confirmable now`). The model can't override it, and a pitch that names an unpicked stop is replaced.
+- `fallback`: the prime broke the budget, so the next viable alternate (in order) was used; `note` says why.
+- `suggestion`: no prime (deep-link/details only). The model's suggestion among the alternates is labeled as a suggestion and has no badge.
+- `listed`: no prime and no model suggestion; the first alternate in order.
+
+`alternates` is the decline auto-promotion order (ranked first). Paths that fail a
+hard filter (seats < party, minimum party > committed, not confirmable) are
+dropped, not demoted, and a `prime_path` notice says why. For an unsaved proposal
+`goingCount` is 1 (only the requester has committed) and `partySize` is the stated
+party, or 1 if none was given. Budget, schedule and the final `planFeasibility`
+check still run after ranking.
+
 ## Route
 
 `concierge.plan` (`trpc/conciergePlanRouter.ts`): authenticated mutation, 10/min per user, input `{ message, location? }`, output `{ version: 1, status: 'ok' | 'unavailable', reply, result }`. Open only when `CONCIERGE_PLAN_ENABLED=true` **and** Concierge discovery is open to the user (`CONCIERGE_DISCOVERY_ENABLED`, `CONCIERGE_AUDIENCE`, `CONCIERGE_PILOT_USER_IDS`). Model: `CONCIERGE_PLAN_MODEL` (default `gpt-4o-mini`), key `OPENAI_API_KEY`. Nothing is saved or booked; the client saves via `plans.create` / `plans.createWithBookables`, and `plans.feasibility` stays authoritative.

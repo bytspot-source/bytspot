@@ -35,6 +35,8 @@ export const candidateSchema = z.object({
   endsAt: z.string().nullable(),
   durationMins: z.number().int().nullable(),
   capacity: z.number().int().nullable(),
+  /** Smallest party the supply runs for, when it states one. Null = no stated minimum. */
+  minParty: z.number().int().nullable(),
   bookableId: z.string().nullable(),
   /** book | request | details (bookableProjection). Places are details until bookables says otherwise. */
   capability: z.enum(['book', 'request', 'details']),
@@ -79,7 +81,7 @@ export const discoverySkill = defineSkill({
             latitude: e.latitude, longitude: e.longitude, distanceMeters: Math.round(d), rating: null, isOpen: null,
             priceCents: e.priceCents, priceBasis: e.priceCents === null ? null : e.bookableId ? 'bytspot_bookable' : 'provider_listed',
             startsAt: e.startsAt, endsAt: e.endsAt, durationMins: e.endsAt ? minutesBetween(e.startsAt, e.endsAt) : null,
-            capacity: e.capacity, bookableId: e.bookableId, capability: e.capability, crowd: null,
+            capacity: e.capacity, minParty: e.minParty ?? null, bookableId: e.bookableId, capability: e.capability, crowd: null,
           });
         }
       } catch { status = 'unavailable'; messages.push('Bytspot events are unavailable right now.'); }
@@ -98,7 +100,7 @@ export const discoverySkill = defineSkill({
             latitude: p.latitude, longitude: p.longitude, distanceMeters: Math.round(d), rating: p.rating,
             isOpen: found.source === 'google-stale' ? null : p.isOpen,
             priceCents: p.priceCents, priceBasis: p.priceCents === null ? null : p.priceBasis,
-            startsAt: null, endsAt: null, durationMins: null, capacity: null, bookableId: null, capability: 'details',
+            startsAt: null, endsAt: null, durationMins: null, capacity: null, minParty: null, bookableId: null, capability: 'details',
             crowd: crowdInfo(p.crowd, now) ?? await typicalFromPort(ports, p, args.startsAt ?? defaults.startsAt ?? now),
           });
         }

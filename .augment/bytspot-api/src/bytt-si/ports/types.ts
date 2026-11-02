@@ -45,6 +45,8 @@ export interface EventRecord {
   bookableId: string | null;
   /** Same values as bookableProjection: book | request | details. */
   capability: 'book' | 'request' | 'details';
+  /** Smallest party the supply runs for, when it states one (a group minimum). Omitted/null = no minimum (1). */
+  minParty?: number | null;
 }
 export interface EventsPort {
   /** Must return `{ events: [], source: 'unavailable' }` on failure — never fallback or curated events. */

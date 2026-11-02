@@ -13,6 +13,7 @@ import type { Context } from '../../trpc/context';
 import { eventsRouter } from '../../trpc/eventsRouter';
 import { createEngine, type ByttSiEngine } from '../engine';
 import { OpenAIProvider } from '../llm/openai';
+import { primePathNeedRanker } from './primePath';
 import type { Ports } from '../ports/types';
 import { createBackendBookablesPort } from './bookables';
 import { createBackendCrowdPort } from './crowd';
@@ -44,6 +45,9 @@ export function createBackendPorts(ctx: Context): Ports {
   };
 }
 
+/** Prime Path makes the final pick per need in production; the model only names the needs. */
+export const BACKEND_RANKER = primePathNeedRanker;
+
 /** The engine for a request, or null when no OpenAI key is configured (the route then says so). */
 export function createBackendEngine(ctx: Context): ByttSiEngine | null {
   if (!config.openaiApiKey) return null;
@@ -51,5 +55,6 @@ export function createBackendEngine(ctx: Context): ByttSiEngine | null {
     llm: new OpenAIProvider({ apiKey: config.openaiApiKey, model: config.conciergePlanModel }),
     ports: createBackendPorts(ctx),
     finalCheck: backendFinalCheck,
+    ranker: BACKEND_RANKER,
   });
 }

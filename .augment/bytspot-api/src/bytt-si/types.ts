@@ -82,6 +82,23 @@ export interface ProposedPlanItem {
   crowd: CrowdInfo | null;
   booking: BookingOption[];
   rides: RideLink[];
+  /**
+   * How this stop was chosen when a ranker (Prime Path) ran; null when the
+   * model picked (no ranker configured).
+   * - prime: Prime Path's pick; `reason` is its '★ Prime Path — …' line.
+   * - fallback: the prime broke the budget; this is the next viable alternate (`note` says why).
+   * - suggestion: no prime (deep-link/details only); the model's suggestion among the alternates.
+   * - listed: no prime and no model suggestion; first alternate in order.
+   */
+  primePath: ItemRanking | null;
+}
+
+export interface ItemRanking {
+  status: 'prime' | 'fallback' | 'suggestion' | 'listed';
+  reason: string | null;
+  note: string | null;
+  /** Decline auto-promotion order: Prime Path alternates (ranked) first, then unranked deep links/details. */
+  alternates: Array<{ candidateId: string; title: string; ranked: boolean }>;
 }
 
 export type Verdict = 'fits' | 'breaks' | 'unknown';
@@ -91,7 +108,7 @@ export type NoticeCode =
   | 'provider_unavailable' | 'provider_stale' | 'assistant_unavailable' | 'dropped_unverified_item'
   | 'budget_repaired' | 'over_budget' | 'price_unknown' | 'price_estimate'
   | 'schedule_adjusted' | 'schedule_infeasible' | 'typical_not_live' | 'deeplink_only'
-  | 'step_cap' | 'text_replaced' | 'no_options' | 'assumption' | 'final_check';
+  | 'step_cap' | 'text_replaced' | 'no_options' | 'assumption' | 'final_check' | 'prime_path';
 export interface Notice { code: NoticeCode; message: string }
 
 export interface BudgetSummary {
@@ -121,6 +138,8 @@ export interface ProposedPlan extends PlanConstraints {
     book: { available: boolean; reason: string | null };
   };
   meta: { provider: string; steps: number; toolCalls: string[] };
+  /** Who made the final pick per need: the Prime Path ranker, or the model (no ranker). */
+  ranking: 'prime_path' | 'model';
 }
 
 export interface QuickAnswer {
@@ -149,6 +168,12 @@ const itemSchema = z.object({
   priceCents: z.number().int().nullable(), priceBasis: z.enum(['bytspot_bookable', 'provider_listed', 'estimate']).nullable(),
   capability: z.enum(['details', 'request', 'book']), crowd: crowdSchema.nullable(), booking: z.array(bookingSchema),
   rides: z.array(z.object({ provider: z.enum(['uber', 'lyft']), url: z.string(), fareChecked: z.literal(false) }).strict()),
+  primePath: z.object({
+    status: z.enum(['prime', 'fallback', 'suggestion', 'listed']),
+    reason: z.string().startsWith('★ Prime Path — ').nullable(),
+    note: z.string().nullable(),
+    alternates: z.array(z.object({ candidateId: z.string(), title: z.string(), ranked: z.boolean() }).strict()),
+  }).strict().refine((r) => (r.status === 'prime') === (r.reason !== null), 'Only a prime carries the Prime Path reason line').nullable(),
 }).strict();
 export const proposedPlanSchema = planConstraintsSchema.extend({
   kind: z.literal('plan'), status: z.enum(['proposed', 'needs_changes']), lifecycle: z.literal('proposed'),
@@ -162,6 +187,7 @@ export const proposedPlanSchema = planConstraintsSchema.extend({
     book: z.object({ available: z.boolean(), reason: z.string().nullable() }).strict(),
   }).strict(),
   meta: metaSchema,
+  ranking: z.enum(['prime_path', 'model']),
 }).strict();
 export const quickAnswerResultSchema = z.object({
   kind: z.literal('quick_answer'), answer: z.string(), notices: z.array(noticeSchema),

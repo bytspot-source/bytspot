@@ -9,9 +9,11 @@ import { clockLabel } from './core/time';
 import type { ChatMessage, LLMProvider } from './llm/types';
 import type { Ports } from './ports/types';
 import { loadSystemPrompt } from './prompt/index';
+import { estimateTravel } from './core/geo';
 import { bookablesSkill, discoverySkill, SKILLS, toToolDefinition, travelBetween, type Candidate, type Skill, type SkillContext } from './skills/index';
 import { DISCOVERY_NEEDS } from './skills/discovery';
-import type { BookingOption, ConciergeRequest, ConciergeResult, Notice, PlanConstraints, ProposedPlan, ProposedPlanItem, QuickAnswer } from './types';
+import type { NeedRanker, NeedRanking, RankableOption } from './ranking';
+import type { BookingOption, ConciergeRequest, ConciergeResult, ItemRanking, Notice, PlanConstraints, ProposedPlan, ProposedPlanItem, QuickAnswer } from './types';
 
 export interface EngineOptions {
   llm: LLMProvider;
@@ -27,6 +29,12 @@ export interface EngineOptions {
    * Runs last; a `breaks` overrules the engine, and a failure blocks booking.
    */
   finalCheck?: (plan: ProposedPlan) => Promise<{ verdict: 'fits' | 'breaks' | 'unknown'; checks: ProposedPlan['feasibility']['checks'] }>;
+  /**
+   * Per-need ranker that makes the final pick (bytspot-api wires Prime Path).
+   * When set, the model only names the needs and may suggest among
+   * alternates where nothing can be featured; it cannot override a prime.
+   */
+  ranker?: NeedRanker;
 }
 
 /** Model's final pick (structured output "plan_selection"). Ids only — facts come from the ledger. */
@@ -78,6 +86,7 @@ export class ByttSiEngine {
   private readonly system: string;
   private readonly skills: readonly Skill[];
   private readonly finalCheck: EngineOptions['finalCheck'];
+  readonly ranker: NeedRanker | undefined;
 
   constructor(options: EngineOptions) {
     this.llm = options.llm;
@@ -87,6 +96,7 @@ export class ByttSiEngine {
     this.system = options.systemPrompt ?? loadSystemPrompt();
     this.skills = options.skills ?? SKILLS;
     this.finalCheck = options.finalCheck;
+    this.ranker = options.ranker;
   }
 
   async handle(request: ConciergeRequest): Promise<ConciergeResult> {
@@ -180,6 +190,12 @@ export class ByttSiEngine {
 
     if (mode === 'quick') return this.quick(request, constraints, ledger, messages, notices, meta, llmUp);
 
+    // 3a. With a ranker (Prime Path), the ranker makes the final pick per need.
+    if (this.ranker && constraints.needs.some((n) => (DISCOVERY_NEEDS as readonly string[]).includes(n))) {
+      const suggestions = llmUp ? await this.select(messages, ledger, constraints, null) : null;
+      return this.rankedPlan(this.ranker, request, constraints, ledger, suggestions, notices, meta, context);
+    }
+
     // 3. Compose: the model picks candidate ids; code builds and checks the plan.
     let selection = llmUp ? await this.select(messages, ledger, constraints, null) : null;
     if (!selection) selection = this.fallbackSelection(constraints, ledger);
@@ -209,6 +225,139 @@ export class ByttSiEngine {
       }
     }
     return this.finalizePlan(constraints, items, ledger, selection, notices, meta);
+  }
+
+  /**
+   * Ranked composition. For each requested need, in order: gather the need's
+   * candidates with their bookables and travel from the previous stop, let the
+   * ranker pick, then apply the budget in code (a prime that breaks it falls to
+   * the next viable alternate). The model's selection is only consulted where
+   * the ranker featured nothing, and is labeled a suggestion.
+   */
+  private async rankedPlan(ranker: NeedRanker, request: ConciergeRequest, constraints: PlanConstraints, ledger: Ledger, suggestions: PlanSelection | null,
+    notices: Notice[], meta: ProposedPlan['meta'], context: SkillContext): Promise<ProposedPlan> {
+    const window = { startsAt: constraints.startsAt, endsAt: constraints.endsAt };
+    const partySize = constraints.partySize ?? 1;
+    // Only the requester has committed to an unsaved proposal.
+    const goingCount = 1;
+    const used = new Set<string>();
+    // First stop: travel is known only from a location the guest actually gave (not the default area centre).
+    let from: { latitude: number; longitude: number } | null = request.latitude !== undefined && request.longitude !== undefined ? { latitude: request.latitude, longitude: request.longitude } : null;
+    type Decision = { need: string; candidate: Candidate; ranking: ItemRanking; order: string[]; primeId: string | null };
+    const decisions: Decision[] = [];
+
+    for (const need of constraints.needs) {
+      if (!(DISCOVERY_NEEDS as readonly string[]).includes(need)) continue;
+      const pool = [...ledger.candidates.values()].filter((c) => !used.has(c.id) && (c.needKind === need || (need === 'nightlife' && c.kind === 'event')));
+      if (!pool.length) continue;
+      const options: RankableOption[] = [];
+      for (const candidate of pool) {
+        const found = candidate.kind === 'place' && candidate.placeId ? await this.bookablesFor(candidate.placeId, ledger, constraints, notices, context) : null;
+        options.push({
+          candidate,
+          bytspot: (found?.bytspot ?? []).map(({ fitsParty: _f, ...b }) => b),
+          deeplinks: found?.deeplinks ?? [],
+          travelMinutes: from ? await this.routeMinutes(from, candidate) : null,
+        });
+      }
+      let ranking: NeedRanking;
+      try {
+        ranking = ranker.rank({ need, options, partySize, goingCount, window });
+      } catch {
+        notices.push({ code: 'prime_path', message: `Couldn't rank ${need} options right now, so none were featured.` });
+        continue;
+      }
+      const name = (id: string) => ledger.candidates.get(id)?.name ?? id;
+      for (const d of ranking.dropped) {
+        const why = d.why === 'seats' ? `not enough open spots for ${partySize}` : d.why === 'min_party' ? 'it needs more people committed than have joined' : "it can't be confirmed for your time";
+        notices.push({ code: 'prime_path', message: `Left out ${name(d.id)}: ${why}.` });
+      }
+      const order = [...ranking.rankedAlternateIds, ...ranking.unrankedIds].filter((id) => ledger.candidates.has(id));
+      const ranked = new Set(ranking.rankedAlternateIds);
+      const alternatesExcept = (...ids: string[]) => order.filter((id) => !ids.includes(id)).map((id) => ({ candidateId: id, title: name(id), ranked: ranked.has(id) }));
+      let chosen: string | null = null;
+      let itemRanking: ItemRanking;
+      if (ranking.primeId && ranking.reason && ledger.candidates.has(ranking.primeId)) {
+        chosen = ranking.primeId;
+        itemRanking = { status: 'prime', reason: ranking.reason, note: null, alternates: alternatesExcept(chosen) };
+      } else {
+        const suggested = suggestions?.items.find((i) => order.includes(i.candidateId))?.candidateId ?? null;
+        chosen = suggested ?? order[0] ?? null;
+        if (!chosen) continue;
+        itemRanking = suggested
+          ? { status: 'suggestion', reason: null, note: 'Suggestion — not a Prime Path pick: nothing here can be confirmed in Bytspot, so check availability via the link.', alternates: alternatesExcept(chosen) }
+          : { status: 'listed', reason: null, note: 'Not a Prime Path pick: nothing here can be confirmed in Bytspot. Listed by distance; check availability via the link.', alternates: alternatesExcept(chosen) };
+      }
+      const candidate = ledger.candidates.get(chosen)!;
+      used.add(chosen);
+      decisions.push({ need, candidate, ranking: itemRanking, order, primeId: ranking.primeId });
+      from = { latitude: candidate.latitude, longitude: candidate.longitude };
+    }
+
+    // Budget still enforced in code after ranking: a prime that breaks it falls to the next viable alternate.
+    const budgetOf = () => evaluateBudget(decisions.map((d) => d.candidate), constraints.partySize, constraints.budgetCents);
+    let budget = budgetOf();
+    if (budget.verdict === 'breaks') {
+      const before = budget.detail;
+      const primesFirst = [...decisions].sort((a, b) => Number(b.ranking.status === 'prime') - Number(a.ranking.status === 'prime'));
+      for (const d of primesFirst) {
+        const original = d.candidate;
+        for (const id of d.order) {
+          if (id === original.id || decisions.some((o) => o.candidate.id === id)) continue;
+          d.candidate = ledger.candidates.get(id)!;
+          if (budgetOf().verdict === 'fits') break;
+          d.candidate = original;
+        }
+        if (d.candidate === original) continue;
+        const ranked = new Set(d.ranking.alternates.filter((a) => a.ranked).map((a) => a.candidateId));
+        const wasPrime = d.ranking.status === 'prime';
+        const message = wasPrime
+          ? `Prime Path pick ${original.name} is over your budget (${before}); using the next viable alternate, ${d.candidate.name}.`
+          : `${original.name} is over your budget (${before}); using ${d.candidate.name} instead.`;
+        d.ranking = {
+          status: wasPrime ? 'fallback' : 'listed', reason: null, note: message,
+          alternates: d.order.filter((id) => id !== d.candidate.id && id !== original.id).map((id) => ({ candidateId: id, title: ledger.candidates.get(id)!.name, ranked: ranked.has(id) || id === d.primeId })),
+        };
+        notices.push({ code: wasPrime ? 'prime_path' : 'budget_repaired', message });
+        budget = budgetOf();
+        if (budget.verdict === 'fits') break;
+      }
+    }
+
+    const selection: PlanSelection = {
+      title: suggestions?.title || constraints.intent,
+      pitch: suggestions?.pitch ?? '',
+      items: decisions.map((d) => {
+        const timed = suggestions?.items.find((i) => i.candidateId === d.candidate.id);
+        return { candidateId: d.candidate.id, startsAt: timed?.startsAt ?? null, durationMins: timed?.durationMins ?? null };
+      }),
+    };
+    const items = await this.buildItems(selection, ledger, constraints, notices, context);
+    for (const item of items) {
+      const decision = decisions.find((d) => d.candidate.id === item.candidateId);
+      if (!decision) continue;
+      item.primePath = decision.ranking;
+      item.needKind = decision.need; // a party found for "nightlife" is the nightlife stop
+    }
+    return this.finalizePlan(constraints, items, ledger, selection, notices, meta, 'prime_path');
+  }
+
+  private async bookablesFor(placeId: string, ledger: Ledger, constraints: PlanConstraints, notices: Notice[], context: SkillContext) {
+    let found = ledger.bookables.get(placeId);
+    if (!found) {
+      found = await bookablesSkill.run({ placeId, partySize: constraints.partySize ?? undefined }, context);
+      ledger.record('bookables', { placeId }, found);
+      if (found.status === 'unavailable') notices.push({ code: 'provider_unavailable', message: found.message });
+    }
+    return found;
+  }
+
+  /** Routing estimate only; unknown stays null (never a guessed number). */
+  private async routeMinutes(from: { latitude: number; longitude: number }, to: { latitude: number; longitude: number }): Promise<number | null> {
+    try {
+      const est = await this.ports.routing.travel(from, to, estimateTravel(from, to).mode);
+      return est ? est.minutes : null;
+    } catch { return null; }
   }
 
   private async runSkill(name: string, args: unknown, context: SkillContext, ledger: Ledger): Promise<string> {
@@ -315,14 +464,14 @@ export class ByttSiEngine {
         timeSource: schedule[position].timeSource, travelMinsBefore: schedule[position].travelMinsBefore,
         priceCents: candidate.priceCents, priceBasis: candidate.priceBasis,
         capability: bookable ? (bookable.capability === 'request' ? 'request' : 'book') : 'details',
-        crowd: candidate.crowd, booking,
+        crowd: candidate.crowd, booking, primePath: null,
         rides: (this.ports.routing.rideLinks ?? rideLinks)({ latitude: candidate.latitude, longitude: candidate.longitude, name: candidate.name, address: candidate.address }),
       });
     }
     return items;
   }
 
-  private finalizePlan(constraints: PlanConstraints, items: ProposedPlanItem[], ledger: Ledger, selection: PlanSelection, notices: Notice[], meta: ProposedPlan['meta']): ProposedPlan {
+  private finalizePlan(constraints: PlanConstraints, items: ProposedPlanItem[], ledger: Ledger, selection: PlanSelection, notices: Notice[], meta: ProposedPlan['meta'], ranking: ProposedPlan['ranking'] = 'model'): ProposedPlan {
     const window = { startsAt: constraints.startsAt, endsAt: constraints.endsAt };
     const budget = evaluateBudget(items, constraints.partySize, constraints.budgetCents);
     const checks = [
@@ -344,7 +493,10 @@ export class ByttSiEngine {
 
     const fallbackSummary = this.summarize(items, budget.perPersonCents, budget.totalCents, constraints.partySize, budget.basis === 'estimate');
     let summary = selection.pitch?.trim() || fallbackSummary;
-    if (summary !== fallbackSummary && honestyViolations(summary, this.honestyFacts(items, constraints, budget.perPersonCents, budget.totalCents)).length) {
+    // Ranked plans: the model's text may not name a stop the ranker did not pick.
+    const inPlan = new Set(items.map((i) => i.candidateId));
+    const namesUnpicked = ranking === 'prime_path' && [...ledger.candidates.values()].some((c) => !inPlan.has(c.id) && !items.some((i) => i.title.includes(c.name)) && summary.includes(c.name));
+    if (summary !== fallbackSummary && (namesUnpicked || honestyViolations(summary, this.honestyFacts(items, constraints, budget.perPersonCents, budget.totalCents)).length)) {
       notices.push({ code: 'text_replaced', message: "The assistant's description made a claim the data doesn't support, so it was replaced with a plain summary." });
       summary = fallbackSummary;
     }
@@ -361,6 +513,7 @@ export class ByttSiEngine {
         book: { available: status === 'proposed' && bookable, reason: status !== 'proposed' ? 'Fix the flagged checks first.' : bookable ? null : 'No bookable stops; these are walk-in or details only.' },
       },
       meta,
+      ranking,
     };
   }
 

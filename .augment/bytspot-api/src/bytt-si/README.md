@@ -70,7 +70,7 @@ check still run after ranking.
 
 ## Route
 
-`concierge.plan` (`trpc/conciergePlanRouter.ts`): authenticated mutation, 10/min per user, input `{ message, location? }`, output `{ version: 1, status: 'ok' | 'unavailable', reply, result }`. Open only when `CONCIERGE_PLAN_ENABLED=true` **and** Concierge discovery is open to the user (`CONCIERGE_DISCOVERY_ENABLED`, `CONCIERGE_AUDIENCE`, `CONCIERGE_PILOT_USER_IDS`). Model: `CONCIERGE_PLAN_MODEL` (default `gpt-4o-mini`), key `OPENAI_API_KEY`. Nothing is saved or booked; the client saves via `plans.create` / `plans.createWithBookables`, and `plans.feasibility` stays authoritative.
+`concierge.plan` (`trpc/conciergePlanRouter.ts`): authenticated mutation, 10/min per user, input `{ message, location? }`, output `{ version: 1, status: 'ok' | 'unavailable', reply, result }`. Open to every signed-in user when `CONCIERGE_PLAN_ENABLED=true`; it does not use the discovery flag or pilot list. Model: `CONCIERGE_PLAN_MODEL` (default `gpt-4o-mini`), key `OPENAI_API_KEY`. Nothing is saved or booked; the client saves via `plans.create` / `plans.createWithBookables`, and `plans.feasibility` stays authoritative.
 
 ## Swapping the LLM
 

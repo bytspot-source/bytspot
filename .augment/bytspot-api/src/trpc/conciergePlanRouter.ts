@@ -4,13 +4,12 @@ import type { ConciergeRequest, ConciergeResult } from '../bytt-si/types';
 import { conciergeResultSchema } from '../bytt-si/types';
 import { config } from '../config';
 import { coordinateSchema } from '../services/conciergeDiscovery';
-import { conciergeOpenTo } from './conciergeRouter';
 import type { Context } from './context';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
-/** concierge.plan opens only where discovery is open (flag + audience) AND CONCIERGE_PLAN_ENABLED is on. */
-export function conciergePlanOpenTo(userId: string | undefined): boolean {
-  return config.conciergePlanEnabled && conciergeOpenTo(userId);
+/** concierge.plan is open to every signed-in user when CONCIERGE_PLAN_ENABLED is on. */
+export function conciergePlanOpenTo(): boolean {
+  return config.conciergePlanEnabled;
 }
 
 export const conciergePlanInput = z.object({
@@ -57,7 +56,7 @@ export function createConciergePlanRouter(deps: ConciergePlanDependencies) {
       .input(conciergePlanInput)
       .output(conciergePlanOutput)
       .mutation(async ({ ctx, input }) => {
-        if (!conciergePlanOpenTo(ctx.user.userId)) return { version: 1 as const, status: 'unavailable' as const, reply: NOT_ENABLED, result: null };
+        if (!conciergePlanOpenTo()) return { version: 1 as const, status: 'unavailable' as const, reply: NOT_ENABLED, result: null };
         const engine = deps.engineFor(ctx);
         if (!engine) return { version: 1 as const, status: 'unavailable' as const, reply: UNAVAILABLE, result: null };
         let timer: NodeJS.Timeout | undefined;

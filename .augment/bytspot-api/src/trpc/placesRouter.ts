@@ -13,6 +13,9 @@ import { isPhotoName, photoProxyUrl } from '../routes/placesPhoto';
 import { indexedVenueToFindResult, mergeFindResults, resolvedPlaceToFindResult, type FindResult } from '../services/findResults';
 import { ensureTableBookingLinks, tableBookingLinkFor, type TableBookingLink } from '../services/tableBookingLinks';
 import { withLatestCrowd } from '../services/latestCrowd';
+import { normalizePreferences, preferenceFilterInput } from '../services/preferenceFit';
+import { DISCOVER_RANK_MAX, discoverCandidateInput, rankDiscover } from '../services/discoverRank';
+import type { OpeningPeriod } from '../services/itinerary';
 import {
   RECOMMEND_POOLS, rankRecommendations, radiusForWalk, recommendCell, searchRadiusFor, vibeProfile,
   type RecommendPlace, type RecommendPool, type RecommendVenue,
@@ -131,6 +134,36 @@ export async function resolvePlaceLocation(
     return null;
   }
 }
+
+/**
+ * Google's weekly opening periods for a place, cached for a day. Null when
+ * Google lists no hours, the id is malformed, or the lookup fails.
+ */
+export async function resolvePlaceHours(placeId: string): Promise<OpeningPeriod[] | null> {
+  if (!config.googlePlacesApiKey || !/^[A-Za-z0-9_-]{1,255}$/.test(placeId)) return null;
+  try {
+    const hours = await cached(`gp:${CACHE_VERSION}:hours:${placeId}`, 86_400, async () => {
+      const data = await gpGet<Record<string, unknown>>(`/places/${encodeURIComponent(placeId)}`,
+        'id,regularOpeningHours.periods', 2500);
+      const parsed = openingPeriodsSchema.safeParse((data.regularOpeningHours as { periods?: unknown } | undefined)?.periods);
+      return { periods: parsed.success && parsed.data.length > 0 ? parsed.data : null };
+    });
+    return hours.periods;
+  } catch (err) {
+    captureError(err, { provider: 'google-places', operation: 'resolvePlaceHours' });
+    return null;
+  }
+}
+
+const openingPointSchema = z.object({
+  day: z.number().int().min(0).max(6),
+  hour: z.number().int().min(0).max(24),
+  minute: z.number().int().min(0).max(59),
+});
+const openingPeriodsSchema = z.array(z.object({
+  open: openingPointSchema,
+  close: openingPointSchema.nullish(),
+})).max(28);
 
 export async function gpPost<T>(path: string, body: object, fieldMask: string): Promise<T> {
   const res = await fetch(`${GP_BASE}${path}`, {
@@ -338,6 +371,8 @@ export const placesRouter = router({
       group: z.string().max(40).optional(),
       /** The guest's local hour, for intents with no place type of their own. */
       hour: z.number().int().min(0).max(23).optional(),
+      /** Saved avoid list and price ceiling, sent by the client. */
+      preferences: preferenceFilterInput.optional(),
     }))
     .query(async ({ input }) => {
       const profile = vibeProfile(input.vibe, input.hour);
@@ -366,7 +401,30 @@ export const placesRouter = router({
         placesSource = results.every((r) => !r.ok) ? 'unavailable' : results.some((r) => r.stale) ? 'google-stale' : 'google';
       }
       const venues = await venuesPromise;
-      return { ...rankRecommendations(input, pools, venues), placesSource };
+      const preferences = normalizePreferences(input.preferences);
+      return { ...rankRecommendations({ ...input, preferences }, pools, venues), placesSource };
+    }),
+
+  /**
+   * The order of the Discover deck, from the cards the client is about to
+   * show and the facts it already has. Preference-avoided and over-ceiling
+   * cards come back as `hidden`.
+   */
+  rankDiscover: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'places-rank-discover' }))
+    .input(z.object({
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      vibe: z.string().max(40).optional(),
+      walk: z.string().max(40).optional(),
+      group: z.string().max(40).optional(),
+      hour: z.number().int().min(0).max(23).optional(),
+      preferences: preferenceFilterInput.optional(),
+      candidates: z.array(discoverCandidateInput).max(DISCOVER_RANK_MAX),
+    }))
+    .query(({ input }) => {
+      const { candidates, preferences, ...rest } = input;
+      return rankDiscover({ ...rest, preferences: normalizePreferences(preferences) }, candidates);
     }),
 
   nearbySearch: publicProcedure

@@ -227,7 +227,7 @@ export function printConfigDiagnostics(): void {
   check(config.redisUrl, 'Redis', 'caching disabled, using in-memory fallback');
   check(config.cronSecret, 'Cron secret', 'cron endpoints unprotected');
   check(config.bandSunMasterKey, 'Band fresh codes', 'secured bands, cards and fobs will be refused at the door');
-  check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will use fallback data');
+  check(config.ticketmasterApiKey, 'Ticketmaster', 'events feed will be empty');
   check(config.googlePlacesApiKey, 'Google Places', 'venue photos unavailable');
   check(config.mobilityAggregatorMode === 'live' && config.mobilityAggregatorBaseUrl && config.mobilityAggregatorApiKey ? 'ok' : '', 'Mobility aggregator', 'premium rides will use Uber/Lyft handoff only');
   check(config.adminPassword, 'Admin password', 'invite gating disabled — all signups allowed');

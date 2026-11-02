@@ -943,6 +943,10 @@ model UserPreference {
   cuisines  String[] @default([])
   parking   Json? // { covered, evCharging, security }
   behavior  Json? // { categoryClicks, lastLocations, visitCounts }
+  // Results matching an avoided tag are left out (services/preferenceFit).
+  avoid     String[] @default([])
+  // Highest Google price level to show, 1 ($) to 4 ($$$$); null = no ceiling.
+  priceCeiling Int? @map("price_ceiling")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

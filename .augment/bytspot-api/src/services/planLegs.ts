@@ -64,6 +64,10 @@ export interface PlanLegSource {
     coffeeSpot?: { latitude: number | null; longitude: number | null } | null;
   } | null;
   coffeeSpot?: { latitude: number | null; longitude: number | null } | null;
+  /** A Google place the server resolved at attach time, while still fresh. */
+  place?: { lat: number | null; lng: number | null } | null;
+  /** The time the guest said they booked this place for. Their word only. */
+  guestBookedFor?: Date | null;
 }
 
 /**
@@ -148,7 +152,7 @@ function coordinate(lat: number | null | undefined, lng: number | null | undefin
 export function legForItem(source: PlanLegSource): PlanLeg {
   const { offer, party } = source;
 
-  const startsAt = offer?.startsAt ?? party?.startsAt ?? null;
+  const startsAt = offer?.startsAt ?? party?.startsAt ?? source.guestBookedFor ?? null;
 
   // A duration is only ever measured, never assumed. A party states one by
   // having both ends; an offer states one outright; coffee states none.
@@ -158,7 +162,8 @@ export function legForItem(source: PlanLegSource): PlanLeg {
   const place = coordinate(offer?.lat, offer?.lng)
     ?? coordinate(party?.lat, party?.lng)
     ?? coordinate(source.coffeeReservation?.coffeeSpot?.latitude, source.coffeeReservation?.coffeeSpot?.longitude)
-    ?? coordinate(source.coffeeSpot?.latitude, source.coffeeSpot?.longitude);
+    ?? coordinate(source.coffeeSpot?.latitude, source.coffeeSpot?.longitude)
+    ?? coordinate(source.place?.lat, source.place?.lng);
 
   // Only an accepted offer states a price. The `Bookable` snapshot is not
   // consulted: `partyToBookableSnapshot` and `coffeeToBookableSnapshot` write

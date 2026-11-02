@@ -6,12 +6,7 @@ import { MapPin, ArrowRight, Radio, ParkingCircle, Car, Clock } from 'lucide-rea
 const API_URL = 'https://bytspot-api.onrender.com';
 const BETA_APP_URL = 'https://bytspot-beta.onrender.com';
 
-interface Venue { id: string; name: string; crowdLevel: string; parkingAvailable: number; updatedAt: string; }
-
-/** Generate a recent-ish ISO timestamp (1-8 mins ago) for fallback realism */
-function recentTimestamp(minsAgo: number): string {
-  return new Date(Date.now() - minsAgo * 60_000).toISOString();
-}
+interface Venue { id: string; name: string; crowdLevel: string | null; crowdTypical: boolean; parkingAvailable: number | null; updatedAt: string | null; }
 
 /** Format an ISO timestamp as a relative "X ago" string */
 function timeAgo(iso: string | number): string {
@@ -45,17 +40,6 @@ function timeAgo(iso: string | number): string {
   return diffWeeks <= 1 ? '1 wk ago' : `${diffWeeks} wks ago`;
 }
 
-/** Fallback venues shown when API is cold-starting or unreachable */
-function buildFallbackVenues(): Venue[] {
-  return [
-    { id: 'f1', name: 'Ponce City Market', crowdLevel: 'Active', parkingAvailable: 45, updatedAt: recentTimestamp(2) },
-    { id: 'f2', name: 'Colony Square', crowdLevel: 'Chill', parkingAvailable: 22, updatedAt: recentTimestamp(4) },
-    { id: 'f3', name: 'Krog Street Market', crowdLevel: 'Active', parkingAvailable: 12, updatedAt: recentTimestamp(1) },
-    { id: 'f4', name: 'The Painted Pin', crowdLevel: 'Packed', parkingAvailable: 5, updatedAt: recentTimestamp(6) },
-    { id: 'f5', name: 'Piedmont Park', crowdLevel: 'Chill', parkingAvailable: 60, updatedAt: recentTimestamp(3) },
-  ];
-}
-
 const CROWD_COLOR: Record<string, string> = {
   Chill: 'text-emerald-400',
   Active: 'text-orange-400',
@@ -71,7 +55,7 @@ const CROWD_BAR: Record<string, string> = {
 
 const FEATURE_CHECKLIST = [
   { label: 'Live crowd data', done: true },
-  { label: 'Parking availability', done: true },
+  { label: 'Parking availability', done: false },
   { label: 'Ride ETAs', done: false, wip: true },
   { label: 'Reservations', done: false },
 ];
@@ -95,22 +79,28 @@ function VenueCard({ venue }: { venue: Venue }) {
     >
       <div className="flex justify-between items-start">
         <p className="text-white font-semibold text-[14px] leading-tight">{venue.name}</p>
-        <span className={`text-[12px] font-bold ${CROWD_COLOR[venue.crowdLevel] ?? 'text-white/60'}`}>
-          {venue.crowdLevel}
+        <span className={`text-[12px] font-bold ${(venue.crowdLevel && CROWD_COLOR[venue.crowdLevel]) ?? 'text-white/60'}`}>
+          {venue.crowdLevel ? `${venue.crowdTypical ? 'Typically ' : ''}${venue.crowdLevel}` : 'Crowd unknown'}
         </span>
       </div>
-      <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all duration-700 ${CROWD_BAR[venue.crowdLevel] ?? 'w-1/2 bg-white/40'}`} />
-      </div>
+      {venue.crowdLevel && (
+        <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+          <div className={`h-full rounded-full transition-all duration-700 ${CROWD_BAR[venue.crowdLevel] ?? 'w-1/2 bg-white/40'}`} />
+        </div>
+      )}
       <div className="flex items-center justify-between text-[11px] text-white/40">
-        <div className="flex items-center gap-1">
-          <ParkingCircle className="w-3 h-3 text-cyan-400" />
-          <span>{venue.parkingAvailable} spots open nearby</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Clock className="w-3 h-3 text-white/30" />
-          <span>{timeAgo(venue.updatedAt)}</span>
-        </div>
+        {venue.parkingAvailable !== null && (
+          <div className="flex items-center gap-1">
+            <ParkingCircle className="w-3 h-3 text-cyan-400" />
+            <span>{venue.parkingAvailable} spots open nearby</span>
+          </div>
+        )}
+        {venue.updatedAt && !venue.crowdTypical && (
+          <div className="flex items-center gap-1">
+            <Clock className="w-3 h-3 text-white/30" />
+            <span>{timeAgo(venue.updatedAt)}</span>
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -142,18 +132,19 @@ export default function WelcomeLanding() {
         const mapped = (data.venues || []).slice(0, 5).map((v: any) => ({
           id: v.id,
           name: v.name,
-          crowdLevel: v.crowd?.label ?? 'Active',
-          parkingAvailable: v.parking?.totalAvailable ?? 0,
-          updatedAt: v.crowd?.recordedAt ?? new Date().toISOString(),
+          crowdLevel: v.crowd?.label ?? null,
+          crowdTypical: v.crowd?.source === 'typical',
+          parkingAvailable: v.parking?.freshness === 'live' ? v.parking.totalAvailable : null,
+          updatedAt: v.crowd?.recordedAt ?? null,
         }));
-        setVenues(mapped.length > 0 ? mapped : buildFallbackVenues());
+        setVenues(mapped);
+        setError(mapped.length === 0);
         setLoading(false);
       })
       .catch(() => {
         clearTimeout(timeout);
-        // Use fallback venues instead of showing error
-        setVenues(buildFallbackVenues());
-        setError(false);
+        setVenues([]);
+        setError(true);
         setLoading(false);
       });
     return () => { clearTimeout(timeout); controller.abort(); };
@@ -177,7 +168,7 @@ export default function WelcomeLanding() {
           setVenues(prev => prev.map(v => {
             const match = (msg.venues as any[]).find((s: any) => s.id === v.id);
             if (match?.crowd) {
-              return { ...v, crowdLevel: match.crowd.label ?? v.crowdLevel, updatedAt: match.crowd.recordedAt ?? v.updatedAt };
+              return { ...v, crowdLevel: match.crowd.label ?? v.crowdLevel, crowdTypical: match.crowd.source === 'typical', updatedAt: match.crowd.recordedAt ?? v.updatedAt };
             }
             return v;
           }));
@@ -185,7 +176,7 @@ export default function WelcomeLanding() {
         if (msg.type === 'update' && msg.venueId && msg.crowd) {
           setVenues(prev => prev.map(v =>
             v.id === msg.venueId
-              ? { ...v, crowdLevel: msg.crowd.label ?? v.crowdLevel, updatedAt: msg.crowd.recordedAt ?? new Date().toISOString() }
+              ? { ...v, crowdLevel: msg.crowd.label ?? v.crowdLevel, crowdTypical: msg.crowd.source === 'typical', updatedAt: msg.crowd.recordedAt ?? v.updatedAt }
               : v
           ));
         }
@@ -254,13 +245,15 @@ export default function WelcomeLanding() {
               <span className="text-[12px] font-bold text-white/80 uppercase tracking-widest">Right now in Midtown →</span>
             </div>
             <div className="flex items-center gap-1 text-[10px] text-white/30">
-              <Radio className="w-3 h-3" /><span>Live</span>
+              <Radio className="w-3 h-3" /><span>{venues.some(v => v.crowdLevel && !v.crowdTypical) ? 'Live' : 'Typical'}</span>
             </div>
           </div>
 
           {loading && [0, 1, 2].map(i => <VenueCardSkeleton key={i} />)}
 
-          {/* Error state removed — fallback venues always fill in */}
+          {!loading && error && (
+            <p className="text-[13px] text-white/40">Venue info is unavailable right now. Open the app for the latest.</p>
+          )}
 
           {!loading && !error && venues.map((v, i) => (
             <motion.div key={v.id} transition={{ delay: 0.1 * i }}>

@@ -6,6 +6,7 @@ import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
+import { venueParking } from '../services/parkingFreshness';
 
 const router = Router();
 
@@ -47,16 +48,7 @@ router.get('/venues', async (_req, res) => {
               : String(v.crowdLevels[0].recordedAt),
           }
         : null,
-      parking: {
-        totalAvailable: v.parking.reduce((sum, p) => sum + p.available, 0),
-        spots: v.parking.map((p) => ({
-          name: p.name,
-          type: p.type,
-          available: p.available,
-          total: p.totalSpots,
-          pricePerHr: p.pricePerHr,
-        })),
-      },
+      parking: venueParking(v.parking),
     }));
   });
 
@@ -188,6 +180,7 @@ router.get('/venues/:slug', async (req, res) => {
     return;
   }
 
+  const parking = venueParking(venue.parking);
   res.json({
     id: venue.id,
     name: venue.name,
@@ -203,13 +196,9 @@ router.get('/venues/:slug', async (req, res) => {
       current: venue.crowdLevels[0] || null,
       history: venue.crowdLevels,
     },
-    parking: venue.parking.map((p) => ({
-      name: p.name,
-      type: p.type,
-      available: p.available,
-      total: p.totalSpots,
-      pricePerHr: p.pricePerHr,
-    })),
+    parking: parking.spots,
+    parkingFreshness: parking.freshness,
+    parkingAsOf: parking.asOf,
   });
 });
 

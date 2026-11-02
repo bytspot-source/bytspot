@@ -6,7 +6,7 @@ import { appRouter } from './router';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
 import type { Context } from './context';
-import { PLAN_DEFAULT_LENGTH_MS, capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, planClosesAt, itemDestination, itemIsBooked, usePlaceLocationResolverForTest, openNeeds, planDisplayState, planReadiness } from './planRouter';
+import { PLAN_DEFAULT_LENGTH_MS, capabilityForAccessMode, capabilityForSupply, categoryForParty, isProposedPlanExpired, planClosesAt, itemDestination, itemIsBooked, usePlaceHoursResolverForTest, usePlaceLocationResolverForTest, openNeeds, planDisplayState, planReadiness } from './planRouter';
 import { controlFromCapability } from '../services/bookableProjection';
 import { useTableBookingLinksForTest } from '../services/tableBookingLinks';
 
@@ -2032,6 +2032,85 @@ test('plans.feasibility asks for no supply when the Plan holds none', async () =
   bookable.findMany = async () => { throw new Error('must not query bookables for an empty Plan'); };
   coffeeSpot.findMany = async () => { throw new Error('must not query coffee spots for an empty Plan'); };
   assert.equal((await caller().plans.feasibility({ planId: 'plan-1' })).verdict, 'unknown');
+});
+
+test('plans.feasibility measures travel to a place stop and honours its reported booking time', async () => {
+  const resolvedAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  feasibilityFixture({
+    items: [
+      planItemFixture({ id: 'dinner', offerId: 'offer-1' }),
+      // ~8.3 miles away, booked for ten minutes after dinner ends.
+      planItemFixture({ id: 'late', position: 1, needKind: 'dining', title: 'Airport Grill', placeId: 'gp-far',
+        placeLat: 33.6407, placeLng: -84.4277, placeResolvedAt: resolvedAt,
+        guestBookedAt: resolvedAt, guestBookedFor: new Date('2026-10-01T20:10:00Z') }),
+    ],
+    offers: [{ id: 'offer-1', startsAt: new Date('2026-10-01T19:00:00Z'), durationMins: 60, priceCents: 1_000, capacity: 10, lat: 33.7726, lng: -84.3654 }],
+  });
+  const result = await caller().plans.feasibility({ planId: 'plan-1' });
+  assert.equal(verdictOf(result, 'travel'), 'breaks');
+});
+
+// ─── plans.itinerary ─────────────────────────────────────────────────────────
+
+test('plans.itinerary is closed to strangers', async () => {
+  feasibilityFixture();
+  await assert.rejects(() => stranger().plans.itinerary({ planId: 'plan-1' }), { code: 'NOT_FOUND' });
+});
+
+test('plans.itinerary times place stops from the Plan start and reads their opening hours', async () => {
+  const resolvedAt = new Date(Date.now() - 60 * 60 * 1000);
+  feasibilityFixture({
+    // 2026-10-02 is a Friday; 22:00Z is 6 PM in Atlanta.
+    plan: { startsAt: new Date('2026-10-02T22:00:00Z'), endsAt: new Date('2026-10-03T04:00:00Z') },
+    items: [
+      planItemFixture({ id: 'dinner', needKind: 'dining', title: 'Dinner', placeId: 'gp-dinner',
+        placeLat: 33.781, placeLng: -84.386, placeResolvedAt: resolvedAt }),
+      planItemFixture({ id: 'bar', position: 1, needKind: 'nightlife', title: 'Bar', placeId: 'gp-bar',
+        placeLat: 33.782, placeLng: -84.387, placeResolvedAt: resolvedAt }),
+      planItemFixture({ id: 'garage', position: 2, needKind: 'parking', title: 'Garage' }),
+      planItemFixture({ id: 'gone', position: 3, status: 'cancelled', title: 'Dropped', placeId: 'gp-gone' }),
+    ],
+  });
+  const asked: string[] = [];
+  const restore = usePlaceHoursResolverForTest(async (placeId) => {
+    asked.push(placeId);
+    return placeId === 'gp-bar'
+      ? [{ open: { day: 5, hour: 21, minute: 0 }, close: { day: 6, hour: 2, minute: 0 } }]
+      : null;
+  });
+  try {
+    const result = await guest().plans.itinerary({ planId: 'plan-1' });
+    assert.equal(result.status, 'timed');
+    assert.deepEqual(asked.sort(), ['gp-bar', 'gp-dinner'], 'cancelled items cost no lookup');
+    assert.deepEqual(result.skipped.map((entry) => entry.title), ['Garage']);
+    const [dinner, bar] = result.stops;
+    assert.deepEqual(dinner.arriveAt, new Date('2026-10-02T22:00:00Z'));
+    assert.equal(dinner.time, 'estimated');
+    assert.equal(dinner.hours, 'unknown');
+    assert.deepEqual(bar.arriveAt, new Date('2026-10-03T01:00:00Z'), 'waits for the bar to open at 9 PM');
+    assert.ok(bar.waitMins > 0);
+    assert.equal(bar.hours, 'known');
+  } finally {
+    restore();
+  }
+});
+
+test('plans.itinerary labels a reported booking time as set by the guest', async () => {
+  const reportedAt = new Date(Date.now() - 60 * 60 * 1000);
+  feasibilityFixture({
+    plan: { startsAt: new Date('2026-10-02T22:00:00Z'), endsAt: new Date('2026-10-03T04:00:00Z') },
+    items: [planItemFixture({ id: 'table', needKind: 'dining', title: 'Table', guestBookedAt: reportedAt,
+      guestBookedFor: new Date('2026-10-02T23:30:00Z') })],
+  });
+  const restore = usePlaceHoursResolverForTest(async () => { throw new Error('no place, no lookup'); });
+  try {
+    const [table] = (await caller().plans.itinerary({ planId: 'plan-1' })).stops;
+    assert.equal(table.time, 'set');
+    assert.equal(table.timeSource, 'guestBooking');
+    assert.deepEqual(table.arriveAt, new Date('2026-10-02T23:30:00Z'));
+  } finally {
+    restore();
+  }
 });
 
 test('an item says where it is only when that place may be shared', () => {

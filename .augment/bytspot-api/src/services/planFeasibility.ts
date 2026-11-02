@@ -58,7 +58,7 @@ export interface PlanConstraints {
  * will actually achieve — so it is a floor on impossibility, not a prediction.
  * Anything short of that is left alone rather than warned about.
  */
-const OPTIMISTIC_TRAVEL_METERS_PER_MIN = 1207;
+export const OPTIMISTIC_TRAVEL_METERS_PER_MIN = 1207;
 
 const fits = (check: CheckName, detail: string, itemIds: string[] = []): CheckResult =>
   ({ check, verdict: 'fits', detail, itemIds });

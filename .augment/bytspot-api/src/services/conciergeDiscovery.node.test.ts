@@ -741,7 +741,7 @@ test('a request with two needs proposes a Plan from one nearest card per need, w
   assert.deepEqual(response.proposedPlan, {
     title: 'Dinner and drinks', intent: 'dinner and drinks for 4 tonight', needs: ['dining', 'nightlife'], partySize: 4,
     stops: [{ cardId: 'gp:kitchen', needKind: 'dining', title: 'Real Kitchen' }, { cardId: 'gp:bar', needKind: 'nightlife', title: 'Real Bar' }],
-    openNeeds: [],
+    openNeeds: [], area: null,
   });
   assert.match(response.reply, /^Proposed Plan: Real Kitchen for dinner, then Real Bar for drinks\. Nothing is saved until you choose Make it a Plan/);
   assert.ok(response.cards.every((c) => c.capability === 'details' && c.actions.some((a) => a.type === 'add_to_plan')));
@@ -846,6 +846,7 @@ test('a Plan in a named area searches around the point Google gives near the gue
   assert.deepEqual(asked, ['Midtown']);
   assert.ok(searched.length === 2 && searched.every((s) => s.lat === midtown.lat));
   assert.equal(response.proposedPlan?.partySize, 4);
+  assert.deepEqual(response.proposedPlan?.area, { label: 'Midtown', ...midtown });
   assert.deepEqual(response.proposedPlan?.stops.map((s) => s.title), ['Real Kitchen', 'Real Bar']);
   assert.match(response.reply, /Searched near Midtown as Google places it; distances are from there\./);
 

@@ -4,7 +4,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
-  conciergeActionRequest, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
+  conciergeActionRequest, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
 } from './conciergeDiscovery';
 import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
@@ -796,4 +796,91 @@ test('the output contract refuses a proposed Plan whose stops are not shown card
   assert.ok(conciergeDiscoverOutput.safeParse({ version: 1, reply: 'x', status: 'ready', cards: [card], refinements: [], proposedPlan: plan }).success);
   assert.equal(conciergeDiscoverOutput.safeParse({ version: 1, reply: 'x', status: 'ready', cards: [card], refinements: [], proposedPlan: { ...plan, stops: [{ ...plan.stops[0], cardId: 'gp:b' }] } }).success, false);
   assert.equal(conciergeDiscoverOutput.safeParse({ version: 1, reply: 'x', status: 'ready', cards: [card], refinements: [], proposedPlan: { ...plan, needs: ['dining', 'coffee'] } }).success, false);
+});
+
+function planPlaces(searched: Array<{ query: string; lat: number }> = []): ConciergeDependencies['places'] {
+  return async (search) => {
+    searched.push({ query: search.query, lat: search.location.lat });
+    const at = search.location;
+    return search.query === 'restaurant'
+      ? { source: 'google', places: [place({ placeId: 'kitchen', name: 'Real Kitchen', primaryType: 'restaurant', types: ['restaurant'], lat: at.lat + 0.001, lng: at.lng })] }
+      : { source: 'google', places: [place({ placeId: 'bar', name: 'Real Bar', primaryType: 'bar', types: ['bar'], lat: at.lat + 0.002, lng: at.lng })] };
+  };
+}
+
+test('an action after a Proposed Plan resolves against its stops, in stop order', async () => {
+  const searched: Array<{ query: string; lat: number }> = [];
+  const discover = service({ places: planPlaces(searched) });
+  const cases: Array<[string, string, string, RegExp]> = [
+    ['Directions to the second one', 'directions', 'gp:bar', /directions to Real Bar/],
+    ['Add the first one to my Plan', 'add_to_plan', 'gp:kitchen', /add Real Kitchen to a Plan/],
+    ['save the last one', 'save', 'gp:bar', /save Real Bar/],
+  ];
+  for (const [text, type, cardId, reply] of cases) {
+    const response = await discover(input('dinner and drinks for 4', text));
+    assert.equal(conciergeDiscoverOutput.safeParse(response).success, true, text);
+    assert.deepEqual(response.proposal, { type, cardId }, text);
+    assert.deepEqual(response.cards.map((c) => c.id), ['gp:kitchen', 'gp:bar'], text);
+    assert.equal(response.proposedPlan, null);
+    assert.match(response.reply, reply);
+    assert.match(response.reply, /stops from your Proposed Plan/);
+    assert.doesNotMatch(response.reply, /Make it a Plan/);
+  }
+  assert.deepEqual(searched.map((s) => s.query).sort(), ['bar', 'bar', 'bar', 'restaurant', 'restaurant', 'restaurant']);
+  const unmatched = await discover(input('dinner and drinks', 'Directions to the third one'));
+  assert.equal(unmatched.proposal, null);
+  assert.match(unmatched.reply, /could not match that to a place shown/);
+  assert.deepEqual(unmatched.refinements, ['Directions to the first one', 'Directions to the second one']);
+});
+
+test('a Plan in a named area searches around the point Google gives near the guest', async () => {
+  const searched: Array<{ query: string; lat: number }> = [];
+  const asked: string[] = [];
+  const midtown = { lat: 40.05, lng: -75 };
+  const response = await service({ places: planPlaces(searched), area: async (name, near) => {
+    asked.push(name);
+    assert.deepEqual(near, HERE);
+    return midtown;
+  } })(input('dinner and drinks in Midtown for 4'));
+  assert.equal(conciergeDiscoverOutput.safeParse(response).success, true);
+  assert.deepEqual(asked, ['Midtown']);
+  assert.ok(searched.length === 2 && searched.every((s) => s.lat === midtown.lat));
+  assert.equal(response.proposedPlan?.partySize, 4);
+  assert.deepEqual(response.proposedPlan?.stops.map((s) => s.title), ['Real Kitchen', 'Real Bar']);
+  assert.match(response.reply, /Searched near Midtown as Google places it; distances are from there\./);
+
+  const action = await service({ places: planPlaces(), area: async () => midtown })(input('dinner and drinks in Midtown', 'Directions to the first one'));
+  assert.deepEqual(action.proposal, { type: 'directions', cardId: 'gp:kitchen' });
+});
+
+test('a named area that is far, missing, slow or unsupported keeps the location prompt and never searches', async () => {
+  let searches = 0;
+  const places: ConciergeDependencies['places'] = async () => { searches++; return { source: 'google', places: [] }; };
+  const variants: Array<Partial<ConciergeDependencies>> = [
+    { area: async () => ({ lat: 33.78, lng: -84.38 }) },
+    { area: async () => null },
+    { area: async () => { throw new Error('upstream'); } },
+    { area: async () => ({ lat: 0, lng: 0, extra: 'x' }) as unknown as { lat: number; lng: number } },
+    {},
+  ];
+  for (const over of variants) {
+    const response = await service({ places, ...over })(input('dinner and drinks in Midtown'));
+    assert.equal(response.status, 'needs_location');
+    assert.equal(response.proposedPlan, null);
+  }
+  let areaCalls = 0;
+  const single = await service({ places, area: async () => { areaCalls++; return HERE; } })(input('coffee in Midtown'));
+  assert.equal(single.status, 'needs_location');
+  assert.equal(areaCalls, 0, 'a single search with a place name keeps the existing prompt');
+  assert.equal(searches, 0);
+});
+
+test('planArea reads the named area and ignores times, near me and bare at', () => {
+  assert.equal(planArea(['dinner and drinks in Midtown for 4']), 'Midtown');
+  assert.equal(planArea(['drinks near Piedmont Park then dinner']), 'Piedmont Park');
+  assert.equal(planArea(['dinner downtown and drinks']), 'downtown');
+  assert.equal(planArea(['plan dinner in Old Fourth Ward tonight']), 'Old Fourth Ward');
+  assert.equal(planArea(['dinner in an hour and drinks']), null);
+  assert.equal(planArea(['dinner and drinks near me']), null);
+  assert.equal(planArea(['dinner and drinks at 7']), null);
 });

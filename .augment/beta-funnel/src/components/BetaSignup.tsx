@@ -1,21 +1,12 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { MapPin, Users, Car, Clock, KeyRound, Mail, ArrowRight, Shield, ExternalLink, Lock, Smartphone, Radio, ParkingCircle } from 'lucide-react';
+import { MapPin, Users, Car, Clock, KeyRound, Mail, ArrowRight, Shield, ExternalLink, Lock, Smartphone, Ticket } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 
 const BACKEND_PROVIDER: 'formspree' | 'custom' | 'mock' = 'custom';
 const FORMSPREE_FORM_ID = 'xqedgrzv';
 const CUSTOM_API_URL = 'https://bytspot-api.onrender.com/beta-signup';
-
-/** P3: Dynamic spots counter — decrements based on days since launch */
-function getSpotsLeft(): number {
-  const launchDate = new Date('2026-02-24').getTime();
-  const now = Date.now();
-  const daysSinceLaunch = Math.floor((now - launchDate) / (1000 * 60 * 60 * 24));
-  const base = 47;
-  const decrement = daysSinceLaunch * 2 + Math.floor((now / (1000 * 60 * 60 * 6)) % 3);
-  return Math.max(3, base - decrement);
-}
+const APP_STORE_URL = 'https://apps.apple.com/us/app/id6761876421';
 
 interface BetaSignupProps { isDarkMode?: boolean; onComplete?: () => void; standalone?: boolean; }
 
@@ -47,7 +38,6 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
   const [name, setName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
-  const spotsLeft = useMemo(() => getSpotsLeft(), []);
   const [alreadySignedUp, setAlreadySignedUp] = useState(false);
 
   useEffect(() => { const s = localStorage.getItem('bytspot_beta_signed_up'); if (s) { setAlreadySignedUp(true); setIsSuccess(true); } }, []);
@@ -67,7 +57,7 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
           toast.success("You're already on the list!", { description: 'Check your inbox for the welcome email.' });
         } else {
           const firstName = name.split(' ')[0].trim();
-          toast.success(firstName ? `Welcome, ${firstName}! 🎯` : 'Welcome to the Inner Circle!', { description: "You've secured your spot for the Midtown Beta." });
+          toast.success(firstName ? `Welcome, ${firstName}! 🎯` : "You're on the list!", { description: "We'll email you Bytspot updates for Atlanta." });
         }
         if (onComplete) setTimeout(() => onComplete(), 2500);
       } else { toast.error(result.message || 'Something went wrong.'); }
@@ -87,7 +77,7 @@ export function BetaSignup({ isDarkMode = true, onComplete, standalone = false }
         {!isSuccess ? (<>
           <HeaderSection />
           <ProductMockCard />
-          <SignupForm email={email} setEmail={setEmail} name={name} setName={setName} isSubmitting={isSubmitting} spotsLeft={spotsLeft} isDarkMode={isDarkMode} onSubmit={handleSubmit} />
+          <SignupForm email={email} setEmail={setEmail} name={name} setName={setName} isSubmitting={isSubmitting} isDarkMode={isDarkMode} onSubmit={handleSubmit} />
         </>) : (
           <SuccessState alreadySignedUp={alreadySignedUp} onComplete={onComplete} standalone={standalone} />
         )}
@@ -108,20 +98,22 @@ function HeaderSection() {
         <MapPin className="w-3 h-3 text-cyan-400" />
         <span className="text-[11px] font-bold text-white/90 tracking-widest uppercase">Atlanta Beta &bull; Midtown</span>
       </div>
-      <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white tracking-tight leading-[1.1]">Know{' '}<span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-cyan-400">Before</span>{' '}You Go.</h1>
-      <p className="text-[15px] sm:text-[17px] text-white/70 max-w-sm mx-auto leading-relaxed">Bytspot shows live crowd levels, parking availability, and ride options — all in one place.</p>
+      <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white tracking-tight leading-[1.1]">Plan the night.{' '}<span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-cyan-400">Send one link.</span>{' '}Everyone's in.</h1>
+      <p className="text-[15px] sm:text-[17px] text-white/70 max-w-sm mx-auto leading-relaxed">Make a plan with friends, host a party with a shareable pass, and find the right spot nearby — Atlanta, starting in Midtown.</p>
       {/* P2: Feature bullets */}
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 pt-1">
-        <span className="flex items-center gap-1.5 text-[11px] text-white/50"><Radio className="w-3.5 h-3.5 text-red-400" />Live Crowds</span>
+        <span className="flex items-center gap-1.5 text-[11px] text-white/50"><Users className="w-3.5 h-3.5 text-purple-400" />Group Plans</span>
         <span className="text-white/20 hidden sm:inline">·</span>
-        <span className="flex items-center gap-1.5 text-[11px] text-white/50"><ParkingCircle className="w-3.5 h-3.5 text-cyan-400" />Open Parking</span>
+        <span className="flex items-center gap-1.5 text-[11px] text-white/50"><Ticket className="w-3.5 h-3.5 text-cyan-400" />Party Passes</span>
         <span className="text-white/20 hidden sm:inline">·</span>
-        <span className="flex items-center gap-1.5 text-[11px] text-white/50"><Car className="w-3.5 h-3.5 text-purple-400" />Ride ETAs</span>
+        <span className="flex items-center gap-1.5 text-[11px] text-white/50"><MapPin className="w-3.5 h-3.5 text-purple-400" />Spots Nearby</span>
       </div>
-      {/* P2: iOS & Android badge */}
-      <div className="flex items-center justify-center gap-1.5 pt-1">
-        <Smartphone className="w-3 h-3 text-white/30" />
-        <span className="text-[10px] font-medium text-white/30 uppercase tracking-widest">Coming to iOS &amp; Android</span>
+      {/* App Store download */}
+      <div className="flex items-center justify-center pt-2">
+        <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download Bytspot on the App Store" className="inline-flex items-center gap-2 min-h-[48px] px-6 py-3 rounded-xl bg-white text-black font-bold text-[15px] shadow-lg hover:bg-white/90 active:bg-white/80 transition-colors">
+          <Smartphone className="w-5 h-5" />
+          <span>Download on the App Store</span>
+        </a>
       </div>
     </div>
   );
@@ -159,13 +151,12 @@ function ProductMockCard() {
   );
 }
 
-function SignupForm({ email, setEmail, name, setName, isSubmitting, spotsLeft, isDarkMode, onSubmit }: {
-  email: string; setEmail: (v: string) => void; name: string; setName: (v: string) => void; isSubmitting: boolean; spotsLeft: number; isDarkMode: boolean; onSubmit: (e: React.FormEvent) => void;
+function SignupForm({ email, setEmail, name, setName, isSubmitting, isDarkMode, onSubmit }: {
+  email: string; setEmail: (v: string) => void; name: string; setName: (v: string) => void; isSubmitting: boolean; isDarkMode: boolean; onSubmit: (e: React.FormEvent) => void;
 }) {
   return (
     <form onSubmit={onSubmit} className="space-y-3">
-      {/* P1: Social proof counter */}
-      <p className="text-center text-[12px] text-white/50 font-medium">Join <span className="text-white/80">300+</span> Midtown locals on the waitlist</p>
+      <p className="text-center text-[12px] text-white/50 font-medium">Not on iPhone yet? Get Bytspot updates by email.</p>
       <div className="space-y-3">
         {/* First name */}
         <div className={`group relative rounded-xl transition-all duration-300 ${isDarkMode ? 'bg-white/5 border border-white/10 focus-within:bg-white/10 focus-within:border-white/20' : 'bg-white/80 border border-black/10'}`}>
@@ -181,22 +172,15 @@ function SignupForm({ email, setEmail, name, setName, isSubmitting, spotsLeft, i
           <Lock className="w-3 h-3 text-white/25" />
           <span className="text-[10px] text-white/30">We'll never spam you. Unsubscribe anytime.</span>
         </div>
-        <div className="flex items-center justify-center gap-2">
-          <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/10 border border-red-500/20">
-            <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span></span>
-            <span className="text-[10px] font-medium text-red-200">Only {spotsLeft} Early Access spots left</span>
-          </span>
-        </div>
       </div>
       <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} type="submit" disabled={isSubmitting} className="w-full relative overflow-hidden rounded-xl p-4 bg-gradient-to-r from-purple-600 to-cyan-600 text-white font-bold text-lg shadow-lg shadow-purple-500/25 disabled:opacity-70 disabled:cursor-not-allowed group">
         <div className="relative z-10 flex items-center justify-center gap-2">
-          {isSubmitting ? (<div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />) : (<><span>Reserve My Spot</span><ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" /></>)}
+          {isSubmitting ? (<div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />) : (<><span>Get Updates</span><ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" /></>)}
         </div>
         <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]" />
       </motion.button>
       <div className="text-center space-y-3 pt-2">
-        <p className="text-sm text-white/80 font-medium">First 100 Midtown users get <span className="text-cyan-400">free parking credit</span> during beta.</p>
-        <p className="text-[11px] text-white/30">Launching in select Midtown venues.</p>
+        <p className="text-[11px] text-white/30">Currently in Atlanta, starting with Midtown.</p>
       </div>
       {BACKEND_PROVIDER === 'mock' && (<div className="flex items-center justify-center gap-1.5 pt-2"><Shield className="w-3 h-3 text-yellow-500/60" /><span className="text-[10px] text-yellow-500/60">Preview mode — emails not saved. Connect Formspree to go live.</span></div>)}
     </form>
@@ -247,7 +231,7 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
           <p className="text-[12px] text-white/40 mb-3">Share with friends in Midtown</p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button
-              onClick={() => { const t = encodeURIComponent("I just got early access to Bytspot — live crowd levels, parking & ride options for Atlanta Midtown venues. Get yours:"); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }}
+              onClick={() => { const t = encodeURIComponent("Plan the night on Bytspot — send one link and everyone's in. Atlanta, starting in Midtown:"); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }}
               className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors flex items-center gap-1.5"
             >Share on X<ExternalLink className="w-3 h-3" /></button>
             <button

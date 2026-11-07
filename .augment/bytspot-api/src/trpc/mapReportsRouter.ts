@@ -27,6 +27,9 @@ import {
   type ReportRow,
 } from '../services/mapReports';
 import { alertPlansOfBusyStop } from '../services/mapReportAlerts';
+import { latestCrowdByVenue, REPORTED_CROWD } from '../services/latestCrowd';
+import { getRedis } from '../lib/redis';
+import { crowdEmitter } from '../routes/venues';
 import { RELAY_KEYS_PER_MEMBER, readRelayedPayload, relayPublicKey, verifyRelaySignature } from '../services/mapReportRelay';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 
@@ -111,11 +114,28 @@ async function settle(id: string, now: Date): Promise<Settled> {
   const removed = row.removedAt !== null || verdict.removed;
   if (verdict.removed && row.removedAt === null) data.removedAt = now;
   if (Object.keys(data).length > 0) await db.mapReport.update({ where: { id }, data });
-  if (verdict.confirmed && row.confirmedAt === null) await confirmAndPay(row, now);
+  const confirmedNow = verdict.confirmed && row.confirmedAt === null;
+  if (confirmedNow) await confirmAndPay(row, now);
+  // A confirmed packed or long-line report is the venue's crowd reading until it ends.
+  if (row.venueId && row.kind in REPORTED_CROWD && (confirmedNow || (verdict.removed && row.removedAt === null && row.confirmedAt !== null))) {
+    void announceVenueCrowd(row.venueId, now).catch(() => {});
+  }
 
   const report = toPublicReport(row, verdict);
   await publishMapReportChange(removed ? { type: 'remove', id, lat: row.lat, lng: row.lng } : { type: 'upsert', report });
   return { report, removed };
+}
+
+/** Tells open venue streams the venue's crowd reading changed, and drops the cached venue list. */
+async function announceVenueCrowd(venueId: string, now: Date): Promise<void> {
+  await getRedis()?.del('venues:all', 'venues:all:free', 'venues:all:paid').catch(() => undefined);
+  const current = (await latestCrowdByVenue([venueId], now)).get(venueId);
+  if (!current) return;
+  crowdEmitter.emit('crowd-update', {
+    venueId,
+    crowd: { level: current.level, label: current.label, waitMins: current.waitMins, source: current.source,
+      recordedAt: new Date(current.recordedAt).toISOString() },
+  });
 }
 
 async function castVote(reportId: string, voterId: string, vote: MapReportVoteKind, weight: number, now: Date): Promise<void> {

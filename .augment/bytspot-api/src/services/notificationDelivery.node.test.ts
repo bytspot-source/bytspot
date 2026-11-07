@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
 import {
+  apnsPayload,
   deliverPushNotification,
   readPushDeliveryTotals,
   resetPushDeliveryTotalsForTests,
 } from './notificationDelivery';
+import { pushPresentation, pushThreadId } from './pushPresentation';
 
 const iosPushDevice = db.iOSPushDevice as any;
 
@@ -59,4 +61,47 @@ test('Totals accumulate across sends so the tally is a history, not a snapshot',
   await deliverPushNotification({ ...alert, userIds: ['usr_1', 'usr_2'] });
   const totals = await readPushDeliveryTotals();
   assert.equal(totals.skipped, 2);
+});
+
+test('Only what is about to happen to the member is Time Sensitive; other people\'s activity waits in the summary', () => {
+  assert.equal(pushPresentation('reminder.party', '30m').interruptionLevel, 'time-sensitive');
+  assert.equal(pushPresentation('reminder.plan', '30m').interruptionLevel, 'time-sensitive');
+  assert.equal(pushPresentation('reminder.plan', '2h').interruptionLevel, 'active');
+  assert.equal(pushPresentation('reminder.party', '24h').interruptionLevel, 'passive');
+  assert.equal(pushPresentation('plan-stop-busy').interruptionLevel, 'time-sensitive');
+  for (const type of ['party.rsvp', 'plan.joined', 'plan.changed', 'feedback.request']) {
+    assert.equal(pushPresentation(type).interruptionLevel, 'passive', type);
+  }
+  assert.equal(pushPresentation('demand-offer').interruptionLevel, 'active');
+  assert.equal(pushPresentation('reminder.party', '2h').category, 'PARTY_REMINDER');
+  assert.equal(pushPresentation('reminder.plan', '2h').category, undefined);
+});
+
+test('Pushes stack by the Party, Plan or venue they open', () => {
+  assert.equal(pushThreadId('https://bytspot.app/party/p_1?intent=arrival'), 'party:p_1');
+  assert.equal(pushThreadId('https://bytspot.app/plan/pl_2'), 'plan:pl_2');
+  assert.equal(pushThreadId('https://bytspot.app/venue/the-optimist'), 'venue:the-optimist');
+  assert.equal(pushThreadId('https://bytspot.app/discover'), undefined);
+  assert.equal(pushThreadId('https://bytspot.app/feedback?kind=plan&id=pl_2'), undefined);
+});
+
+test('The payload carries presentation and only Bytspot action routes', () => {
+  const payload = apnsPayload({
+    title: 'Time to head out',
+    body: 'Rooftop starts in 30 minutes.',
+    url: 'https://bytspot.app/party/p_1?intent=arrival',
+    type: 'reminder.party',
+    stage: '30m',
+    actions: { directions: 'https://bytspot.app/party/p_1?intent=arrival', pass: 'https://evil.example/party/p_1' },
+  });
+  assert.deepEqual(payload.aps, {
+    alert: { title: 'Time to head out', body: 'Rooftop starts in 30 minutes.' },
+    sound: 'default',
+    'interruption-level': 'time-sensitive',
+    'relevance-score': 1,
+    'thread-id': 'party:p_1',
+    category: 'PARTY_REMINDER',
+  });
+  assert.deepEqual(payload.actions, { directions: 'https://bytspot.app/party/p_1?intent=arrival' });
+  assert.equal('actions' in apnsPayload({ title: 't', body: 'b', url: 'https://bytspot.app/discover', type: 'packed' }), false);
 });

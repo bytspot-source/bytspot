@@ -3,14 +3,21 @@ import { readFileSync } from 'node:fs';
 import { sign } from 'node:crypto';
 import { config } from '../config';
 import type { IosPushEnvironment } from './iosPushDevices';
+import type { InterruptionLevel } from './pushPresentation';
 
 export interface ApnsPayload {
   aps: {
     alert: { title: string; body: string };
     sound: 'default';
+    'interruption-level'?: InterruptionLevel;
+    'relevance-score'?: number;
+    'thread-id'?: string;
+    category?: string;
   };
   url: string;
   type: string;
+  /** Route each action button opens, keyed by the app's action identifier. */
+  actions?: Record<string, string>;
 }
 
 export type ApnsSendStatus = 'sent' | 'permanent-failure' | 'temporary-failure' | 'skipped';

@@ -1,7 +1,8 @@
 import { db } from '../lib/db';
 import { config } from '../config';
 import { getRedis } from '../lib/redis';
-import { sendApnsNotification } from './apns';
+import { sendApnsNotification, type ApnsPayload } from './apns';
+import { pushPresentation, pushThreadId } from './pushPresentation';
 import {
   getEligibleIosPushDevices,
   invalidateIosPushDevice,
@@ -107,6 +108,32 @@ export function venueNotificationUrl(slug: string | null | undefined): string {
   return slug ? `https://bytspot.app/venue/${encodeURIComponent(slug)}` : 'https://bytspot.app/discover';
 }
 
+export function apnsPayload(input: {
+  title: string;
+  body: string;
+  url: string;
+  type: string;
+  stage?: '24h' | '2h' | '30m';
+  actions?: Record<string, string>;
+}): ApnsPayload {
+  const presentation = pushPresentation(input.type, input.stage);
+  const threadId = pushThreadId(input.url);
+  const actions = Object.fromEntries(Object.entries(input.actions ?? {}).filter(([, url]) => isAllowedBytspotUrl(url)));
+  return {
+    aps: {
+      alert: { title: input.title, body: input.body },
+      sound: 'default',
+      'interruption-level': presentation.interruptionLevel,
+      'relevance-score': presentation.relevanceScore,
+      ...(threadId ? { 'thread-id': threadId } : {}),
+      ...(presentation.category ? { category: presentation.category } : {}),
+    },
+    url: input.url,
+    type: input.type,
+    ...(Object.keys(actions).length > 0 ? { actions } : {}),
+  };
+}
+
 export async function deliverPushNotification(input: {
   userIds: string[];
   category: PushCategory;
@@ -114,6 +141,8 @@ export async function deliverPushNotification(input: {
   body: string;
   url: string;
   type: string;
+  stage?: '24h' | '2h' | '30m';
+  actions?: Record<string, string>;
 }): Promise<NotificationDeliveryResult> {
   const targetUserIds = [...new Set(input.userIds)];
   const empty = {
@@ -128,13 +157,10 @@ export async function deliverPushNotification(input: {
 
   try {
     const devices = await getEligibleIosPushDevices(targetUserIds, input.category, config.apnsBundleId);
+    const payload = apnsPayload(input);
     const outcomes = await Promise.all(devices.map(async (device) => {
       try {
-        const status = await sendApnsNotification(device, {
-          aps: { alert: { title: input.title, body: input.body }, sound: 'default' },
-          url: input.url,
-          type: input.type,
-        });
+        const status = await sendApnsNotification(device, payload);
         if (status === 'permanent-failure') {
           await invalidateIosPushDevice(device.token).catch(() => {});
         }

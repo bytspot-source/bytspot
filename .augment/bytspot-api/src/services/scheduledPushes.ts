@@ -100,6 +100,8 @@ export async function sendOnce(input: {
   body: string;
   url: string;
   type: string;
+  stage?: ReminderStage;
+  actions?: Record<string, string>;
 }): Promise<number> {
   const permitted = await usersPermitting(input.userIds, input.categories);
   const claimed: string[] = [];
@@ -114,6 +116,8 @@ export async function sendOnce(input: {
     body: input.body,
     url: input.url,
     type: input.type,
+    stage: input.stage,
+    actions: input.actions,
   });
   return claimed.length;
 }
@@ -159,6 +163,8 @@ async function sendPartyReminders(now: Date): Promise<number> {
       ...copy,
       url: partyUrl(party.id, due.stage === '30m' ? 'arrival' : undefined),
       type: 'reminder.party',
+      stage: due.stage,
+      actions: { directions: partyUrl(party.id, 'arrival'), pass: partyUrl(party.id) },
     });
   }
   return sent;
@@ -197,6 +203,7 @@ async function sendPlanReminders(now: Date): Promise<number> {
       ...copy,
       url: planUrl(plan.id),
       type: 'reminder.plan',
+      stage: due.stage,
     });
   }
   return sent;

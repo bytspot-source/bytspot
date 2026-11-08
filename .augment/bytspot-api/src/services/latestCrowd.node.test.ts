@@ -62,7 +62,8 @@ test('No venue read goes back to a nested crowdLevels include', () => {
   assert.deepEqual(offenders, []);
 });
 
-const NOW = new Date('2026-11-07T22:00:00Z');
+// withLatestCrowd reads the real clock, so fixtures are relative to it.
+const NOW = new Date();
 const row = (id: string, level: number, source: string, minutesAgo: number) => ({
   id, venueId: 'v1', level, label: ['', 'Chill', 'Active', 'Busy', 'Packed'][level], waitMins: null, source,
   recordedAt: new Date(NOW.getTime() - minutesAgo * 60_000),

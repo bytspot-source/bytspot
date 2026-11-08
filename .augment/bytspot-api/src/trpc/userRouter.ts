@@ -235,6 +235,24 @@ const preferencesRouter = router({
     }),
 });
 
+/**
+ * A blank phone, address or birthday clears it. A blank name is ignored:
+ * friends, hosts and invites always need something to call the member.
+ */
+export function profileUpdateData(input: {
+  name?: string; phone?: string; address?: string; birthday?: string; profileImage?: string;
+}): { name?: string; phone?: string | null; address?: string | null; birthday?: string | null; profileImage?: string } {
+  const data: ReturnType<typeof profileUpdateData> = {};
+  const name = input.name?.trim();
+  if (name) data.name = name;
+  for (const key of ['phone', 'address', 'birthday'] as const) {
+    const value = input[key];
+    if (value !== undefined) data[key] = value.trim() || null;
+  }
+  if (input.profileImage !== undefined) data.profileImage = input.profileImage;
+  return data;
+}
+
 // ─── Profile sub-router ─────────────────────────────────────────────
 const profileRouter = router({
   /** Get user profile (personal info) */
@@ -259,7 +277,7 @@ const profileRouter = router({
     .mutation(async ({ ctx, input }) => {
       const user = await db.user.update({
         where: { id: ctx.user.userId },
-        data: input,
+        data: profileUpdateData(input),
         select: { id: true, email: true, name: true, phone: true, profileImage: true, address: true, birthday: true },
       });
       // Identity hashes are refreshed only from auth-verified identifiers

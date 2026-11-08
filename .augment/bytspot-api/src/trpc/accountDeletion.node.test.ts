@@ -664,3 +664,15 @@ test('a password account is welcomed when its email is confirmed, never at signu
   await confirm(new Date('2026-09-01T00:00:00Z'));
   assert.deepEqual(sent, ['me@bytspot.com']);
 });
+
+test('Profile update clears a blank phone, address or birthday but never blanks the name', async () => {
+  let written: Record<string, unknown> | undefined;
+  user.update = async ({ data }: { data: Record<string, unknown> }) => {
+    written = data;
+    return { id: 'usr_me', email: 'me@bytspot.com', name: 'Ama', phone: null, profileImage: null, address: 'Midtown', birthday: null };
+  };
+  await createCaller(authenticated).user.profile.update({ name: '  ', phone: '', address: ' Midtown ', birthday: '   ' });
+  assert.deepEqual(written, { phone: null, address: 'Midtown', birthday: null });
+  await createCaller(authenticated).user.profile.update({ name: ' Ama ' });
+  assert.deepEqual(written, { name: 'Ama' });
+});

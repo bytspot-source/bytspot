@@ -1,6 +1,6 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
-import { inventoryInput, liveInventory } from '../vendor/inventory';
+import { inventoryInput, liveCardsAtVenue, liveInventory, venueInventoryInput } from '../vendor/inventory';
 import { openPatch } from '../vendor/patches';
 import { publicProcedure, rateLimitMiddleware, router } from './trpc';
 
@@ -13,6 +13,12 @@ export const inventoryRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'inventory-list' }))
     .input(inventoryInput)
     .query(({ input }) => liveInventory(input)),
+
+  /** What the businesses attached to one listed place offer, for its detail page. */
+  atVenue: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'inventory-at-venue' }))
+    .input(venueInventoryInput)
+    .query(({ input }) => liveCardsAtVenue(input)),
 
   /**
    * A scanned QR / NFC patch: the place it names and what can be asked for

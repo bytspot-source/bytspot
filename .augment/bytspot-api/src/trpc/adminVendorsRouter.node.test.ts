@@ -158,3 +158,17 @@ test('approval requires active seller/location, discoverable binding and uploade
   }
   assert.equal(writes.length, 0);
 });
+
+test('vendor decisions enforce admin identity before touching a business', async () => {
+  let reads = 0;
+  stubModel(db.vendorSeller, 'findUnique', async () => { reads += 1; return null; });
+  for (const client of [caller('guest'), adminVendorsRouter.createCaller({ user: null, clientRateLimitKey: 'decisions-anonymous' })]) {
+    for (const run of [() => client.pause({ sellerId: 's1' }), () => client.restore({ sellerId: 's1' }),
+      () => client.close({ sellerId: 's1', confirmName: 'Kitchen' }), () => client.create({ legalName: 'Kitchen', email: 'a@b.co' }),
+      () => client.resendInvite({ sellerId: 's1' })]) {
+      await assert.rejects(run, (error: any) => ['FORBIDDEN', 'UNAUTHORIZED'].includes(error.code));
+    }
+  }
+  assert.equal(reads, 0);
+  await assert.rejects(() => caller().pause({ sellerId: 'missing' }), { code: 'NOT_FOUND' });
+});

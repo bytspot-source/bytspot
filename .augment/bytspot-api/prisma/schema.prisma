@@ -1444,6 +1444,16 @@ model VendorSeller {
   /// business cannot upload video and none is shown.
   videoHostingAt       DateTime? @map("video_hosting_at")
   videoHostingByUserId String?   @map("video_hosting_by_user_id")
+  /// A Bytspot admin's decision to take the business off guest screens. The
+  /// reason, when given, is shown to the business in its console and email.
+  pausedAt       DateTime? @map("paused_at")
+  pausedByUserId String?   @map("paused_by_user_id")
+  pausedReason   String?   @map("paused_reason")
+  /// A Bytspot admin closed the business for good. History is kept.
+  closedAt       DateTime? @map("closed_at")
+  closedByUserId String?   @map("closed_by_user_id")
+  /// Set when a Bytspot admin created the business and invited its owner.
+  createdByUserId String?  @map("created_by_user_id")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

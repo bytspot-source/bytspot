@@ -25,6 +25,13 @@ export const inventoryInput = z.object({
 });
 export type InventoryInput = z.infer<typeof inventoryInput>;
 
+/** One listed place, by any of the ids a guest screen holds for it. */
+export const venueInventoryInput = z.object({
+  venueId: z.string().min(1).max(64).optional(),
+  googlePlaceId: z.string().min(1).max(300).optional(),
+  slug: z.string().min(1).max(200).optional(),
+}).refine((input) => Boolean(input.venueId || input.googlePlaceId || input.slug), { message: 'Name the place.' });
+
 export interface InventoryCard {
   windowId: string;
   sellerId: string;
@@ -38,6 +45,8 @@ export interface InventoryCard {
   maxGuests: number;
   durationMins: number;
   intent: string;
+  /** The listed place a Bytspot admin attached this business's location to. */
+  venueId: string | null;
   place: { label: string; address: string | null; lat: number; lng: number; phone: string | null; website: string | null };
   /** This bookable's own website, else the place's. */
   website: string | null;
@@ -169,6 +178,7 @@ async function toCards(windows: CardWindow[], now: Date, origin?: { lat: number;
       maxGuests: window.maxGuests,
       durationMins: template.durationMins,
       intent: window.intent,
+      venueId: window.location.menuVenueId ?? null,
       place: {
         label: window.location.label,
         address: window.location.address,
@@ -220,6 +230,26 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
 export async function liveCardsAt(locationId: string, now: Date = new Date()): Promise<InventoryCard[]> {
   const windows = await db.vendorAvailabilityWindow.findMany({
     where: { ...LIVE_WINDOW, locationId },
+    include: CARD_INCLUDE,
+    take: 50,
+  });
+  const cards = await toCards(windows, now);
+  return cards.sort((a, b) => a.nextSlot.startsAt.localeCompare(b.nextSlot.startsAt));
+}
+
+/** Every sellable card at the locations attached to one listed place. */
+export async function liveCardsAtVenue(input: z.infer<typeof venueInventoryInput>, now: Date = new Date()): Promise<InventoryCard[]> {
+  const venue = await db.venue.findFirst({
+    where: { discoverable: true, OR: [
+      ...(input.venueId ? [{ id: input.venueId }] : []),
+      ...(input.googlePlaceId ? [{ googlePlaceId: input.googlePlaceId }] : []),
+      ...(input.slug ? [{ slug: input.slug }] : []),
+    ] },
+    select: { id: true },
+  });
+  if (!venue) return [];
+  const windows = await db.vendorAvailabilityWindow.findMany({
+    where: { ...LIVE_WINDOW, location: { state: 'ACTIVE', menuVenueId: venue.id } },
     include: CARD_INCLUDE,
     take: 50,
   });

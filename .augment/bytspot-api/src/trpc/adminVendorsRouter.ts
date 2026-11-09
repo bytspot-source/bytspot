@@ -9,12 +9,16 @@ import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { config } from '../config';
-import { sendVendorVerifiedEmail } from '../lib/email';
+import { sendVendorInviteEmail, sendVendorPausedEmail, sendVendorRestoredEmail, sendVendorVerifiedEmail } from '../lib/email';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { advanceSeller, awaitingApproval, markVerified, outstandingRequirements, satisfiedRequirements } from '../vendor/sellerState';
 import { requirementsForState } from '../vendor/contract';
 import { mediaUrl } from '../vendor/media';
 import { assignBands, bandSummaries, BandRangeRefused, releaseBands } from '../vendor/bands';
+import {
+  closeSeller, createSellerWithOwner, pauseSeller, PAUSE_REASON_MAX, renewOwnerInvite, restoreSeller, VendorDecisionRefused,
+} from '../vendor/adminDecisions';
+import { INVITE_EXPIRY_HOURS } from '../vendor/team';
 import {
   linkMenuVenue, linkMenuVenueSchema, menuDishDto, menuMediaSelect, MenuEvidenceError,
   reviewMenuDish, reviewMenuDishSchema,
@@ -26,6 +30,23 @@ function menuAdminError(error: unknown): never {
   }
   // Do not expose submitted text or database diagnostics through the RPC error.
   throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Menu review is temporarily unavailable.' });
+}
+
+function decisionError(error: unknown): never {
+  if (error instanceof VendorDecisionRefused) throw new TRPCError({ code: error.code, message: error.reason });
+  throw error;
+}
+
+const sellerIdInput = z.object({ sellerId: z.string().min(1).max(64) });
+
+function inviteOwner(email: string, legalName: string | null) {
+  void sendVendorInviteEmail(email, {
+    legalName: legalName ?? 'A business',
+    roleLabel: 'the owner',
+    consoleUrl: vendorConsoleOrigin(),
+    expiresInDays: Math.round(INVITE_EXPIRY_HOURS / 24),
+    fromBytspot: true,
+  });
 }
 
 /** Where the verified email links: the vendor console's own origin. */
@@ -100,7 +121,10 @@ export const adminVendorsRouter = router({
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.list' });
       const sellers = await db.vendorSeller.findMany({
         where: { state: { not: 'CLOSED' } },
-        include: { locations: true },
+        include: {
+          locations: { include: { menuVenue: { select: { name: true, address: true } } } },
+          seats: { where: { role: 'owner', state: 'INVITED' }, select: { id: true } },
+        },
         orderBy: { createdAt: 'desc' },
         take: 500,
       });
@@ -118,8 +142,14 @@ export const adminVendorsRouter = router({
           approvedAt: seller.approvedAt,
           verifiedAt: seller.verifiedAt,
           videoHostingAt: seller.videoHostingAt,
+          pausedAt: seller.pausedAt,
+          pausedReason: seller.pausedReason,
+          ownerInvitePending: seller.seats.length > 0,
           createdAt: seller.createdAt,
-          locations: seller.locations.filter((l) => l.state !== 'CLOSED').map((l) => ({ label: l.label, address: l.address, state: l.state })),
+          locations: seller.locations.filter((l) => l.state !== 'CLOSED').map((l) => ({
+            id: l.id, label: l.label, address: l.address, state: l.state,
+            venueId: l.menuVenueId, venueName: l.menuVenue?.name ?? null, venueAddress: l.menuVenue?.address ?? null,
+          })),
           missing: [...live].filter((id) => !satisfied.includes(id)),
           outstanding: outstandingRequirements(seller, seller.locations),
           bands: bands.get(seller.id) ?? { total: 0, active: 0, lost: 0, ranges: [] },
@@ -141,7 +171,7 @@ export const adminVendorsRouter = router({
       // Conditional, so two admins approving at once record one approver.
       await db.vendorSeller.updateMany({
         where: { id: seller.id, approvedAt: null },
-        data: { approvedAt: new Date(), approvedByUserId: ctx.user.userId },
+        data: { approvedAt: new Date(), approvedByUserId: ctx.user.userId, pausedAt: null, pausedByUserId: null, pausedReason: null },
       });
       const approved = await db.vendorSeller.findUniqueOrThrow({ where: { id: seller.id } });
       const moved = await advanceSeller(approved, seller.locations);
@@ -157,6 +187,92 @@ export const adminVendorsRouter = router({
         detail: { sellerId: seller.id, state: verified.seller.state },
       });
       return { state: verified.seller.state, live: verified.seller.state === 'ACTIVE' };
+    }),
+
+  /**
+   * Takes a business off guest screens: a live one is suspended, one not yet
+   * live loses its approval. The owner is emailed, with the reason if given.
+   */
+  pause: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-pause' }))
+    .input(sellerIdInput.extend({ reason: z.string().max(PAUSE_REASON_MAX).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const seller = await pauseSeller(input.sellerId, ctx.user.userId, input.reason ?? null).catch(decisionError);
+      if (seller.contactEmail) {
+        void sendVendorPausedEmail(seller.contactEmail, {
+          legalName: seller.legalName ?? 'Your business', reason: seller.pausedReason, consoleUrl: vendorConsoleOrigin(),
+        });
+      }
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.pause',
+        detail: { sellerId: seller.id, state: seller.state, withReason: Boolean(seller.pausedReason) },
+      });
+      return { state: seller.state };
+    }),
+
+  /** Lifts a pause on a live business, and tells the owner. */
+  restore: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-restore' }))
+    .input(sellerIdInput)
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const seller = await restoreSeller(input.sellerId).catch(decisionError);
+      if (seller.contactEmail) {
+        void sendVendorRestoredEmail(seller.contactEmail, { legalName: seller.legalName ?? 'Your business', consoleUrl: vendorConsoleOrigin() });
+      }
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.restore',
+        detail: { sellerId: seller.id, state: seller.state },
+      });
+      return { state: seller.state };
+    }),
+
+  /**
+   * Closes a business for good once nothing still needs it. Its history is
+   * kept. `blockers` lists what to finish first; nothing changes while any remain.
+   */
+  close: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin-vendors-close' }))
+    .input(sellerIdInput.extend({ confirmName: z.string().max(200) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const { seller, blockers } = await closeSeller(input.sellerId, ctx.user.userId, input.confirmName).catch(decisionError);
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.close',
+        detail: { sellerId: seller.id, closed: blockers.length === 0, blockers: blockers.length },
+      });
+      return { closed: blockers.length === 0, blockers };
+    }),
+
+  /** Creates a business and emails its owner an invite to finish setting it up. */
+  create: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin-vendors-create' }))
+    .input(z.object({ legalName: z.string().trim().min(1).max(200), email: z.string().trim().min(3).max(254) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const { seller, email } = await createSellerWithOwner(input, ctx.user.userId).catch(decisionError);
+      inviteOwner(email, seller.legalName);
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.create',
+        detail: { sellerId: seller.id },
+      });
+      return { sellerId: seller.id };
+    }),
+
+  /** Sends the owner invite again, with a fresh expiry. */
+  resendInvite: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'admin-vendors-resend-invite' }))
+    .input(sellerIdInput)
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const { seller, email } = await renewOwnerInvite(input.sellerId).catch(decisionError);
+      inviteOwner(email, seller.legalName);
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.resendInvite',
+        detail: { sellerId: seller.id },
+      });
+      return { sent: true };
     }),
 
   /** Vendor photos, menus and videos waiting for the team, oldest first. */

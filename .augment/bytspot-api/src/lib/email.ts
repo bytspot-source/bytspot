@@ -551,11 +551,73 @@ export async function sendVendorVerifiedEmail(to: string, verified: VendorVerifi
   }
 }
 
+export interface VendorPausedNotice {
+  legalName: string;
+  reason: string | null;
+  consoleUrl: string;
+}
+
+/** Bytspot paused a business. Logged, not thrown: the console says the same. */
+export async function sendVendorPausedEmail(to: string, paused: VendorPausedNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `${paused.legalName} is paused on Bytspot`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Your business is paused</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            Bytspot paused ${escapeHtml(paused.legalName)}. Guests no longer see your places or bookables.
+          </p>
+          ${paused.reason ? `<p style="color: #ddd; font-size: 15px; line-height: 1.5; margin: 16px 0 8px;"><strong>Reason:</strong> ${escapeHtml(paused.reason)}</p>` : ''}
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 24px;">
+            Guests who already paid can still be admitted. Reach out to Bytspot to lift the pause.
+          </p>
+          <a href="${escapeHtml(paused.consoleUrl)}" style="display: inline-block; background: #fff; color: #0d0d0d; font-weight: 600; text-decoration: none; padding: 12px 20px; border-radius: 10px;">Open your console</a>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorPausedEmail failed:', err?.message);
+  }
+}
+
+/** Bytspot lifted a pause. Logged, not thrown. */
+export async function sendVendorRestoredEmail(to: string, restored: { legalName: string; consoleUrl: string }): Promise<void> {
+  const resend = getResend();
+  if (!resend) return;
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `${restored.legalName} is back on Bytspot`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">You're back on Bytspot</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 24px;">
+            Bytspot lifted the pause on ${escapeHtml(restored.legalName)}. Guests can see your places and book again.
+          </p>
+          <a href="${escapeHtml(restored.consoleUrl)}" style="display: inline-block; background: #fff; color: #0d0d0d; font-weight: 600; text-decoration: none; padding: 12px 20px; border-radius: 10px;">Open your console</a>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorRestoredEmail failed:', err?.message);
+  }
+}
+
 export interface VendorInviteNotice {
   legalName: string;
   roleLabel: string;
   consoleUrl: string;
   expiresInDays: number;
+  /** Set when Bytspot, not someone at the business, sent the invite. */
+  fromBytspot?: boolean;
 }
 
 /**
@@ -575,7 +637,7 @@ export async function sendVendorInviteEmail(to: string, invite: VendorInviteNoti
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
           <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">You were added to a team</h1>
           <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
-            ${escapeHtml(invite.legalName)} added you as ${escapeHtml(invite.roleLabel)}.
+            ${invite.fromBytspot ? `Bytspot added you as ${escapeHtml(invite.roleLabel)} of ${escapeHtml(invite.legalName)}.` : `${escapeHtml(invite.legalName)} added you as ${escapeHtml(invite.roleLabel)}.`}
           </p>
           <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 24px;">
             Sign in with this email address within ${invite.expiresInDays} days. We will email you a code; signing in accepts the invite.

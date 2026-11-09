@@ -19,6 +19,8 @@ export interface SellerDto {
   state: SellerState;
   businessMode: 'standard' | 'cottage';
   satisfied: string[];
+  /** Bytspot's reason for a pause, when it gave one. */
+  pausedReason: string | null;
 }
 
 export interface SeatDto {
@@ -103,6 +105,7 @@ export function toSellerDto(seller: VendorSeller, locations: VendorLocation[]): 
     state: seller.state,
     businessMode: seller.businessMode,
     satisfied: satisfiedRequirements(seller, locations),
+    pausedReason: seller.pausedReason ?? null,
   };
 }
 

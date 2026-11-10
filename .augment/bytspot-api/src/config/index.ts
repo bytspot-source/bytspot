@@ -59,6 +59,13 @@ const envSchema = z.object({
   PAID_CHECKOUT_ENABLED:  z.enum(['true', 'false']).default('true'),
   // REA X2: refund a payment the webhook could not honour without waiting on the host.
   // REA: Google-billed Places proxies need a signed-in member.
+  // REA PS1: private-sale guard rails.
+  PRIVATE_SALE_MAX_CENTS: z.coerce.number().int().min(100).max(10_000_000).default(500_000),
+  PRIVATE_SALE_NEW_SELLER_MAX_CENTS: z.coerce.number().int().min(100).max(10_000_000).default(200_000),
+  PRIVATE_SALE_TRUSTED_AFTER_SALES: z.coerce.number().int().min(0).max(1000).default(3),
+  PRIVATE_SALES_REQUIRE_VERIFIED_EMAIL: z.enum(['true', 'false']).default('true'),
+  // 0 = face value or less. Raising it is a counsel decision (O.C.G.A. 43-4B-25).
+  TICKET_RESALE_MAX_MARKUP_BPS: z.coerce.number().int().min(0).max(100_000).default(0),
   PLACES_REQUIRE_AUTH: z.enum(['true', 'false']).default('true'),
   AUTO_REFUND_UNHONOURED_PAYMENTS: z.enum(['true', 'false']).default('true'),
   // REA X6/P1. A birth date under this refuses signup. 13 matches the
@@ -198,6 +205,11 @@ export const config = {
   newHostMaxTicketQuantity: env.NEW_HOST_MAX_TICKET_QUANTITY,
   newHostPayoutDelayHours: env.NEW_HOST_PAYOUT_DELAY_HOURS,
   paidCheckoutEnabled: env.PAID_CHECKOUT_ENABLED === 'true',
+  privateSaleMaxCents: env.PRIVATE_SALE_MAX_CENTS,
+  privateSaleNewSellerMaxCents: env.PRIVATE_SALE_NEW_SELLER_MAX_CENTS,
+  privateSaleTrustedAfterSales: env.PRIVATE_SALE_TRUSTED_AFTER_SALES,
+  privateSalesRequireVerifiedEmail: env.PRIVATE_SALES_REQUIRE_VERIFIED_EMAIL === 'true',
+  ticketResaleMaxMarkupBps: env.TICKET_RESALE_MAX_MARKUP_BPS,
   placesRequireAuth: env.PLACES_REQUIRE_AUTH === 'true',
   autoRefundUnhonouredPayments: env.AUTO_REFUND_UNHONOURED_PAYMENTS === 'true',
   minSignupAge: env.MIN_SIGNUP_AGE,

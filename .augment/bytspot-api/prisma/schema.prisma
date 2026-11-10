@@ -2259,6 +2259,10 @@ model PrivateSale {
   title          String
   /// Display only. USD.
   priceCents     Int       @map("price_cents")
+  /// REA PS1. One of services/privateSalesPolicy SALE_CATEGORIES.
+  category       String    @default("other")
+  /// Printed face value, required for event tickets (resale cap).
+  faceValueCents Int?      @map("face_value_cents")
   /// Which of the seller's handles the buyer may pay with.
   providers      String[]
   /// A public place, snapped to about 30 m. Cleared 7 days after the sale closes.

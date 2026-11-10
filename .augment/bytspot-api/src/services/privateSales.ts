@@ -58,12 +58,18 @@ export function handleUrl(provider: PaymentProvider, handle: string): string {
   return `https://venmo.com/u/${handle}`;
 }
 
-/** What the buyer reads under each pay button. Pending legal review. */
+/**
+ * What the buyer reads under each pay button. REA PS1: rewritten 2026-11-10
+ * to say plainly who is responsible; the matching rules are in
+ * bytspot-beta/docs/legal-drafts/private-sales-prohibited-items.md, a DRAFT
+ * that still needs attorney sign-off (and a check against Venmo, Cash App and
+ * PayPal terms) before launch.
+ */
 export function paymentReminder(provider: PaymentProvider): string {
-  if (provider === 'cashapp') {
-    return 'Cash App payments between people have no purchase protection. Bytspot doesn\'t process or protect this payment.';
-  }
-  return 'Pay as Goods and Services where available. Bytspot doesn\'t process or protect this payment.';
+  const base = 'This sale is between you and the seller. Bytspot doesn\'t process or protect this payment and can\'t refund it. Meet in public and see the item before you pay.';
+  if (provider === 'cashapp') return `Cash App payments between people have no purchase protection. ${base}`;
+  if (provider === 'paypal') return `Choose Goods and Services in PayPal for purchase protection. ${base}`;
+  return `Pay as a purchase (Goods and Services) where Venmo offers it. ${base}`;
 }
 
 export function snapMeetPoint(lat: number, lng: number): { lat: number; lng: number } {

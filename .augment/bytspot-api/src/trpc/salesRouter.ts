@@ -20,6 +20,8 @@ import {
 } from '../services/privateSales';
 import { isBlockedBetween } from '../services/safety';
 import { filteredText } from '../lib/contentFilter';
+import { SALE_CATEGORIES, assertVerifiedEmailForSales, isNewSeller, saleListingProblem } from '../services/privateSalesPolicy';
+import { serializableTransactionWithRetry } from '../lib/transactions';
 
 /**
  * Private sales. The meet point leaves this router only for the seller and
@@ -149,6 +151,9 @@ export const salesRouter = router({
     .input(z.object({
       title: filteredText(z.string().trim().min(3).max(80), { blockContactInfo: true }),
       priceCents: z.number().int().min(0).max(10_000_000),
+      // REA PS1. Optional on the wire so shipped clients keep working; they list as `other`.
+      category: z.enum(SALE_CATEGORIES).default('other'),
+      faceValueCents: z.number().int().min(0).max(10_000_000).optional(),
       meetPoint: z.object({
         lat: z.number().min(-90).max(90),
         lng: z.number().min(-180).max(180),
@@ -165,6 +170,12 @@ export const salesRouter = router({
       const now = new Date();
       const problem = meetWindowProblem(input.windowStart, input.windowEnd, now);
       if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });
+      await assertVerifiedEmailForSales(ctx.user.userId);
+      const listingProblem = saleListingProblem(
+        { title: input.title, category: input.category, priceCents: input.priceCents, faceValueCents: input.faceValueCents ?? null },
+        { newSeller: await isNewSeller(ctx.user.userId) },
+      );
+      if (listingProblem) throw new TRPCError({ code: 'BAD_REQUEST', message: listingProblem });
 
       const providers = [...new Set(input.providers)];
       const saved = await db.sellerPaymentHandle.findMany({
@@ -193,6 +204,8 @@ export const salesRouter = router({
           sellerId: ctx.user.userId,
           title: input.title,
           priceCents: input.priceCents,
+          category: input.category,
+          faceValueCents: input.faceValueCents ?? null,
           providers,
           meetPlaceName: input.meetPoint.placeName,
           meetLat: point.lat,
@@ -342,6 +355,7 @@ export const salesRouter = router({
     .mutation(async ({ ctx, input }) => {
       const sale = await liveSale(input.saleId, ctx.user.userId);
       if (sale.sellerId === ctx.user.userId) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This is your own sale.' });
+      await assertVerifiedEmailForSales(ctx.user.userId);
       const key = { saleId_buyerId: { saleId: sale.id, buyerId: ctx.user.userId } };
       const existing = await db.privateSaleRequest.findUnique({ where: key, select: { status: true } });
       if (existing) return { status: existing.status };
@@ -363,11 +377,16 @@ export const salesRouter = router({
     .mutation(async ({ ctx, input }) => {
       const request = await ownRequest(ctx.user.userId, input.requestId);
       if (request.status === 'approved') return { status: 'approved' };
-      const approved = await db.privateSaleRequest.count({ where: { saleId: request.sale.id, status: 'approved' } });
-      if (approved >= request.sale.buyerLimit) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'This sale already has as many approved buyers as it allows.' });
-      }
-      await db.privateSaleRequest.update({ where: { id: request.id }, data: { status: 'approved', decidedAt: new Date() } });
+      // REA PS2: count-then-approve in one serializable transaction, so two
+      // approvals racing for the last slot cannot both win (one retries and
+      // then sees the sale is full).
+      await serializableTransactionWithRetry(async (tx) => {
+        const approved = await tx.privateSaleRequest.count({ where: { saleId: request.sale.id, status: 'approved' } });
+        if (approved >= request.sale.buyerLimit) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This sale already has as many approved buyers as it allows.' });
+        }
+        await tx.privateSaleRequest.update({ where: { id: request.id }, data: { status: 'approved', decidedAt: new Date() } });
+      }, 'Another approval for this sale is in flight. Try again.');
       return { status: 'approved' };
     }),
 

@@ -56,6 +56,7 @@ test('A shared link previews as the party, not as "Bytspot"', async () => {
   assert.match(html, /<meta property="og:title" content="Champagne pop">/);
   assert.match(html, /<meta property="og:description" content="Ava Reed[^"]*The Roof, Midtown">/);
   assert.match(html, /<title>Champagne pop · Bytspot<\/title>/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
 });
 
 test('The Smart App Banner opens the party, not the app root', async () => {

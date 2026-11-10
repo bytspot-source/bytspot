@@ -50,6 +50,7 @@ test('The invite previews as the friend and the plan, and points at the App Stor
   assert.equal(status, 200);
   // A crawler never runs JavaScript, so the invite must be in the response bytes.
   assert.match(html, /Ava invited you to a plan/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
   assert.match(html, /Rooftop then dinner/);
   assert.match(html, /Midtown/);
   assert.match(html, /apps\.apple\.com\/app\/id6761876421/);

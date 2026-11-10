@@ -103,6 +103,7 @@ function renderPage(party: PublicParty): string {
   const client = shareClient(party.userAgent);
 
   return renderSharePage({
+    robotsNoIndex: true,
     documentTitle: `${title} · Bytspot`,
     description,
     ogTitle: title,

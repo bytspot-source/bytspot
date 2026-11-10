@@ -52,6 +52,7 @@ test('The sale page hands the Smart App Banner the sale link, never the home pag
   assert.doesNotMatch(html, /app-clip-bundle-id|appclip\.apple\.com|App Clip/i);
   assert.doesNotMatch(html, /app-argument=https:\/\/bytspot\.app\/"/);
   assert.match(html, /Private sale/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
   assert.match(html, /Vintage denim jacket/);
   assert.match(html, /\$45 · from Ava/);
   assert.match(html, /og:image" content="[^"]*\/media\/sales\/photo-1"/);

@@ -92,6 +92,7 @@ function renderPage(plan: PublicPlan): string {
   const areaChip = plan.area ? `<span class="chip">${escapeHtml(plan.area)}</span>` : '';
 
   return renderSharePage({
+    robotsNoIndex: true,
     documentTitle: `${heading} · Bytspot`,
     description,
     ogTitle: heading,

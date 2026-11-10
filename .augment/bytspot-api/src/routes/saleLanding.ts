@@ -54,6 +54,7 @@ function renderPage(sale: PublicSale): string {
   const client = shareClient(sale.userAgent);
 
   return renderSharePage({
+    robotsNoIndex: true,
     documentTitle: `${title} · Private Sale · Bytspot`,
     description,
     ogTitle: `${title} · ${price}`,

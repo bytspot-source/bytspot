@@ -113,7 +113,7 @@ const listedSelect = {
 } satisfies Prisma.VenueSelect;
 
 export const adminPlacesRouter = router({
-  /** Google matches for a name, each marked when it is already listed. */
+  /** Google matches for a name, each marked when it is already listed or tied to another Bytspot venue. */
   search: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-search' }))
     .input(z.object({ query: z.string().trim().min(2).max(200) }))
@@ -124,7 +124,7 @@ export const adminPlacesRouter = router({
       const placeIds = found.places.map((p) => p.placeId).filter(Boolean);
       const existing = await db.venue.findMany({
         where: { googlePlaceId: { in: placeIds } },
-        select: { id: true, googlePlaceId: true, listedAt: true, discoverable: true },
+        select: { id: true, name: true, googlePlaceId: true, listedAt: true, discoverable: true },
       });
       const byPlace = new Map(existing.map((v) => [v.googlePlaceId, v]));
       return {
@@ -136,6 +136,7 @@ export const adminPlacesRouter = router({
             suggestedCategory: categoryForPlaceType(p.primaryType),
             listed: Boolean(venue?.listedAt && venue.discoverable),
             venueId: venue?.id ?? null,
+            venueName: venue?.name ?? null,
           };
         }),
       };

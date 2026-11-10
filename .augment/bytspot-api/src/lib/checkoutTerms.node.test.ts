@@ -18,3 +18,12 @@ test('REA V3: door pass lookups are rate-limited per seat', () => {
   const route = readFileSync(join(__dirname, '..', 'routes/vendorBookings.ts'), 'utf8');
   assert.match(route, /'\/vendor\/passes\/verify', requireVendorSeat, requireCapability\('VERIFY'\), passLookupLimiter/);
 });
+
+test('REA bottle terms: checkout copy and session line items never charge alcohol', () => {
+  assert.match(PARTY_CHECKOUT_TERMS, /does not charge for them/);
+  const party = readFileSync(join(__dirname, '..', 'trpc/partyRouter.ts'), 'utf8');
+  assert.match(party, /sessionStripeDescription\(partySession\)/);
+  assert.doesNotMatch(party, /bottles included/);
+  const sessions = readFileSync(join(__dirname, '..', 'services/partySessions.ts'), 'utf8');
+  assert.match(sessions, /includedBottlesProblem/);
+});

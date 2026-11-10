@@ -16,7 +16,7 @@ export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
 import { parseImageDataUri } from '../lib/imageDataUri';
 import { serializableTransaction } from '../lib/transactions';
-import { liveClaimWhere, liveGateClaimWhere, liveRemaining, sessionState, validateSessions } from '../services/partySessions';
+import { includedBottlesProblem, liveClaimWhere, liveGateClaimWhere, liveRemaining, sessionState, sessionStripeDescription, validateSessions } from '../services/partySessions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -1864,6 +1864,11 @@ export const partyTicketsRouter = router({
       if (partySession && partySession.startsAt.getTime() <= Date.now()) {
         throw new TRPCError({ code: 'CONFLICT', message: 'That session has already started.' });
       }
+      // REA re-review 2026-11-10: bottles cannot be part of the Stripe charge.
+      // Existing "included" sessions must be re-authored as a venue-settled
+      // minimum (or a table with no bottles) before they can be sold.
+      const bottlesProblem = includedBottlesProblem(partySession);
+      if (bottlesProblem) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: bottlesProblem });
       // REA P1: 21+ parties and any bottle session need a 21+ birth date, and
       // bottles are only sold by a business with a verified alcohol licence.
       const buysAlcohol = sessionSellsAlcohol(partySession);
@@ -2029,12 +2034,9 @@ export const partyTicketsRouter = router({
               unit_amount: reservation.sessionAmountCents,
               product_data: {
                 name: `${party.title} · ${partySession.name}`,
-                // The line item says what the money buys. Under `minimum` it
-                // says so plainly, because the guest is about to pay a number
-                // that is not the whole bill.
-                description: partySession.bottleTerms === 'minimum'
-                  ? `Session · ${partySession.bottleCount}-bottle minimum, bottles charged separately`
-                  : `Session · ${partySession.bottleCount} bottles included`,
+                // Reservation/admission only. Bottles are never described as
+                // part of what Stripe is collecting (REA bottle terms).
+                description: sessionStripeDescription(partySession),
               },
             },
             quantity: 1,

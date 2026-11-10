@@ -1600,7 +1600,7 @@ const frontTable = {
   // gone went unnoticed.
   startsAt: new Date(Date.now() + 6 * 60 * 60 * 1000),
   endsAt: new Date(Date.now() + 10 * 60 * 60 * 1000),
-  quantity: 1, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'included',
+  quantity: 1, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'minimum',
   requiredMembershipTier: null,
 };
 
@@ -1637,6 +1637,16 @@ async function reserve(captured: any, input: any) {
   await assert.rejects(() => captured.buyer().events.tickets.createCheckout(input), () => true);
   return captured;
 }
+
+test('A session that includes bottles in its Stripe price cannot be checked out', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ session: { ...frontTable, bottleTerms: 'included' } });
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'PRECONDITION_FAILED', message: /no longer charges/ },
+  );
+  assert.equal(captured.created, undefined);
+});
 
 test('A guest already inside can buy bottles from a promoter', async () => {
   // The ordinary sale of the night: the door was paid an hour ago and the

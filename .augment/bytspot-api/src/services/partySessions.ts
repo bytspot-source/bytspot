@@ -22,9 +22,16 @@
  * never the only guard.
  */
 
-/** `included` — the price is the whole number, bottles are in it.
- *  `minimum`  — the price is the fee and bottles are bought on top, so the
- *  guest will pay more than the number and has to be told so. */
+/**
+ * `included` historically meant the Stripe price included bottles. Bytspot
+ * does not take payment for alcohol, so a session with bottles may only use
+ * `minimum`: the Stripe amount is a table or reservation fee, and bottles
+ * are arranged and settled at the licensed venue. `included` remains valid
+ * only for a table with zero bottles.
+ *
+ * `minimum` — the Stripe price is the reservation fee; the bottle minimum is
+ * an agreement with the venue and is paid there.
+ */
 export type BottleTerms = 'included' | 'minimum';
 
 export type SessionKind = 'table' | 'after-hours';
@@ -73,9 +80,18 @@ export function validateSessions(sessions: SessionDraft[]): SessionIssue[] {
     }
     // Zero bottles under `minimum` is a minimum of nothing, which is not a
     // minimum. Under `included` it is a table with no bottles, which a vendor
-    // may legitimately sell.
+    // may legitimately sell. Bottles listed as "included" in the Stripe price
+    // are refused: Bytspot does not collect payment for alcohol (REA re-review
+    // 2026-11-10, bottle terms mismatch).
     if (session.bottleTerms === 'minimum' && session.bottleCount === 0) {
       issues.push({ index, field: 'bottleCount', message: 'A bottle minimum of zero bottles states no minimum.' });
+    }
+    if (session.bottleTerms === 'included' && session.bottleCount > 0) {
+      issues.push({
+        index,
+        field: 'bottleTerms',
+        message: 'Bottles cannot be included in the price charged through Bytspot. List a bottle minimum to be settled at the venue, or a table with no bottles.',
+      });
     }
     if (session.priceCents < 0) {
       issues.push({ index, field: 'priceCents', message: 'A session cannot cost less than nothing.' });
@@ -115,6 +131,30 @@ export function validateSessions(sessions: SessionDraft[]): SessionIssue[] {
  * `full` and `passed` are different facts and are never collapsed: one says
  * come back for the next one, the other says this already happened.
  */
+
+/**
+ * Why a session cannot be sold through Stripe because it prices bottles into
+ * the charge, or null. Used at checkout for rows authored before this rule.
+ */
+export function includedBottlesProblem(session: { bottleTerms: string; bottleCount: number } | null | undefined): string | null {
+  if (session && session.bottleTerms === 'included' && session.bottleCount > 0) {
+    return 'This session includes bottles in its price, which Bytspot no longer charges. The host must change it to a bottle minimum settled at the venue, or a table with no bottles.';
+  }
+  return null;
+}
+
+/**
+ * Stripe line-item description for a session. The charge is a reservation or
+ * admission fee only; bottles are never described as part of what Stripe is
+ * collecting.
+ */
+export function sessionStripeDescription(session: { name?: string | null; bottleCount: number }): string {
+  if (session.bottleCount > 0) {
+    return `Session reservation · ${session.bottleCount}-bottle minimum arranged and settled at the venue (not charged by Bytspot)`;
+  }
+  return session.name ? `Session reservation · ${session.name}` : 'Session reservation';
+}
+
 export type SessionState = 'open' | 'full' | 'passed';
 
 /**

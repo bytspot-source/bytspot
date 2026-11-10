@@ -29,7 +29,7 @@ const endsAt = new Date(Date.now() + 28 * hour);
 function draft(over: Record<string, unknown> = {}) {
   return {
     name: 'Front Table', kind: 'table' as const, startsAt, endsAt,
-    bottleCount: 4, bottleTerms: 'included' as const, priceCents: 90000, quantity: 2, ...over,
+    bottleCount: 4, bottleTerms: 'minimum' as const, priceCents: 90000, quantity: 2, ...over,
   };
 }
 
@@ -307,6 +307,6 @@ test('REA P1: a business without a verified alcohol licence cannot author a bott
   );
   assert.equal(created, undefined, 'nothing written');
   // A session with no bottles is not alcohol and needs no licence.
-  await authorPartySession('seller-1', 'party-1', draft({ bottleCount: 0, name: 'Booth only' }));
+  await authorPartySession('seller-1', 'party-1', draft({ bottleCount: 0, bottleTerms: 'included', name: 'Booth only' }));
   assert.equal((created as any)?.bottleCount, 0);
 });

@@ -9,7 +9,9 @@ export const TERMS_OF_SALE_URL = 'https://bytspot.app/terms-of-sale';
 export const PARTY_CHECKOUT_TERMS =
   'If the host cancels or Bytspot removes the event, you get a full refund to this card. '
   + 'Otherwise passes are non-refundable unless the host offers one. '
-  + 'Bottle minimums are settled at the venue. 21+ events need a valid ID at the door. '
+  + 'The amount charged here is admission or a table reservation only. '
+  + 'Bottle minimums and any alcohol are arranged and settled at the venue; Bytspot does not charge for them. '
+  + '21+ events need a valid ID at the door. '
   + `Terms of Sale: ${TERMS_OF_SALE_URL}`;
 
 export const VENDOR_TICKET_CHECKOUT_TERMS =

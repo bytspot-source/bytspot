@@ -18,7 +18,7 @@ const scope = { partyId: 'party', sellerId: 'seller' };
 const draft = {
   name: 'Front table', kind: 'table' as const,
   startsAt: '2030-10-10T20:00:00Z', endsAt: '2030-10-11T02:00:00Z',
-  bottleCount: 2, bottleTerms: 'included' as const, priceCents: 12345, quantity: 3,
+  bottleCount: 2, bottleTerms: 'minimum' as const, priceCents: 12345, quantity: 3,
 };
 let seats: any[];
 let writes: any[];

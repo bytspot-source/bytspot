@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const TARGETS = ['src', 'index.html', 'public'];
+const TARGETS = ['src', 'index.html', 'public', 'README.md'];
 
 const FORBIDDEN = [
   { re: /getSpotsLeft/i, why: 'fake shrinking early-access counter' },
@@ -23,6 +23,7 @@ const FORBIDDEN = [
   { re: /live crowds\b/i, why: 'do not claim live crowds on the marketing site' },
   { re: /live crowd levels/i, why: 'do not claim live crowd levels on the marketing site' },
   { re: /bytspot-beta\.onrender\.com/i, why: 'old web-app CTA; product is the iOS app' },
+  { re: /app\s*clip/i, why: 'do not mention that iOS entry path on the marketing site' },
 ];
 
 const IGNORE_DIR = new Set(['node_modules', 'dist', '.git']);

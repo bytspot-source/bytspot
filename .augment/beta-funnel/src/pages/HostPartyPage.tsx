@@ -12,8 +12,8 @@ const HOST_STEPS = [
     body: 'Send one link. That link is the invite. You do not need a separate ticketing tool to get the word out.',
   },
   {
-    title: 'Guests get in with a pass, or the App Clip',
-    body: 'People with iPhone can open a party link in the App Clip and get their pass without downloading the full Bytspot app. They can also download the app if they want the rest of it.',
+    title: 'Guests get a link to the pass',
+    body: 'The host sends a pass link. Guests use that link to get their pass.',
   },
   {
     title: 'Check people in',
@@ -26,7 +26,7 @@ export function HostPartyPage() {
     <>
       <DocumentTitle
         title="Host a party — Bytspot"
-        description="Use Host Studio to publish a party, share a pass, and let guests in with an App Clip — no download required."
+        description="Use Host Studio to publish a party and share a pass link with your guests."
       />
       <article className="mx-auto max-w-3xl px-5 py-14 md:px-8 md:py-20">
         <p className="text-[12px] font-semibold uppercase tracking-[0.14em] text-[var(--cyan)]">
@@ -66,7 +66,7 @@ export function HostPartyPage() {
         <div className="mt-10 flex flex-col items-start gap-4 sm:flex-row sm:items-center">
           <AppStoreButton size="lg" />
           <Link to="/invite" className="font-semibold text-[var(--cyan)] hover:text-white">
-            How invite links and the App Clip work
+            How invite links work
           </Link>
         </div>
       </article>

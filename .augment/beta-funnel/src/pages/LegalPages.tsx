@@ -95,7 +95,7 @@ export function TermsPage() {
       description="Draft Terms of Service shell for Bytspot. Pending counsel review; not published and not in force."
     >
       <p>
-        This page will hold the Terms of Service for the Bytspot app, App Clip, website,
+        This page will hold the Terms of Service for the Bytspot app, website,
         and API — including accounts, acceptable use, and how hosted events and plans
         work.
       </p>

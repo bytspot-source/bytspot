@@ -5,7 +5,7 @@ import { SiteShell } from './components/SiteShell';
 import { HomePage } from './pages/HomePage';
 import { HowItWorksPage } from './pages/HowItWorksPage';
 import { HostPartyPage } from './pages/HostPartyPage';
-import { InviteClipPage } from './pages/InviteClipPage';
+import { InvitePage } from './pages/InvitePage';
 import {
   HostTermsPage,
   LegalIndexPage,
@@ -27,8 +27,7 @@ function App() {
           <Route path="/how" element={<Navigate to="/how-it-works" replace />} />
           <Route path="/host" element={<HostPartyPage />} />
           <Route path="/party" element={<Navigate to="/host" replace />} />
-          <Route path="/invite" element={<InviteClipPage />} />
-          <Route path="/clip" element={<Navigate to="/invite" replace />} />
+          <Route path="/invite" element={<InvitePage />} />
           <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/legal" element={<LegalIndexPage />} />
           <Route path="/terms" element={<TermsPage />} />

@@ -2,41 +2,39 @@ import { Link } from 'react-router-dom';
 import { AppStoreButton } from '../components/AppStoreButton';
 import { DocumentTitle } from '../components/DocumentTitle';
 
-export function InviteClipPage() {
+export function InvitePage() {
   return (
     <>
       <DocumentTitle
-        title="Invites and the App Clip — Bytspot"
-        description="Open a Bytspot plan or party link on iPhone. Party guests can use the App Clip to get in without downloading the full app."
+        title="Invites — Bytspot"
+        description="Open a Bytspot plan or party-pass link. Hosts share a link; guests use that link to get on the plan or get their pass."
       />
       <article className="mx-auto max-w-3xl px-5 py-14 md:px-8 md:py-20">
         <p className="text-[12px] font-semibold uppercase tracking-[0.14em] text-[var(--cyan)]">
-          Invites &amp; App Clip
+          Invites
         </p>
         <h1 className="mt-3 text-[clamp(2rem,5vw,3.5rem)] font-semibold leading-[1.1] tracking-tight">
           Someone sent you a link?
         </h1>
         <p className="mt-5 text-lg leading-relaxed text-[var(--bone-muted)]">
           Plans and parties on Bytspot travel as a single link. This page explains what
-          happens when you open one. A specific invite from a friend or host will show
-          that plan or party&apos;s own details — this is the general guide.
+          that link is. A specific invite from a friend or host will show that plan or
+          party&apos;s own details — this is the general guide.
         </p>
 
         <section className="mt-12 space-y-8">
           <div>
             <h2 className="text-2xl font-semibold tracking-tight">If it&apos;s a plan</h2>
             <p className="mt-3 text-[16px] leading-relaxed text-[var(--bone-muted)]">
-              Open the link on iPhone and continue in the Bytspot app. You&apos;ll see the
-              same plan everyone else was invited to — the stops, the timing, and any
-              updates the host or friends add.
+              The link is an invite to a shared plan. Open it to see the same plan
+              everyone else was invited to — the stops, the timing, and any updates the
+              host or friends add.
             </p>
           </div>
           <div>
             <h2 className="text-2xl font-semibold tracking-tight">If it&apos;s a party pass</h2>
             <p className="mt-3 text-[16px] leading-relaxed text-[var(--bone-muted)]">
-              On iPhone, a party link can open in the App Clip. You can get your pass and
-              get in without downloading the full app. If you already have Bytspot, the
-              link can open there instead.
+              The host sends a link to the pass. Use that link to get your pass.
             </p>
           </div>
           <div>
@@ -52,8 +50,8 @@ export function InviteClipPage() {
         <div className="mt-12 rounded-3xl border border-[var(--line)] bg-[var(--navy)]/55 p-6 md:p-8">
           <h2 className="text-xl font-semibold tracking-tight">Get the app</h2>
           <p className="mt-3 text-[15px] leading-relaxed text-[var(--bone-muted)]">
-            The App Clip covers party entry. Plans, discovery, the concierge, and the
-            rest of Bytspot live in the full app.
+            Plans, discovery, the concierge, and the rest of Bytspot live in the free
+            iOS app.
           </p>
           <div className="mt-6">
             <AppStoreButton size="lg" />

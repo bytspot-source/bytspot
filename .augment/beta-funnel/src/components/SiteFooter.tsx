@@ -20,7 +20,7 @@ export function SiteFooter() {
             Host a party
           </Link>
           <Link className="text-[var(--bone-muted)] hover:text-[var(--bone)]" to="/invite">
-            Invites &amp; App Clip
+            Invites
           </Link>
           <Link className="text-[var(--bone-muted)] hover:text-[var(--bone)]" to="/legal">
             Legal drafts

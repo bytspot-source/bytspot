@@ -86,7 +86,7 @@ function PassCard() {
         <div>
           <p className="font-semibold">Guest pass</p>
           <p className="mt-1 text-sm leading-relaxed text-[var(--bone-muted)]">
-            Guests can open an App Clip — no download needed.
+            Guests get a link to the pass.
           </p>
         </div>
       </div>

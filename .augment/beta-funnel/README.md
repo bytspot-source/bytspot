@@ -24,7 +24,7 @@ npm test             # honesty check (no fake scarcity or invented live stats)
 - `/` landing
 - `/how-it-works`
 - `/host` (and `/party` → `/host`)
-- `/invite` (and `/clip` → `/invite`)
+- `/invite`
 - `/welcome` (legacy email-signup destination; `/#/welcome` still redirects)
 - `/legal`, `/terms`, `/privacy`, `/terms-of-sale`, `/host-terms` — draft shells, not in force
 

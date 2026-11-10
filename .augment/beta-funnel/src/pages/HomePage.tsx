@@ -25,7 +25,10 @@ export function HomePage() {
             <br />
             Everyone&apos;s in.
           </h1>
-          <p className="mt-6 max-w-lg text-[17px] leading-relaxed text-[var(--bone-muted)] md:text-[18px]">
+          <p className="mt-4 max-w-lg text-[17px] font-medium leading-relaxed text-[var(--bone)] md:text-[18px]">
+            Plans for brunch, the afternoon and after-hours.
+          </p>
+          <p className="mt-4 max-w-lg text-[17px] leading-relaxed text-[var(--bone-muted)] md:text-[18px]">
             Bytspot is a free iOS day-and-night-out app. Make a plan with friends, host a
             party with a shareable pass, and find the right spot nearby — from brunch to
             after-hours.
@@ -86,8 +89,8 @@ export function HomePage() {
           <div>
             <h2 className="text-3xl font-semibold tracking-tight">Hosting tonight?</h2>
             <p className="mt-4 text-[16px] leading-relaxed text-[var(--bone-muted)]">
-              Host Studio lets you publish a party and share a pass. Guests can get in
-              with an App Clip, without downloading the full app.
+              Host Studio lets you publish a party and share a pass. Guests get a link
+              to the pass from you.
             </p>
             <Link
               to="/host"

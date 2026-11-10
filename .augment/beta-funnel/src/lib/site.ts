@@ -10,7 +10,7 @@ export const SITE_DESCRIPTION =
 export const NAV_LINKS = [
   { to: '/how-it-works', label: 'How it works' },
   { to: '/host', label: 'Host a party' },
-  { to: '/invite', label: 'Invites & App Clip' },
+  { to: '/invite', label: 'Invites' },
 ] as const;
 
 export const LEGAL_LINKS = [
@@ -30,7 +30,7 @@ export const FEATURES = [
   {
     id: 'parties',
     title: 'Host Studio party passes',
-    body: 'Publish a party and share a pass. Guests can get in with an App Clip, without downloading the full app.',
+    body: 'Publish a party and share a pass. Guests get a link to the pass from the host.',
   },
   {
     id: 'discover',
@@ -78,7 +78,7 @@ export const HOW_IT_WORKS_STEPS = [
   {
     n: '03',
     title: 'Invite everyone',
-    body: 'Friends open the plan link in the app. Party guests can use an App Clip to get in without downloading, or open the full app.',
+    body: 'Friends open the plan link in the app. Party guests get a link to the pass from the host.',
   },
   {
     n: '04',

@@ -101,11 +101,33 @@ test('redelivering the same event is a no-op', async () => {
   assert.equal(claims[0].state, 'held');
 });
 
-test('a dispute closed as won does not revoke anything', async () => {
+test('a dispute closed as won does not revoke anything and does not freeze the payout', async () => {
   await applyChargeRiskEvent(event('evt_w', 'charge.dispute.closed', { payment_intent: 'pi_1', status: 'won' }));
   assert.equal(checkouts[0].disputeStatus, 'won');
+  assert.equal(checkouts[0].disputedAt, null);
   assert.equal(guests[0].accessGranted, true);
   assert.equal(orders[0].status, 'completed');
+});
+
+test('winning a dispute that was already open unfreezes the payout but does not re-admit the guest', async () => {
+  await applyChargeRiskEvent(event('evt_1', 'charge.dispute.created', { payment_intent: 'pi_1', status: 'needs_response' }));
+  assert.ok(checkouts[0].disputedAt instanceof Date);
+  assert.equal(guests[0].accessGranted, false);
+  assert.equal(orders[0].status, 'disputed');
+  await applyChargeRiskEvent(event('evt_w', 'charge.dispute.closed', { payment_intent: 'pi_1', status: 'won' }));
+  assert.equal(checkouts[0].disputedAt, null, 'payouts can resume');
+  assert.equal(checkouts[0].disputeStatus, 'won');
+  assert.equal(guests[0].accessGranted, false, 'access stays revoked until an admin restores it');
+  assert.equal(orders[0].status, 'completed', 'a won vendor order is no longer held as disputed');
+});
+
+test('a dispute closed as lost stays frozen', async () => {
+  await applyChargeRiskEvent(event('evt_1', 'charge.dispute.created', { payment_intent: 'pi_1', status: 'needs_response' }));
+  await applyChargeRiskEvent(event('evt_l', 'charge.dispute.closed', { payment_intent: 'pi_1', status: 'lost' }));
+  assert.ok(checkouts[0].disputedAt instanceof Date);
+  assert.equal(checkouts[0].disputeStatus, 'lost');
+  assert.equal(guests[0].accessGranted, false);
+  assert.equal(orders[0].status, 'disputed');
 });
 
 test('an early fraud warning freezes the payout and revokes the pass', async () => {

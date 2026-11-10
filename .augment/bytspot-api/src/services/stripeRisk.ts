@@ -16,7 +16,9 @@ import { stripeHandle } from '../vendor/payout';
  *     existing payout reversal already claws back a transfer that went out),
  *   - the event id is recorded, so redelivery is a no-op.
  * A dispute that is later won does not silently re-admit anyone; an admin
- * restores access by hand after checking.
+ * restores access by hand after checking. Winning does clear disputedAt so
+ * the host payout can resume (REA X2 re-review). Open or lost disputes stay
+ * frozen.
  */
 export const RISK_EVENT_TYPES = new Set([
   'charge.dispute.created',
@@ -91,17 +93,25 @@ export async function applyChargeRiskEvent(event: Stripe.Event, now = new Date()
 
     if (event.type.startsWith('charge.dispute.')) {
       const dispute = event.data.object as Stripe.Dispute;
-      // Any open dispute revokes; a closed one that Bytspot won leaves things as
-      // they are (access is restored by an admin, not automatically).
-      const revoke = event.type === 'charge.dispute.closed' ? dispute.status === 'lost' : true;
+      const won = dispute.status === 'won';
+      // Any open or lost dispute revokes; a won one leaves access as it is
+      // (an admin restores it, not this handler) and clears the payout freeze.
+      const revoke = won ? false : event.type === 'charge.dispute.closed' ? dispute.status === 'lost' : true;
       for (const checkout of checkouts) {
         await tx.partyCheckout.update({
           where: { id: checkout.id },
-          data: { disputedAt: now, disputeStatus: dispute.status ?? null },
+          data: won
+            ? { disputedAt: null, disputeStatus: 'won' }
+            : { disputedAt: now, disputeStatus: dispute.status ?? null },
         });
         if (revoke) await revokePartyAccess(tx, checkout, 'disputed');
       }
-      if (revoke) {
+      if (won) {
+        await tx.vendorTicketOrder.updateMany({
+          where: { id: { in: orders.map((o) => o.id) }, status: 'disputed' },
+          data: { status: 'completed' },
+        });
+      } else if (revoke) {
         await tx.vendorTicketOrder.updateMany({ where: { id: { in: orders.map((o) => o.id) }, status: 'completed' }, data: { status: 'disputed' } });
       }
       return;

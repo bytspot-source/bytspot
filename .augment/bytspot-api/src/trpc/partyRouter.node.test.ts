@@ -2005,3 +2005,24 @@ test('REA X5: production refuses a party checkout on a Stripe test key before an
     (config as any).nodeEnv = previousEnv;
   }
 });
+
+test('REA X1: a paid party cannot publish without a finished payout account, even with payouts off', async () => {
+  (config as any).partyPayoutsEnabled = false;
+  party.findFirst = async () => ({ ...partyDraft, ticketTiers: [{ name: 'GA', priceCents: 2500, quantity: 50, requiredMembershipTier: 'green' }] });
+  (db.hostPayoutAccount as any).findUnique = async () => null;
+  party.updateMany = async () => { throw new Error('must not publish'); };
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'PRECONDITION_FAILED', message: /Set up payouts/ });
+});
+
+test('REA X1: a new host is held to the ticket price and quantity caps', async () => {
+  party.findFirst = async () => ({ ...partyDraft, ticketTiers: [{ name: 'VIP', priceCents: 50_000, quantity: 50, requiredMembershipTier: 'green' }] });
+  (db.hostPayoutAccount as any).findUnique = async () => ({ status: 'active' });
+  party.count = async () => 0;
+  party.updateMany = async () => { throw new Error('must not publish'); };
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'PRECONDITION_FAILED', message: /New hosts/ });
+
+  party.count = async () => 10; // established host
+  party.updateMany = async () => ({ count: 1 });
+  const published = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.equal(published.id, 'party-1');
+});

@@ -7,6 +7,7 @@ import { config } from '../config';
 import { alertGuestOfDecision, alertGuestsOfArrivalUpdate, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
 import { hostCanSellPaidTickets, partySellsPaidTickets } from '../services/hostPayouts';
+import { hostPayoutDelayHours, isNewHost, newHostTierProblem } from '../services/hostTrust';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
@@ -711,6 +712,10 @@ export const partyPublish = protectedProcedure
     if (partySellsPaidTickets(party.ticketTiers) && !(await hostCanSellPaidTickets(ctx.user.userId))) {
       throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Set up payouts before publishing a party with paid tickets. Free parties do not need payouts.' });
     }
+    if (partySellsPaidTickets(party.ticketTiers) && await isNewHost(ctx.user.userId)) {
+      const problem = newHostTierProblem(party.ticketTiers);
+      if (problem) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: problem });
+    }
     // Snapshot the Official Host identity so later profile edits never
     // rewrite an already-shared pass. The profile remains the source of truth
     // for the next party.
@@ -1315,7 +1320,10 @@ export const partyControlRouter = router({
       feePercent: feeBps / 100,
       hostSharePercent: (10_000 - feeBps) / 100,
       payoutsEnabled: payout?.status === 'active',
-      payoutDelayHours: config.partyPayoutDelayHours,
+      payoutDelayHours: await hostPayoutDelayHours(ctx.user.userId),
+      newHostLimits: (await isNewHost(ctx.user.userId))
+        ? { maxTicketCents: config.newHostMaxTicketCents, maxTicketQuantity: config.newHostMaxTicketQuantity, trustedAfterParties: config.newHostTrustedAfterParties }
+        : null,
       note: 'This rate is locked to your party when you publish. Later changes to the platform rate do not affect a party that is already live.',
     };
   }),

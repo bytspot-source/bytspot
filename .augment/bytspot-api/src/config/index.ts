@@ -47,6 +47,12 @@ const envSchema = z.object({
   // Off until hosts can onboard; while off, paid parties publish as before.
   PARTY_PAYOUTS_ENABLED:  z.enum(['true', 'false']).default('false'),
   PARTY_PAYOUT_DELAY_HOURS: z.coerce.number().int().min(0).max(24 * 30).default(48),
+  // New-host limits (services/hostTrust.ts, REA X1). Proposed conservative
+  // defaults; raise them per Daniel's risk appetite.
+  NEW_HOST_TRUSTED_AFTER_PARTIES: z.coerce.number().int().min(0).max(100).default(3),
+  NEW_HOST_MAX_TICKET_CENTS: z.coerce.number().int().min(0).max(10_000_000).default(20_000),
+  NEW_HOST_MAX_TICKET_QUANTITY: z.coerce.number().int().min(1).max(10_000).default(200),
+  NEW_HOST_PAYOUT_DELAY_HOURS: z.coerce.number().int().min(0).max(24 * 60).default(168),
   // Kill switch for every paid flow (party passes, sessions, vendor tickets,
   // tips, Platinum). Production also refuses paid checkout on a Stripe test
   // key whatever this says (lib/paidCheckout.ts, REA X5).
@@ -171,6 +177,10 @@ export const config = {
   vendorBookingFeeMinCents: env.VENDOR_BOOKING_FEE_MIN_CENTS,
   partyPayoutsEnabled: env.PARTY_PAYOUTS_ENABLED === 'true',
   partyPayoutDelayHours: env.PARTY_PAYOUT_DELAY_HOURS,
+  newHostTrustedAfterParties: env.NEW_HOST_TRUSTED_AFTER_PARTIES,
+  newHostMaxTicketCents: env.NEW_HOST_MAX_TICKET_CENTS,
+  newHostMaxTicketQuantity: env.NEW_HOST_MAX_TICKET_QUANTITY,
+  newHostPayoutDelayHours: env.NEW_HOST_PAYOUT_DELAY_HOURS,
   paidCheckoutEnabled: env.PAID_CHECKOUT_ENABLED === 'true',
   payoutAlertEmail: env.PAYOUT_ALERT_EMAIL,
   frontendUrl: env.FRONTEND_URL,

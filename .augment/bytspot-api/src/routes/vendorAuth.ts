@@ -3,6 +3,10 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { normalizeEmail } from '../lib/contactHash';
 import { mailerIsConfigured, sendVendorSignInCode } from '../lib/email';
+import { randomBytes } from 'crypto';
+
+/** Indirection so tests can stand in for the mailer (REA V1). */
+export const vendorAuthMailer = { isConfigured: mailerIsConfigured, sendCode: sendVendorSignInCode };
 import { captureError } from '../lib/observability';
 import { signVendorAccessToken } from '../vendor/accessToken';
 import { AUTH } from '../vendor/contract';
@@ -123,7 +127,7 @@ router.post('/vendor/auth/code', async (req, res) => {
 
   // Checked before anything else: a mailer that silently drops the code would
   // have us return a cheerful 200 to someone who can never sign in.
-  if (!mailerIsConfigured()) {
+  if (!vendorAuthMailer.isConfigured()) {
     res.status(503).json({ error: 'Sign-in is temporarily unavailable' });
     return;
   }
@@ -153,16 +157,24 @@ router.post('/vendor/auth/code', async (req, res) => {
     // because it is the limit that actually bounds an enumeration sweep.
     await recordIpSend(ip);
 
+    // REA V1: the per-address cooldown is recorded for every address, so a
+    // second request inside the window answers 429 whether or not the
+    // address has a seat.
+    await recordSend(email);
+
     if (!user || seats === 0) {
-      // Deliberately indistinguishable from success. No email, no challenge,
-      // same status and shape as the branch below.
-      res.status(200).json({ challengeId: `chal_${'0'.repeat(32)}` });
+      // Indistinguishable from success: a random id in the same format as a
+      // real one (the old all-zero id gave the answer away), same status, and
+      // no email. Submitting it reads exactly like a wrong code.
+      res.status(200).json({ challengeId: `chal_${randomBytes(16).toString('hex')}` });
       return;
     }
 
     const challenge = await createChallenge(email, user.id);
-    await sendVendorSignInCode(email, challenge.code, Math.round(AUTH.code.ttlSecs / 60));
-    await recordSend(email);
+    // Sent after the response is decided so the mailer's latency doesn't
+    // separate real addresses from unknown ones. A failure is still captured.
+    void vendorAuthMailer.sendCode(email, challenge.code, Math.round(AUTH.code.ttlSecs / 60))
+      .catch((err) => captureError(err, { route: 'vendor/auth/code', step: 'send' }));
 
     res.status(200).json({ challengeId: challenge.id });
   } catch (err) {

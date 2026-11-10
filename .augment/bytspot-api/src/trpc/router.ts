@@ -77,6 +77,7 @@ import {
   takePendingEmail,
 } from '../services/accountEmails';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
+import { publicStats } from '../lib/publicStats';
 import { applyDeletionPolicyOnSignIn, signOutSessionsIssuedBefore } from '../services/accountDeletion';
 import { issueRefreshToken, revokeFamily, rotateRefreshToken, signOutEverywhere, signOutToken, spendRefreshToken } from '../vendor/refreshTokens';
 import { userRouter } from './userRouter';
@@ -233,19 +234,34 @@ const healthRouter = router({
     return { status: healthy ? 'healthy' : 'degraded', checks };
   }),
 
-  /** Public stats — mirrors GET /stats */
-  stats: publicProcedure.query(async () => {
-    try {
+  /**
+   * Public stats, mirrors GET /stats. REA X7: exact member and beta-lead counts
+   * are business data, so the public answer is coarse (userCount rounded down
+   * to a step, no betaLeadCount). Exact numbers: health.adminStats.
+   * A count that can't be read is 0, never an invented number.
+   */
+  stats: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'health-stats' }))
+    .query(async () => {
+      try {
+        const [userCount, venueCount] = await Promise.all([db.user.count(), db.venue.count({ where: { discoverable: true } })]);
+        return publicStats(userCount, venueCount);
+      } catch {
+        return { userCount: 0, venueCount: 0 };
+      }
+    }),
+
+  adminStats: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'health-admin-stats' }))
+    .query(async ({ ctx }) => {
+      assertBytspotAdmin(ctx.user);
       const [userCount, venueCount, betaLeadCount] = await Promise.all([
         db.user.count(),
         db.venue.count({ where: { discoverable: true } }),
         db.betaLead.count(),
       ]);
       return { userCount, venueCount, betaLeadCount };
-    } catch {
-      return { userCount: 246, venueCount: 12, betaLeadCount: 0 };
-    }
-  }),
+    }),
 });
 
 /**

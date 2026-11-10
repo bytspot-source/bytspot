@@ -1,6 +1,7 @@
 import type Redis from 'ioredis';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
+import { config } from '../config';
 import { getRedis } from '../lib/redis';
 
 /**
@@ -189,12 +190,47 @@ export async function markSessionsSuspended(userId: string, suspended: boolean, 
   }
 }
 
-export async function isSessionSuspended(userId: string, redis: Redis | null = getRedis()): Promise<boolean> {
-  if (!redis) return false;
+/**
+ * REA V3: with Redis missing or down this used to answer "not suspended" for
+ * everyone, so a suspended member's live access token kept working for its
+ * whole lifetime. It now falls back to the database flag, cached briefly per
+ * process so an outage doesn't turn into a query per request. Only if the
+ * database is also unreachable does it fail open (and the request will almost
+ * certainly fail on its own database work anyway).
+ */
+const SUSPENSION_FALLBACK_TTL_MS = 30_000;
+const suspensionFallback = new Map<string, { suspended: boolean; at: number }>();
+
+export function resetSuspensionFallbackForTests(): void {
+  suspensionFallback.clear();
+}
+
+async function suspendedInDatabase(userId: string, now = Date.now()): Promise<boolean> {
+  const hit = suspensionFallback.get(userId);
+  if (hit && now - hit.at < SUSPENSION_FALLBACK_TTL_MS) return hit.suspended;
+  try {
+    const user = await db.user.findUnique({ where: { id: userId }, select: { suspendedAt: true } });
+    const suspended = Boolean(user?.suspendedAt);
+    if (suspensionFallback.size > 50_000) suspensionFallback.clear();
+    suspensionFallback.set(userId, { suspended, at: now });
+    return suspended;
+  } catch (error) {
+    console.warn('[safety] suspension check fell through: Redis and database unavailable', (error as Error)?.message);
+    return false;
+  }
+}
+
+export async function isSessionSuspended(
+  userId: string,
+  redis: Redis | null = getRedis(),
+  opts: { noRedisFallback?: boolean } = {},
+): Promise<boolean> {
+  // No Redis at all is a misconfiguration in production, so the database
+  // answers there. Locally and in tests (no REDIS_URL) the old behaviour stands.
+  if (!redis) return (opts.noRedisFallback ?? config.nodeEnv === 'production') ? suspendedInDatabase(userId) : false;
   try {
     return (await redis.exists(`${SUSPENDED_KEY}:${userId}`)) === 1;
   } catch {
-    // Fail open, as isSessionRevoked does: a Redis outage must not lock out every member.
-    return false;
+    return suspendedInDatabase(userId);
   }
 }

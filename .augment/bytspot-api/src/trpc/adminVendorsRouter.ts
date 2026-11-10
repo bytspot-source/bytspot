@@ -211,6 +211,38 @@ export const adminVendorsRouter = router({
       return { state: seller.state };
     }),
 
+  /**
+   * REA P1/V2. Records that a Bytspot admin checked this business's on-premise
+   * alcohol licence (number, name match, expiry) outside the app. Without it
+   * the business cannot author or sell bottle sessions.
+   */
+  verifyAlcoholLicence: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-alcohol-licence' }))
+    .input(sellerIdInput.extend({ licenceNumber: z.string().trim().min(3).max(80) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const seller = await db.vendorSeller.update({
+        where: { id: input.sellerId },
+        data: { alcoholLicenceNumber: input.licenceNumber, alcoholLicenceVerifiedAt: new Date(), alcoholLicenceVerifiedByUserId: ctx.user.userId },
+        select: { id: true, alcoholLicenceVerifiedAt: true },
+      });
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.verifyAlcoholLicence', detail: { sellerId: seller.id } });
+      return { verifiedAt: seller.alcoholLicenceVerifiedAt!.toISOString() };
+    }),
+
+  revokeAlcoholLicence: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-alcohol-licence' }))
+    .input(sellerIdInput)
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      await db.vendorSeller.update({
+        where: { id: input.sellerId },
+        data: { alcoholLicenceVerifiedAt: null, alcoholLicenceVerifiedByUserId: ctx.user.userId },
+      });
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.revokeAlcoholLicence', detail: { sellerId: input.sellerId } });
+      return { revoked: true as const };
+    }),
+
   /** Lifts a pause on a live business, and tells the owner. */
   restore: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-restore' }))

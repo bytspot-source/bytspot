@@ -29,7 +29,7 @@ const endsAt = new Date(Date.now() + 28 * hour);
 function draft(over: Record<string, unknown> = {}) {
   return {
     name: 'Front Table', kind: 'table' as const, startsAt, endsAt,
-    bottleCount: 4, bottleTerms: 'included' as const, priceCents: 90000, quantity: 2, ...over,
+    bottleCount: 4, bottleTerms: 'minimum' as const, priceCents: 90000, quantity: 2, ...over,
   };
 }
 
@@ -44,6 +44,8 @@ beforeEach(() => {
   partySession.create = async (input: any) => { created = input.data; return { id: 'session-1', committed: 0, ...input.data }; };
   partySession.updateMany = async () => ({ count: 1 });
   partySessionClaim.count = async () => 0;
+  // A business with a verified alcohol licence unless a test says otherwise (REA P1).
+  (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date('2026-01-01T00:00:00Z') });
   // Withdrawal counts and retires in one serializable transaction, so the
   // counts cannot be a photograph of a floor that moved underneath them.
   prisma.$transaction = async (callback: any) => callback({ partySession, partySessionClaim, partyCheckout });
@@ -295,4 +297,16 @@ test('A listing is scoped to the business that authored it', async () => {
   partySession.findMany = async (input: any) => { query = input; return []; };
   await listPartySessions('seller-1', 'party-1');
   assert.deepEqual(query.where, { partyId: 'party-1', sellerId: 'seller-1', withdrawnAt: null });
+});
+
+test('REA P1: a business without a verified alcohol licence cannot author a bottle session', async () => {
+  (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: null });
+  await assert.rejects(
+    () => authorPartySession('seller-1', 'party-1', draft()),
+    (error: unknown) => error instanceof SessionRefused && error.issues.some((issue) => issue.field === 'bottleCount' && /alcohol licence/.test(issue.message)),
+  );
+  assert.equal(created, undefined, 'nothing written');
+  // A session with no bottles is not alcohol and needs no licence.
+  await authorPartySession('seller-1', 'party-1', draft({ bottleCount: 0, bottleTerms: 'included', name: 'Booth only' }));
+  assert.equal((created as any)?.bottleCount, 0);
 });

@@ -1,3 +1,4 @@
+import { coarseCoordinate } from '../lib/geoPrivacy';
 import { createHash, randomBytes } from 'crypto';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
@@ -18,6 +19,7 @@ import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableB
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 import { resolvePlaceHours, resolvePlaceLocation } from './placesRouter';
 import { dispatchPlanChanged, dispatchPlanDecided, dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined, type PlanChange } from '../services/planAlerts';
+import { filteredText } from '../lib/contentFilter';
 
 /**
  * Plan — the control plane.
@@ -406,8 +408,9 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
     endsAt: plan.endsAt,
     expiresAt: planClosesAt(plan),
     areaLabel: plan.areaLabel,
-    latitude: plan.latitude,
-    longitude: plan.longitude,
+    // REA location: only the creator sees their own precise point.
+    latitude: plan.creatorUserId === viewerUserId ? plan.latitude : coarseCoordinate(plan.latitude),
+    longitude: plan.creatorUserId === viewerUserId ? plan.longitude : coarseCoordinate(plan.longitude),
     partySize: plan.partySize,
     budgetCents: plan.budgetCents,
     needs: plan.needs,
@@ -596,8 +599,8 @@ async function resolveSupply(
 
 const createPlanInput = z.object({
   idempotencyKey: z.string().uuid(),
-  title: z.string().trim().min(1).max(80),
-  intent: z.string().trim().min(1).max(280),
+  title: filteredText(z.string().trim().min(1).max(80)),
+  intent: filteredText(z.string().trim().min(1).max(280)),
   startsAt: z.coerce.date().optional(),
   endsAt: z.coerce.date().optional(),
   areaLabel: z.string().trim().max(80).optional(),
@@ -1274,6 +1277,26 @@ export const planRouter = router({
     }),
 
   /**
+   * REA location: a join link that was forwarded too far can be killed. The
+   * creator gets a fresh link and the old one stops seating anyone; people
+   * already on the Plan keep their seats. (Links also stop working when the
+   * Plan expires, is cancelled or is over; see joinByToken.)
+   */
+  rotateJoinLink: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'plan-rotate-join-link' }))
+    .input(z.object({ planId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
+      const joinToken = newJoinToken();
+      const updated = await db.plan.updateMany({
+        where: { id: plan.id, creatorUserId: ctx.user.userId, deletedAt: null },
+        data: { joinToken },
+      });
+      if (updated.count !== 1) await loadPlanForCreator(plan.id, ctx.user.userId);
+      return { id: plan.id, joinToken };
+    }),
+
+  /**
    * Invite takes a userId and deliberately performs no relationship check.
    * Spot Code exists to introduce strangers, so a prior-relationship gate here
    * would reject the very handoff it is meant to enable.
@@ -1461,7 +1484,7 @@ export const planRouter = router({
       z.object({
         planId: z.string().min(1),
         needKind: z.string().trim().min(1).max(40),
-        title: z.string().trim().min(1).max(120).optional(),
+        title: filteredText(z.string().trim().min(1).max(120)).optional(),
         // Legacy top-level partyId is kept for one release so unshipped iOS
         // builds do not break; a follow-up removes it. Prefer supplyRef.
         partyId: z.string().min(1).optional(),
@@ -1575,8 +1598,8 @@ export const planRouter = router({
           partyId: z.string().min(1).optional(),
           coffeeReservationId: z.string().min(1).optional(),
         }),
-        title: z.string().trim().min(1).max(80).optional(),
-        intent: z.string().trim().min(1).max(280).optional(),
+        title: filteredText(z.string().trim().min(1).max(80)).optional(),
+        intent: filteredText(z.string().trim().min(1).max(280)).optional(),
         areaLabel: z.string().trim().max(80).optional(),
         partySize: z.number().int().min(1).max(200).optional(),
         startsAt: z.coerce.date().optional(),

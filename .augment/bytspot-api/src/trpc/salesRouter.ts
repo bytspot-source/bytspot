@@ -19,6 +19,9 @@ import {
   type PaymentProvider,
 } from '../services/privateSales';
 import { isBlockedBetween } from '../services/safety';
+import { filteredText } from '../lib/contentFilter';
+import { SALE_CATEGORIES, assertVerifiedEmailForSales, inferredSaleCategory, isNewSeller, saleListingProblem } from '../services/privateSalesPolicy';
+import { serializableTransactionWithRetry } from '../lib/transactions';
 
 /**
  * Private sales. The meet point leaves this router only for the seller and
@@ -146,8 +149,13 @@ export const salesRouter = router({
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'sales-create' }))
     .input(z.object({
-      title: z.string().trim().min(3).max(80),
+      title: filteredText(z.string().trim().min(3).max(80), { blockContactInfo: true }),
       priceCents: z.number().int().min(0).max(10_000_000),
+      // Optional so shipped clients that omit it still work. There is no
+      // default of `other` on the cap: ticket-like titles are treated as
+      // event-ticket even when the field is missing or set to other.
+      category: z.enum(SALE_CATEGORIES).optional(),
+      faceValueCents: z.number().int().min(0).max(10_000_000).optional(),
       meetPoint: z.object({
         lat: z.number().min(-90).max(90),
         lng: z.number().min(-180).max(180),
@@ -164,6 +172,13 @@ export const salesRouter = router({
       const now = new Date();
       const problem = meetWindowProblem(input.windowStart, input.windowEnd, now);
       if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });
+      await assertVerifiedEmailForSales(ctx.user.userId);
+      const category = inferredSaleCategory(input.title, input.category);
+      const listingProblem = saleListingProblem(
+        { title: input.title, category, priceCents: input.priceCents, faceValueCents: input.faceValueCents ?? null },
+        { newSeller: await isNewSeller(ctx.user.userId) },
+      );
+      if (listingProblem) throw new TRPCError({ code: 'BAD_REQUEST', message: listingProblem });
 
       const providers = [...new Set(input.providers)];
       const saved = await db.sellerPaymentHandle.findMany({
@@ -192,6 +207,8 @@ export const salesRouter = router({
           sellerId: ctx.user.userId,
           title: input.title,
           priceCents: input.priceCents,
+          category,
+          faceValueCents: input.faceValueCents ?? null,
           providers,
           meetPlaceName: input.meetPoint.placeName,
           meetLat: point.lat,
@@ -341,6 +358,7 @@ export const salesRouter = router({
     .mutation(async ({ ctx, input }) => {
       const sale = await liveSale(input.saleId, ctx.user.userId);
       if (sale.sellerId === ctx.user.userId) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This is your own sale.' });
+      await assertVerifiedEmailForSales(ctx.user.userId);
       const key = { saleId_buyerId: { saleId: sale.id, buyerId: ctx.user.userId } };
       const existing = await db.privateSaleRequest.findUnique({ where: key, select: { status: true } });
       if (existing) return { status: existing.status };
@@ -362,11 +380,16 @@ export const salesRouter = router({
     .mutation(async ({ ctx, input }) => {
       const request = await ownRequest(ctx.user.userId, input.requestId);
       if (request.status === 'approved') return { status: 'approved' };
-      const approved = await db.privateSaleRequest.count({ where: { saleId: request.sale.id, status: 'approved' } });
-      if (approved >= request.sale.buyerLimit) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'This sale already has as many approved buyers as it allows.' });
-      }
-      await db.privateSaleRequest.update({ where: { id: request.id }, data: { status: 'approved', decidedAt: new Date() } });
+      // REA PS2: count-then-approve in one serializable transaction, so two
+      // approvals racing for the last slot cannot both win (one retries and
+      // then sees the sale is full).
+      await serializableTransactionWithRetry(async (tx) => {
+        const approved = await tx.privateSaleRequest.count({ where: { saleId: request.sale.id, status: 'approved' } });
+        if (approved >= request.sale.buyerLimit) {
+          throw new TRPCError({ code: 'CONFLICT', message: 'This sale already has as many approved buyers as it allows.' });
+        }
+        await tx.privateSaleRequest.update({ where: { id: request.id }, data: { status: 'approved', decidedAt: new Date() } });
+      }, 'Another approval for this sale is in flight. Try again.');
       return { status: 'approved' };
     }),
 

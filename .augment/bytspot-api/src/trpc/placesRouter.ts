@@ -5,6 +5,7 @@
  */
 import { z } from 'zod';
 import { router, publicProcedure, rateLimitMiddleware } from './trpc';
+import { TRPCError } from '@trpc/server';
 import { cached, getRedis } from '../lib/redis';
 import { captureError } from '../lib/observability';
 import { config } from '../config';
@@ -355,6 +356,19 @@ async function recommendVenues(lat: number, lng: number, radius: number): Promis
   }
 }
 
+/**
+ * REA review 2026-11-10 (concierge/places). The Google-billed proxies were
+ * open to anyone with the URL. They now need a signed-in member unless
+ * PLACES_REQUIRE_AUTH=false (an escape hatch if a signed-out surface turns
+ * out to need them), and every caller is rate-limited either way.
+ */
+const placesProxy = (label: string, max = 60) => publicProcedure
+  .use(async ({ ctx, next }) => {
+    if (config.placesRequireAuth && !ctx.user) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Sign in to search places.' });
+    return next();
+  })
+  .use(rateLimitMiddleware({ windowMs: 60_000, max, label }));
+
 export const placesRouter = router({
   /**
    * Places picked for a guest from their onboarding answers (vibe, how far
@@ -427,7 +441,7 @@ export const placesRouter = router({
       return rankDiscover({ ...rest, preferences: normalizePreferences(preferences) }, candidates);
     }),
 
-  nearbySearch: publicProcedure
+  nearbySearch: placesProxy('places-nearby')
     .input(z.object({
       lat: z.number(), lng: z.number(),
       radius: z.number().min(100).max(50000).optional().default(2000),
@@ -466,7 +480,7 @@ export const placesRouter = router({
       }
     }),
 
-  textSearch: publicProcedure
+  textSearch: placesProxy('places-text')
     .input(z.object({
       query: z.string().min(2).max(200),
       maxResults: z.number().min(1).max(20).optional().default(10),
@@ -481,7 +495,7 @@ export const placesRouter = router({
    * where the page came from; `provider` carries the external outcome so an
    * outage degrades honestly instead of masquerading as an empty index.
    */
-  find: publicProcedure
+  find: placesProxy('places-find')
     .input(z.object({
       query: z.string().min(2).max(200),
       maxResults: z.number().min(1).max(20).optional().default(10),
@@ -512,7 +526,7 @@ export const placesRouter = router({
       return { results, source, provider };
     }),
 
-  details: publicProcedure
+  details: placesProxy('places-details')
     .input(z.object({ placeId: z.string() }))
     .query(async ({ input }) => {
       if (!config.googlePlacesApiKey) return { place: null };
@@ -559,7 +573,7 @@ export const placesRouter = router({
       return { counted: true };
     }),
 
-  photoUrl: publicProcedure
+  photoUrl: placesProxy('places-photo-url', 120)
     .input(z.object({ photoName: z.string(), maxWidth: z.number().min(100).max(4800).optional().default(800) }))
     .query(({ input }) => {
       if (!config.googlePlacesApiKey) return { url: null };

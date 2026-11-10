@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  includedBottlesProblem,
   liveRemaining,
   sessionPriceFloors,
   sessionState,
+  sessionStripeDescription,
   validateSessions,
   type SessionDraft,
 } from './partySessions';
@@ -17,7 +19,7 @@ function draft(over: Partial<SessionDraft> = {}): SessionDraft {
     startsAt: at('2099-06-01T22:00:00Z'),
     endsAt: at('2099-06-02T02:00:00Z'),
     bottleCount: 4,
-    bottleTerms: 'included',
+    bottleTerms: 'minimum',
     priceCents: 90000,
     quantity: 1,
     ...over,
@@ -70,6 +72,23 @@ test('A table with no bottles included is a vendor decision, not an error', () =
   // Zero under `included` is a table sold without bottles, which is theirs to
   // offer. Only a minimum of nothing is incoherent.
   assert.deepEqual(validateSessions([draft({ bottleTerms: 'included', bottleCount: 0 })]), []);
+});
+
+test('bottles cannot be included in the Stripe price', () => {
+  const issues = validateSessions([draft({ bottleTerms: 'included', bottleCount: 4 })]);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].field, 'bottleTerms');
+  assert.match(issues[0].message, /settled at the venue/);
+  assert.match(includedBottlesProblem({ bottleTerms: 'included', bottleCount: 4 })!, /no longer charges/);
+  assert.equal(includedBottlesProblem({ bottleTerms: 'minimum', bottleCount: 4 }), null);
+  assert.equal(includedBottlesProblem({ bottleTerms: 'included', bottleCount: 0 }), null);
+  assert.equal(includedBottlesProblem(null), null);
+});
+
+test('Stripe session line items describe a reservation, never bottles included', () => {
+  assert.match(sessionStripeDescription({ name: 'Front Table', bottleCount: 4 }), /settled at the venue/);
+  assert.doesNotMatch(sessionStripeDescription({ name: 'Front Table', bottleCount: 4 }), /included/i);
+  assert.equal(sessionStripeDescription({ name: 'Front Table', bottleCount: 0 }), 'Session reservation · Front Table');
 });
 
 test('A session states both coordinates or neither', () => {

@@ -1,4 +1,5 @@
 import type Stripe from 'stripe';
+import { VENDOR_TICKET_CHECKOUT_TERMS } from '../lib/checkoutTerms';
 import { Prisma, type VendorTicketOrder } from '@prisma/client';
 import { z } from 'zod';
 import { config } from '../config';
@@ -9,6 +10,7 @@ import { currentPlatformFeeBps, splitBookingAmount, VENDOR_BOOKING_FEE_SCOPE } f
 import { zonedInstant } from './availability';
 import { newPassCode } from './bookings';
 import { stripeHandle } from './payout';
+import { paidCheckoutBlockReason } from '../lib/paidCheckout';
 
 /**
  * Tickets a business sells itself, one date at a time: its Sunday special on
@@ -271,6 +273,8 @@ export async function startTicketCheckout(input: { ticketId: string; userId: str
   const now = input.now ?? new Date();
   const stripe = stripeHandle.client();
   if (!stripe) throw new PaymentsUnavailable();
+  // REA X5: never sell a pass for a test-mode charge in production.
+  if (paidCheckoutBlockReason()) throw new PaymentsUnavailable();
 
   const ticket = await db.vendorTicket.findFirst({
     where: { id: input.ticketId, ...LIVE_TICKET },
@@ -328,6 +332,8 @@ export async function startTicketCheckout(input: { ticketId: string; userId: str
   const session = await stripe.checkout.sessions.create(
     {
       mode: 'payment',
+      // REA X3: refund terms on the payment page itself.
+      custom_text: { submit: { message: VENDOR_TICKET_CHECKOUT_TERMS } },
       line_items: [
         {
           price_data: {
@@ -345,7 +351,6 @@ export async function startTicketCheckout(input: { ticketId: string; userId: str
       },
       metadata: { kind: VENDOR_TICKET_KIND, orderId: order.id, ticketId: ticket.id, userId: input.userId },
       expires_at: Math.floor(order.expiresAt.getTime() / 1000),
-      custom_text: { submit: { message: 'Refunds after buying are handled by Bytspot support.' } },
       success_url: `${back}&checkout=ticket-paid&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${back}&checkout=ticket-cancelled`,
     },

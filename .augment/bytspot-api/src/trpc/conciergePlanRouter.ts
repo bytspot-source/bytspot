@@ -5,11 +5,16 @@ import { conciergeResultSchema } from '../bytt-si/types';
 import { config } from '../config';
 import { coordinateSchema } from '../services/conciergeDiscovery';
 import type { Context } from './context';
-import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
+import { router } from './trpc';
+import { CONCIERGE_REFUSAL_TEXT, conciergeProcedure, conciergeRefusal, onConciergePilot } from '../services/conciergeAccess';
 
-/** concierge.plan is open to every signed-in user when CONCIERGE_PLAN_ENABLED is on. */
-export function conciergePlanOpenTo(): boolean {
-  return config.conciergePlanEnabled;
+/**
+ * REA C1: concierge.plan was open to every signed-in user once enabled. It now
+ * shares the discovery pilot allowlist (CONCIERGE_AUDIENCE /
+ * CONCIERGE_PILOT_USER_IDS), so turning the flag on reaches only the pilot.
+ */
+export function conciergePlanOpenTo(userId?: string): boolean {
+  return config.conciergePlanEnabled && onConciergePilot(userId);
 }
 
 export const conciergePlanInput = z.object({
@@ -51,12 +56,13 @@ const TIMEOUT = Symbol('timeout');
  */
 export function createConciergePlanRouter(deps: ConciergePlanDependencies) {
   return router({
-    plan: protectedProcedure
-      .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'concierge-plan' }))
+    plan: conciergeProcedure('concierge-plan', 10)
       .input(conciergePlanInput)
       .output(conciergePlanOutput)
       .mutation(async ({ ctx, input }) => {
-        if (!conciergePlanOpenTo()) return { version: 1 as const, status: 'unavailable' as const, reply: NOT_ENABLED, result: null };
+        if (!conciergePlanOpenTo(ctx.user.userId)) return { version: 1 as const, status: 'unavailable' as const, reply: NOT_ENABLED, result: null };
+        const refusal = await conciergeRefusal(ctx.user.userId);
+        if (refusal) return { version: 1 as const, status: 'unavailable' as const, reply: CONCIERGE_REFUSAL_TEXT[refusal], result: null };
         const engine = deps.engineFor(ctx);
         if (!engine) return { version: 1 as const, status: 'unavailable' as const, reply: UNAVAILABLE, result: null };
         let timer: NodeJS.Timeout | undefined;

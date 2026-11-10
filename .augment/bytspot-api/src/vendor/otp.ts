@@ -157,6 +157,24 @@ export async function createChallenge(email: string, userId: string, scope: OtpS
 }
 
 /**
+ * Same work as createChallenge (id, code, HMAC, two Redis writes) but with no
+ * user binding, so an unknown address takes the same path as a real seat.
+ * Submitting the decoy id still reads as a wrong or unknown code.
+ */
+export async function createDecoyChallenge(scope: OtpScope = 'vendor'): Promise<{ id: string }> {
+  const redis = requireRedis();
+  const id = `chal_${randomBytes(16).toString('hex')}`;
+  const code = generateCode();
+  const challenge: Challenge = { id, codeHash: hashCode(id, code), attempts: 0 };
+  await redis.set(`${challengePrefix(scope)}${id}`, JSON.stringify(challenge), 'EX', AUTH.code.ttlSecs);
+  // A key is written so the number of Redis round-trips matches a real
+  // challenge, but the value is empty: verifyChallenge treats a missing user
+  // as unknown and never issues a session.
+  await redis.set(`${challengePrefix(scope)}${id}:user`, '', 'EX', AUTH.code.ttlSecs);
+  return { id };
+}
+
+/**
  * One attempt. Consumes the challenge on success and on exhaustion, so a code
  * is single-use and a locked challenge cannot be retried by reconnecting.
  */

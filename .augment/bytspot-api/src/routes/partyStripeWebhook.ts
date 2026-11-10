@@ -6,6 +6,7 @@ import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services/partyAlerts';
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
 import { applyTicketCheckoutEvent } from '../vendor/tickets';
+import { applyChargeRiskEvent, refundPartyCheckout } from '../services/stripeRisk';
 
 const partyStripeWebhookRouter = Router();
 
@@ -214,6 +215,19 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
     return;
   }
 
+  // REA X2: disputes, refunds and early fraud warnings revoke the pass and
+  // freeze the payout. Claimed before the Checkout cast; these are charge objects.
+  try {
+    if (await applyChargeRiskEvent(event)) {
+      res.json({ received: true });
+      return;
+    }
+  } catch (error) {
+    console.error('[stripe-risk-webhook] risk event failed', error);
+    res.status(500).json({ error: 'Risk event will be retried.' });
+    return;
+  }
+
   const session = event.data.object as Stripe.Checkout.Session;
   const metadata = partyCheckoutMetadata(session);
   if (!metadata.hasPartyIdentifiers) {
@@ -255,6 +269,14 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
 
   try {
     await reconcilePartyCheckoutPayment(session, checkoutId, partyId, userId, new Date(event.created * 1000));
+    // REA X2: a payment that could not be honoured (expired hold, closed room,
+    // sold-out table) is refunded now instead of waiting on the host. Best
+    // effort: a failure is logged and left for an admin, and the event is
+    // still acknowledged because the payment itself was recorded.
+    if (config.autoRefundUnhonouredPayments) {
+      const result = await refundPartyCheckout(checkoutId, 'Payment could not be honoured', undefined, { statuses: ['refund-required'] }).catch(() => 'failed' as const);
+      if (result === 'failed') console.error('[party-stripe-webhook] automatic refund failed; needs a manual refund', { checkoutId });
+    }
     res.json({ received: true });
   } catch (error) {
     if (error instanceof PartyCheckoutValidationError) {

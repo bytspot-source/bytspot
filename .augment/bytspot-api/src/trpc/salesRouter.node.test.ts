@@ -35,7 +35,8 @@ let saleWhere: any;
 let tier = 'green';
 beforeEach(() => {
   tier = 'green';
-  user.findUnique = async () => ({ membershipTier: tier });
+  user.findUnique = async () => ({ membershipTier: tier, emailVerifiedAt: new Date() });
+  (db as any).$transaction = async (fn: (tx: any) => unknown) => fn(db);
   resetLocalRateLimitForTests();
   saleWhere = null;
   sale.findFirst = async ({ where }: any) => { saleWhere = where; return openSale(); };
@@ -254,4 +255,87 @@ test('a seller deletes only their own sold, cancelled or ended sale', async () =
 
   sale.findFirst = async () => null;
   await assert.rejects(() => buyer().sales.delete({ saleId: 'sale-1' }), { code: 'NOT_FOUND' });
+});
+
+test('REA X4: a sale title with contact details or a slur is refused by the content filter', async () => {
+  const input = {
+    title: 'Jordans, text 404-555-0123', priceCents: 22_000,
+    meetPoint: { lat: 33.787861, lng: -84.383191, placeName: 'Colony Square plaza', areaLabel: 'Midtown' },
+    windowStart: new Date(Date.now() + hour), windowEnd: new Date(Date.now() + 3 * hour), providers: ['venmo' as const],
+  };
+  sale.create = async () => { throw new Error('must not create'); };
+  await assert.rejects(() => seller().sales.create(input), { code: 'BAD_REQUEST' });
+});
+
+// ─── REA PS1 / PS2 ─────────────────────────────────────────────────────────────
+
+const listing = (over: Record<string, unknown> = {}) => ({
+  title: 'Jordan 4 Retro, size 10', priceCents: 22_000,
+  meetPoint: { lat: 33.787861, lng: -84.383191, placeName: 'Colony Square plaza', areaLabel: 'Midtown' },
+  windowStart: new Date(Date.now() + hour), windowEnd: new Date(Date.now() + 3 * hour), providers: ['venmo' as const],
+  ...over,
+});
+
+test('REA PS1: prohibited items are refused by name, with the rule they broke', async () => {
+  for (const title of ['Grey Goose vodka 750ml', 'Elf Bar vapes x10', 'Delta 8 gummies', 'Glock 19 w/ case', 'Replica Rolex', '$100 Visa gift card', 'Fake IDs any state']) {
+    resetLocalRateLimitForTests();
+    await assert.rejects(() => seller().sales.create(listing({ title }) as any), { code: 'BAD_REQUEST', message: /can't be sold/ }, title);
+  }
+  // Ordinary things that share words still list.
+  for (const title of ['Wine glasses set of 6', 'Hot glue gun', 'Nerf gun blaster', 'Whiskey stones gift set', 'Massage gun Theragun']) {
+    resetLocalRateLimitForTests();
+    const created = await seller().sales.create(listing({ title }) as any);
+    assert.equal(created.saleId, 'sale-new', title);
+  }
+});
+
+test('REA PS1: new sellers have a lower price cap than established ones', async () => {
+  sale.count = async ({ where }: any) => (where.status === 'sold' ? 0 : 0);
+  await assert.rejects(() => seller().sales.create(listing({ priceCents: config.privateSaleNewSellerMaxCents + 1 }) as any), { code: 'BAD_REQUEST', message: /New sellers/ });
+  sale.count = async ({ where }: any) => (where.status === 'sold' ? 10 : 0);
+  assert.equal((await seller().sales.create(listing({ priceCents: config.privateSaleNewSellerMaxCents + 1 }) as any)).saleId, 'sale-new');
+  await assert.rejects(() => seller().sales.create(listing({ priceCents: config.privateSaleMaxCents + 1 }) as any), { code: 'BAD_REQUEST' });
+});
+
+test('REA PS1: tickets need a face value and cannot be listed above it', async () => {
+  let created: any;
+  sale.create = async ({ data }: any) => { created = data; return { id: 'sale-new', ...data }; };
+  await assert.rejects(() => seller().sales.create(listing({ title: 'Hawks vs Celtics, 2 seats', category: 'event-ticket', priceCents: 9000 }) as any), { message: /face value/ });
+  await assert.rejects(() => seller().sales.create(listing({ title: 'Hawks vs Celtics, 2 seats', category: 'event-ticket', priceCents: 9000, faceValueCents: 8000 }) as any), { message: /face value or less/ });
+  await seller().sales.create(listing({ title: 'Hawks vs Celtics, 2 seats', category: 'event-ticket', priceCents: 8000, faceValueCents: 8000 }) as any);
+  assert.equal(created.category, 'event-ticket');
+  assert.equal(created.faceValueCents, 8000);
+});
+
+test('REA PS1: a ticket listed as other or with no category still needs a face value', async () => {
+  await assert.rejects(() => seller().sales.create(listing({ title: '2 GA Coldplay', category: 'other', priceCents: 9000 }) as any), { message: /face value/ });
+  await assert.rejects(() => seller().sales.create(listing({ title: '2 GA Coldplay', priceCents: 9000 }) as any), { message: /face value/ });
+  let created: any;
+  sale.create = async ({ data }: any) => { created = data; return { id: 'sale-new', ...data }; };
+  await seller().sales.create(listing({ title: '2 GA Coldplay', priceCents: 8000, faceValueCents: 8000 }) as any);
+  assert.equal(created.category, 'event-ticket', 'an omitted category is stored as event-ticket when the title is a ticket');
+  await seller().sales.create(listing({ title: '2 GA Coldplay', category: 'other', priceCents: 8000, faceValueCents: 8000 }) as any);
+  assert.equal(created.category, 'other', 'an explicit other is stored, but the cap still applied');
+});
+
+test('REA PS1: selling and requesting need a confirmed email', async () => {
+  user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: null });
+  await assert.rejects(() => seller().sales.create(listing() as any), { code: 'FORBIDDEN', message: /Confirm your email/ });
+  await assert.rejects(() => buyer().sales.request({ saleId: 'sale-1' }), { code: 'FORBIDDEN' });
+});
+
+test('REA PS2: approval counts and writes inside one serializable transaction', async () => {
+  const isolation: unknown[] = [];
+  (db as any).$transaction = async (fn: (tx: any) => unknown, opts: any) => { isolation.push(opts?.isolationLevel); return fn(db); };
+  request.findFirst = async () => ({ id: 'req-1', status: 'pending', sale: { id: 'sale-1', buyerLimit: 1 } });
+  assert.deepEqual(await seller().sales.approve({ requestId: 'req-1' }), { status: 'approved' });
+  assert.deepEqual(isolation, ['Serializable']);
+});
+
+test('REA PS1: the pay reminder says who is responsible and never says pending review', async () => {
+  const { paymentReminder } = await import('../services/privateSales');
+  for (const provider of ['venmo', 'cashapp', 'paypal'] as const) {
+    assert.match(paymentReminder(provider), /between you and the seller/);
+    assert.doesNotMatch(paymentReminder(provider), /pending/i);
+  }
 });

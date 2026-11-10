@@ -17,12 +17,18 @@ import { windowTemplate } from './windows';
 
 /** No 0/O or 1/I, so a code read aloud or typed from a screen survives. */
 const PASS_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-export const PASS_LENGTH = 8;
+/** New codes are this long. Already-issued 8-character codes still scan. */
+export const PASS_LENGTH = 12;
+export const LEGACY_PASS_LENGTH = 8;
 /** A QR pass carries this prefix so the scanner ignores unrelated codes. */
 export const PASS_QR_PREFIX = 'BYTSPOT-PASS:';
 
 /** Guests may be checked in this long before their time. */
 export const CHECK_IN_EARLY_MINS = 120;
+
+export function isAcceptedPassLength(length: number): boolean {
+  return length === PASS_LENGTH || length === LEGACY_PASS_LENGTH;
+}
 
 export function newPassCode(): string {
   let code = '';
@@ -36,7 +42,7 @@ export function normalizePassCode(raw: unknown): string | undefined {
   let value = raw.trim().toUpperCase();
   if (value.startsWith(PASS_QR_PREFIX)) value = value.slice(PASS_QR_PREFIX.length);
   value = value.replace(/[\s-]/g, '');
-  return /^[A-Z0-9]{8}$/.test(value) ? value : undefined;
+  return /^[A-Z0-9]+$/.test(value) && isAcceptedPassLength(value.length) ? value : undefined;
 }
 
 export class BookingNotFound extends Error {

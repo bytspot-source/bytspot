@@ -10,6 +10,10 @@ import type { Context } from './context';
 import { conciergePlanOpenTo, conciergePlanOutput, conciergePlanRouter, createConciergePlanRouter } from './conciergePlanRouter';
 import { appRouter } from './router';
 import { resetLocalRateLimitForTests } from './trpc';
+import { db } from '../lib/db';
+
+// REA C1: an open audience needs a confirmed email; these members have one.
+(db.user as any).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
 
 const original = {
   conciergeDiscoveryEnabled: config.conciergeDiscoveryEnabled, conciergePlanEnabled: config.conciergePlanEnabled,
@@ -47,15 +51,53 @@ test('the CONCIERGE_PLAN_ENABLED flag defaults OFF and the off reply runs no eng
   assert.equal(fake.built(), 0);
 });
 
-test('CONCIERGE_PLAN_ENABLED alone opens concierge.plan, regardless of discovery flag or pilot list', async () => {
+test('REA C1: CONCIERGE_PLAN_ENABLED opens concierge.plan to the pilot list only', async () => {
   Object.assign(config, { conciergePlanEnabled: true, conciergeDiscoveryEnabled: false, conciergeAudience: 'pilot', conciergePilotUserIds: '' });
-  assert.equal(conciergePlanOpenTo(), true);
+  assert.equal(conciergePlanOpenTo(member.user!.userId), false, 'an empty pilot list opens it to no one');
   const fake = fakeEngine();
+  const refused = await createConciergePlanRouter({ engineFor: fake.engineFor }).createCaller(member).plan(ask);
+  assert.equal(refused.status, 'unavailable');
+  assert.equal(fake.built(), 0);
+
+  Object.assign(config, { conciergePilotUserIds: `someone-else, ${member.user!.userId}` });
   const out = await createConciergePlanRouter({ engineFor: fake.engineFor }).createCaller(member).plan(ask);
   assert.equal(out.status, 'ok');
   assert.equal(fake.built(), 1);
   Object.assign(config, { conciergePlanEnabled: false });
-  assert.equal(conciergePlanOpenTo(), false);
+  assert.equal(conciergePlanOpenTo(member.user!.userId), false);
+});
+
+test('REA C1/C3: an open audience needs a confirmed email, and consent when required', async () => {
+  openAll();
+  const fake = fakeEngine();
+  (db.user as any).findUnique = async () => ({ emailVerifiedAt: null, aiConsentAt: null });
+  const unverified = await createConciergePlanRouter({ engineFor: fake.engineFor }).createCaller(member).plan(ask);
+  assert.equal(unverified.reply, 'Confirm your email to use Concierge.');
+  const previous = config.conciergeRequireAiConsent;
+  Object.assign(config, { conciergeRequireAiConsent: true });
+  (db.user as any).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: null });
+  try {
+    const noConsent = await createConciergePlanRouter({ engineFor: fake.engineFor }).createCaller(member).plan(ask);
+    assert.match(noConsent.reply ?? '', /OpenAI/);
+    assert.equal(fake.built(), 0);
+  } finally {
+    Object.assign(config, { conciergeRequireAiConsent: previous });
+    (db.user as any).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
+  }
+});
+
+const resetMinuteOnly = () => resetLocalRateLimitForTests('concierge-plan');
+
+test('REA C1: a daily per-member quota caps concierge.plan', async () => {
+  openAll();
+  const router = createConciergePlanRouter({ engineFor: fakeEngine().engineFor });
+  const caller = router.createCaller({ ...member, user: { ...member.user!, userId: 'quota-user' } });
+  for (let n = 0; n < config.conciergeDailyQuota; n++) {
+    resetMinuteOnly();
+    await caller.plan(ask);
+  }
+  resetMinuteOnly();
+  await assert.rejects(() => caller.plan(ask), { code: 'TOO_MANY_REQUESTS', message: /concierge-daily/ });
 });
 
 test('when enabled it returns a ProposedPlan that matches the wire contract', async () => {

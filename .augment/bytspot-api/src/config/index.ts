@@ -47,6 +47,46 @@ const envSchema = z.object({
   // Off until hosts can onboard; while off, paid parties publish as before.
   PARTY_PAYOUTS_ENABLED:  z.enum(['true', 'false']).default('false'),
   PARTY_PAYOUT_DELAY_HOURS: z.coerce.number().int().min(0).max(24 * 30).default(48),
+  // New-host limits (services/hostTrust.ts, REA X1). Proposed conservative
+  // defaults; raise them per Daniel's risk appetite.
+  NEW_HOST_TRUSTED_AFTER_PARTIES: z.coerce.number().int().min(0).max(100).default(3),
+  NEW_HOST_MAX_TICKET_CENTS: z.coerce.number().int().min(0).max(10_000_000).default(20_000),
+  NEW_HOST_MAX_TICKET_QUANTITY: z.coerce.number().int().min(1).max(10_000).default(200),
+  NEW_HOST_PAYOUT_DELAY_HOURS: z.coerce.number().int().min(0).max(24 * 60).default(168),
+  // Kill switch for every paid flow (party passes, sessions, vendor tickets,
+  // tips, Platinum). Production also refuses paid checkout on a Stripe test
+  // key whatever this says (lib/paidCheckout.ts, REA X5).
+  PAID_CHECKOUT_ENABLED:  z.enum(['true', 'false']).default('true'),
+  // REA X2: refund a payment the webhook could not honour without waiting on the host.
+  // REA: Google-billed Places proxies need a signed-in member.
+  // REA PS1: private-sale guard rails.
+  PRIVATE_SALE_MAX_CENTS: z.coerce.number().int().min(100).max(10_000_000).default(500_000),
+  PRIVATE_SALE_NEW_SELLER_MAX_CENTS: z.coerce.number().int().min(100).max(10_000_000).default(200_000),
+  PRIVATE_SALE_TRUSTED_AFTER_SALES: z.coerce.number().int().min(0).max(1000).default(3),
+  PRIVATE_SALES_REQUIRE_VERIFIED_EMAIL: z.enum(['true', 'false']).default('true'),
+  // 0 = face value or less. Raising it is a counsel decision (O.C.G.A. 43-4B-25).
+  TICKET_RESALE_MAX_MARKUP_BPS: z.coerce.number().int().min(0).max(100_000).default(0),
+  // REA X7: shared secret Cloudflare adds to every request; unset = origin lock off.
+  ORIGIN_LOCK_SECRET: z.string().default('').refine((v) => v === '' || v.length >= 32, 'ORIGIN_LOCK_SECRET must be at least 32 characters'),
+  PLACES_REQUIRE_AUTH: z.enum(['true', 'false']).default('true'),
+  // Off so shipped clients can still load <img src="/places/photo?..."> without
+  // a signature. When on, the URL must carry a short-lived HMAC (minted by
+  // photoProxyUrl). Turn on after clients only use URLs from the API.
+  PLACES_PHOTO_REQUIRE_AUTH: z.enum(['true', 'false']).default('false'),
+  AUTO_REFUND_UNHONOURED_PAYMENTS: z.enum(['true', 'false']).default('true'),
+  // REA X6/P1. A birth date under this refuses signup. 13 matches the
+  // current published terms; counsel may move the floor to 18.
+  MIN_SIGNUP_AGE:         z.coerce.number().int().min(13).max(21).default(13),
+  // Off until the iOS/web builds that send age + terms consent ship; when on,
+  // auth.signup refuses a request without them.
+  SIGNUP_REQUIRE_AGE_AND_TERMS: z.enum(['true', 'false']).default('false'),
+  // REA P1 re-review: 18+/21+ request, checkout, approve, check-in and host
+  // age gates. Default off so shipping the API before a client that can call
+  // consent.setAge does not lock existing members out of age-gated parties.
+  // Turn on together with the client DOB screen (see bytspot-fixes/XCODE-TODO.md).
+  AGE_GATE_ENFORCED: z.enum(['true', 'false']).default('false'),
+  // The Terms version a member must accept. Bump on every published change.
+  TERMS_VERSION:          z.string().trim().min(1).max(40).default('2026-10-10'),
   // Inbox told when a payout or a reversal fails. Empty: Sentry only.
   PAYOUT_ALERT_EMAIL:     z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
@@ -55,6 +95,9 @@ const envSchema = z.object({
   // Inbox told about every new member report, so reports are acted on within
   // 24 hours without someone watching the admin console.
   SAFETY_ALERT_EMAIL:     z.string().default(''),
+  // REA X4: the proposed, published response time for a report (Apple 1.2
+  // "timely responses"). Shown on each admin queue item as respondBy/overdue.
+  MODERATION_RESPONSE_HOURS: z.coerce.number().int().min(1).max(168).default(24),
   // 32 hex characters. Every band's, card's and fob's chip keys are derived
   // from it, so it must never change once items are secured.
   BAND_SUN_MASTER_KEY:    z.string().regex(/^([0-9a-fA-F]{32})?$/, 'BAND_SUN_MASTER_KEY must be 32 hex characters').default(''),
@@ -72,6 +115,12 @@ const envSchema = z.object({
   CONCIERGE_PILOT_USER_IDS: z.string().default(''),
   // BYTT-SI concierge.plan (proposed Plans). Off by default; when on, open to every signed-in user.
   CONCIERGE_PLAN_ENABLED: z.enum(['true', 'false']).default('false'),
+  // REA C1-C3. Per-user daily quota and a global daily breaker for every
+  // LLM-backed concierge call; consent is enforced once clients ship the sheet.
+  CONCIERGE_DAILY_QUOTA: z.coerce.number().int().min(1).max(10_000).default(20),
+  CONCIERGE_GLOBAL_DAILY_MAX: z.coerce.number().int().min(0).max(10_000_000).default(2000),
+  CONCIERGE_REQUIRE_AI_CONSENT: z.enum(['true', 'false']).default('false'),
+  CONCIERGE_CHAT_ENABLED: z.enum(['true', 'false']).default('true'),
   CONCIERGE_PLAN_MODEL:   z.string().trim().min(1).default('gpt-4o-mini'),
   OPENAI_API_KEY:         z.string().default(''),
   TICKETMASTER_API_KEY:   z.string().default(''),
@@ -167,6 +216,24 @@ export const config = {
   vendorBookingFeeMinCents: env.VENDOR_BOOKING_FEE_MIN_CENTS,
   partyPayoutsEnabled: env.PARTY_PAYOUTS_ENABLED === 'true',
   partyPayoutDelayHours: env.PARTY_PAYOUT_DELAY_HOURS,
+  newHostTrustedAfterParties: env.NEW_HOST_TRUSTED_AFTER_PARTIES,
+  newHostMaxTicketCents: env.NEW_HOST_MAX_TICKET_CENTS,
+  newHostMaxTicketQuantity: env.NEW_HOST_MAX_TICKET_QUANTITY,
+  newHostPayoutDelayHours: env.NEW_HOST_PAYOUT_DELAY_HOURS,
+  paidCheckoutEnabled: env.PAID_CHECKOUT_ENABLED === 'true',
+  privateSaleMaxCents: env.PRIVATE_SALE_MAX_CENTS,
+  privateSaleNewSellerMaxCents: env.PRIVATE_SALE_NEW_SELLER_MAX_CENTS,
+  privateSaleTrustedAfterSales: env.PRIVATE_SALE_TRUSTED_AFTER_SALES,
+  privateSalesRequireVerifiedEmail: env.PRIVATE_SALES_REQUIRE_VERIFIED_EMAIL === 'true',
+  ticketResaleMaxMarkupBps: env.TICKET_RESALE_MAX_MARKUP_BPS,
+  originLockSecret: env.ORIGIN_LOCK_SECRET,
+  placesRequireAuth: env.PLACES_REQUIRE_AUTH === 'true',
+  placesPhotoRequireAuth: env.PLACES_PHOTO_REQUIRE_AUTH === 'true',
+  autoRefundUnhonouredPayments: env.AUTO_REFUND_UNHONOURED_PAYMENTS === 'true',
+  minSignupAge: env.MIN_SIGNUP_AGE,
+  signupRequireAgeAndTerms: env.SIGNUP_REQUIRE_AGE_AND_TERMS === 'true',
+  ageGateEnforced: env.AGE_GATE_ENFORCED === 'true',
+  termsVersion: env.TERMS_VERSION,
   payoutAlertEmail: env.PAYOUT_ALERT_EMAIL,
   frontendUrl: env.FRONTEND_URL,
   conciergeDiscoveryEnabled: env.CONCIERGE_DISCOVERY_ENABLED === 'true',
@@ -174,12 +241,17 @@ export const config = {
   conciergeAudience: env.CONCIERGE_AUDIENCE,
   conciergePilotUserIds: env.CONCIERGE_PILOT_USER_IDS,
   conciergePlanEnabled: env.CONCIERGE_PLAN_ENABLED === 'true',
+  conciergeDailyQuota: env.CONCIERGE_DAILY_QUOTA,
+  conciergeGlobalDailyMax: env.CONCIERGE_GLOBAL_DAILY_MAX,
+  conciergeRequireAiConsent: env.CONCIERGE_REQUIRE_AI_CONSENT === 'true',
+  conciergeChatEnabled: env.CONCIERGE_CHAT_ENABLED === 'true',
   conciergePlanModel: env.CONCIERGE_PLAN_MODEL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,
   adminUserIds: env.ADMIN_USER_IDS,
   adminBootstrapEmails: env.ADMIN_BOOTSTRAP_EMAILS,
   safetyAlertEmail: env.SAFETY_ALERT_EMAIL,
+  moderationResponseHours: env.MODERATION_RESPONSE_HOURS,
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,
   bandSunMasterKey: env.BAND_SUN_MASTER_KEY,

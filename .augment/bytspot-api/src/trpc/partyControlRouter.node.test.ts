@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
+import { config } from '../config';
 import { db } from '../lib/db';
+import { stripeHandle } from '../vendor/payout';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
@@ -33,6 +35,7 @@ beforeEach(() => {
   party.findMany = async () => [];
   party.updateMany = async () => ({ count: 1 });
   partyGuest.count = async () => 0;
+  (db.partyCheckout as any).findMany = async () => [];
   partyGuest.findMany = async () => [];
   partyGuest.findUnique = async () => null;
   partyGuest.findFirst = async () => null;
@@ -525,4 +528,121 @@ test('The door and the decision both run at serializable isolation', async () =>
   await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential });
 
   assert.deepEqual(levels, ['Serializable', 'Serializable']);
+});
+
+test('REA X2: cancelling a party closes it, expires the link and refunds every paid guest once', async () => {
+  const originalClient = stripeHandle.client;
+  const refunds: any[] = [];
+  stripeHandle.client = () => ({ refunds: { create: async (params: any, options: any) => { refunds.push({ params, options }); return { id: 're_1' }; } } }) as any;
+  const checkout = { id: 'co-1', partyId: 'party-1', partyGuestId: 'guest-1', userId: 'guest-user', ticketTierName: 'GA', sessionId: null, status: 'completed', paymentIntentId: 'pi_1' };
+  const partyCheckout = db.partyCheckout as any;
+  partyCheckout.findMany = async ({ where }: any) => (where.status.in.includes(checkout.status) ? [{ id: checkout.id }] : []);
+  partyCheckout.findUnique = async () => ({ ...checkout });
+  partyCheckout.updateMany = async ({ data }: any) => { Object.assign(checkout, data); return { count: 1 }; };
+  prisma.$transaction = async (callback: any) => callback({ party, partyGuest, partyCheckout, partySessionClaim: { updateMany: async () => ({ count: 0 }) }, partySession: { updateMany: async () => ({ count: 0 }) } });
+  let written: any;
+  party.updateMany = async (input: any) => { written = input; return { count: 1 }; };
+  try {
+    await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'test-cancel-anon' }).events.control.cancel({ partyId: 'party-1' }), { code: 'UNAUTHORIZED' });
+    const result = await createCaller({ ...hostContext, clientRateLimitKey: 'test-cancel-host' }).events.control.cancel({ partyId: 'party-1', reason: 'Venue fell through' });
+    assert.ok(written.data.cancelledAt instanceof Date);
+    assert.deepEqual(written.data.shareLinkExpiresAt, written.data.cancelledAt);
+    assert.deepEqual(result.refunds, { refunded: 1, skipped: 0, failed: 0 });
+    assert.equal(refunds[0].options.idempotencyKey, 'party-refund:co-1');
+    assert.equal(checkout.status, 'refunded');
+    // A retry finds nothing left to refund.
+    const again = await createCaller({ ...hostContext, clientRateLimitKey: 'test-cancel-host' }).events.control.cancel({ partyId: 'party-1' });
+    assert.deepEqual(again.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(refunds.length, 1);
+  } finally {
+    stripeHandle.client = originalClient;
+  }
+});
+
+test('REA X2: closing a party that has not been delivered refunds paid guests', async () => {
+  const originalClient = stripeHandle.client;
+  const refunds: any[] = [];
+  stripeHandle.client = () => ({ refunds: { create: async (params: any, options: any) => { refunds.push({ params, options }); return { id: 're_1' }; } } }) as any;
+  const checkout = { id: 'co-1', partyId: 'party-1', partyGuestId: 'guest-1', userId: 'guest-user', ticketTierName: 'GA', sessionId: null, status: 'completed', paymentIntentId: 'pi_1' };
+  const partyCheckout = db.partyCheckout as any;
+  partyCheckout.findMany = async ({ where }: any) => (where.status.in.includes(checkout.status) ? [{ id: checkout.id }] : []);
+  partyCheckout.findUnique = async () => ({ ...checkout });
+  partyCheckout.updateMany = async ({ data }: any) => { Object.assign(checkout, data); return { count: 1 }; };
+  prisma.$transaction = async (callback: any) => callback({ party, partyGuest, partyCheckout, partySessionClaim: { updateMany: async () => ({ count: 0 }) }, partySession: { updateMany: async () => ({ count: 0 }) } });
+  try {
+    const result = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-refund' }).events.control.close({ partyId: 'party-1' });
+    assert.ok(result.closedAt);
+    assert.deepEqual(result.refunds, { refunded: 1, skipped: 0, failed: 0 });
+    assert.equal(refunds[0].options.idempotencyKey, 'party-refund:co-1');
+    assert.equal(checkout.status, 'refunded');
+    // A retry (already closed, still before endsAt, no check-in) does not refund twice.
+    party.findFirst = async () => ({ ...publishedParty, closedAt: new Date(result.closedAt) });
+    const again = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-refund' }).events.control.close({ partyId: 'party-1' });
+    assert.deepEqual(again.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(refunds.length, 1);
+  } finally {
+    stripeHandle.client = originalClient;
+  }
+});
+
+test('REA X2: closing after a check-in or after the party ends keeps the money', async () => {
+  const originalClient = stripeHandle.client;
+  let called = 0;
+  stripeHandle.client = () => { called += 1; return { refunds: { create: async () => ({ id: 're_x' }) } } as any; };
+  try {
+    partyGuest.count = async () => 1;
+    const afterCheckIn = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-keep-1' }).events.control.close({ partyId: 'party-1' });
+    assert.deepEqual(afterCheckIn.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(called, 0);
+
+    partyGuest.count = async () => 0;
+    party.findFirst = async () => ({ ...publishedParty, startsAt: new Date(Date.now() - 5 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 1000), closedAt: null });
+    const afterEnd = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-keep-2' }).events.control.close({ partyId: 'party-1' });
+    assert.deepEqual(afterEnd.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(called, 0);
+  } finally {
+    stripeHandle.client = originalClient;
+  }
+});
+
+test('REA P1: with age gates on, approve and check-in re-check age and licence', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  const partySession = db.partySession as any;
+  const vendorSeller = db.vendorSeller as any;
+  party.findFirst = async () => ({ ...publishedParty, templateConfig: { kind: 'standard', hostAge: '21-plus' } });
+  partySession.findMany = async () => [{ sellerId: 'seller-1', bottleCount: 2 }];
+  try {
+    partyGuest.findFirst = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'pending', userId: 'guest-user' });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
+    await assert.rejects(
+      () => caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' }),
+      { code: 'FORBIDDEN', message: /21\+/ },
+    );
+
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    vendorSeller.findUnique = async () => ({ alcoholLicenceVerifiedAt: null });
+    await assert.rejects(
+      () => caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' }),
+      { code: 'PRECONDITION_FAILED', message: /alcohol licence/ },
+    );
+
+    vendorSeller.findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date() });
+    partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', userId: 'guest-user', ...data });
+    const decided = await caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' });
+    assert.equal(decided.status, 'approved');
+
+    partyGuest.findUnique = async () => ({ id: 'guest-1', partyId: 'party-1', userId: 'guest-user', status: 'approved', accessGranted: true, user: { name: 'Ada' } });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: null });
+    await assert.rejects(
+      () => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential }),
+      { code: 'FORBIDDEN', message: /21\+/ },
+    );
+
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    const arrived = await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential });
+    assert.equal(arrived.status, 'checked-in');
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
 });

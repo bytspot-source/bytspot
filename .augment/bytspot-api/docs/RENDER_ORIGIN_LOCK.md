@@ -1,0 +1,55 @@
+# Locking the Render origin to Cloudflare (REA X7)
+
+Status: code shipped on branch `fix/abuse-risk-review-2026-11-10`, **off until
+configured**. Nothing changes in production until both steps below are done.
+
+## Why
+`bytspot-api.onrender.com` answers directly. Express trusts two proxy hops
+(`app.set('trust proxy', 2)`), so a caller who skips Cloudflare can send their
+own `X-Forwarded-For` and get a fresh per-IP rate-limit bucket on every request.
+
+## What the code does
+- `src/middleware/originLock.ts`: when `ORIGIN_LOCK_SECRET` is set, every
+  request must carry `x-bytspot-origin-auth: <secret>`, or it gets `403`.
+  Exempt: `/health*` (Render health check) and `/webhooks/stripe*` (Stripe
+  signs these itself).
+- Rate-limit keys use `CF-Connecting-IP` only on requests that carried the
+  secret. Everything else keys on `req.ip` as before.
+
+## Blocker: shipped clients call the Render origin directly
+Checked 2026-11-10 in bytspot-beta:
+- iOS `BytspotAPIClient.swift` defaults to `https://bytspot-api.onrender.com`.
+  `Info.plist` and `Clip/Info.plist` list it, and so does the trusted-host check at about line 919.
+- Web `src/utils/trpc.ts` falls back to the same host when `VITE_API_URL` is unset.
+
+**Don't set `ORIGIN_LOCK_SECRET` until** every live client talks to the Cloudflare
+hostname (`api.bytspot.app` is already in the web CSP). That means:
+1. An iOS and App Clip build whose base URL is `https://api.bytspot.app`. Xcode
+   work isn't done on this branch because it can't be built or tested here.
+2. Web deployed with `VITE_API_URL=https://api.bytspot.app`.
+3. Enough users on the new iOS build. Older builds will get a 403 on every call
+   once the lock is on, so pair it with a forced-update prompt.
+
+Until then the other X7 fixes still apply: Places needs sign-in, public reads
+are rate-limited, and stats are coarse.
+
+## Daniel: turn it on (order matters)
+1. Generate a secret, at least 32 characters, on your own machine, for example
+   `openssl rand -base64 48`. Don't paste it into chat or a ticket.
+2. Cloudflare → bytspot zone → Rules → Transform Rules → **Modify Request
+   Header** → new rule for hostname `api.bytspot.com` (or whatever proxies to
+   Render): **Set static** header `x-bytspot-origin-auth` = the secret. Deploy.
+3. Render → bytspot-api → Environment: add `ORIGIN_LOCK_SECRET` = the same
+   secret, then redeploy.
+4. Check:
+   - `curl -s -o /dev/null -w '%{http_code}' https://bytspot-api.onrender.com/trpc/health.check` returns `403`
+   - `curl -s -o /dev/null -w '%{http_code}' https://api.bytspot.com/trpc/health.check` returns `200`
+   - The iOS app and web app still load
+5. If the Stripe webhook URL points at the Render hostname, it keeps working (it's
+   exempt). It's still better to move it to the Cloudflare hostname.
+
+Rollback: remove `ORIGIN_LOCK_SECRET` in Render and redeploy. The Cloudflare
+rule can stay.
+
+To rotate: set the new value in Cloudflare and Render within a few minutes of
+each other. Requests fail with 403 during the gap.

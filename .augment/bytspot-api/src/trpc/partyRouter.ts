@@ -1,4 +1,6 @@
 import { randomBytes } from 'crypto';
+import { closeShouldRefund, refundParty } from '../services/stripeRisk';
+import { PARTY_CHECKOUT_TERMS } from '../lib/checkoutTerms';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
@@ -7,12 +9,14 @@ import { config } from '../config';
 import { alertGuestOfDecision, alertGuestsOfArrivalUpdate, alertGuestsOfRecap, alertHostOfDoorArrival, alertHostOfGuestResponse, dispatchPartyAlert } from '../services/partyAlerts';
 import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
 import { hostCanSellPaidTickets, partySellsPaidTickets } from '../services/hostPayouts';
+import { hostPayoutDelayHours, isNewHost, newHostTierProblem } from '../services/hostTrust';
+import { alcoholLicenceProblem, assertHostAge, assertLiveBottleLicences, assertMemberAge, minimumAgeFor, partyAgeRule, sessionSellsAlcohol } from '../services/ageGate';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
 import { parseImageDataUri } from '../lib/imageDataUri';
 import { serializableTransaction } from '../lib/transactions';
-import { liveClaimWhere, liveGateClaimWhere, liveRemaining, sessionState, validateSessions } from '../services/partySessions';
+import { includedBottlesProblem, liveClaimWhere, liveGateClaimWhere, liveRemaining, sessionState, sessionStripeDescription, validateSessions } from '../services/partySessions';
 import { isMembershipTier, meetsRequiredMembershipTier, type MembershipTier } from '../lib/membershipTier';
 import { getRedis } from '../lib/redis';
 import { handoffUrl } from './mobilityRouter';
@@ -21,6 +25,8 @@ import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from
 import { isBlockedBetween } from '../services/safety';
 import { MAX_REQUEST_NOTES_PER_TICKET } from '../services/partyRequestNotes';
 import { musicInput, musicListing, musicSetTimeProblem, storedMusic } from '../services/partyMusic';
+import { assertPaidCheckoutAllowedForTrpc } from '../lib/paidCheckout';
+import { filteredText } from '../lib/contentFilter';
 
 const maxAlbumImages = 6;
 const partyKinds = ['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up'] as const;
@@ -123,8 +129,9 @@ function projectDestinationList(value: Prisma.JsonValue | null | undefined): Arr
 const draftInput = z.object({
   idempotencyKey: z.string().uuid(),
   templateId: z.enum(partyKinds),
-  title: z.string().trim().min(3).max(140),
-  tagline: z.string().trim().max(280),
+  // REA X4: member text passes the objectionable-content filter.
+  title: filteredText(z.string().trim().min(3).max(140)),
+  tagline: filteredText(z.string().trim().max(280)),
   startsAt: z.string().datetime({ offset: true }),
   endsAt: z.string().datetime({ offset: true }).nullish(),
   venueName: z.string().trim().min(1).max(200),
@@ -674,6 +681,7 @@ export const partyRecapRouter = router({
       return { published: false };
     }),
   get: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-public-get' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
       const party = await db.party.findUnique({
@@ -702,6 +710,8 @@ export const partyPublish = protectedProcedure
   .input(z.object({ partyId: z.string().min(1), idempotencyKey: z.string().uuid() }))
   .mutation(async ({ ctx, input }) => {
     await requireConfirmedHost(ctx.user.userId);
+    // REA P1 re-review: host 18+ is enforced only when AGE_GATE_ENFORCED is on.
+    await assertHostAge(ctx.user.userId);
     const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId } });
     if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
@@ -709,6 +719,10 @@ export const partyPublish = protectedProcedure
     if (party.status !== 'draft') throw new TRPCError({ code: 'CONFLICT', message: 'Party cannot be published from its current state.' });
     if (partySellsPaidTickets(party.ticketTiers) && !(await hostCanSellPaidTickets(ctx.user.userId))) {
       throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Set up payouts before publishing a party with paid tickets. Free parties do not need payouts.' });
+    }
+    if (partySellsPaidTickets(party.ticketTiers) && await isNewHost(ctx.user.userId)) {
+      const problem = newHostTierProblem(party.ticketTiers);
+      if (problem) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: problem });
     }
     // Snapshot the Official Host identity so later profile edits never
     // rewrite an already-shared pass. The profile remains the source of truth
@@ -951,6 +965,7 @@ async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {
 }
 
 export const partyInvite = publicProcedure
+  .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-invite' }))
   .input(z.object({ partyId: z.string().min(1).max(128) }))
   .query(async ({ ctx, input }) => {
     const party = await publishedParty(input.partyId);
@@ -1011,6 +1026,9 @@ export const partyInvite = publicProcedure
       locationDisclosure: party.locationDisclosure,
       ...(discoverStranger ? { latitude: null, longitude: null } : publicArrivalCoordinate(party)),
       accessMode: party.accessMode,
+      // REA P1: printed on the pass and enforced at request and checkout.
+      ageRule: partyAgeRule(party.templateConfig),
+      ageNotice: partyAgeRule(party.templateConfig) === '21-plus' ? '21+ / ID required' : partyAgeRule(party.templateConfig) === '18-plus' ? '18+ / ID required' : null,
       capacity: party.capacity,
       participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
       ticketTiers: parsedTicketTiers(party.ticketTiers),
@@ -1025,16 +1043,23 @@ export const partyInvite = publicProcedure
       // place.
       sessions: sessions.map((session) => {
         const remaining = liveRemaining(session, holdsBySession.get(session.id) ?? 0);
+        // REA location: a session's own address follows the Party's
+        // disclosure rule. Withheld or after-approval parties reveal it only
+        // to the host and to guests who were let in.
+        const revealSessionPlace = (Boolean(ctx.user) && ctx.user?.userId === party.hostUserId) || Boolean(guest?.accessGranted)
+          || (party.locationDisclosure === 'public' && !discoverStranger);
         return {
           id: session.id,
           name: session.name,
           kind: session.kind,
           startsAt: session.startsAt.toISOString(),
           endsAt: session.endsAt.toISOString(),
-          venueName: session.venueName,
-          latitude: session.lat,
-          longitude: session.lng,
+          venueName: revealSessionPlace ? session.venueName : null,
+          latitude: revealSessionPlace ? session.lat : null,
+          longitude: revealSessionPlace ? session.lng : null,
+          placeWithheld: !revealSessionPlace && Boolean(session.venueName || session.lat != null),
           bottleCount: session.bottleCount,
+          ageNotice: sessionSellsAlcohol(session) ? '21+ / ID required' : null,
           // `minimum` means the price is not what the guest will pay, so the
           // terms travel beside the number rather than being inferred from it.
           bottleTerms: session.bottleTerms,
@@ -1158,6 +1183,7 @@ export const partyPassRouter = router({
   }),
 
   resolve: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-resolve' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
@@ -1314,7 +1340,10 @@ export const partyControlRouter = router({
       feePercent: feeBps / 100,
       hostSharePercent: (10_000 - feeBps) / 100,
       payoutsEnabled: payout?.status === 'active',
-      payoutDelayHours: config.partyPayoutDelayHours,
+      payoutDelayHours: await hostPayoutDelayHours(ctx.user.userId),
+      newHostLimits: (await isNewHost(ctx.user.userId))
+        ? { maxTicketCents: config.newHostMaxTicketCents, maxTicketQuantity: config.newHostMaxTicketQuantity, trustedAfterParties: config.newHostTrustedAfterParties }
+        : null,
       note: 'This rate is locked to your party when you publish. Later changes to the platform rate do not affect a party that is already live.',
     };
   }),
@@ -1361,22 +1390,36 @@ export const partyControlRouter = router({
    * machinery that already exempts confirmed guests and the host. `status` is
    * deliberately untouched — every other party query reads `published`, so a
    * terminal status here would revoke every guest's pass.
+   *
+   * REA X2 re-review: if the night was not delivered (no check-ins and the
+   * party has not ended), paid guests are refunded, same as cancel. Closing
+   * after a check-in or after endsAt keeps the money; the host must cancel
+   * to refund then. A retry uses the original closedAt so the choice stays
+   * put, and refundParty is idempotent.
    */
   close: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-close' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .mutation(async ({ ctx, input }) => {
       const party = await hostControlledParty(input.partyId, ctx.user.userId);
-      if (party.closedAt) return { partyId: party.id, closedAt: party.closedAt.toISOString() };
-      const closedAt = new Date();
-      const updated = await db.party.updateMany({
-        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: null },
-        data: { closedAt, shareLinkExpiresAt: closedAt },
-      });
-      if (updated.count === 1) return { partyId: party.id, closedAt: closedAt.toISOString() };
-      const current = await hostControlledParty(input.partyId, ctx.user.userId);
-      if (current.closedAt) return { partyId: current.id, closedAt: current.closedAt.toISOString() };
-      throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      let closedAt = party.closedAt;
+      if (!closedAt) {
+        closedAt = new Date();
+        const updated = await db.party.updateMany({
+          where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: null },
+          data: { closedAt, shareLinkExpiresAt: closedAt },
+        });
+        if (updated.count !== 1) {
+          const current = await hostControlledParty(input.partyId, ctx.user.userId);
+          if (!current.closedAt) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+          closedAt = current.closedAt;
+        }
+      }
+      const checkedIn = await db.partyGuest.count({ where: { partyId: party.id, status: 'checked-in' } });
+      const refunds = closeShouldRefund(party, checkedIn, closedAt)
+        ? await refundParty(party.id, 'Host closed the party before it was delivered')
+        : { refunded: 0, skipped: 0, failed: 0 };
+      return { partyId: party.id, closedAt: closedAt.toISOString(), refunds };
     }),
 
   /**
@@ -1408,6 +1451,29 @@ export const partyControlRouter = router({
       }
       const effective = shareLinkExpiry({ shareLinkExpiresAt: null, endsAt: party.endsAt, startsAt: party.startsAt });
       return { partyId: party.id, closedAt: null, shareLinkExpiresAt: effective.toISOString(), shareLinkExpired: effective.getTime() <= Date.now() };
+    }),
+
+  /**
+   * REA X2. Cancel a party: the room closes, the link stops working, and every
+   * paid guest is refunded in full from Bytspot's balance before any host
+   * payout (the payout run skips cancelled parties). Not reversible; a host
+   * who wants the night back publishes a new party. Re-running retries any
+   * refund that failed, and Stripe's idempotency key stops a double refund.
+   */
+  cancel: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'party-control-cancel' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), reason: z.string().trim().min(1).max(500).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      const now = new Date();
+      if (!party.cancelledAt) {
+        await db.party.updateMany({
+          where: { id: party.id, hostUserId: ctx.user.userId, cancelledAt: null },
+          data: { cancelledAt: now, closedAt: party.closedAt ?? now, shareLinkExpiresAt: now },
+        });
+      }
+      const refunds = await refundParty(party.id, input.reason ? `Host cancelled: ${input.reason}` : 'Host cancelled the party');
+      return { partyId: party.id, cancelledAt: (party.cancelledAt ?? now).toISOString(), refunds };
     }),
 
   summary: protectedProcedure
@@ -1562,6 +1628,8 @@ export const partyControlRouter = router({
         if (!guest) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party guest not found.' });
         if (guest.status !== 'pending') throw new TRPCError({ code: 'CONFLICT', message: 'Only pending guests can be decided.' });
         if (input.decision === 'approved') {
+          await assertMemberAge(guest.userId, minimumAgeFor(partyAgeRule(party.templateConfig)));
+          await assertLiveBottleLicences(party.id);
           const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
           if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
         }
@@ -1594,6 +1662,8 @@ export const partyControlRouter = router({
           throw new TRPCError({ code: 'NOT_FOUND', message: 'That attendee credential is not recognized for this Party.' });
         }
         if (guest.status === 'checked-in') throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already been checked in.' });
+        await assertMemberAge(guest.userId, minimumAgeFor(partyAgeRule(party.templateConfig)));
+        await assertLiveBottleLicences(party.id);
         const updated = await tx.partyGuest.updateMany({
           where: { id: guest.id, status: { not: 'checked-in' }, accessGranted: true },
           data: { status: 'checked-in', checkedInAt: new Date() },
@@ -1737,6 +1807,8 @@ export const partyRsvpRouter = router({
       if (!meetsRequiredMembershipTier(await membershipTierFor(ctx.user.userId), party.requiredMembershipTier)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
       }
+      // REA P1: the host's age rule is enforced, not just stored.
+      if (ctx.user.userId !== party.hostUserId) await assertMemberAge(ctx.user.userId, minimumAgeFor(partyAgeRule(party.templateConfig)));
       const approvalRequired = party.accessMode === 'private-approval';
       const status = approvalRequired ? 'pending' : 'rsvp';
       const accessGranted = !approvalRequired;
@@ -1784,6 +1856,7 @@ export const partyTicketsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
+      if (party.cancelledAt) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This party was cancelled. Nothing was charged.' });
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       assertShareLinkUsable(party, knownGuest);
       await assertPartyReachable(party, knownGuest, ctx.user.userId);
@@ -1811,6 +1884,19 @@ export const partyTicketsRouter = router({
       if (partySession && partySession.startsAt.getTime() <= Date.now()) {
         throw new TRPCError({ code: 'CONFLICT', message: 'That session has already started.' });
       }
+      // REA re-review 2026-11-10: bottles cannot be part of the Stripe charge.
+      // Existing "included" sessions must be re-authored as a venue-settled
+      // minimum (or a table with no bottles) before they can be sold.
+      const bottlesProblem = includedBottlesProblem(partySession);
+      if (bottlesProblem) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: bottlesProblem });
+      // REA P1: 21+ parties and any bottle session need a 21+ birth date, and
+      // bottles are only sold by a business with a verified alcohol licence.
+      const buysAlcohol = sessionSellsAlcohol(partySession);
+      if (buysAlcohol) {
+        const seller = await db.vendorSeller.findUnique({ where: { id: partySession!.sellerId }, select: { alcoholLicenceVerifiedAt: true } });
+        if (alcoholLicenceProblem(seller)) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This session is not available to buy in the app.' });
+      }
+      await assertMemberAge(ctx.user.userId, minimumAgeFor(partyAgeRule(party.templateConfig), buysAlcohol));
 
       const membershipTier = await membershipTierFor(ctx.user.userId);
       if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)
@@ -1834,6 +1920,7 @@ export const partyTicketsRouter = router({
         throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
       }
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
+      assertPaidCheckoutAllowedForTrpc();
 
       const now = new Date();
       const reservation = await serializableTransaction(async (tx) => {
@@ -1947,6 +2034,8 @@ export const partyTicketsRouter = router({
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
+        // REA X3: refund terms on the payment page itself.
+        custom_text: { submit: { message: PARTY_CHECKOUT_TERMS } },
         ...(buyer?.stripeCustomerId ? { customer: buyer.stripeCustomerId } : {}),
         // Itemised, so the guest sees the door and the table as the two
         // separate things they are rather than one unexplained total.
@@ -1965,12 +2054,9 @@ export const partyTicketsRouter = router({
               unit_amount: reservation.sessionAmountCents,
               product_data: {
                 name: `${party.title} · ${partySession.name}`,
-                // The line item says what the money buys. Under `minimum` it
-                // says so plainly, because the guest is about to pay a number
-                // that is not the whole bill.
-                description: partySession.bottleTerms === 'minimum'
-                  ? `Session · ${partySession.bottleCount}-bottle minimum, bottles charged separately`
-                  : `Session · ${partySession.bottleCount} bottles included`,
+                // Reservation/admission only. Bottles are never described as
+                // part of what Stripe is collecting (REA bottle terms).
+                description: sessionStripeDescription(partySession),
               },
             },
             quantity: 1,

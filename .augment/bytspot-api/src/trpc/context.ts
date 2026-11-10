@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
 import { rateLimitSubject } from './trpc';
+import { trustedClientIp } from '../middleware/originLock';
 
 /**
  * Creates the tRPC context from the Express request.
@@ -29,15 +30,31 @@ export function bearerUser(header: string | undefined): AuthPayload | null {
 
 /** Global limiter key: signed-in users by account, so people behind one shared
  *  address (a home network, a carrier gateway) do not use up each other's allowance. */
-export function globalRateLimitKey(req: { headers: { authorization?: string }; ip?: string }): string {
-  return rateLimitSubject(bearerUser(req.headers.authorization)?.userId, clientRateLimitKey(req.ip));
+export function globalRateLimitKey(req: { headers: Record<string, string | string[] | undefined> & { authorization?: string }; ip?: string }): string {
+  return rateLimitSubject(bearerUser(req.headers.authorization)?.userId, clientRateLimitKey(trustedClientIp(req)));
+}
+
+/**
+ * Which client made the call. Only used to keep Apple-only rules (3.1.1: no
+ * Stripe subscription for a digital unlock inside the iOS app) and never as a
+ * security boundary: a caller can say anything here.
+ */
+export type ClientPlatform = 'ios' | 'web' | 'unknown';
+export function clientPlatformOf(headers: Record<string, string | string[] | undefined>): ClientPlatform {
+  const declared = String(headers['x-bytspot-client'] ?? '').toLowerCase();
+  if (declared === 'ios' || declared === 'ios-clip') return 'ios';
+  const agent = String(headers['user-agent'] ?? '');
+  // URLSession's default agent: "Bytspot/1.1 CFNetwork/1494 Darwin/23.0.0".
+  if (/CFNetwork\/|Darwin\//.test(agent)) return 'ios';
+  if (declared === 'web') return 'web';
+  return 'unknown';
 }
 
 export async function createContext({
   req,
-}: trpcExpress.CreateExpressContextOptions) {
+}: trpcExpress.CreateExpressContextOptions): Promise<{ user: AuthPayload | null; clientRateLimitKey: string; clientPlatform?: ClientPlatform }> {
   const user = bearerUser(req.headers.authorization);
-  return { user, clientRateLimitKey: clientRateLimitKey(req.ip) };
+  return { user, clientRateLimitKey: clientRateLimitKey(trustedClientIp(req)), clientPlatform: clientPlatformOf(req.headers) };
 }
 
 export type Context = Awaited<ReturnType<typeof createContext>>;

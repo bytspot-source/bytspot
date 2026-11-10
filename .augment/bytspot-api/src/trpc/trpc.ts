@@ -1,5 +1,6 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import type Redis from 'ioredis';
+import { config } from '../config';
 import { getRedis } from '../lib/redis';
 import { isSessionRevoked, isTokenSignedOut } from '../services/accountDeletion';
 import { ProviderLinkRequired } from '../services/providerLink';
@@ -108,8 +109,9 @@ export function incrementLocalRateLimit(key: string, windowMs: number, now = Dat
 }
 
 /** Test-only reset; no production call sites. */
-export function resetLocalRateLimitForTests(): void {
-  rateBuckets.clear();
+export function resetLocalRateLimitForTests(label?: string): void {
+  if (!label) { rateBuckets.clear(); return; }
+  for (const key of rateBuckets.keys()) if (key.startsWith(`${label}:`)) rateBuckets.delete(key);
 }
 
 /** Marks a middleware as a limiter so the router can be audited for coverage. */
@@ -146,3 +148,37 @@ export function rateLimitMiddleware(opts: { windowMs: number; max: number; label
   return t.middleware(Object.assign(limiter, { [RATE_LIMIT_LABEL]: opts.label }));
 }
 
+
+/**
+ * REA C1. A spend breaker shared by every caller: once `max` calls land in
+ * the window, the procedure refuses everyone until it resets. Same counters
+ * as rateLimitMiddleware, one fixed key.
+ */
+export function globalBudgetMiddleware(opts: { windowMs: number; max: () => number; label: string; message: string }) {
+  return t.middleware(async ({ next }) => {
+    const max = opts.max();
+    if (max <= 0) return next();
+    const key = `budget:${opts.label}`;
+    let count: number | null = null;
+    const redis = getRedis();
+    if (redis) {
+      try {
+        count = await incrementRedisRateLimit(redis, `rate-limit:${key}`, opts.windowMs);
+      } catch {
+        // Fail closed: a Redis outage must not lift the daily cap (the old
+        // in-process fallback was per instance and not global).
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: opts.message });
+      }
+    } else if (config.nodeEnv === 'production') {
+      // Production is expected to have Redis. Without it the breaker cannot
+      // be global, so we refuse rather than count in-process.
+      throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: opts.message });
+    } else {
+      // Dev and test: no Redis, so a process-local counter is documented and
+      // accepted.
+      count = incrementLocalRateLimit(key, opts.windowMs);
+    }
+    if (count === null || count > max) throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: opts.message });
+    return next();
+  });
+}

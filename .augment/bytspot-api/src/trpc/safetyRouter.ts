@@ -31,6 +31,11 @@ function alertSummary(kind: ReportKind, target: ReportTarget): string {
     case 'party': return `Party: ${text(s.title)}`;
     case 'review': return `Review of ${text(s.venueName)}: ${text(s.comment) || `${String(s.stars)} stars`}`;
     case 'sale': return `Private Sale: ${text(s.title)}`;
+    case 'plan': return `Plan: ${text(s.title)}`;
+    case 'media': return `Party photo in ${text(s.partyTitle)}`;
+    case 'note': return `Request note: ${text(s.body)}`;
+    case 'vendor': return `Business: ${text(s.legalName)}`;
+    case 'concierge': return `Concierge answer: ${text(s.excerpt) || text(s.responseId)}`;
   }
 }
 
@@ -52,10 +57,16 @@ export const safetyRouter = router({
       targetId: z.string().min(1).max(128),
       reason: z.enum(REPORT_REASONS),
       note: z.string().trim().max(500).optional(),
+      /** For a concierge answer, which is not stored: the text being reported. */
+      excerpt: z.string().trim().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const target = await reportTarget(input.kind, input.targetId);
       if (!target) throw unavailable();
+      if (input.kind === 'concierge') {
+        if (!input.excerpt) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Include the answer you are reporting.' });
+        target.snapshot = { ...target.snapshot, excerpt: input.excerpt };
+      }
       if (target.ownerId === ctx.user.userId) throw new TRPCError({ code: 'BAD_REQUEST', message: "You can't report yourself." });
 
       try {

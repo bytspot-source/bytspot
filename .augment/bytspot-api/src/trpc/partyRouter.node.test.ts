@@ -76,7 +76,10 @@ beforeEach(() => {
   partyCheckout.groupBy = async () => [];
   partySession.findMany = async () => [];
   venue.findUnique = async () => null;
-  user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date() });
+  // An adult guest buying from a licensed business unless a test says
+  // otherwise (REA P1 age and alcohol-licence gates).
+  user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date(), birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+  (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date('2026-01-01T00:00:00Z') });
   (config as any).stripeSecretKey = '';
   prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
 });
@@ -1597,7 +1600,7 @@ const frontTable = {
   // gone went unnoticed.
   startsAt: new Date(Date.now() + 6 * 60 * 60 * 1000),
   endsAt: new Date(Date.now() + 10 * 60 * 60 * 1000),
-  quantity: 1, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'included',
+  quantity: 1, committed: 0, priceCents: 90000, bottleCount: 4, bottleTerms: 'minimum',
   requiredMembershipTier: null,
 };
 
@@ -1623,7 +1626,7 @@ function stubCheckout(over: { session?: any; guest?: any } = {}) {
   partyGuest.findUnique = async () => over.guest ?? null;
   partyGuest.create = async (input: any) => { captured.guestCreated = input.data; return { id: 'guest-1' }; };
   partyGuest.update = async (input: any) => { captured.guestUpdated = input.data; return { id: 'guest-1' }; };
-  user.findUnique = async () => ({ membershipTier: 'green' });
+  user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
   prisma.$transaction = async (callback: any) => callback({ partyCheckout, partyGuest, partySession });
   return captured;
 }
@@ -1634,6 +1637,16 @@ async function reserve(captured: any, input: any) {
   await assert.rejects(() => captured.buyer().events.tickets.createCheckout(input), () => true);
   return captured;
 }
+
+test('A session that includes bottles in its Stripe price cannot be checked out', async () => {
+  party.findFirst = async () => freeDoorParty;
+  const captured = stubCheckout({ session: { ...frontTable, bottleTerms: 'included' } });
+  await assert.rejects(
+    () => captured.buyer().events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }),
+    { code: 'PRECONDITION_FAILED', message: /no longer charges/ },
+  );
+  assert.equal(captured.created, undefined);
+});
 
 test('A guest already inside can buy bottles from a promoter', async () => {
   // The ordinary sale of the night: the door was paid an hour ago and the
@@ -1975,8 +1988,8 @@ test('An invitation never hands a guest the vendor unit counts', async () => {
   // How many units are gone is the vendor's business; a guest is told what
   // is left, what it costs, and on what terms.
   assert.deepEqual(Object.keys(invite.sessions[0]).sort(), [
-    'bottleCount', 'bottleTerms', 'endsAt', 'id', 'kind', 'latitude', 'longitude',
-    'name', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state', 'venueName',
+    'ageNotice', 'bottleCount', 'bottleTerms', 'endsAt', 'id', 'kind', 'latitude', 'longitude',
+    'name', 'placeWithheld', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state', 'venueName',
   ]);
 });
 
@@ -1984,4 +1997,139 @@ test('A Party with no sessions says so with an empty floor, not a missing one', 
   partyWithSessions();
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
   assert.deepEqual(invite.sessions, []);
+});
+
+test('REA X5: production refuses a party checkout on a Stripe test key before any reservation', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: '', ...linkAlive,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+  const previousEnv = config.nodeEnv;
+  (config as any).nodeEnv = 'production';
+  (config as any).stripeSecretKey = 'sk_test_party';
+  prisma.$transaction = async () => { throw new Error('must not reserve inventory'); };
+  try {
+    await assert.rejects(
+      () => createCaller({ ...authenticatedContext, user: { userId: 'x5-buyer', email: 'x5@example.test' } })
+        .events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }),
+      { code: 'PRECONDITION_FAILED', message: /not live/ },
+    );
+  } finally {
+    (config as any).nodeEnv = previousEnv;
+  }
+});
+
+test('REA X1: a paid party cannot publish without a finished payout account, even with payouts off', async () => {
+  (config as any).partyPayoutsEnabled = false;
+  party.findFirst = async () => ({ ...partyDraft, ticketTiers: [{ name: 'GA', priceCents: 2500, quantity: 50, requiredMembershipTier: 'green' }] });
+  (db.hostPayoutAccount as any).findUnique = async () => null;
+  party.updateMany = async () => { throw new Error('must not publish'); };
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'PRECONDITION_FAILED', message: /Set up payouts/ });
+});
+
+test('REA X1: a new host is held to the ticket price and quantity caps', async () => {
+  party.findFirst = async () => ({ ...partyDraft, ticketTiers: [{ name: 'VIP', priceCents: 50_000, quantity: 50, requiredMembershipTier: 'green' }] });
+  (db.hostPayoutAccount as any).findUnique = async () => ({ status: 'active' });
+  party.count = async () => 0;
+  party.updateMany = async () => { throw new Error('must not publish'); };
+  await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'PRECONDITION_FAILED', message: /New hosts/ });
+
+  party.count = async () => 10; // established host
+  party.updateMany = async () => ({ count: 1 });
+  const published = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+  assert.equal(published.id, 'party-1');
+});
+
+test('REA P1: with age gates off, a 21+ party does not lock out a guest who has no date of birth', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: false });
+  try {
+    party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, templateConfig: { kind: 'standard', hostAge: '21-plus' }, ...linkAlive });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: null });
+    prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
+    const guest = createCaller({ ...authenticatedContext, user: { userId: 'age-guest-off', email: 'ageoff@example.test' } });
+    const result = await guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+    assert.equal(result.accessGranted, true);
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
+});
+
+test('REA P1: a 21+ party refuses an RSVP without a 21+ birth date', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  try {
+    party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, templateConfig: { kind: 'standard', hostAge: '21-plus' }, ...linkAlive });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
+    prisma.$transaction = async () => { throw new Error('must not seat the guest'); };
+    const guest = createCaller({ ...authenticatedContext, user: { userId: 'age-guest', email: 'age@example.test' } });
+    await assert.rejects(() => guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN', message: /21\+/ });
+
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
+    const result = await guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+    assert.equal(result.accessGranted, true);
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
+});
+
+test('REA P1: a bottle session cannot be bought from an unlicensed business, or by an under-21 guest', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  try {
+  party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, title: 'T', tagline: '', templateConfig: { kind: 'standard' }, ticketTiers: [], ...linkAlive });
+  partySession.findFirst = async () => ({ id: 'session-1', sellerId: 'seller-1', priceCents: 30_000, bottleCount: 2, startsAt: new Date(Date.now() + 3_600_000), requiredMembershipTier: null });
+  (config as any).stripeSecretKey = 'sk_test_dev';
+  prisma.$transaction = async () => { throw new Error('must not reserve'); };
+  const guest = createCaller({ ...authenticatedContext, user: { userId: 'bottle-guest', email: 'b@example.test' } });
+
+  (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: null });
+  user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+  await assert.rejects(() => guest.events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }), { code: 'PRECONDITION_FAILED' });
+
+  (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date() });
+  user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
+  await assert.rejects(() => guest.events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }), { code: 'FORBIDDEN', message: /21\+/ });
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
+});
+
+test('REA P1: with age gates on, a host under 18 cannot publish', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  try {
+    party.findFirst = async () => ({ ...partyDraft });
+    user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date(), birthDate: new Date('2010-01-01T00:00:00Z'), ageConfirmedAt: null });
+    party.updateMany = async () => { throw new Error('must not publish'); };
+    await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN', message: /18\+/ });
+    user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date(), birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    (db.platformFeeSetting as any).findFirst = async () => null;
+    party.updateMany = async () => ({ count: 1 });
+    const published = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+    assert.equal(published.id, 'party-1');
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
+});
+
+test('REA X4: a party draft whose title fails the content filter is refused before anything is written', async () => {
+  party.create = async () => { throw new Error('must not create'); };
+  const host = createCaller({ user: { userId: 'filter-host', email: 'filter@bytspot.com' }, clientRateLimitKey: 'test-party-filter' });
+  await assert.rejects(() => host.events.drafts.create({ ...draftInput, title: 'no f4ggots allowed' }), { code: 'BAD_REQUEST' });
+});
+
+test('REA location: an after-hours session address follows the Party disclosure rule', async () => {
+  partyWithSessions({ locationDisclosure: 'withheld' });
+  partySession.findMany = async () => [sessionRow({ venueName: 'Secret Loft', lat: 33.78, lng: -84.38 })];
+  const stranger = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(stranger.sessions[0].venueName, null);
+  assert.equal(stranger.sessions[0].latitude, null);
+  assert.equal(stranger.sessions[0].placeWithheld, true);
+
+  partyWithSessions({ locationDisclosure: 'public' });
+  const open = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(open.sessions[0].venueName, 'Secret Loft');
+  assert.equal(open.sessions[0].placeWithheld, false);
 });

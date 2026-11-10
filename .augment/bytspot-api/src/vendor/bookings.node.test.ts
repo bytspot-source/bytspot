@@ -50,6 +50,11 @@ test('a typed or scanned pass reads as the same code', () => {
   assert.equal(normalizePassCode('https://example.com/ABCD2345'), undefined);
   assert.equal(normalizePassCode('ABC'), undefined);
   assert.equal(normalizePassCode(42), undefined);
+  // Already-issued 8-character codes still scan; 9-11 do not.
+  assert.equal(normalizePassCode('ABCD2345'), 'ABCD2345');
+  assert.equal(normalizePassCode('ABCD23456789'), 'ABCD23456789');
+  assert.equal(normalizePassCode('ABCD23456'), undefined);
+  assert.equal(normalizePassCode(`${PASS_QR_PREFIX}ABCD23456789`), 'ABCD23456789');
 });
 
 test('a booking is upcoming until it ends, then past unless someone recorded it', () => {

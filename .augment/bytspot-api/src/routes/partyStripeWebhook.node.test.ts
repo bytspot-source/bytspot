@@ -477,6 +477,8 @@ function payoutHarness(options: { hostStatus?: string; charge?: Partial<Stripe.C
     payouts: [] as { recipient: string; status: string }[],
   };
   let lastQuery: any;
+  // An established host unless a test says otherwise (services/hostTrust).
+  party.count = async () => 99;
   partyCheckout.findMany = async (input: any) => {
     if (input.distinct) return [{ sellerId: checkout.sellerId }];
     lastQuery = input;
@@ -612,13 +614,16 @@ test('Nothing moves while party payouts are off', async () => {
   assert.equal(harness.transfers.length, 0);
 });
 
-test('Only paid parties need a payout account to publish, and only once payouts are on', async () => {
+test('Only paid parties need a payout account to publish, and they need one even while payouts are off (REA X1)', async () => {
   assert.equal(partySellsPaidTickets([{ name: 'Free', priceCents: 0 }]), false);
   assert.equal(partySellsPaidTickets([{ name: 'Free', priceCents: 0 }, { name: 'VIP', priceCents: 2500 }]), true);
   assert.equal(partySellsPaidTickets(null), false);
   payoutHarness({});
   (config as any).partyPayoutsEnabled = false;
+  assert.equal(await hostCanSellPaidTickets('host-1'), false, 'no Connect account, no paid publishing, flag or not');
+  payoutHarness({ hostStatus: 'active' });
   assert.equal(await hostCanSellPaidTickets('host-1'), true);
+  payoutHarness({});
   await withPayoutsOn(async () => {
     assert.equal(await hostCanSellPaidTickets('host-1'), false);
     payoutHarness({ hostStatus: 'active' });
@@ -712,3 +717,60 @@ test('No transfer is sent without a claimed row, and an earlier transfer is foun
   assert.equal(lost.transfers.length, 1);
   assert.equal(lost.rows[0].stripeTransferId, 'tr_lost');
 }));
+
+test('REA X1/X2: a new host waits the longer payout delay; an established one does not', () => withPayoutsOn(async () => {
+  const previous = config.newHostPayoutDelayHours;
+  (config as any).newHostPayoutDelayHours = 168;
+  try {
+    let harness = payoutHarness({ hostStatus: 'active', sellerActive: true });
+    party.count = async () => 0; // no settled paid parties yet
+    // Party ended 2026-10-31T03:00Z; 3 days later is past 48h but inside 7 days.
+    let result = await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-03T03:00:00Z') });
+    assert.equal(harness.transfers.filter((t: any) => t.destination === 'acct_host').length, 0, 'new host is not paid yet');
+    assert.ok(result.waiting >= 1);
+
+    harness = payoutHarness({ hostStatus: 'active', sellerActive: true });
+    party.count = async () => 0;
+    result = await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-08T04:00:00Z') });
+    assert.equal(harness.transfers.filter((t: any) => t.destination === 'acct_host').length, 1, 'paid once the new-host delay has passed');
+  } finally {
+    (config as any).newHostPayoutDelayHours = previous;
+  }
+}));
+
+// ─── REA X2: disputes, refunds, fraud warnings ───────────
+
+test('Payouts never select a disputed, fraud-flagged or cancelled sale', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'active' });
+  await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-02T04:00:00Z') });
+  const where = harness.query().where;
+  assert.equal(where.disputedAt, null);
+  assert.equal(where.fraudWarningAt, null);
+  assert.equal(where.party.cancelledAt, null);
+}));
+
+test('A signed dispute event is claimed by the risk handler, recorded once and revokes the pass', async () => {
+  const recorded: string[] = [];
+  const checkoutUpdates: any[] = [];
+  const guestUpdates: any[] = [];
+  const risky = {
+    stripeWebhookEvent: { create: async ({ data }: any) => { recorded.push(data.id); return data; } },
+    partyCheckout: {
+      findMany: async () => [{ id: 'checkout-1', partyId: 'party-1', partyGuestId: 'guest-1', userId: 'user-1', ticketTierName: 'First Drop', sessionId: null, status: 'completed' }],
+      update: async (input: any) => { checkoutUpdates.push(input); return input; },
+    },
+    partyGuest: { updateMany: async (input: any) => { guestUpdates.push(input); return { count: 1 }; } },
+    vendorTicketOrder: { findMany: async () => [], updateMany: async () => ({ count: 0 }) },
+    partySessionClaim: { updateMany: async () => ({ count: 0 }) },
+    partySession: { updateMany: async () => ({ count: 0 }) },
+  };
+  prisma.$transaction = async (callback: any) => callback(risky);
+  const result = await deliverSignedEvent({
+    id: 'evt_dispute_1', type: 'charge.dispute.created', created: Math.floor(Date.now() / 1000),
+    data: { object: { id: 'dp_1', object: 'dispute', payment_intent: 'pi_party_1', status: 'needs_response' } },
+  } as unknown as Stripe.Event);
+  assert.equal(result.status, 200);
+  assert.deepEqual(recorded, ['evt_dispute_1']);
+  assert.equal(checkoutUpdates[0].data.disputeStatus, 'needs_response');
+  assert.deepEqual(guestUpdates[0].data, { accessGranted: false, status: 'disputed', credential: null });
+});

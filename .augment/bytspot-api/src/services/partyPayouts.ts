@@ -3,6 +3,7 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import { last4Of, statusFrom } from '../vendor/payout';
 import { refreshHostPayout } from './hostPayouts';
+import { hostPayoutDelayHours } from './hostTrust';
 
 /**
  * Pays party sales out to the people they are owed to, after the party ends.
@@ -290,7 +291,11 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
   const due = {
     status: 'completed',
     platformFeeBps: { not: null },
-    party: { OR: [{ endsAt: { lte: endedBy } }, { endsAt: null, startsAt: { lte: startedBy } }] },
+    // REA X2: a disputed or fraud-flagged charge is never paid out, and a
+    // cancelled party's money goes back to guests rather than to the host.
+    disputedAt: null,
+    fraudWarningAt: null,
+    party: { cancelledAt: null, OR: [{ endsAt: { lte: endedBy } }, { endsAt: null, startsAt: { lte: startedBy } }] },
   };
   const owedTo = (recipient: Recipient) => ({
     AND: [
@@ -339,12 +344,22 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
   };
   const sellerDestination = async (sellerId: string) => activeSellers.get(sellerId) ?? null;
 
+  // REA X1/X2: a new host's share waits longer after the party, so a dispute
+  // or refund lands before the money has gone. Sellers keep the base delay.
+  const hostDelay = new Map<string, number>();
+  const hostShareDue = async (hostUserId: string, party: { startsAt: Date; endsAt: Date | null }) => {
+    if (!hostDelay.has(hostUserId)) hostDelay.set(hostUserId, await hostPayoutDelayHours(hostUserId, now));
+    return payoutDueAt(party, hostDelay.get(hostUserId)) <= now;
+  };
+
   for (const checkout of checkouts) {
     const settled = new Set(checkout.payouts
       .filter((row) => SETTLED.includes(row.status) || (row.status === 'failed' && row.updatedAt > retryBefore))
       .map((row) => row.recipient));
     const shares: { recipient: Recipient; recipientUserId: string | null; sellerId: string | null; amountCents: number; currency: string }[] = [];
-    if ((checkout.hostNetCents ?? 0) > 0 && !settled.has('host')) {
+    if ((checkout.hostNetCents ?? 0) > 0 && !settled.has('host') && !(await hostShareDue(checkout.party.hostUserId, checkout.party))) {
+      result.waiting++;
+    } else if ((checkout.hostNetCents ?? 0) > 0 && !settled.has('host')) {
       shares.push({ recipient: 'host', recipientUserId: checkout.party.hostUserId, sellerId: null, amountCents: checkout.hostNetCents!, currency: checkout.currency });
     }
     if (checkout.sellerId && (checkout.sellerNetCents ?? 0) > 0 && !settled.has('seller')) {

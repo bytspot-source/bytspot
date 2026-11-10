@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db } from '../lib/db';
+import { publicStats } from '../lib/publicStats';
 import { getRedis } from '../lib/redis';
 import { apnsKeySource, apnsReadiness } from '../services/apns';
 import { readPushDeliveryTotals } from '../services/notificationDelivery';
@@ -69,14 +70,14 @@ router.get('/health', async (_req, res) => {
 });
 
 // ─── Public stats for home screen display ────────────────────────────────────
+// REA X7: coarse numbers only; exact counts are admin-only (health.adminStats).
 router.get('/stats', async (_req, res) => {
   try {
-    const [userCount, venueCount, betaLeadCount] = await Promise.all([
+    const [userCount, venueCount] = await Promise.all([
       db.user.count(),
       db.venue.count({ where: { discoverable: true } }),
-      db.betaLead.count(),
     ]);
-    res.json({ userCount, venueCount, betaLeadCount });
+    res.json(publicStats(userCount, venueCount));
   } catch {
     // A count we cannot read is unknown, not 246. Inventing one here would
     // publish a number precisely when nothing can verify it.

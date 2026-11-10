@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 import { captureError } from '../lib/observability';
 import { requireCapability, requireVendorSeat } from '../middleware/vendorAuth';
 import { roleScope, type SeatRole } from '../vendor/contract';
@@ -72,8 +73,21 @@ router.post('/vendor/bookings/:id/state', requireVendorSeat, requireCapability('
 
 const passCheck = z.object({ code: z.string().max(80) });
 
+/**
+ * REA V3: an 8-character pass is guessable only with many tries, so each door
+ * device (seat) gets 30 lookups a minute. A real door line is far below that.
+ */
+export const passLookupLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  keyGenerator: (req) => `pass-lookup:${(req as Request).vendor?.seat.id ?? 'none'}`,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many pass lookups. Wait a minute.' },
+});
+
 /** Reads a pass without changing it. Checking in is a separate, explicit step. */
-router.post('/vendor/passes/verify', requireVendorSeat, requireCapability('VERIFY'), async (req, res) => {
+router.post('/vendor/passes/verify', requireVendorSeat, requireCapability('VERIFY'), passLookupLimiter, async (req, res) => {
   const parsed = passCheck.safeParse(req.body);
   const code = parsed.success ? normalizePassCode(parsed.data.code) : undefined;
   if (!code) {

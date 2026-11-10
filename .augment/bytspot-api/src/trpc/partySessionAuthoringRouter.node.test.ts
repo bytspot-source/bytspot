@@ -18,7 +18,7 @@ const scope = { partyId: 'party', sellerId: 'seller' };
 const draft = {
   name: 'Front table', kind: 'table' as const,
   startsAt: '2030-10-10T20:00:00Z', endsAt: '2030-10-11T02:00:00Z',
-  bottleCount: 2, bottleTerms: 'included' as const, priceCents: 12345, quantity: 3,
+  bottleCount: 2, bottleTerms: 'minimum' as const, priceCents: 12345, quantity: 3,
 };
 let seats: any[];
 let writes: any[];
@@ -37,6 +37,7 @@ beforeEach(() => {
     },
   }];
   (db.user as any).findUnique = async () => ({ id: 'host' });
+  (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date('2026-01-01T00:00:00Z') });
   party.findFirst = async ({ where }: any) => where.hostUserId && where.hostUserId !== 'host' ? null : { id: 'party', hostUserId: 'host' };
   seat.findMany = async ({ where }: any) => seats.filter((row) => row.userId === where.userId && row.state === where.state);
   session.findMany = async () => [];

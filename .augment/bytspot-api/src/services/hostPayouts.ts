@@ -105,10 +105,15 @@ export function partySellsPaidTickets(ticketTiers: unknown): boolean {
 
 /**
  * Whether this host may publish a party that sells paid tickets. Free parties
- * never need payouts. While party payouts are off, nothing is required.
+ * never need payouts.
+ *
+ * REA review 2026-11-10, X1: a finished Stripe Connect onboarding (payouts
+ * enabled, nothing overdue) is required whatever PARTY_PAYOUTS_ENABLED says.
+ * Bytspot is the merchant of record on these charges, so a seller with no
+ * identity check behind them is the case Stripe restricts. Payouts staying
+ * off only means transfers wait; it no longer means KYC is skipped.
  */
 export async function hostCanSellPaidTickets(userId: string): Promise<boolean> {
-  if (!config.partyPayoutsEnabled) return true;
   const stored = await db.hostPayoutAccount.findUnique({ where: { userId }, select: { status: true } });
   if (stored?.status === 'active') return true;
   if (!stored) return false;

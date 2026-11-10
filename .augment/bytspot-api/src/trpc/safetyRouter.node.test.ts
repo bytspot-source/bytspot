@@ -181,7 +181,9 @@ test('dismiss shows the item again; remove keeps it hidden', async () => {
 });
 
 test('suspending flags the owner, and a suspended account cannot sign in by any route', async () => {
-  assert.deepEqual(await admin().admin.safety.decide({ kind: 'party', targetId: 'p1', action: 'suspend' }), { status: 'suspended' });
+  // REA X2: a party taken down by moderation is cancelled and its paid guests refunded.
+  (db.partyCheckout as any).findMany = async () => [];
+  assert.deepEqual(await admin().admin.safety.decide({ kind: 'party', targetId: 'p1', action: 'suspend' }), { status: 'suspended', refunds: { refunded: 0, skipped: 0, failed: 0 } });
   const suspended = writes.find((w) => w.op === 'user.updateMany')!.args;
   assert.deepEqual(suspended.where, { id: 'host-id', suspendedAt: null });
 
@@ -193,4 +195,40 @@ test('suspending flags the owner, and a suspended account cannot sign in by any 
   assert.deepEqual(await admin().admin.safety.reinstate({ userId: 'host-id' }), { reinstated: true });
   user.updateMany = async () => ({ count: 0 });
   await assert.rejects(() => admin().admin.safety.reinstate({ userId: 'host-id' }), { code: 'NOT_FOUND' });
+});
+
+test('REA X4: Plans, party media, notes, businesses and concierge answers can be reported with the new reasons', async () => {
+  (db.plan as any).findFirst = async () => ({ creatorUserId: 'planner', title: 'Friday', intent: 'dinner', areaLabel: 'Midtown', startsAt: null });
+  (db.partyMedia as any).findUnique = async () => ({ id: 'm1', kind: 'album', partyId: 'p1', party: { hostUserId: 'host', title: 'Roof' } });
+  (db.partyRequestNote as any).findUnique = async () => ({ senderUserId: 'sender', body: 'play it', partyId: 'p1' });
+  (db.vendorSeller as any).findUnique = async () => ({ id: 's1', legalName: 'Lounge LLC', seats: [{ userId: 'owner' }] });
+  report.count = async () => 0;
+  for (const [kind, reason, owner] of [
+    ['plan', 'scam', 'planner'], ['media', 'underage', 'host'], ['note', 'harassment', 'sender'], ['vendor', 'alcohol', 'owner'],
+  ] as const) {
+    writes = [];
+    await member().safety.report({ kind, targetId: 'x1', reason });
+    const created = writes.find((w) => w.op === 'report.create')!.args.data;
+    assert.equal(created.targetKind, kind);
+    assert.equal(created.ownerId, owner);
+    assert.ok(!('latitude' in created.snapshot), 'a Plan snapshot never carries coordinates');
+  }
+  await assert.rejects(() => member().safety.report({ kind: 'concierge', targetId: 'resp-1', reason: 'illegal-item' }), { code: 'BAD_REQUEST' });
+  writes = [];
+  await member().safety.report({ kind: 'concierge', targetId: 'resp-1', reason: 'illegal-item', excerpt: 'where to buy...' });
+  assert.equal(writes.find((w) => w.op === 'report.create')!.args.data.snapshot.excerpt, 'where to buy...');
+  await assert.rejects(() => member().safety.report({ kind: 'concierge', targetId: 'no', reason: 'illegal-item', excerpt: 'x' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => member().safety.report({ kind: 'concierge', targetId: 'not a valid id!!!', reason: 'illegal-item', excerpt: 'x' }), { code: 'NOT_FOUND' });
+});
+
+test('REA X4: the admin queue shows the response deadline for each item', async () => {
+  const old = new Date(Date.now() - 30 * 3_600_000);
+  report.findMany = async () => [{ targetKind: 'party', targetId: 'p1', ownerId: 'host', snapshot: {}, createdAt: old, status: 'open', decidedAt: null, reason: 'scam', note: null }];
+  report.groupBy = async () => [];
+  party.findMany = async () => [];
+  review.findMany = async () => [];
+  sale.findMany = async () => [];
+  const { items } = await admin().admin.safety.reports({ status: 'open' });
+  assert.equal(items[0].overdue, config.moderationResponseHours < 30);
+  assert.equal(items[0].respondBy.getTime(), old.getTime() + config.moderationResponseHours * 3_600_000);
 });

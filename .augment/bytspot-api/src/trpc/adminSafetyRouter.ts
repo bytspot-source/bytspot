@@ -7,9 +7,11 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
+import { config } from '../config';
 import { captureError } from '../lib/observability';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { signOutSessionsIssuedBefore } from '../services/accountDeletion';
+import { refundParty } from '../services/stripeRisk';
 import { REPORT_KINDS, markSessionsSuspended, setModerationHidden, type ReportKind } from '../services/safety';
 import { signOutEverywhere } from '../vendor/refreshTokens';
 
@@ -77,11 +79,17 @@ export const adminSafetyRouter = router({
       }
       const hidden = await hiddenTargets([...items.values()]);
       return {
-        items: [...items.values()].map((item) => ({
-          ...item,
-          reporterCount: item.reports.length,
-          hidden: hidden.has(`${item.kind}:${item.targetId}`),
-        })),
+        items: [...items.values()].map((item) => {
+          // REA X4: the published response commitment, per item.
+          const respondBy = new Date(item.firstReportedAt.getTime() + config.moderationResponseHours * 3_600_000);
+          return {
+            ...item,
+            reporterCount: item.reports.length,
+            hidden: hidden.has(`${item.kind}:${item.targetId}`),
+            respondBy,
+            overdue: item.status === 'open' && respondBy.getTime() < Date.now(),
+          };
+        }),
       };
     }),
 
@@ -92,7 +100,9 @@ export const adminSafetyRouter = router({
    */
   decide: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'admin-safety-decide' }))
-    .input(z.object({ kind, targetId: z.string().min(1).max(128), action: z.enum(['dismiss', 'remove', 'suspend']) }))
+    // refundGuests (party only, default on): REA X2. A party taken down by
+    // moderation is cancelled and every paid guest refunded before payout.
+    .input(z.object({ kind, targetId: z.string().min(1).max(128), action: z.enum(['dismiss', 'remove', 'suspend']), refundGuests: z.boolean().default(true) }))
     .mutation(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
       const open = await db.contentReport.findFirst({ where: { targetKind: input.kind, targetId: input.targetId, status: 'open' }, select: { ownerId: true } });
@@ -101,9 +111,16 @@ export const adminSafetyRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'A person is suspended, not removed.' });
       }
       const now = new Date();
+      // Removing reported media deletes the image: it has no hidden state.
+      if (input.action !== 'dismiss' && input.kind === 'media') await db.partyMedia.deleteMany({ where: { id: input.targetId } });
       if (input.action === 'dismiss') await setModerationHidden(input.kind, input.targetId, false);
       else await setModerationHidden(input.kind, input.targetId, true, now);
       if (input.action === 'suspend') await suspendMember(open.ownerId, now);
+      let refunds: Awaited<ReturnType<typeof refundParty>> | null = null;
+      if (input.action !== 'dismiss' && input.kind === 'party' && input.refundGuests) {
+        await db.party.updateMany({ where: { id: input.targetId, cancelledAt: null }, data: { cancelledAt: now, closedAt: now, shareLinkExpiresAt: now } });
+        refunds = await refundParty(input.targetId, `Removed by Bytspot moderation (${input.action})`);
+      }
       const status = input.action === 'dismiss' ? 'dismissed' : input.action === 'remove' ? 'removed' : 'suspended';
       const closed = await db.contentReport.updateMany({
         where: { targetKind: input.kind, targetId: input.targetId, status: 'open' },
@@ -111,9 +128,9 @@ export const adminSafetyRouter = router({
       });
       auditAdminAction({
         actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.safety.decide',
-        detail: { kind: input.kind, targetId: input.targetId, decision: status, ownerId: open.ownerId, reports: closed.count },
+        detail: { kind: input.kind, targetId: input.targetId, decision: status, ownerId: open.ownerId, reports: closed.count, ...(refunds ? { refunded: refunds.refunded, refundsFailed: refunds.failed } : {}) },
       });
-      return { status };
+      return { status, ...(refunds ? { refunds } : {}) };
     }),
 
   /** Lifts a suspension. What reports removed stays removed. */

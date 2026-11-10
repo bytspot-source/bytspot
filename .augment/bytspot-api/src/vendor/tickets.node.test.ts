@@ -162,7 +162,7 @@ test('a ticket is sold once per guest up to its cap, and its pass checks in once
 
   const [mine] = await myTickets(ids.first);
   assert.equal(mine.payment, 'paid');
-  assert.match(mine.pass ?? '', /^[A-Z0-9]{8}$/);
+  assert.match(mine.pass ?? '', /^[A-Z0-9]{12}$/);
   const [theirs] = await myTickets(ids.second);
   assert.equal(theirs.payment, 'refunded');
   assert.equal(theirs.refundReason, 'The last ticket went while you were paying.');

@@ -453,7 +453,7 @@ test('accepting commits the slot the seller actually has', async (t) => {
   assert.equal(demand.state, 'BOOKED');
   const accepted = await db.offer.findUniqueOrThrow({ where: { id: offer.id } });
   assert.equal(accepted.state, 'ACCEPTED');
-  assert.match(accepted.passCode ?? '', /^[A-Z0-9]{8}$/, 'an accepted booking carries a pass for the door');
+  assert.match(accepted.passCode ?? '', /^[A-Z0-9]{12}$/, 'an accepted booking carries a pass for the door');
 
   const mine = await guest().demand.mine();
   const held = mine.flatMap((row) => row.offers).find((row) => row.id === offer.id);

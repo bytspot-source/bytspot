@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { newPassCode, PASS_LENGTH } from './bookings';
+import { isAcceptedPassLength, newPassCode } from './bookings';
 import { liveCardsAt, type InventoryCard } from './inventory';
 import { windowTemplate } from './windows';
 
@@ -38,7 +38,7 @@ export function patchKind(raw: unknown): PatchKind {
 export function normalizePatchCode(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const value = raw.trim().toUpperCase().replace(/[\s-]/g, '');
-  return value.length === PASS_LENGTH && CODE_ALPHABET.test(value) ? value : undefined;
+  return isAcceptedPassLength(value.length) && CODE_ALPHABET.test(value) ? value : undefined;
 }
 
 /** What is printed on the QR code and written to the tag. */

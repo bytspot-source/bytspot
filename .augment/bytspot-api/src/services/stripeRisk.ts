@@ -207,11 +207,13 @@ export const REFUND_PARTY_PAGE_SIZE = 200;
  * later retry does not change the original choice.
  */
 export function closeShouldRefund(
-  party: { endsAt: Date },
+  party: { endsAt: Date | null },
   checkedInCount: number,
   asOf = new Date(),
 ): boolean {
   if (checkedInCount > 0) return false;
+  // No end time: treat the night as not yet delivered and refund.
+  if (!party.endsAt) return true;
   return party.endsAt.getTime() > asOf.getTime();
 }
 

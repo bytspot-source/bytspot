@@ -228,4 +228,6 @@ test('close refunds when the night was not delivered, and keeps the money after 
   assert.equal(closeShouldRefund({ endsAt }, 1, before), false, 'a check-in means it was delivered');
   assert.equal(closeShouldRefund({ endsAt }, 0, after), false, 'after endsAt the night occurred');
   assert.equal(closeShouldRefund({ endsAt }, 0, endsAt), false);
+  assert.equal(closeShouldRefund({ endsAt: null }, 0, after), true, 'a missing end is treated as not yet delivered');
+  assert.equal(closeShouldRefund({ endsAt: null }, 1, after), false);
 });

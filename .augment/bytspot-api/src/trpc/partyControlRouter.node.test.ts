@@ -4,6 +4,7 @@ import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
 import { config } from '../config';
 import { db } from '../lib/db';
+import { stripeHandle } from '../vendor/payout';
 import type { Context } from './context';
 
 const createCaller = createCallerFactory(appRouter);
@@ -530,7 +531,6 @@ test('The door and the decision both run at serializable isolation', async () =>
 });
 
 test('REA X2: cancelling a party closes it, expires the link and refunds every paid guest once', async () => {
-  const { stripeHandle } = await import('../vendor/payout');
   const originalClient = stripeHandle.client;
   const refunds: any[] = [];
   stripeHandle.client = () => ({ refunds: { create: async (params: any, options: any) => { refunds.push({ params, options }); return { id: 're_1' }; } } }) as any;
@@ -560,7 +560,6 @@ test('REA X2: cancelling a party closes it, expires the link and refunds every p
 });
 
 test('REA X2: closing a party that has not been delivered refunds paid guests', async () => {
-  const { stripeHandle } = await import('../vendor/payout');
   const originalClient = stripeHandle.client;
   const refunds: any[] = [];
   stripeHandle.client = () => ({ refunds: { create: async (params: any, options: any) => { refunds.push({ params, options }); return { id: 're_1' }; } } }) as any;
@@ -587,7 +586,6 @@ test('REA X2: closing a party that has not been delivered refunds paid guests', 
 });
 
 test('REA X2: closing after a check-in or after the party ends keeps the money', async () => {
-  const { stripeHandle } = await import('../vendor/payout');
   const originalClient = stripeHandle.client;
   let called = 0;
   stripeHandle.client = () => { called += 1; return { refunds: { create: async () => ({ id: 're_x' }) } } as any; };

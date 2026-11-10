@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { analyticsRange, localDate, payoutTotals, summarizeAnalytics, summarizeEarnings } from './insights';
+import { db } from '../lib/db';
+import { analyticsRange, loadAnalytics, localDate, payoutTotals, summarizeAnalytics, summarizeEarnings } from './insights';
 import { commitmentFlags, scheduleBlockers, slotOperationAllowed } from './slots';
 
 test('analytics counts what the demand rail recorded and ranks what sold', () => {
@@ -40,6 +41,54 @@ test('analytics counts what the demand rail recorded and ranks what sold', () =>
 
 test('a business with no offers has no win rate rather than zero percent', () => {
   assert.equal(summarizeAnalytics({ days: 7, events: [], offers: [], checkouts: [] }).winRate, null);
+});
+
+test('check-ins count every proven visit and each guest once', () => {
+  const summary = summarizeAnalytics({
+    days: 30, events: [], offers: [], checkouts: [],
+    checkIns: [{ userId: 'ada' }, { userId: 'ada' }, { userId: 'kofi' }],
+  });
+  assert.equal(summary.checkIns, 3);
+  assert.equal(summary.checkInGuests, 2);
+  const none = summarizeAnalytics({ days: 7, events: [], offers: [], checkouts: [] });
+  assert.equal(none.checkIns, 0);
+  assert.equal(none.checkInGuests, 0);
+});
+
+test('the dashboard counts proven check-ins only at the business\'s own linked places', async () => {
+  const stubs = db as any;
+  const saved = {
+    location: stubs.vendorLocation.findMany, events: stubs.demandEvent.findMany, offers: stubs.offer.findMany,
+    checkouts: stubs.offerCheckout.findMany, tickets: stubs.vendorTicketOrder.findMany, checkIns: stubs.checkIn.findMany,
+  };
+  const now = new Date('2026-11-10T20:00:00Z');
+  let checkInQuery: any;
+  let linkedQuery: any;
+  stubs.demandEvent.findMany = async () => [];
+  stubs.offer.findMany = async () => [];
+  stubs.offerCheckout.findMany = async () => [];
+  stubs.vendorTicketOrder.findMany = async () => [];
+  stubs.checkIn.findMany = async (query: any) => { checkInQuery = query; return [{ userId: 'ada' }, { userId: 'kofi' }, { userId: 'ada' }]; };
+  try {
+    stubs.vendorLocation.findMany = async (query: any) => { linkedQuery = query; return [{ menuVenueId: 'venue-vidash' }]; };
+    const summary = await loadAnalytics('seller-1', 30, now);
+    assert.deepEqual(linkedQuery.where, { sellerId: 'seller-1', menuVenueId: { not: null } });
+    assert.deepEqual(checkInQuery.where.venueId, { in: ['venue-vidash'] });
+    assert.deepEqual(checkInQuery.where.proof, { not: 'self_reported' });
+    assert.equal(checkInQuery.where.createdAt.gte.toISOString(), '2026-10-11T20:00:00.000Z');
+    assert.deepEqual(checkInQuery.select, { userId: true });
+    assert.equal(summary.checkIns, 3);
+    assert.equal(summary.checkInGuests, 2);
+
+    checkInQuery = undefined;
+    stubs.vendorLocation.findMany = async () => [];
+    const unlinked = await loadAnalytics('seller-1', 30, now);
+    assert.equal(checkInQuery, undefined, 'no linked place means no check-in read');
+    assert.equal(unlinked.checkIns, 0);
+  } finally {
+    stubs.vendorLocation.findMany = saved.location; stubs.demandEvent.findMany = saved.events; stubs.offer.findMany = saved.offers;
+    stubs.offerCheckout.findMany = saved.checkouts; stubs.vendorTicketOrder.findMany = saved.tickets; stubs.checkIn.findMany = saved.checkIns;
+  }
 });
 
 test('only the offered ranges are accepted', () => {

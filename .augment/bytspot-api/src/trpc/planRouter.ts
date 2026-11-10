@@ -1,3 +1,4 @@
+import { coarseCoordinate } from '../lib/geoPrivacy';
 import { createHash, randomBytes } from 'crypto';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
@@ -407,8 +408,9 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
     endsAt: plan.endsAt,
     expiresAt: planClosesAt(plan),
     areaLabel: plan.areaLabel,
-    latitude: plan.latitude,
-    longitude: plan.longitude,
+    // REA location: only the creator sees their own precise point.
+    latitude: plan.creatorUserId === viewerUserId ? plan.latitude : coarseCoordinate(plan.latitude),
+    longitude: plan.creatorUserId === viewerUserId ? plan.longitude : coarseCoordinate(plan.longitude),
     partySize: plan.partySize,
     budgetCents: plan.budgetCents,
     needs: plan.needs,
@@ -1272,6 +1274,26 @@ export const planRouter = router({
       if (cancelled.count === 0) await loadPlanForCreator(plan.id, ctx.user.userId);
       else dispatchPlanDecided({ planId: plan.id, actorUserId: ctx.user.userId, decision: 'cancelled' });
       return { id: plan.id, lifecycle: 'cancelled' };
+    }),
+
+  /**
+   * REA location: a join link that was forwarded too far can be killed. The
+   * creator gets a fresh link and the old one stops seating anyone; people
+   * already on the Plan keep their seats. (Links also stop working when the
+   * Plan expires, is cancelled or is over; see joinByToken.)
+   */
+  rotateJoinLink: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'plan-rotate-join-link' }))
+    .input(z.object({ planId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const plan = await loadPlanForCreator(input.planId, ctx.user.userId);
+      const joinToken = newJoinToken();
+      const updated = await db.plan.updateMany({
+        where: { id: plan.id, creatorUserId: ctx.user.userId, deletedAt: null },
+        data: { joinToken },
+      });
+      if (updated.count !== 1) await loadPlanForCreator(plan.id, ctx.user.userId);
+      return { id: plan.id, joinToken };
     }),
 
   /**

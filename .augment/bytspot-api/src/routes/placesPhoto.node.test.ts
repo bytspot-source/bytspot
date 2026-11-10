@@ -23,7 +23,7 @@ test('No photo URL a client receives carries the API key', async () => {
     }],
   }), { status: 200 })) as typeof fetch;
   try {
-    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places' } as never);
+    const caller = placesRouter.createCaller({ user: { userId: 'u-places', email: 'p@bytspot.com' }, clientRateLimitKey: 'test-places' } as never);
     const nearby = await caller.nearbySearch({ lat: 33.78, lng: -84.38, radius: 1500, maxResults: 5, types: ['coffee_shop', 'cafe'] });
     const serialized = JSON.stringify(nearby);
     assert.equal(serialized.includes(secret), false, 'nearbySearch leaked the Places key');

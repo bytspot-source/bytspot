@@ -2131,3 +2131,24 @@ test('an item says where it is only when that place may be shared', () => {
   assert.equal(itemDestination({ party: { venueName: 'x', locationDisclosure: 'public', arrivalVenue: null } }), null);
   assert.equal(itemDestination({}), null);
 });
+
+// ─── REA location ──────────────────────────────────────────────────────────────
+
+test('REA location: only the creator sees the Plan point precisely; guests get the ~500 m cell', async () => {
+  plan.findUnique = async () => planFixture({ latitude: 33.7866, longitude: -84.3833, participants: [creatorSeat, guestSeat] });
+  const mine = await caller().plans.get({ planId: 'plan-1' });
+  assert.deepEqual([mine.latitude, mine.longitude], [33.7866, -84.3833]);
+  const theirs = await guest().plans.get({ planId: 'plan-1' });
+  assert.deepEqual([theirs.latitude, theirs.longitude], [33.7875, -84.3825]);
+});
+
+test('REA location: the creator can kill a forwarded join link; nobody else can', async () => {
+  plan.findUnique = async () => planFixture();
+  let written: any = null;
+  plan.updateMany = async (args: any) => { written = args; return { count: 1 }; };
+  const rotated = await caller().plans.rotateJoinLink({ planId: 'plan-1' });
+  assert.match(rotated.joinToken, /^[A-Za-z0-9_-]{32}$/);
+  assert.notEqual(rotated.joinToken, 'tok-secret');
+  assert.deepEqual(written.where, { id: 'plan-1', creatorUserId: 'creator-id', deletedAt: null });
+  await assert.rejects(() => guest().plans.rotateJoinLink({ planId: 'plan-1' }), { code: 'NOT_FOUND' });
+});

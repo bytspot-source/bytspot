@@ -33,8 +33,9 @@ test('a plan that says enough asks for exactly what it says', () => {
     partySize: 4,
     earliest: new Date('2026-09-18T23:00:00Z'),
     latest: new Date('2026-09-19T02:00:00Z'),
-    latitude: 33.7866,
-    longitude: -84.3833,
+    // REA location: businesses get the ~500 m grid cell, not the guest's fix.
+    latitude: 33.7875,
+    longitude: -84.3825,
   });
 });
 

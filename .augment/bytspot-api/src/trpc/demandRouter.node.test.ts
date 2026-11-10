@@ -309,7 +309,9 @@ test('a plan asks for what it already says, without the guest restating it', asy
   assert.equal(result.state, 'OPEN');
   assert.equal(result.category, 'dining');
   assert.equal(created[0].partySize, 4);
-  assert.equal(created[0].latitude, 33.7866);
+  // REA location: snapped to the ~500 m grid before any business sees it.
+  assert.equal(created[0].latitude, 33.7875);
+  assert.equal(created[0].longitude, -84.3825);
   // The demand stays attached to the plan that raised it.
   assert.equal(created[0].planId, 'plan-1');
   // And obeys the same contract defaults as a typed request.

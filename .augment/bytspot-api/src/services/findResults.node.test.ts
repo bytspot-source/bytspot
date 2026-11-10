@@ -15,7 +15,7 @@ function resolvedPlace(over: Partial<ResolvedPlace> = {}): ResolvedPlace {
   return { placeId: 'gp-B', name: 'Highland Bakery', address: '644 N Highland', lat: 33.77, lng: -84.35, primaryType: 'bakery', photoUrls: ['https://img/1'], ...over };
 }
 function caller() {
-  return placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-find' } as never);
+  return placesRouter.createCaller({ user: { userId: 'u-find', email: 'f@bytspot.com' }, clientRateLimitKey: 'test-find' } as never);
 }
 
 test('An indexed venue keeps its slug and is DETAILS', () => {
@@ -83,4 +83,11 @@ test('places.find degrades honestly when the index is short and the provider is 
     (config as { googlePlacesApiKey: string | undefined }).googlePlacesApiKey = originalKey;
     globalThis.fetch = originalFetch;
   }
+});
+
+test('REA: the Google-billed places proxies refuse a signed-out caller', async () => {
+  const anonymous = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-find-anon' } as never);
+  await assert.rejects(() => anonymous.find({ query: 'coffee', lat: 33.7, lng: -84.4 } as never), { code: 'UNAUTHORIZED' });
+  await assert.rejects(() => anonymous.nearbySearch({ lat: 33.7, lng: -84.4 } as never), { code: 'UNAUTHORIZED' });
+  await assert.rejects(() => anonymous.textSearch({ query: 'coffee' } as never), { code: 'UNAUTHORIZED' });
 });

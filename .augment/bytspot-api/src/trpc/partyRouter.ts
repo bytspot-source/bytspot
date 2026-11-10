@@ -680,6 +680,7 @@ export const partyRecapRouter = router({
       return { published: false };
     }),
   get: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-public-get' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
       const party = await db.party.findUnique({
@@ -961,6 +962,7 @@ async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {
 }
 
 export const partyInvite = publicProcedure
+  .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-invite' }))
   .input(z.object({ partyId: z.string().min(1).max(128) }))
   .query(async ({ ctx, input }) => {
     const party = await publishedParty(input.partyId);
@@ -1038,15 +1040,21 @@ export const partyInvite = publicProcedure
       // place.
       sessions: sessions.map((session) => {
         const remaining = liveRemaining(session, holdsBySession.get(session.id) ?? 0);
+        // REA location: a session's own address follows the Party's
+        // disclosure rule. Withheld or after-approval parties reveal it only
+        // to the host and to guests who were let in.
+        const revealSessionPlace = (Boolean(ctx.user) && ctx.user?.userId === party.hostUserId) || Boolean(guest?.accessGranted)
+          || (party.locationDisclosure === 'public' && !discoverStranger);
         return {
           id: session.id,
           name: session.name,
           kind: session.kind,
           startsAt: session.startsAt.toISOString(),
           endsAt: session.endsAt.toISOString(),
-          venueName: session.venueName,
-          latitude: session.lat,
-          longitude: session.lng,
+          venueName: revealSessionPlace ? session.venueName : null,
+          latitude: revealSessionPlace ? session.lat : null,
+          longitude: revealSessionPlace ? session.lng : null,
+          placeWithheld: !revealSessionPlace && Boolean(session.venueName || session.lat != null),
           bottleCount: session.bottleCount,
           ageNotice: sessionSellsAlcohol(session) ? '21+ / ID required' : null,
           // `minimum` means the price is not what the guest will pay, so the
@@ -1172,6 +1180,7 @@ export const partyPassRouter = router({
   }),
 
   resolve: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'party-resolve' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);

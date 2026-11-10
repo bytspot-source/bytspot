@@ -1979,7 +1979,7 @@ test('An invitation never hands a guest the vendor unit counts', async () => {
   // is left, what it costs, and on what terms.
   assert.deepEqual(Object.keys(invite.sessions[0]).sort(), [
     'ageNotice', 'bottleCount', 'bottleTerms', 'endsAt', 'id', 'kind', 'latitude', 'longitude',
-    'name', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state', 'venueName',
+    'name', 'placeWithheld', 'priceCents', 'remaining', 'requiredMembershipTier', 'startsAt', 'state', 'venueName',
   ]);
 });
 
@@ -2063,4 +2063,18 @@ test('REA X4: a party draft whose title fails the content filter is refused befo
   party.create = async () => { throw new Error('must not create'); };
   const host = createCaller({ user: { userId: 'filter-host', email: 'filter@bytspot.com' }, clientRateLimitKey: 'test-party-filter' });
   await assert.rejects(() => host.events.drafts.create({ ...draftInput, title: 'no f4ggots allowed' }), { code: 'BAD_REQUEST' });
+});
+
+test('REA location: an after-hours session address follows the Party disclosure rule', async () => {
+  partyWithSessions({ locationDisclosure: 'withheld' });
+  partySession.findMany = async () => [sessionRow({ venueName: 'Secret Loft', lat: 33.78, lng: -84.38 })];
+  const stranger = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(stranger.sessions[0].venueName, null);
+  assert.equal(stranger.sessions[0].latitude, null);
+  assert.equal(stranger.sessions[0].placeWithheld, true);
+
+  partyWithSessions({ locationDisclosure: 'public' });
+  const open = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
+  assert.equal(open.sessions[0].venueName, 'Secret Loft');
+  assert.equal(open.sessions[0].placeWithheld, false);
 });

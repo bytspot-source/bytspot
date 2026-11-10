@@ -1,3 +1,4 @@
+import { coarseCoordinate } from '../lib/geoPrivacy';
 import { DEMAND_DEFAULTS, demandCategoryIds } from './demand';
 
 /**
@@ -151,8 +152,9 @@ export function constraintsFromPlan(plan: EmittingPlan, need: EmittingNeed, now:
       partySize: Math.min(plan.partySize, DEMAND_DEFAULTS.maxPartySize),
       earliest,
       latest,
-      latitude: plan.latitude,
-      longitude: plan.longitude,
+      // Businesses never receive the guest's precise fix (REA location).
+      latitude: coarseCoordinate(plan.latitude),
+      longitude: coarseCoordinate(plan.longitude),
     },
   };
 }

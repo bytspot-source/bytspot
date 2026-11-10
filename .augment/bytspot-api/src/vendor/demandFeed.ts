@@ -1,3 +1,4 @@
+import { coarseCoordinate } from '../lib/geoPrivacy';
 import { z } from 'zod';
 import { db } from '../lib/db';
 
@@ -232,8 +233,8 @@ async function demandFor(
     partySize: row.partySize,
     earliest: row.earliest,
     latest: row.latest,
-    latitude: row.latitude,
-    longitude: row.longitude,
+    latitude: coarseCoordinate(row.latitude),
+    longitude: coarseCoordinate(row.longitude),
     radiusMiles: row.radiusMiles,
     budgetCents: row.budgetCents,
   }));
@@ -247,8 +248,9 @@ function demandDto(demand: EvaluableDemand, raisedAt: Date, note: string | null)
     partySize: demand.partySize,
     earliest: demand.earliest.toISOString(),
     latest: demand.latest.toISOString(),
-    lat: demand.latitude,
-    lng: demand.longitude,
+    // Rows raised before REA's fix may hold a precise point; coarsen on the way out too.
+    lat: coarseCoordinate(demand.latitude),
+    lng: coarseCoordinate(demand.longitude),
     radiusMiles: demand.radiusMiles,
     budgetCents: demand.budgetCents ?? undefined,
     note: note ?? undefined,

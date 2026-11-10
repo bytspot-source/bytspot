@@ -26,7 +26,7 @@ test('Google failing empties the list honestly instead of erroring the tab', asy
   (config as { googlePlacesApiKey: string }).googlePlacesApiKey = 'test-key';
   globalThis.fetch = (async () => new Response('denied', { status: 403 })) as typeof fetch;
   try {
-    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places' } as never);
+    const caller = placesRouter.createCaller({ user: { userId: 'u-places', email: 'p@bytspot.com' }, clientRateLimitKey: 'test-places' } as never);
     const nearby = await caller.nearbySearch({ lat: 33.7866, lng: -84.3833, radius: 2000, maxResults: 10 });
     assert.deepEqual(nearby, { places: [], source: 'unavailable' });
 
@@ -42,7 +42,7 @@ test('An unconfigured key stays distinct from an unreachable provider', async ()
   const originalKey = config.googlePlacesApiKey;
   (config as { googlePlacesApiKey: string }).googlePlacesApiKey = '';
   try {
-    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places' } as never);
+    const caller = placesRouter.createCaller({ user: { userId: 'u-places', email: 'p@bytspot.com' }, clientRateLimitKey: 'test-places' } as never);
     // 'none' means never asked; 'unavailable' means asked and could not reach.
     assert.equal((await caller.nearbySearch({ lat: 33.7866, lng: -84.3833, radius: 2000, maxResults: 10 })).source, 'none');
     // Both search paths must agree; only nearbySearch was covered before.
@@ -119,7 +119,7 @@ test('The singular type still works and merges with types without duplicating', 
     return new Response(JSON.stringify({ places: [] }), { status: 200 });
   }) as unknown as typeof fetch;
   try {
-    const caller = placesRouter.createCaller({ user: null, clientRateLimitKey: 'test-places' } as never);
+    const caller = placesRouter.createCaller({ user: { userId: 'u-places', email: 'p@bytspot.com' }, clientRateLimitKey: 'test-places' } as never);
     // Existing callers pass `type` alone and must be unaffected.
     await caller.nearbySearch({ lat: 34.0, lng: -84.0, radius: 2000, maxResults: 10, type: 'night_club' });
     assert.deepEqual(bodies[0].includedTypes, ['night_club']);

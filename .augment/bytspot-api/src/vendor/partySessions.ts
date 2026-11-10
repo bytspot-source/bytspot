@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { isSerializationConflict } from '../lib/transactions';
 import { liveClaimWhere, validateSessions, type SessionDraft, type SessionIssue } from '../services/partySessions';
+import { alcoholLicenceProblem, sessionSellsAlcohol } from '../services/ageGate';
 
 /**
  * Authoring the bottles-and-hours a Party sells.
@@ -187,6 +188,13 @@ export async function authorPartySession(
   };
 
   const issues = validateSessions([draft]);
+  // REA P1/V2: bottles are alcohol. Only a business whose on-premise licence
+  // a Bytspot admin has checked may sell them.
+  if (sessionSellsAlcohol(draft)) {
+    const seller = await db.vendorSeller.findUnique({ where: { id: sellerId }, select: { alcoholLicenceVerifiedAt: true } });
+    const problem = alcoholLicenceProblem(seller);
+    if (problem) issues.push({ index: 0, field: 'bottleCount', message: problem });
+  }
   // validateSessions only sees the drafts handed to it, so the collision with
   // sessions already on the floor is checked here. Reported against the new
   // session, because that is the one the vendor can still rename.

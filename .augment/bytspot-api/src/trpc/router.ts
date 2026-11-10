@@ -102,6 +102,8 @@ import { mapReportsRouter } from './mapReportsRouter';
 import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
 import { venueParking } from '../services/parkingFreshness';
 import { assertPaidCheckoutAllowedForTrpc } from '../lib/paidCheckout';
+import { parseBirthDate } from '../services/ageGate';
+import { consentRouter } from './consentRouter';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -246,6 +248,33 @@ const healthRouter = router({
 });
 
 /**
+ * What a signup recorded about age and the Terms (REA X6). Refuses a birth
+ * date under MIN_SIGNUP_AGE, a stale Terms version, and, once
+ * SIGNUP_REQUIRE_AGE_AND_TERMS is on, a signup without both.
+ */
+export function signupConsent(input: { birthDate?: string; ageConfirmed18?: boolean; acceptTerms?: boolean; termsVersion?: string }, now = new Date()) {
+  const data: { birthDate?: Date; ageConfirmedAt?: Date; termsVersion?: string; termsAcceptedAt?: Date } = {};
+  if (input.birthDate) {
+    const parsed = parseBirthDate(input.birthDate, now);
+    if ('problem' in parsed) throw new TRPCError({ code: 'BAD_REQUEST', message: parsed.problem });
+    data.birthDate = parsed.date;
+  }
+  if (input.ageConfirmed18) data.ageConfirmedAt = now;
+  if (input.acceptTerms) {
+    if (input.termsVersion && input.termsVersion !== config.termsVersion) {
+      throw new TRPCError({ code: 'CONFLICT', message: 'The Terms changed. Reload them before signing up.' });
+    }
+    data.termsVersion = config.termsVersion;
+    data.termsAcceptedAt = now;
+  }
+  if (config.signupRequireAgeAndTerms) {
+    if (!data.birthDate && !data.ageConfirmedAt) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Confirm your age to create an account.' });
+    if (!data.termsAcceptedAt) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Accept the Terms of Service to create an account.' });
+  }
+  return data;
+}
+
+/**
  * ── Auth sub-router ───────────────────────────────────
  */
 const authRouter = router({
@@ -257,9 +286,16 @@ const authRouter = router({
       password: z.string().min(8, 'Password must be at least 8 characters').max(128),
       name: z.string().max(100).optional(),
       ref: z.string().max(100).optional(),
+      // REA X6. Optional until SIGNUP_REQUIRE_AGE_AND_TERMS is on, so builds
+      // already in the App Store keep signing up; consent.* collects them later.
+      birthDate: z.string().trim().max(10).optional(),
+      ageConfirmed18: z.boolean().optional(),
+      acceptTerms: z.boolean().optional(),
+      termsVersion: z.string().trim().max(40).optional(),
     }))
     .mutation(async ({ input }) => {
       const { email, password, name, ref } = input;
+      const consent = signupConsent(input);
 
       const existing = await db.user.findUnique({ where: { email } }) ?? await extraEmailOwnerId(email);
       if (existing) {
@@ -271,7 +307,7 @@ const authRouter = router({
 
       const hashed = await bcrypt.hash(password, 12);
       const user = await db.user.create({
-        data: { email, password: hashed, name, ref: await signupRef(ref), passwordSetAt: new Date() },
+        data: { email, password: hashed, name, ref: await signupRef(ref), passwordSetAt: new Date(), ...consent },
       });
 
       const session = await memberSession(user.id, user.email);
@@ -1785,6 +1821,7 @@ export const appRouter = router({
   betaSignup: betaSignupRouter,
   cron: cronRouter,
   user: userRouter,
+  consent: consentRouter,
   social: socialRouter,
   reviews: reviewsRouter,
   feedback: feedbackRouter,

@@ -57,6 +57,15 @@ const envSchema = z.object({
   // tips, Platinum). Production also refuses paid checkout on a Stripe test
   // key whatever this says (lib/paidCheckout.ts, REA X5).
   PAID_CHECKOUT_ENABLED:  z.enum(['true', 'false']).default('true'),
+  // REA X6/P1. A birth date under this refuses signup. 13 matches the
+  // current published terms; counsel may move the floor to 18.
+  MIN_SIGNUP_AGE:         z.coerce.number().int().min(13).max(21).default(13),
+  // Off until the iOS/web builds that send age + terms consent ship; when on,
+  // auth.signup refuses a request without them. Gated surfaces enforce age
+  // either way (services/ageGate.ts).
+  SIGNUP_REQUIRE_AGE_AND_TERMS: z.enum(['true', 'false']).default('false'),
+  // The Terms version a member must accept. Bump on every published change.
+  TERMS_VERSION:          z.string().trim().min(1).max(40).default('2026-10-10'),
   // Inbox told when a payout or a reversal fails. Empty: Sentry only.
   PAYOUT_ALERT_EMAIL:     z.string().default(''),
   ADMIN_PASSWORD:         z.string().default(''),
@@ -182,6 +191,9 @@ export const config = {
   newHostMaxTicketQuantity: env.NEW_HOST_MAX_TICKET_QUANTITY,
   newHostPayoutDelayHours: env.NEW_HOST_PAYOUT_DELAY_HOURS,
   paidCheckoutEnabled: env.PAID_CHECKOUT_ENABLED === 'true',
+  minSignupAge: env.MIN_SIGNUP_AGE,
+  signupRequireAgeAndTerms: env.SIGNUP_REQUIRE_AGE_AND_TERMS === 'true',
+  termsVersion: env.TERMS_VERSION,
   payoutAlertEmail: env.PAYOUT_ALERT_EMAIL,
   frontendUrl: env.FRONTEND_URL,
   conciergeDiscoveryEnabled: env.CONCIERGE_DISCOVERY_ENABLED === 'true',

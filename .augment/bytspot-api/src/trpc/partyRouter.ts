@@ -8,6 +8,7 @@ import { alertGuestOfDecision, alertGuestsOfArrivalUpdate, alertGuestsOfRecap, a
 import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
 import { hostCanSellPaidTickets, partySellsPaidTickets } from '../services/hostPayouts';
 import { hostPayoutDelayHours, isNewHost, newHostTierProblem } from '../services/hostTrust';
+import { alcoholLicenceProblem, assertMemberAge, minimumAgeFor, partyAgeRule, sessionSellsAlcohol } from '../services/ageGate';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
@@ -1017,6 +1018,9 @@ export const partyInvite = publicProcedure
       locationDisclosure: party.locationDisclosure,
       ...(discoverStranger ? { latitude: null, longitude: null } : publicArrivalCoordinate(party)),
       accessMode: party.accessMode,
+      // REA P1: printed on the pass and enforced at request and checkout.
+      ageRule: partyAgeRule(party.templateConfig),
+      ageNotice: partyAgeRule(party.templateConfig) === '21-plus' ? '21+ / ID required' : partyAgeRule(party.templateConfig) === '18-plus' ? '18+ / ID required' : null,
       capacity: party.capacity,
       participantCount: await db.partyGuest.count({ where: { partyId: party.id, accessGranted: true } }),
       ticketTiers: parsedTicketTiers(party.ticketTiers),
@@ -1041,6 +1045,7 @@ export const partyInvite = publicProcedure
           latitude: session.lat,
           longitude: session.lng,
           bottleCount: session.bottleCount,
+          ageNotice: sessionSellsAlcohol(session) ? '21+ / ID required' : null,
           // `minimum` means the price is not what the guest will pay, so the
           // terms travel beside the number rather than being inferred from it.
           bottleTerms: session.bottleTerms,
@@ -1746,6 +1751,8 @@ export const partyRsvpRouter = router({
       if (!meetsRequiredMembershipTier(await membershipTierFor(ctx.user.userId), party.requiredMembershipTier)) {
         throw new TRPCError({ code: 'FORBIDDEN', message: 'Your membership tier does not meet this Party requirement.' });
       }
+      // REA P1: the host's age rule is enforced, not just stored.
+      if (ctx.user.userId !== party.hostUserId) await assertMemberAge(ctx.user.userId, minimumAgeFor(partyAgeRule(party.templateConfig)));
       const approvalRequired = party.accessMode === 'private-approval';
       const status = approvalRequired ? 'pending' : 'rsvp';
       const accessGranted = !approvalRequired;
@@ -1820,6 +1827,14 @@ export const partyTicketsRouter = router({
       if (partySession && partySession.startsAt.getTime() <= Date.now()) {
         throw new TRPCError({ code: 'CONFLICT', message: 'That session has already started.' });
       }
+      // REA P1: 21+ parties and any bottle session need a 21+ birth date, and
+      // bottles are only sold by a business with a verified alcohol licence.
+      const buysAlcohol = sessionSellsAlcohol(partySession);
+      if (buysAlcohol) {
+        const seller = await db.vendorSeller.findUnique({ where: { id: partySession!.sellerId }, select: { alcoholLicenceVerifiedAt: true } });
+        if (alcoholLicenceProblem(seller)) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This session is not available to buy in the app.' });
+      }
+      await assertMemberAge(ctx.user.userId, minimumAgeFor(partyAgeRule(party.templateConfig), buysAlcohol));
 
       const membershipTier = await membershipTierFor(ctx.user.userId);
       if (!meetsRequiredMembershipTier(membershipTier, party.requiredMembershipTier)

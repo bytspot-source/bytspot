@@ -21,6 +21,14 @@ model User {
   profileImage      String? @map("profile_image")
   address           String?
   birthday          String?
+  /// REA review 2026-11-10 (X6/P1). Self-declared date of birth, set once by
+  /// the member (support changes it). 21+ parties and bottle sessions need it.
+  birthDate         DateTime? @map("birth_date") @db.Date
+  /// When the member confirmed they are 18 or older, if they gave no birth date.
+  ageConfirmedAt    DateTime? @map("age_confirmed_at")
+  /// The Terms of Service version the member accepted, and when.
+  termsVersion      String?   @map("terms_version")
+  termsAcceptedAt   DateTime? @map("terms_accepted_at")
   notificationPrefs Json?   @map("notification_prefs") // push/email/sms preference toggles
   ref               String? // signup source: "qr", "tiktok", "organic"
   inviteCode        String? @unique @map("invite_code") // the member's own code, issued on first use; a new member's `ref` is the inviter's id
@@ -1454,6 +1462,11 @@ model VendorSeller {
   closedByUserId String?   @map("closed_by_user_id")
   /// Set when a Bytspot admin created the business and invited its owner.
   createdByUserId String?  @map("created_by_user_id")
+  /// REA review 2026-11-10 (P1/V2). An on-premise alcohol licence a Bytspot
+  /// admin checked. Without it the business cannot sell bottle sessions.
+  alcoholLicenceNumber           String?   @map("alcohol_licence_number")
+  alcoholLicenceVerifiedAt       DateTime? @map("alcohol_licence_verified_at")
+  alcoholLicenceVerifiedByUserId String?   @map("alcohol_licence_verified_by_user_id")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

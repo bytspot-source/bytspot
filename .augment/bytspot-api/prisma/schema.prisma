@@ -359,6 +359,9 @@ model Party {
   /// that block deletion survive; closing only removes the room from the host
   /// console and stops new arrivals.
   closedAt               DateTime? @map("closed_at")
+  /// REA review 2026-11-10 (X2). The host called the party off, or moderation
+  /// removed it. Every paid checkout is refunded when this is set.
+  cancelledAt            DateTime? @map("cancelled_at")
   passCode               String?   @unique @map("pass_code")
   /// Platform fee in basis points, frozen at publish from the then-current
   /// PlatformFeeSetting. Null on drafts and on parties published before the
@@ -631,6 +634,14 @@ model PartyCheckout {
   paymentIntentId      String?   @map("payment_intent_id")
   currency             String    @default("usd")
   status               String    @default("creating")
+  /// REA review 2026-11-10 (X2). Set by Bytspot's refund or Stripe's
+  /// charge.refunded; a dispute or early fraud warning freezes the payout.
+  refundId             String?   @map("refund_id")
+  refundedAt           DateTime? @map("refunded_at")
+  refundReason         String?   @map("refund_reason")
+  disputedAt           DateTime? @map("disputed_at")
+  disputeStatus        String?   @map("dispute_status")
+  fraudWarningAt       DateTime? @map("fraud_warning_at")
   reservationExpiresAt DateTime  @map("reservation_expires_at")
   completedAt          DateTime? @map("completed_at")
   createdAt            DateTime  @default(now()) @map("created_at")
@@ -646,6 +657,7 @@ model PartyCheckout {
   @@index([partyId, ticketTierName, status, reservationExpiresAt])
   @@index([sessionId, status, reservationExpiresAt])
   @@index([partyGuestId, updatedAt(sort: Desc)])
+  @@index([paymentIntentId])
   @@map("party_checkouts")
 }
 
@@ -1887,7 +1899,7 @@ model VendorTicketOrder {
   platformFeeCents Int       @map("platform_fee_cents")
   sellerNetCents   Int       @map("seller_net_cents")
   currency         String    @default("usd")
-  /// creating | pending | settling | completed | refunded | expired
+  /// creating | pending | settling | completed | refunded | expired | disputed
   status           String    @default("creating")
   stripeSessionId  String?   @unique @map("stripe_session_id")
   checkoutUrl      String?   @map("checkout_url")
@@ -1912,6 +1924,7 @@ model VendorTicketOrder {
   @@index([ticketId, status])
   @@index([sellerId, status])
   @@index([userId, createdAt(sort: Desc)])
+  @@index([paymentIntentId])
   @@map("vendor_ticket_orders")
 }
 
@@ -2422,4 +2435,14 @@ model MapReportRelayKey {
 
   @@index([userId, createdAt])
   @@map("map_report_relay_keys")
+}
+
+/// REA review 2026-11-10 (X2). Stripe events the dispute, refund and fraud
+/// handlers have applied, so a redelivered event is a no-op.
+model StripeWebhookEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@map("stripe_webhook_events")
 }

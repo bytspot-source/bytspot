@@ -291,7 +291,11 @@ export async function runPartyPayouts(input: { stripe: Stripe; now?: Date; limit
   const due = {
     status: 'completed',
     platformFeeBps: { not: null },
-    party: { OR: [{ endsAt: { lte: endedBy } }, { endsAt: null, startsAt: { lte: startedBy } }] },
+    // REA X2: a disputed or fraud-flagged charge is never paid out, and a
+    // cancelled party's money goes back to guests rather than to the host.
+    disputedAt: null,
+    fraudWarningAt: null,
+    party: { cancelledAt: null, OR: [{ endsAt: { lte: endedBy } }, { endsAt: null, startsAt: { lte: startedBy } }] },
   };
   const owedTo = (recipient: Recipient) => ({
     AND: [

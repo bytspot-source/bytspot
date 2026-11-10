@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { refundParty } from '../services/stripeRisk';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
@@ -1426,6 +1427,29 @@ export const partyControlRouter = router({
       return { partyId: party.id, closedAt: null, shareLinkExpiresAt: effective.toISOString(), shareLinkExpired: effective.getTime() <= Date.now() };
     }),
 
+  /**
+   * REA X2. Cancel a party: the room closes, the link stops working, and every
+   * paid guest is refunded in full from Bytspot's balance before any host
+   * payout (the payout run skips cancelled parties). Not reversible; a host
+   * who wants the night back publishes a new party. Re-running retries any
+   * refund that failed, and Stripe's idempotency key stops a double refund.
+   */
+  cancel: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 5, label: 'party-control-cancel' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), reason: z.string().trim().min(1).max(500).optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const party = await hostControlledParty(input.partyId, ctx.user.userId);
+      const now = new Date();
+      if (!party.cancelledAt) {
+        await db.party.updateMany({
+          where: { id: party.id, hostUserId: ctx.user.userId, cancelledAt: null },
+          data: { cancelledAt: now, closedAt: party.closedAt ?? now, shareLinkExpiresAt: now },
+        });
+      }
+      const refunds = await refundParty(party.id, input.reason ? `Host cancelled: ${input.reason}` : 'Host cancelled the party');
+      return { partyId: party.id, cancelledAt: (party.cancelledAt ?? now).toISOString(), refunds };
+    }),
+
   summary: protectedProcedure
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .query(async ({ ctx, input }) => {
@@ -1802,6 +1826,7 @@ export const partyTicketsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const party = await publishedParty(input.partyId);
+      if (party.cancelledAt) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'This party was cancelled. Nothing was charged.' });
       const knownGuest = await db.partyGuest.findUnique({ where: { partyId_userId: { partyId: party.id, userId: ctx.user.userId } } });
       assertShareLinkUsable(party, knownGuest);
       await assertPartyReachable(party, knownGuest, ctx.user.userId);

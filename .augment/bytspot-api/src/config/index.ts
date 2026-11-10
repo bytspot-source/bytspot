@@ -57,6 +57,8 @@ const envSchema = z.object({
   // tips, Platinum). Production also refuses paid checkout on a Stripe test
   // key whatever this says (lib/paidCheckout.ts, REA X5).
   PAID_CHECKOUT_ENABLED:  z.enum(['true', 'false']).default('true'),
+  // REA X2: refund a payment the webhook could not honour without waiting on the host.
+  AUTO_REFUND_UNHONOURED_PAYMENTS: z.enum(['true', 'false']).default('true'),
   // REA X6/P1. A birth date under this refuses signup. 13 matches the
   // current published terms; counsel may move the floor to 18.
   MIN_SIGNUP_AGE:         z.coerce.number().int().min(13).max(21).default(13),
@@ -194,6 +196,7 @@ export const config = {
   newHostMaxTicketQuantity: env.NEW_HOST_MAX_TICKET_QUANTITY,
   newHostPayoutDelayHours: env.NEW_HOST_PAYOUT_DELAY_HOURS,
   paidCheckoutEnabled: env.PAID_CHECKOUT_ENABLED === 'true',
+  autoRefundUnhonouredPayments: env.AUTO_REFUND_UNHONOURED_PAYMENTS === 'true',
   minSignupAge: env.MIN_SIGNUP_AGE,
   signupRequireAgeAndTerms: env.SIGNUP_REQUIRE_AGE_AND_TERMS === 'true',
   termsVersion: env.TERMS_VERSION,

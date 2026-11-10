@@ -526,3 +526,33 @@ test('The door and the decision both run at serializable isolation', async () =>
 
   assert.deepEqual(levels, ['Serializable', 'Serializable']);
 });
+
+test('REA X2: cancelling a party closes it, expires the link and refunds every paid guest once', async () => {
+  const { stripeHandle } = await import('../vendor/payout');
+  const originalClient = stripeHandle.client;
+  const refunds: any[] = [];
+  stripeHandle.client = () => ({ refunds: { create: async (params: any, options: any) => { refunds.push({ params, options }); return { id: 're_1' }; } } }) as any;
+  const checkout = { id: 'co-1', partyId: 'party-1', partyGuestId: 'guest-1', userId: 'guest-user', ticketTierName: 'GA', sessionId: null, status: 'completed', paymentIntentId: 'pi_1' };
+  const partyCheckout = db.partyCheckout as any;
+  partyCheckout.findMany = async ({ where }: any) => (where.status.in.includes(checkout.status) ? [{ id: checkout.id }] : []);
+  partyCheckout.findUnique = async () => ({ ...checkout });
+  partyCheckout.updateMany = async ({ data }: any) => { Object.assign(checkout, data); return { count: 1 }; };
+  prisma.$transaction = async (callback: any) => callback({ party, partyGuest, partyCheckout, partySessionClaim: { updateMany: async () => ({ count: 0 }) }, partySession: { updateMany: async () => ({ count: 0 }) } });
+  let written: any;
+  party.updateMany = async (input: any) => { written = input; return { count: 1 }; };
+  try {
+    await assert.rejects(() => createCaller({ user: null, clientRateLimitKey: 'test-cancel-anon' }).events.control.cancel({ partyId: 'party-1' }), { code: 'UNAUTHORIZED' });
+    const result = await createCaller({ ...hostContext, clientRateLimitKey: 'test-cancel-host' }).events.control.cancel({ partyId: 'party-1', reason: 'Venue fell through' });
+    assert.ok(written.data.cancelledAt instanceof Date);
+    assert.deepEqual(written.data.shareLinkExpiresAt, written.data.cancelledAt);
+    assert.deepEqual(result.refunds, { refunded: 1, skipped: 0, failed: 0 });
+    assert.equal(refunds[0].options.idempotencyKey, 'party-refund:co-1');
+    assert.equal(checkout.status, 'refunded');
+    // A retry finds nothing left to refund.
+    const again = await createCaller({ ...hostContext, clientRateLimitKey: 'test-cancel-host' }).events.control.cancel({ partyId: 'party-1' });
+    assert.deepEqual(again.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(refunds.length, 1);
+  } finally {
+    stripeHandle.client = originalClient;
+  }
+});

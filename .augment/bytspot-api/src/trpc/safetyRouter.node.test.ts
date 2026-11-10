@@ -181,7 +181,9 @@ test('dismiss shows the item again; remove keeps it hidden', async () => {
 });
 
 test('suspending flags the owner, and a suspended account cannot sign in by any route', async () => {
-  assert.deepEqual(await admin().admin.safety.decide({ kind: 'party', targetId: 'p1', action: 'suspend' }), { status: 'suspended' });
+  // REA X2: a party taken down by moderation is cancelled and its paid guests refunded.
+  (db.partyCheckout as any).findMany = async () => [];
+  assert.deepEqual(await admin().admin.safety.decide({ kind: 'party', targetId: 'p1', action: 'suspend' }), { status: 'suspended', refunds: { refunded: 0, skipped: 0, failed: 0 } });
   const suspended = writes.find((w) => w.op === 'user.updateMany')!.args;
   assert.deepEqual(suspended.where, { id: 'host-id', suspendedAt: null });
 

@@ -737,3 +737,40 @@ test('REA X1/X2: a new host waits the longer payout delay; an established one do
     (config as any).newHostPayoutDelayHours = previous;
   }
 }));
+
+// ─── REA X2: disputes, refunds, fraud warnings ───────────
+
+test('Payouts never select a disputed, fraud-flagged or cancelled sale', () => withPayoutsOn(async () => {
+  const harness = payoutHarness({ hostStatus: 'active' });
+  await runPartyPayouts({ stripe: harness.stripe, now: new Date('2026-11-02T04:00:00Z') });
+  const where = harness.query().where;
+  assert.equal(where.disputedAt, null);
+  assert.equal(where.fraudWarningAt, null);
+  assert.equal(where.party.cancelledAt, null);
+}));
+
+test('A signed dispute event is claimed by the risk handler, recorded once and revokes the pass', async () => {
+  const recorded: string[] = [];
+  const checkoutUpdates: any[] = [];
+  const guestUpdates: any[] = [];
+  const risky = {
+    stripeWebhookEvent: { create: async ({ data }: any) => { recorded.push(data.id); return data; } },
+    partyCheckout: {
+      findMany: async () => [{ id: 'checkout-1', partyId: 'party-1', partyGuestId: 'guest-1', userId: 'user-1', ticketTierName: 'First Drop', sessionId: null, status: 'completed' }],
+      update: async (input: any) => { checkoutUpdates.push(input); return input; },
+    },
+    partyGuest: { updateMany: async (input: any) => { guestUpdates.push(input); return { count: 1 }; } },
+    vendorTicketOrder: { findMany: async () => [], updateMany: async () => ({ count: 0 }) },
+    partySessionClaim: { updateMany: async () => ({ count: 0 }) },
+    partySession: { updateMany: async () => ({ count: 0 }) },
+  };
+  prisma.$transaction = async (callback: any) => callback(risky);
+  const result = await deliverSignedEvent({
+    id: 'evt_dispute_1', type: 'charge.dispute.created', created: Math.floor(Date.now() / 1000),
+    data: { object: { id: 'dp_1', object: 'dispute', payment_intent: 'pi_party_1', status: 'needs_response' } },
+  } as unknown as Stripe.Event);
+  assert.equal(result.status, 200);
+  assert.deepEqual(recorded, ['evt_dispute_1']);
+  assert.equal(checkoutUpdates[0].data.disputeStatus, 'needs_response');
+  assert.deepEqual(guestUpdates[0].data, { accessGranted: false, status: 'disputed', credential: null });
+});

@@ -19,6 +19,7 @@ import {
   type PaymentProvider,
 } from '../services/privateSales';
 import { isBlockedBetween } from '../services/safety';
+import { filteredText } from '../lib/contentFilter';
 
 /**
  * Private sales. The meet point leaves this router only for the seller and
@@ -146,7 +147,7 @@ export const salesRouter = router({
   create: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'sales-create' }))
     .input(z.object({
-      title: z.string().trim().min(3).max(80),
+      title: filteredText(z.string().trim().min(3).max(80), { blockContactInfo: true }),
       priceCents: z.number().int().min(0).max(10_000_000),
       meetPoint: z.object({
         lat: z.number().min(-90).max(90),

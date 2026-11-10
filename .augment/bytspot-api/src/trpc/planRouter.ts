@@ -18,6 +18,7 @@ import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableB
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 import { resolvePlaceHours, resolvePlaceLocation } from './placesRouter';
 import { dispatchPlanChanged, dispatchPlanDecided, dispatchPlanInvited, dispatchPlanItemAdded, dispatchPlanJoined, type PlanChange } from '../services/planAlerts';
+import { filteredText } from '../lib/contentFilter';
 
 /**
  * Plan — the control plane.
@@ -596,8 +597,8 @@ async function resolveSupply(
 
 const createPlanInput = z.object({
   idempotencyKey: z.string().uuid(),
-  title: z.string().trim().min(1).max(80),
-  intent: z.string().trim().min(1).max(280),
+  title: filteredText(z.string().trim().min(1).max(80)),
+  intent: filteredText(z.string().trim().min(1).max(280)),
   startsAt: z.coerce.date().optional(),
   endsAt: z.coerce.date().optional(),
   areaLabel: z.string().trim().max(80).optional(),
@@ -1461,7 +1462,7 @@ export const planRouter = router({
       z.object({
         planId: z.string().min(1),
         needKind: z.string().trim().min(1).max(40),
-        title: z.string().trim().min(1).max(120).optional(),
+        title: filteredText(z.string().trim().min(1).max(120)).optional(),
         // Legacy top-level partyId is kept for one release so unshipped iOS
         // builds do not break; a follow-up removes it. Prefer supplyRef.
         partyId: z.string().min(1).optional(),
@@ -1575,8 +1576,8 @@ export const planRouter = router({
           partyId: z.string().min(1).optional(),
           coffeeReservationId: z.string().min(1).optional(),
         }),
-        title: z.string().trim().min(1).max(80).optional(),
-        intent: z.string().trim().min(1).max(280).optional(),
+        title: filteredText(z.string().trim().min(1).max(80)).optional(),
+        intent: filteredText(z.string().trim().min(1).max(280)).optional(),
         areaLabel: z.string().trim().max(80).optional(),
         partySize: z.number().int().min(1).max(200).optional(),
         startsAt: z.coerce.date().optional(),

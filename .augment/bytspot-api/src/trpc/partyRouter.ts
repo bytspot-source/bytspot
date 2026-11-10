@@ -24,6 +24,7 @@ import { isBlockedBetween } from '../services/safety';
 import { MAX_REQUEST_NOTES_PER_TICKET } from '../services/partyRequestNotes';
 import { musicInput, musicListing, musicSetTimeProblem, storedMusic } from '../services/partyMusic';
 import { assertPaidCheckoutAllowedForTrpc } from '../lib/paidCheckout';
+import { filteredText } from '../lib/contentFilter';
 
 const maxAlbumImages = 6;
 const partyKinds = ['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up'] as const;
@@ -126,8 +127,9 @@ function projectDestinationList(value: Prisma.JsonValue | null | undefined): Arr
 const draftInput = z.object({
   idempotencyKey: z.string().uuid(),
   templateId: z.enum(partyKinds),
-  title: z.string().trim().min(3).max(140),
-  tagline: z.string().trim().max(280),
+  // REA X4: member text passes the objectionable-content filter.
+  title: filteredText(z.string().trim().min(3).max(140)),
+  tagline: filteredText(z.string().trim().max(280)),
   startsAt: z.string().datetime({ offset: true }),
   endsAt: z.string().datetime({ offset: true }).nullish(),
   venueName: z.string().trim().min(1).max(200),

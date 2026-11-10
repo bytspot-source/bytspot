@@ -2058,3 +2058,9 @@ test('REA P1: a bottle session cannot be bought from an unlicensed business, or 
   user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
   await assert.rejects(() => guest.events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }), { code: 'FORBIDDEN', message: /21\+/ });
 });
+
+test('REA X4: a party draft whose title fails the content filter is refused before anything is written', async () => {
+  party.create = async () => { throw new Error('must not create'); };
+  const host = createCaller({ user: { userId: 'filter-host', email: 'filter@bytspot.com' }, clientRateLimitKey: 'test-party-filter' });
+  await assert.rejects(() => host.events.drafts.create({ ...draftInput, title: 'no f4ggots allowed' }), { code: 'BAD_REQUEST' });
+});

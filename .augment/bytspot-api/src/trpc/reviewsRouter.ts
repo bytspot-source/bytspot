@@ -7,6 +7,7 @@ import { TRPCError } from '@trpc/server';
 import { router, publicProcedure, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
 import { blockedUserIds } from '../services/safety';
+import { filteredText } from '../lib/contentFilter';
 
 export const reviewsRouter = router({
   /** List reviews for a venue (public). Leaves out reviews hidden by reports,
@@ -71,7 +72,7 @@ export const reviewsRouter = router({
       venueId: z.string(),
       stars: z.number().int().min(1).max(5),
       vibe: z.number().int().min(1).max(10),
-      comment: z.string().max(500).optional().default(''),
+      comment: filteredText(z.string().max(500)).optional().default(''),
     }))
     .mutation(async ({ ctx, input }) => {
       const { venueId, stars, vibe, comment } = input;

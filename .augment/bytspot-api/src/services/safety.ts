@@ -9,10 +9,20 @@ import { getRedis } from '../lib/redis';
  * and enough independent reports hide the item until an admin decides.
  */
 
-export const REPORT_KINDS = ['user', 'party', 'review', 'sale'] as const;
+// REA review 2026-11-10, X4: Plans, party media, request notes, businesses
+// and concierge answers are reportable too, and the reasons cover underage
+// attendance, alcohol, illegal items and scams.
+export const REPORT_KINDS = ['user', 'party', 'review', 'sale', 'plan', 'media', 'note', 'vendor', 'concierge'] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 
-export const REPORT_REASONS = ['spam', 'harassment', 'sexual', 'violence', 'impersonation', 'other'] as const;
+export const REPORT_REASONS = [
+  'spam', 'harassment', 'sexual', 'violence', 'impersonation',
+  'underage', 'alcohol', 'illegal-item', 'scam',
+  'other',
+] as const;
+
+/** Owner recorded for a concierge answer: Bytspot wrote it, not a member. */
+export const CONCIERGE_OWNER_ID = 'bytspot:concierge';
 export type ReportReason = (typeof REPORT_REASONS)[number];
 
 /** Distinct reporters with confirmed emails it takes to hide an item before review. */
@@ -109,6 +119,37 @@ export async function reportTarget(kind: ReportKind, id: string): Promise<Report
         ? { ownerId: sale.sellerId, snapshot: { title: sale.title, priceCents: sale.priceCents, areaLabel: sale.meetAreaLabel } }
         : null;
     }
+    case 'plan': {
+      // Never the anchor coordinates: the snapshot is read by admins only, but
+      // it still need not carry where someone lives.
+      const plan = await db.plan.findFirst({ where: { id, deletedAt: null }, select: { creatorUserId: true, title: true, intent: true, areaLabel: true, startsAt: true } });
+      return plan
+        ? { ownerId: plan.creatorUserId, snapshot: { title: plan.title, intent: plan.intent, areaLabel: plan.areaLabel, startsAt: plan.startsAt?.toISOString() ?? null } }
+        : null;
+    }
+    case 'media': {
+      const media = await db.partyMedia.findUnique({ where: { id }, select: { id: true, kind: true, partyId: true, party: { select: { hostUserId: true, title: true } } } });
+      return media
+        ? { ownerId: media.party.hostUserId, snapshot: { mediaId: media.id, mediaKind: media.kind, partyId: media.partyId, partyTitle: media.party.title } }
+        : null;
+    }
+    case 'note': {
+      const note = await db.partyRequestNote.findUnique({ where: { id }, select: { senderUserId: true, body: true, partyId: true } });
+      return note ? { ownerId: note.senderUserId, snapshot: { body: note.body, partyId: note.partyId } } : null;
+    }
+    case 'vendor': {
+      const seller = await db.vendorSeller.findUnique({
+        where: { id },
+        select: { id: true, legalName: true, seats: { where: { role: 'owner', state: 'ACTIVE' }, select: { userId: true }, take: 1 } },
+      });
+      return seller
+        ? { ownerId: seller.seats[0]?.userId ?? `seller:${seller.id}`, snapshot: { sellerId: seller.id, legalName: seller.legalName } }
+        : null;
+    }
+    case 'concierge':
+      // Concierge answers are not stored; the reporter's excerpt is the
+      // evidence, attached by the router.
+      return { ownerId: CONCIERGE_OWNER_ID, snapshot: { responseId: id } };
   }
 }
 
@@ -119,6 +160,10 @@ export async function setModerationHidden(kind: ReportKind, id: string, hidden: 
   if (kind === 'party') await db.party.updateMany({ where, data });
   else if (kind === 'review') await db.review.updateMany({ where, data });
   else if (kind === 'sale') await db.privateSale.updateMany({ where, data });
+  // A removed request note leaves the performer's queue. Media, Plans,
+  // businesses and concierge answers have no hidden flag: an admin removes
+  // media, pauses a business (admin.vendors.pause) or fixes the concierge.
+  else if (kind === 'note' && hidden) await db.partyRequestNote.updateMany({ where: { id }, data: { status: 'dismissed' } });
 }
 
 /** Distinct reporters with confirmed emails whose reports on the item are still open. */

@@ -255,3 +255,13 @@ test('a seller deletes only their own sold, cancelled or ended sale', async () =
   sale.findFirst = async () => null;
   await assert.rejects(() => buyer().sales.delete({ saleId: 'sale-1' }), { code: 'NOT_FOUND' });
 });
+
+test('REA X4: a sale title with contact details or a slur is refused by the content filter', async () => {
+  const input = {
+    title: 'Jordans, text 404-555-0123', priceCents: 22_000,
+    meetPoint: { lat: 33.787861, lng: -84.383191, placeName: 'Colony Square plaza', areaLabel: 'Midtown' },
+    windowStart: new Date(Date.now() + hour), windowEnd: new Date(Date.now() + 3 * hour), providers: ['venmo' as const],
+  };
+  sale.create = async () => { throw new Error('must not create'); };
+  await assert.rejects(() => seller().sales.create(input), { code: 'BAD_REQUEST' });
+});

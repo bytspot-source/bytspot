@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { filteredText } from '../lib/contentFilter';
 
 /** Upper bound a host can set on a single ticket tier. */
 export const MAX_REQUEST_NOTES_PER_TICKET = 5;
@@ -12,8 +13,10 @@ export type RequestNoteDecision = 'accept' | 'played' | 'dismiss';
 
 // One line of plain text: no control, line-break or bidi-override characters,
 // so a note reads on the stage screen exactly as the performer approved it.
-export const requestNoteBody = z.string().trim().min(1).max(REQUEST_NOTE_MAX_LENGTH)
-  .regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/, 'Keep the note to one line of text.');
+// REA X4: notes reach performers on a screen in the room, so they pass the
+// content filter and may not carry phone numbers, emails or pay handles.
+export const requestNoteBody = filteredText(z.string().trim().min(1).max(REQUEST_NOTE_MAX_LENGTH)
+  .regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/, 'Keep the note to one line of text.'), { blockContactInfo: true });
 
 type TierShape = { name?: unknown; priceCents?: unknown; requestNotes?: unknown };
 

@@ -2332,7 +2332,7 @@ model UserBlock {
 model ContentReport {
   id          String    @id @default(cuid())
   reporterId  String    @map("reporter_id")
-  /// user | party | review | sale
+  /// user | party | review | sale | plan | media | note | vendor | concierge
   targetKind  String    @map("target_kind")
   targetId    String    @map("target_id")
   /// The member who made the item (the person, for a user report).

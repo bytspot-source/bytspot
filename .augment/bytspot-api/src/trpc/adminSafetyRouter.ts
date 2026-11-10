@@ -7,6 +7,7 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
 import { db } from '../lib/db';
+import { config } from '../config';
 import { captureError } from '../lib/observability';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
 import { signOutSessionsIssuedBefore } from '../services/accountDeletion';
@@ -77,11 +78,17 @@ export const adminSafetyRouter = router({
       }
       const hidden = await hiddenTargets([...items.values()]);
       return {
-        items: [...items.values()].map((item) => ({
-          ...item,
-          reporterCount: item.reports.length,
-          hidden: hidden.has(`${item.kind}:${item.targetId}`),
-        })),
+        items: [...items.values()].map((item) => {
+          // REA X4: the published response commitment, per item.
+          const respondBy = new Date(item.firstReportedAt.getTime() + config.moderationResponseHours * 3_600_000);
+          return {
+            ...item,
+            reporterCount: item.reports.length,
+            hidden: hidden.has(`${item.kind}:${item.targetId}`),
+            respondBy,
+            overdue: item.status === 'open' && respondBy.getTime() < Date.now(),
+          };
+        }),
       };
     }),
 
@@ -101,6 +108,8 @@ export const adminSafetyRouter = router({
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'A person is suspended, not removed.' });
       }
       const now = new Date();
+      // Removing reported media deletes the image: it has no hidden state.
+      if (input.action !== 'dismiss' && input.kind === 'media') await db.partyMedia.deleteMany({ where: { id: input.targetId } });
       if (input.action === 'dismiss') await setModerationHidden(input.kind, input.targetId, false);
       else await setModerationHidden(input.kind, input.targetId, true, now);
       if (input.action === 'suspend') await suspendMember(open.ownerId, now);

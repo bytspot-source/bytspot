@@ -33,7 +33,28 @@ export const PROHIBITED_ITEMS: ReadonlyArray<{ id: string; label: string; patter
   { id: 'medical', label: 'Injectables and prescription-only drugs', pattern: /\b(syringes?|insulin|ozempic|semaglutide|wegovy|steroids?|sarms)\b/ },
 ];
 
-export interface SaleListing { title: string; category: SaleCategory; priceCents: number; faceValueCents?: number | null }
+export interface SaleListing { title: string; category?: SaleCategory | null; priceCents: number; faceValueCents?: number | null }
+
+/**
+ * A listing is treated as a ticket when the seller says so, or when the
+ * title reads as admission (passes, tickets, GA, numbered seats). The
+ * face-value cap must not depend on picking `event-ticket`; shipped clients
+ * that omit category, and anyone who leaves it at `other`, still hit the
+ * rule (REA re-review, PS1 bypass).
+ */
+const TICKET_TITLE = /\b(e-?tickets?|tickets?|general admission|ga|admissions?|wristbands?|(?:vip|guest|door|event|concert|festival|entry) pass(?:es)?|\d+\s+seats?|stubhub|ticketmaster)\b/;
+
+export function looksLikeEventTicket(listing: Pick<SaleListing, 'title' | 'category'>): boolean {
+  if (listing.category === 'event-ticket') return true;
+  const texts = [listing.title.toLowerCase(), normalizeForFilter(listing.title)];
+  return texts.some((text) => TICKET_TITLE.test(text));
+}
+
+/** Category stored when the client omits it: ticket-like titles become event-ticket, otherwise other. */
+export function inferredSaleCategory(title: string, category?: SaleCategory | null): SaleCategory {
+  if (category) return category;
+  return looksLikeEventTicket({ title, category: null }) ? 'event-ticket' : 'other';
+}
 
 export function prohibitedItemFor(title: string): { id: string; label: string } | null {
   // Raw lower-case keeps digits ("750ml", "ar15"); normalized catches
@@ -53,11 +74,12 @@ export function saleListingProblem(listing: SaleListing, opts: { newSeller: bool
       ? `New sellers can list items up to $${(cap / 100).toLocaleString('en-US')}. The limit goes up after a few completed sales.`
       : `Private sales are limited to $${(cap / 100).toLocaleString('en-US')}.`;
   }
-  if (listing.category === 'event-ticket') {
+  if (looksLikeEventTicket(listing)) {
     // Georgia restricts reselling admission above face value without a
     // broker licence (O.C.G.A. 43-4B-25). Whether and how much markup is
     // lawful is a COUNSEL QUESTION; until answered, Bytspot allows face value
-    // or less (TICKET_RESALE_MAX_MARKUP_BPS, default 0).
+    // or less (TICKET_RESALE_MAX_MARKUP_BPS, default 0). Applied to any
+    // ticket-like title, not only category === 'event-ticket'.
     if (listing.faceValueCents == null) return 'Enter the face value printed on the ticket.';
     const max = Math.floor(listing.faceValueCents * (10_000 + config.ticketResaleMaxMarkupBps) / 10_000);
     if (listing.priceCents > max) return 'Tickets can be resold for face value or less on Bytspot.';

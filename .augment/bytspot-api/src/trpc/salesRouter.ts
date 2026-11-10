@@ -20,7 +20,7 @@ import {
 } from '../services/privateSales';
 import { isBlockedBetween } from '../services/safety';
 import { filteredText } from '../lib/contentFilter';
-import { SALE_CATEGORIES, assertVerifiedEmailForSales, isNewSeller, saleListingProblem } from '../services/privateSalesPolicy';
+import { SALE_CATEGORIES, assertVerifiedEmailForSales, inferredSaleCategory, isNewSeller, saleListingProblem } from '../services/privateSalesPolicy';
 import { serializableTransactionWithRetry } from '../lib/transactions';
 
 /**
@@ -151,8 +151,10 @@ export const salesRouter = router({
     .input(z.object({
       title: filteredText(z.string().trim().min(3).max(80), { blockContactInfo: true }),
       priceCents: z.number().int().min(0).max(10_000_000),
-      // REA PS1. Optional on the wire so shipped clients keep working; they list as `other`.
-      category: z.enum(SALE_CATEGORIES).default('other'),
+      // Optional so shipped clients that omit it still work. There is no
+      // default of `other` on the cap: ticket-like titles are treated as
+      // event-ticket even when the field is missing or set to other.
+      category: z.enum(SALE_CATEGORIES).optional(),
       faceValueCents: z.number().int().min(0).max(10_000_000).optional(),
       meetPoint: z.object({
         lat: z.number().min(-90).max(90),
@@ -171,8 +173,9 @@ export const salesRouter = router({
       const problem = meetWindowProblem(input.windowStart, input.windowEnd, now);
       if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });
       await assertVerifiedEmailForSales(ctx.user.userId);
+      const category = inferredSaleCategory(input.title, input.category);
       const listingProblem = saleListingProblem(
-        { title: input.title, category: input.category, priceCents: input.priceCents, faceValueCents: input.faceValueCents ?? null },
+        { title: input.title, category, priceCents: input.priceCents, faceValueCents: input.faceValueCents ?? null },
         { newSeller: await isNewSeller(ctx.user.userId) },
       );
       if (listingProblem) throw new TRPCError({ code: 'BAD_REQUEST', message: listingProblem });
@@ -204,7 +207,7 @@ export const salesRouter = router({
           sellerId: ctx.user.userId,
           title: input.title,
           priceCents: input.priceCents,
-          category: input.category,
+          category,
           faceValueCents: input.faceValueCents ?? null,
           providers,
           meetPlaceName: input.meetPoint.placeName,

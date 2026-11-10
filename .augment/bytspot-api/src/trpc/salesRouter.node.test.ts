@@ -307,6 +307,17 @@ test('REA PS1: tickets need a face value and cannot be listed above it', async (
   assert.equal(created.faceValueCents, 8000);
 });
 
+test('REA PS1: a ticket listed as other or with no category still needs a face value', async () => {
+  await assert.rejects(() => seller().sales.create(listing({ title: '2 GA Coldplay', category: 'other', priceCents: 9000 }) as any), { message: /face value/ });
+  await assert.rejects(() => seller().sales.create(listing({ title: '2 GA Coldplay', priceCents: 9000 }) as any), { message: /face value/ });
+  let created: any;
+  sale.create = async ({ data }: any) => { created = data; return { id: 'sale-new', ...data }; };
+  await seller().sales.create(listing({ title: '2 GA Coldplay', priceCents: 8000, faceValueCents: 8000 }) as any);
+  assert.equal(created.category, 'event-ticket', 'an omitted category is stored as event-ticket when the title is a ticket');
+  await seller().sales.create(listing({ title: '2 GA Coldplay', category: 'other', priceCents: 8000, faceValueCents: 8000 }) as any);
+  assert.equal(created.category, 'other', 'an explicit other is stored, but the cap still applied');
+});
+
 test('REA PS1: selling and requesting need a confirmed email', async () => {
   user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: null });
   await assert.rejects(() => seller().sales.create(listing() as any), { code: 'FORBIDDEN', message: /Confirm your email/ });

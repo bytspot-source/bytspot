@@ -391,6 +391,30 @@ const socialPeopleMetRouter = router({
     }),
 });
 
+/**
+ * Members the caller and they each have in their synced contacts (REA PL2).
+ * Both directions use stored, pepper-keyed hashes; nothing raw is compared.
+ */
+export async function mutualContactMatches(userId: string, myContactHashes?: string[]): Promise<string[]> {
+  const mine = myContactHashes ?? (await db.contactHash.findMany({ where: { userId }, select: { hashedContact: true } }))
+    .map((row) => row.hashedContact);
+  if (mine.length === 0) return [];
+  const inMyBook = await db.userIdentityHash.findMany({
+    where: { hashedIdentity: { in: mine }, userId: { not: userId } },
+    select: { userId: true },
+  });
+  const candidates = [...new Set(inMyBook.map((row) => row.userId))];
+  if (candidates.length === 0) return [];
+  const myIdentity = (await db.userIdentityHash.findMany({ where: { userId }, select: { hashedIdentity: true } }))
+    .map((row) => row.hashedIdentity);
+  if (myIdentity.length === 0) return [];
+  const iAmInTheirs = await db.contactHash.findMany({
+    where: { userId: { in: candidates }, hashedContact: { in: myIdentity } },
+    select: { userId: true },
+  });
+  return [...new Set(iAmInTheirs.map((row) => row.userId))];
+}
+
 export const socialRouter = router({
   invites: socialInvitesRouter,
   groups: socialGroupsRouter,
@@ -398,38 +422,21 @@ export const socialRouter = router({
 
   /**
    * Ranked friend suggestions from the privacy-preserving contact graph.
-   * A member is suggested when either side of the relationship is visible:
-   *   • identity match — one of the caller's device contacts is a member
-   *     (their salted identity hash equals a synced contact hash), or
-   *   • mutual contact overlap — both members synced address books that
-   *     share at least one hashed contact.
-   * Identity matching means a member appears immediately after the caller
-   * syncs, without the other member syncing first. Declined connection
-   * pairs are never resurfaced.
+   *
+   * REA review 2026-11-10, PL2: a member is suggested only on a MUTUAL match:
+   * the caller has them in their synced contacts AND they have the caller in
+   * theirs. One-sided identity matches used to return a member's name for
+   * any phone or email hash the caller uploaded, which made suggestions a
+   * phone-to-name lookup; contact-book overlaps revealed who knows whom.
+   * Neither is returned any more. Declined pairs are never resurfaced.
    */
   suggestions: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'social:suggestions' }))
     .query(async ({ ctx }) => {
-    const mine = await db.contactHash.findMany({
-      where: { userId: ctx.user.userId },
-      select: { hashedContact: true },
-    });
-    if (mine.length === 0) return { items: [] };
-    const myHashes = mine.map((row) => row.hashedContact);
-    const [identityMatches, overlaps] = await Promise.all([
-      db.userIdentityHash.findMany({
-        where: { hashedIdentity: { in: myHashes }, userId: { not: ctx.user.userId } },
-        select: { userId: true },
-      }),
-      db.contactHash.findMany({
-        where: { hashedContact: { in: myHashes }, userId: { not: ctx.user.userId } },
-        select: { userId: true },
-      }),
-    ]);
+    const mutualIds = await mutualContactMatches(ctx.user.userId);
+    if (mutualIds.length === 0) return { items: [] };
     const blocked = await blockedUserIds(ctx.user.userId);
-    const candidateIds = [...new Set([...identityMatches.map((row) => row.userId), ...overlaps.map((row) => row.userId)])]
-      .filter((id) => !blocked.has(id))
-      .slice(0, 50);
+    const candidateIds = mutualIds.filter((id) => !blocked.has(id)).slice(0, 50);
     if (candidateIds.length === 0) return { items: [] };
     const [users, invites, circleMemberships] = await Promise.all([
       db.user.findMany({ where: { id: { in: candidateIds }, suspendedAt: null }, select: { id: true, name: true } }),
@@ -467,7 +474,8 @@ export const socialRouter = router({
    * digests produced on-device.
    */
   syncCloudContact: protectedProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 6, label: 'social:sync-cloud-contact' }))
+    // REA PL2: a few full syncs a day is what a real address book needs.
+    .use(rateLimitMiddleware({ windowMs: 24 * 60 * 60_000, max: 6, label: 'social:sync-cloud-contact' }))
     .input(z.object({
       source: z.string().min(1).max(40),
       hashes: z.array(hashedContactInput).max(5000),
@@ -482,21 +490,10 @@ export const socialRouter = router({
         }),
       ]);
       if (hashes.length === 0) return { synced: 0, matched: 0, mutual: 0 };
-      const [identityMatches, overlaps] = await Promise.all([
-        db.userIdentityHash.findMany({
-          where: { hashedIdentity: { in: hashes }, userId: { not: ctx.user.userId } },
-          select: { userId: true, hashedIdentity: true },
-        }),
-        db.contactHash.findMany({
-          where: { hashedContact: { in: hashes }, userId: { not: ctx.user.userId } },
-          select: { userId: true, hashedContact: true },
-        }),
-      ]);
-      return {
-        synced: hashes.length,
-        matched: new Set([...identityMatches.map((row) => row.hashedIdentity), ...overlaps.map((row) => row.hashedContact)]).size,
-        mutual: new Set([...identityMatches.map((row) => row.userId), ...overlaps.map((row) => row.userId)]).size,
-      };
+      // Only mutual matches are counted: a count of one-sided matches would
+      // tell a caller which uploaded hashes belong to members.
+      const mutual = (await mutualContactMatches(ctx.user.userId, hashes)).length;
+      return { synced: hashes.length, matched: mutual, mutual };
     }),
 
   /** Follow a user */

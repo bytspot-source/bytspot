@@ -26,6 +26,26 @@ const prisma = db as any;
 const checkIn = db.checkIn as any;
 const pointTransaction = db.pointTransaction as any;
 
+
+/**
+ * A contact graph for the mutual-match rule (REA PL2). `book[me]` is what
+ * each member synced; `identity[me]` is each member's own identity hashes.
+ */
+function graph(book: Record<string, string[]>, identity: Record<string, string[]>) {
+  contactHash.findMany = async ({ where }: any) => {
+    if (typeof where.userId === 'string') return (book[where.userId] ?? []).map((hashedContact) => ({ userId: where.userId, hashedContact }));
+    const ids: string[] = where.userId.in;
+    const wanted: string[] = where.hashedContact.in;
+    return ids.flatMap((id) => (book[id] ?? []).filter((h) => wanted.includes(h)).map((hashedContact) => ({ userId: id, hashedContact })));
+  };
+  userIdentityHash.findMany = async ({ where }: any) => {
+    if (typeof where.userId === 'string') return (identity[where.userId] ?? []).map((hashedIdentity) => ({ userId: where.userId, hashedIdentity }));
+    const wanted: string[] = where.hashedIdentity.in;
+    return Object.entries(identity).filter(([id]) => id !== where.userId.not)
+      .flatMap(([id, hs]) => hs.filter((h) => wanted.includes(h)).map((hashedIdentity) => ({ userId: id, hashedIdentity })));
+  };
+}
+
 function caller(context = authenticatedContext) {
   return createCaller(context);
 }
@@ -193,13 +213,12 @@ test('Contact sync rejects raw contact data and replaces the stored hash set', a
     createManyData = data;
     return { count: data.length };
   };
-  contactHash.findMany = async () => [
-    { userId: 'friend', hashedContact: hashA },
-    { userId: 'friend', hashedContact: hashB },
-    { userId: 'other', hashedContact: hashA },
-  ];
+  const [kA, kB] = [keyContactHash(hashA), keyContactHash(hashB)];
+  // friend is in my book (kA) and I am in friend's book; other only overlaps.
+  graph({ friend: ['me-id-hash'], other: [kA] }, { me: ['me-id-hash'], friend: [kA] });
   const result = await caller().social.syncCloudContact({ source: 'apple', hashes: [hashA, hashB, hashA] });
-  assert.deepEqual(result, { synced: 2, matched: 2, mutual: 2 });
+  assert.deepEqual(result, { synced: 2, matched: 1, mutual: 1 }, 'only the mutual match is counted');
+  void kB;
   // What is stored is keyed with the server-only pepper, never the client hash.
   const [keyedA, keyedB] = [keyContactHash(hashA), keyContactHash(hashB)];
   assert.match(keyedA, /^[a-f0-9]{64}$/);
@@ -211,10 +230,11 @@ test('Contact sync rejects raw contact data and replaces the stored hash set', a
   ]);
 });
 
-test('Suggestions surface mutual hash overlaps, never raw contacts, and skip declined pairs', async () => {
-  contactHash.findMany = async ({ where }: any) => where.userId === 'me'
-    ? [{ hashedContact: hashA }, { hashedContact: hashB }]
-    : [{ userId: 'friend' }, { userId: 'declined-user' }];
+test('Suggestions surface only mutual matches, never raw contacts, and skip declined pairs', async () => {
+  graph(
+    { me: ['h-friend', 'h-declined'], friend: ['h-me'], 'declined-user': ['h-me'] },
+    { me: ['h-me'], friend: ['h-friend'], 'declined-user': ['h-declined'] },
+  );
   user.findMany = async () => [
     { id: 'friend', name: 'Friend' },
     { id: 'declined-user', name: 'Declined' },
@@ -231,10 +251,18 @@ test('Suggestions surface mutual hash overlaps, never raw contacts, and skip dec
   for (const item of items) assert.deepEqual(Object.keys(item), ['userId', 'name', 'relationshipStatus', 'circleIds']);
 });
 
+test('REA PL2: contact-book overlap alone never suggests anyone (no who-knows-whom)', async () => {
+  // stranger and I share a contact, but neither has the other.
+  graph({ me: ['h-shared'], stranger: ['h-shared'] }, { me: ['h-me'], stranger: ['h-stranger'] });
+  user.findMany = async () => { throw new Error('no candidate should be looked up'); };
+  assert.deepEqual(await caller().social.suggestions(), { items: [] });
+});
+
 test('A block either way hides the member from suggestions and refuses invites and follows', async () => {
-  contactHash.findMany = async ({ where }: any) => where.userId === 'me'
-    ? [{ hashedContact: hashA }]
-    : [{ userId: 'friend' }, { userId: 'blocked-user' }];
+  graph(
+    { me: ['h-friend', 'h-blocked'], friend: ['h-me'], 'blocked-user': ['h-me'] },
+    { me: ['h-me'], friend: ['h-friend'], 'blocked-user': ['h-blocked'] },
+  );
   let asked: string[] = [];
   user.findMany = async ({ where }: any) => {
     asked = where.id.in;
@@ -254,27 +282,17 @@ test('A block either way hides the member from suggestions and refuses invites a
   }
 });
 
-test('Suggestions surface identity matches without the other member syncing', async () => {
-  contactHash.findMany = async ({ where }: any) => where.userId === 'me'
-    ? [{ hashedContact: hashA }]
-    : []; // the friend never synced an address book
-  userIdentityHash.findMany = async ({ where }: any) => {
-    assert.deepEqual(where.hashedIdentity, { in: [hashA] });
-    assert.deepEqual(where.userId, { not: 'me' });
-    return [{ userId: 'friend' }];
-  };
-  user.findMany = async () => [{ id: 'friend', name: 'Friend' }];
-
-  const { items } = await caller().social.suggestions();
-  assert.equal(items.length, 1);
-  assert.deepEqual(items[0], { userId: 'friend', name: 'Friend', relationshipStatus: 'suggested', circleIds: [] });
+test('REA PL2: a one-sided identity match is not a suggestion, so an uploaded phone hash cannot be turned into a name', async () => {
+  // The caller uploaded the friend's phone hash; the friend never had the caller.
+  graph({ me: ['h-friend'] }, { me: ['h-me'], friend: ['h-friend'] });
+  user.findMany = async () => { throw new Error('no candidate should be looked up'); };
+  assert.deepEqual(await caller().social.suggestions(), { items: [] });
 });
 
-test('Contact sync counts identity matches in matched/mutual', async () => {
-  userIdentityHash.findMany = async () => [{ userId: 'friend', hashedIdentity: hashA }];
-  contactHash.findMany = async () => [];
-  const result = await caller().social.syncCloudContact({ source: 'apple', hashes: [hashA, hashB] });
-  assert.deepEqual(result, { synced: 2, matched: 1, mutual: 1 });
+test('Contact sync counts only mutual matches in matched/mutual', async () => {
+  const kA = keyContactHash(hashA);
+  graph({ friend: [] }, { me: ['h-me'], friend: [kA] });
+  assert.deepEqual(await caller().social.syncCloudContact({ source: 'apple', hashes: [hashA, hashB] }), { synced: 2, matched: 0, mutual: 0 });
 });
 
 test('Contact hashing pins the iOS BytspotContactHasher contract (fixed vectors, dev salt)', () => {

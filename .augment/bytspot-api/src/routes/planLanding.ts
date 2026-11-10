@@ -2,13 +2,22 @@ import { Router, type Response } from 'express';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { captureError } from '../lib/observability';
-import { isInAppBrowserUA } from './partyLanding';
 import { planEffectiveEnd } from '../trpc/planRouter';
+import {
+  APP_STORE_ID,
+  APP_STORE_URL,
+  appStoreCta,
+  escapeHtml,
+  openInBytspotCta,
+  renderSharePage,
+  renderShareShell,
+  shareClient,
+  shareFootnote,
+} from '../lib/sharePage';
+
+export { APP_STORE_ID, APP_STORE_URL, escapeHtml };
 
 const planLandingRouter = Router();
-
-export const APP_STORE_ID = '6761876421';
-export const APP_STORE_URL = `https://apps.apple.com/app/id${APP_STORE_ID}`;
 
 /**
  * Server-rendered Plan invite landing page.
@@ -17,7 +26,7 @@ export const APP_STORE_URL = `https://apps.apple.com/app/id${APP_STORE_ID}`;
  * from their own device — Bytspot never sees the recipient's number, so the
  * social graph's "phone numbers are never accepted, stored, or returned" rule
  * holds. This page is what that link opens: it names the friend who invited
- * them and the Plan, and points at the App Store. Link previews (iMessage,
+ * them and the Plan, and points at the app. Link previews (iMessage,
  * WhatsApp) read the response bytes and never run JavaScript, so the metadata
  * has to be in the HTML.
  *
@@ -27,15 +36,12 @@ export const APP_STORE_URL = `https://apps.apple.com/app/id${APP_STORE_ID}`;
  * is present it rides into the Smart App Banner's app-argument and the share
  * URL, so an installed "Open" — or a re-tap after install — seats the holder.
  * A token-bearing response is never cached: it carries a credential.
+ *
+ * Membership-only detail (who is going, the itinerary stops, the intent, the
+ * area coordinates) is never on this page: an unauthenticated stranger with
+ * the link may only ever see the friend's first name, the title, and the
+ * rough when/where the creator chose to share.
  */
-
-const ESCAPES: Record<string, string> = {
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-};
-
-export function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => ESCAPES[char]);
-}
 
 function formatWhen(startsAt: Date): string {
   return new Intl.DateTimeFormat('en-US', {
@@ -57,10 +63,7 @@ function firstName(name: string | null | undefined): string {
 }
 
 // A deleted, cancelled, expired, or finished Plan reads the same as one that never
-// existed — the link is closed. Membership-only detail (who is going, the
-// intent, the area coordinates) is never on this page: an unauthenticated
-// stranger with the link may only ever see the friend's first name, the
-// title, and the rough when/where the creator chose to share.
+// existed — the link is closed.
 function planLinkClosed(
   plan: { lifecycle: string; startsAt: Date | null; endsAt: Date | null; expiresAt: Date | null; deletedAt: Date | null },
   now: Date,
@@ -75,95 +78,49 @@ function planLinkClosed(
 
 interface PublicPlan {
   hostName: string; title: string; when: string; area: string | null;
-  shareUrl: string; isInAppBrowser: boolean; hasToken: boolean;
+  shareUrl: string; userAgent: string | undefined; hasToken: boolean;
 }
 
 function renderPage(plan: PublicPlan): string {
-  const host = escapeHtml(plan.hostName);
-  const title = escapeHtml(plan.title);
+  const host = plan.hostName;
+  const title = plan.title;
   const heading = `${host} invited you to a plan`;
-  const meta = [escapeHtml(plan.when), plan.area ? escapeHtml(plan.area) : null].filter(Boolean).join(' · ');
+  const meta = [plan.when, plan.area].filter(Boolean).join(' · ');
   const description = `${title} · ${meta}`;
+  const client = shareClient(plan.userAgent);
+  const whenChip = `<span class="chip">${escapeHtml(plan.when)}</span>`;
+  const areaChip = plan.area ? `<span class="chip">${escapeHtml(plan.area)}</span>` : '';
 
-  return `<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>${heading} · Bytspot</title>
-<meta name="description" content="${description}">
-<meta property="og:type" content="website">
-<meta property="og:title" content="${heading}">
-<meta property="og:description" content="${description}">
-<meta property="og:url" content="${escapeHtml(plan.shareUrl)}">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="${heading}">
-<meta name="twitter:description" content="${description}">
-<!-- app-id only: there is no Plan App Clip, so the banner offers Open (when
-     installed) or Get, and app-argument carries the Plan for a future router. -->
-<meta name="apple-itunes-app" content="app-id=${APP_STORE_ID}, app-argument=${escapeHtml(plan.shareUrl)}">
-<style>
-:root{color-scheme:dark}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#05070d;color:#fff;font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
- min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.card{width:100%;max-width:420px}
-.brand{font-size:11px;font-weight:800;letter-spacing:.18em;color:#22d3a8;text-align:center;margin-bottom:18px}
-.kicker{font-size:13px;font-weight:800;color:rgba(255,255,255,.62)}
-h1{font-size:30px;font-weight:900;line-height:1.12;margin:6px 0 14px}
-.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:4px}
-.chip{background:rgba(255,255,255,.08);border-radius:999px;padding:7px 13px;font-size:11px;font-weight:800;
- letter-spacing:.04em}
-.note{margin-top:16px;font-size:13px;font-weight:600;color:rgba(255,255,255,.55)}
-.cta{display:block;margin-top:22px;background:#fff;color:#05070d;text-align:center;text-decoration:none;
- font-weight:900;font-size:16px;padding:16px;border-radius:16px}
-.foot{margin-top:12px;font-size:12px;font-weight:600;color:rgba(255,255,255,.45);text-align:center}
-</style>
-</head><body><div class="card">
-<div class="brand">BYTSPOT</div>
-<p class="kicker">${host} invited you to a plan</p>
-<h1>${title}</h1>
-<div class="chips"><span class="chip">${escapeHtml(plan.when)}</span>${plan.area ? `<span class="chip">${escapeHtml(plan.area)}</span>` : ''}</div>
-<p class="note">You're being invited — you decide if you're in. Bytspot is where the plan lives: see the details and RSVP.</p>
-<a class="cta" href="${escapeHtml(APP_STORE_URL)}">Get Bytspot</a>
-${plan.isInAppBrowser
-  ? `<p class="foot">This in-app browser can't open the App Store. Tap ⋯ and choose "Open in Safari".</p>`
-  : plan.hasToken
-    ? `<p class="foot">Get Bytspot, then reopen this invite to take your seat.</p>`
-    : `<p class="foot">Open on iPhone to see the plan and say if you're in.</p>`}
-</div></body></html>`;
-}
-
-function renderShell(heading: string, body: string): string {
-  return `<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bytspot</title>
-<meta name="robots" content="noindex">
-<style>
-:root{color-scheme:dark}
-body{background:#05070d;color:#fff;font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;
- min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;margin:0}
-h1{font-size:22px;font-weight:900;margin:0 0 8px}
-p{color:rgba(255,255,255,.55);font-weight:600;margin:0}
-</style>
-</head><body><div>
-<h1>${heading}</h1>
-<p>${body}</p>
-</div></body></html>`;
+  return renderSharePage({
+    documentTitle: `${heading} · Bytspot`,
+    description,
+    ogTitle: heading,
+    ogDescription: description,
+    shareUrl: plan.shareUrl,
+    kicker: heading,
+    heading: title,
+    bodyHtml: `<div class="chips">${whenChip}${areaChip}</div>
+<p class="note">You're being invited — you decide if you're in. Bytspot is where the plan lives: see the details and RSVP.</p>`,
+    ctas: [openInBytspotCta(plan.shareUrl), appStoreCta()],
+    footnote: shareFootnote(client, plan.hasToken ? 'plan-token' : 'plan'),
+  });
 }
 
 /** A 500 must not claim the Plan is gone — only that Bytspot cannot answer. */
 function sendUnavailable(res: Response) {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  return res.status(500).send(renderShell("Bytspot can't load this right now", 'Please try again in a moment.'));
+  return res.status(500).send(renderShareShell("Bytspot can't load this right now", 'Please try again in a moment.'));
 }
 
 function sendNotFound(res: Response) {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  return res.status(404).send(renderShell("This plan invite isn't available", 'The link may have been cancelled, or the plan may have ended.'));
+  return res.status(404).send(renderShareShell(
+    "This plan invite isn't available",
+    'The link may have expired, been cancelled, or the plan may have ended.',
+    { ctas: [appStoreCta()] },
+  ));
 }
 
 planLandingRouter.get('/plan/:planId', async (req, res) => {
@@ -205,7 +162,7 @@ planLandingRouter.get('/plan/:planId', async (req, res) => {
     when: plan.startsAt ? formatWhen(plan.startsAt) : WHEN_TBD,
     area: plan.areaLabel,
     shareUrl: token ? `${base}?t=${encodeURIComponent(token)}` : base,
-    isInAppBrowser: isInAppBrowserUA(req.get('user-agent')),
+    userAgent: req.get('user-agent'),
     hasToken: Boolean(token),
   });
 

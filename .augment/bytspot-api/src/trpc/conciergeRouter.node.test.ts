@@ -1,3 +1,4 @@
+import { db } from '../lib/db';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { appRouter } from './router';
@@ -12,6 +13,9 @@ test.afterEach(() => { Object.assign(config, original); });
 
 const member: Context = { user: { userId: 'concierge-test-user', email: 'member@example.test' }, clientRateLimitKey: 'concierge-test' };
 const missingLocation = { messages: [{ role: 'user' as const, content: 'coffee' }] };
+
+// REA C1: an open audience needs a confirmed email; these members have one.
+(db.user as any).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
 
 test('new discover mutation is mounted alongside the unchanged legacy chat', async () => {
   const procedures = appRouter._def.procedures as unknown as Record<string, { _def: { type: string } }>;

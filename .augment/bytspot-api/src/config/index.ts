@@ -66,6 +66,8 @@ const envSchema = z.object({
   PRIVATE_SALES_REQUIRE_VERIFIED_EMAIL: z.enum(['true', 'false']).default('true'),
   // 0 = face value or less. Raising it is a counsel decision (O.C.G.A. 43-4B-25).
   TICKET_RESALE_MAX_MARKUP_BPS: z.coerce.number().int().min(0).max(100_000).default(0),
+  // REA X7: shared secret Cloudflare adds to every request; unset = origin lock off.
+  ORIGIN_LOCK_SECRET: z.string().default('').refine((v) => v === '' || v.length >= 32, 'ORIGIN_LOCK_SECRET must be at least 32 characters'),
   PLACES_REQUIRE_AUTH: z.enum(['true', 'false']).default('true'),
   AUTO_REFUND_UNHONOURED_PAYMENTS: z.enum(['true', 'false']).default('true'),
   // REA X6/P1. A birth date under this refuses signup. 13 matches the
@@ -105,6 +107,12 @@ const envSchema = z.object({
   CONCIERGE_PILOT_USER_IDS: z.string().default(''),
   // BYTT-SI concierge.plan (proposed Plans). Off by default; when on, open to every signed-in user.
   CONCIERGE_PLAN_ENABLED: z.enum(['true', 'false']).default('false'),
+  // REA C1-C3. Per-user daily quota and a global daily breaker for every
+  // LLM-backed concierge call; consent is enforced once clients ship the sheet.
+  CONCIERGE_DAILY_QUOTA: z.coerce.number().int().min(1).max(10_000).default(20),
+  CONCIERGE_GLOBAL_DAILY_MAX: z.coerce.number().int().min(0).max(10_000_000).default(2000),
+  CONCIERGE_REQUIRE_AI_CONSENT: z.enum(['true', 'false']).default('false'),
+  CONCIERGE_CHAT_ENABLED: z.enum(['true', 'false']).default('true'),
   CONCIERGE_PLAN_MODEL:   z.string().trim().min(1).default('gpt-4o-mini'),
   OPENAI_API_KEY:         z.string().default(''),
   TICKETMASTER_API_KEY:   z.string().default(''),
@@ -210,6 +218,7 @@ export const config = {
   privateSaleTrustedAfterSales: env.PRIVATE_SALE_TRUSTED_AFTER_SALES,
   privateSalesRequireVerifiedEmail: env.PRIVATE_SALES_REQUIRE_VERIFIED_EMAIL === 'true',
   ticketResaleMaxMarkupBps: env.TICKET_RESALE_MAX_MARKUP_BPS,
+  originLockSecret: env.ORIGIN_LOCK_SECRET,
   placesRequireAuth: env.PLACES_REQUIRE_AUTH === 'true',
   autoRefundUnhonouredPayments: env.AUTO_REFUND_UNHONOURED_PAYMENTS === 'true',
   minSignupAge: env.MIN_SIGNUP_AGE,
@@ -222,6 +231,10 @@ export const config = {
   conciergeAudience: env.CONCIERGE_AUDIENCE,
   conciergePilotUserIds: env.CONCIERGE_PILOT_USER_IDS,
   conciergePlanEnabled: env.CONCIERGE_PLAN_ENABLED === 'true',
+  conciergeDailyQuota: env.CONCIERGE_DAILY_QUOTA,
+  conciergeGlobalDailyMax: env.CONCIERGE_GLOBAL_DAILY_MAX,
+  conciergeRequireAiConsent: env.CONCIERGE_REQUIRE_AI_CONSENT === 'true',
+  conciergeChatEnabled: env.CONCIERGE_CHAT_ENABLED === 'true',
   conciergePlanModel: env.CONCIERGE_PLAN_MODEL,
   resendApiKey: env.RESEND_API_KEY,
   adminPassword: env.ADMIN_PASSWORD,

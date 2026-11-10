@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
 import { rateLimitSubject } from './trpc';
+import { trustedClientIp } from '../middleware/originLock';
 
 /**
  * Creates the tRPC context from the Express request.
@@ -29,8 +30,8 @@ export function bearerUser(header: string | undefined): AuthPayload | null {
 
 /** Global limiter key: signed-in users by account, so people behind one shared
  *  address (a home network, a carrier gateway) do not use up each other's allowance. */
-export function globalRateLimitKey(req: { headers: { authorization?: string }; ip?: string }): string {
-  return rateLimitSubject(bearerUser(req.headers.authorization)?.userId, clientRateLimitKey(req.ip));
+export function globalRateLimitKey(req: { headers: Record<string, string | string[] | undefined> & { authorization?: string }; ip?: string }): string {
+  return rateLimitSubject(bearerUser(req.headers.authorization)?.userId, clientRateLimitKey(trustedClientIp(req)));
 }
 
 /**
@@ -53,7 +54,7 @@ export async function createContext({
   req,
 }: trpcExpress.CreateExpressContextOptions): Promise<{ user: AuthPayload | null; clientRateLimitKey: string; clientPlatform?: ClientPlatform }> {
   const user = bearerUser(req.headers.authorization);
-  return { user, clientRateLimitKey: clientRateLimitKey(req.ip), clientPlatform: clientPlatformOf(req.headers) };
+  return { user, clientRateLimitKey: clientRateLimitKey(trustedClientIp(req)), clientPlatform: clientPlatformOf(req.headers) };
 }
 
 export type Context = Awaited<ReturnType<typeof createContext>>;

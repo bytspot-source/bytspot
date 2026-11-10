@@ -71,3 +71,16 @@ test('with SIGNUP_REQUIRE_AGE_AND_TERMS on, signup needs both', () => {
   (config as any).signupRequireAgeAndTerms = false;
   assert.deepEqual(signupConsent({}), {}, 'shipped builds that send nothing still sign up');
 });
+
+test('REA C3: a member can agree to, and withdraw, sending concierge requests to OpenAI', async () => {
+  const writes: any[] = [];
+  (db.user as any).update = async (args: any) => { writes.push(args.data); return {}; };
+  const { appRouter } = await import('./router');
+  const caller = appRouter.createCaller({ user: { userId: 'ai-user', email: 'a@bytspot.com' }, clientRateLimitKey: 'ai-consent' });
+  const yes = await caller.consent.setAiConsent({ consent: true });
+  assert.ok(yes.consentedAt);
+  assert.ok(writes[0].aiConsentAt instanceof Date);
+  const no = await caller.consent.setAiConsent({ consent: false });
+  assert.equal(no.consentedAt, null);
+  assert.equal(writes[1].aiConsentAt, null);
+});

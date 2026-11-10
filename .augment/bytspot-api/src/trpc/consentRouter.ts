@@ -10,6 +10,9 @@ import { db } from '../lib/db';
 import { parseBirthDate, provenMinimumAge } from '../services/ageGate';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 
+/** Named in the consent sheet and the privacy policy draft. */
+export const AI_PROVIDER = 'OpenAI';
+
 const write = protectedProcedure.use(rateLimitMiddleware({ windowMs: 60_000, max: 10, label: 'consent-write' }));
 
 export const consentRouter = router({
@@ -18,7 +21,7 @@ export const consentRouter = router({
     .query(async ({ ctx }) => {
       const user = await db.user.findUnique({
         where: { id: ctx.user.userId },
-        select: { birthDate: true, ageConfirmedAt: true, termsVersion: true, termsAcceptedAt: true },
+        select: { birthDate: true, ageConfirmedAt: true, termsVersion: true, termsAcceptedAt: true, aiConsentAt: true },
       });
       if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: 'Account not found.' });
       const minimumAge = provenMinimumAge({ birthDate: user.birthDate, ageConfirmedAt: user.ageConfirmedAt });
@@ -35,6 +38,8 @@ export const consentRouter = router({
           confirmed18: (minimumAge ?? 0) >= 18,
           canEnter21Plus: (minimumAge ?? 0) >= 21 && Boolean(user.birthDate),
         },
+        // REA C3 / App Review 5.1.2(i).
+        ai: { provider: AI_PROVIDER, consentedAt: user.aiConsentAt?.toISOString() ?? null, required: config.conciergeRequireAiConsent },
       };
     }),
 
@@ -69,5 +74,17 @@ export const consentRouter = router({
       if (input.confirm18 && !user.ageConfirmedAt) data.ageConfirmedAt = new Date();
       if (Object.keys(data).length > 0) await db.user.update({ where: { id: ctx.user.userId }, data });
       return { ok: true as const };
+    }),
+
+  /**
+   * REA C3. The member agrees (or withdraws) to have concierge requests,
+   * including approximate location and preferences, sent to OpenAI.
+   */
+  setAiConsent: write
+    .input(z.object({ consent: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const aiConsentAt = input.consent ? new Date() : null;
+      await db.user.update({ where: { id: ctx.user.userId }, data: { aiConsentAt } });
+      return { consentedAt: aiConsentAt?.toISOString() ?? null };
     }),
 });

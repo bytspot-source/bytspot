@@ -29,6 +29,8 @@ model User {
   /// The Terms of Service version the member accepted, and when.
   termsVersion      String?   @map("terms_version")
   termsAcceptedAt   DateTime? @map("terms_accepted_at")
+  /// REA C3. When the member agreed to send concierge requests to a third-party AI provider (OpenAI). Null = not asked or declined.
+  aiConsentAt       DateTime? @map("ai_consent_at")
   notificationPrefs Json?   @map("notification_prefs") // push/email/sms preference toggles
   ref               String? // signup source: "qr", "tiktok", "organic"
   inviteCode        String? @unique @map("invite_code") // the member's own code, issued on first use; a new member's `ref` is the inviter's id

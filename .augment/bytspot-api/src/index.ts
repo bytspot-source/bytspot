@@ -11,6 +11,7 @@ import { logAdminBootstrapIds } from './services/adminRbac';
 // tRPC
 import { appRouter } from './trpc/router';
 import { createContext, globalRateLimitKey } from './trpc/context';
+import { originLock } from './middleware/originLock';
 
 // REST Routes — only keep endpoints that have no tRPC equivalent or are used externally
 import healthRouter from './routes/health';        // external monitoring / Render health checks
@@ -56,6 +57,8 @@ const app = express();
 
 // Trust Cloudflare → Render LB (2 proxy hops) so express-rate-limit and req.ip see real client IPs
 app.set('trust proxy', 2);
+// REA X7: refuse direct-to-Render traffic once ORIGIN_LOCK_SECRET is set (docs/RENDER_ORIGIN_LOCK.md).
+app.use(originLock());
 
 // ─── Global Middleware ───────────────────────────────
 app.use(helmet());

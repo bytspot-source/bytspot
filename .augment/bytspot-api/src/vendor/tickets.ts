@@ -1,4 +1,5 @@
 import type Stripe from 'stripe';
+import { VENDOR_TICKET_CHECKOUT_TERMS } from '../lib/checkoutTerms';
 import { Prisma, type VendorTicketOrder } from '@prisma/client';
 import { z } from 'zod';
 import { config } from '../config';
@@ -331,6 +332,8 @@ export async function startTicketCheckout(input: { ticketId: string; userId: str
   const session = await stripe.checkout.sessions.create(
     {
       mode: 'payment',
+      // REA X3: refund terms on the payment page itself.
+      custom_text: { submit: { message: VENDOR_TICKET_CHECKOUT_TERMS } },
       line_items: [
         {
           price_data: {
@@ -348,7 +351,6 @@ export async function startTicketCheckout(input: { ticketId: string; userId: str
       },
       metadata: { kind: VENDOR_TICKET_KIND, orderId: order.id, ticketId: ticket.id, userId: input.userId },
       expires_at: Math.floor(order.expiresAt.getTime() / 1000),
-      custom_text: { submit: { message: 'Refunds after buying are handled by Bytspot support.' } },
       success_url: `${back}&checkout=ticket-paid&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${back}&checkout=ticket-cancelled`,
     },

@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { refundParty } from '../services/stripeRisk';
+import { PARTY_CHECKOUT_TERMS } from '../lib/checkoutTerms';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import Stripe from 'stripe';
@@ -2008,6 +2009,8 @@ export const partyTicketsRouter = router({
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
+        // REA X3: refund terms on the payment page itself.
+        custom_text: { submit: { message: PARTY_CHECKOUT_TERMS } },
         ...(buyer?.stripeCustomerId ? { customer: buyer.stripeCustomerId } : {}),
         // Itemised, so the guest sees the door and the table as the two
         // separate things they are rather than one unexplained total.

@@ -129,13 +129,16 @@ function BusynessCard() {
         </p>
         <p className="text-[11px] text-[var(--bone-muted)]">Example</p>
       </div>
-      <div className="mt-4 flex h-24 items-end gap-2">
+      <div className="mt-4 flex items-end gap-1.5 sm:gap-2">
         {HOURS.map((hour) => (
-          <div key={hour.label} className="flex flex-1 flex-col items-center gap-1.5">
-            <div
-              className="w-full rounded-t-md bg-[var(--cyan)]/80"
-              style={{ height: `${hour.h}%` }}
-            />
+          <div key={hour.label} className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
+            <div className="flex h-20 w-full items-end sm:h-24">
+              <div
+                className="w-full rounded-t-md bg-[var(--cyan)]"
+                style={{ height: `${hour.h}%` }}
+                title={`${hour.label}`}
+              />
+            </div>
             <span className="text-[10px] text-[var(--bone-muted)]">{hour.label}</span>
           </div>
         ))}

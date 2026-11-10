@@ -40,16 +40,14 @@ export function HomePage() {
               <ArrowRight className="h-4 w-4" aria-hidden="true" />
             </Link>
           </div>
-          <ol className="mt-10 flex flex-wrap items-center gap-x-1 gap-y-2 text-sm text-[var(--bone-muted)]">
+          <p className="mt-10 text-sm leading-relaxed text-[var(--bone-muted)]">
             {DAY_PARTS.map((part, i) => (
-              <li key={part} className="inline-flex items-center gap-1">
-                {i > 0 && (
-                  <span className="mx-2 h-px w-4 bg-[var(--cyan)]/50" aria-hidden="true" />
-                )}
+              <span key={part}>
+                {i > 0 && <span className="mx-2 text-[var(--cyan)]" aria-hidden="true">·</span>}
                 <span>{part}</span>
-              </li>
+              </span>
             ))}
-          </ol>
+          </p>
         </div>
         <ProductIllustration />
       </section>

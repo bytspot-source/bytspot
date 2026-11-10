@@ -46,7 +46,7 @@ export function SiteHeader() {
         </nav>
 
         <div className="hidden md:block">
-          <AppStoreButton />
+          <AppStoreButton size="compact" />
         </div>
 
         <button

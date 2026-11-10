@@ -176,15 +176,52 @@ export async function refundPartyCheckout(
   return 'refunded';
 }
 
-/** Refunds every paid checkout of a party. Used on cancel and on moderation removal. */
-export async function refundParty(partyId: string, reason: string, stripe: Stripe | null = stripeHandle.client()): Promise<PartyRefundResult> {
+/** Page size for refundParty. Overridable in tests so pagination is exercised without thousands of rows. */
+export const REFUND_PARTY_PAGE_SIZE = 200;
+
+/**
+ * Close refunds paid guests when the night was not delivered: no one has
+ * checked in, and the party has not yet ended. After a check-in or after
+ * endsAt, close only hides the room (the host must cancel to refund). The
+ * decision is evaluated at `asOf` (first close: now; a retry: closedAt) so a
+ * later retry does not change the original choice.
+ */
+export function closeShouldRefund(
+  party: { endsAt: Date },
+  checkedInCount: number,
+  asOf = new Date(),
+): boolean {
+  if (checkedInCount > 0) return false;
+  return party.endsAt.getTime() > asOf.getTime();
+}
+
+/** Refunds every paid checkout of a party. Used on cancel, close-before-delivery, and moderation removal. */
+export async function refundParty(
+  partyId: string,
+  reason: string,
+  stripe: Stripe | null = stripeHandle.client(),
+  options: { pageSize?: number } = {},
+): Promise<PartyRefundResult> {
   const result: PartyRefundResult = { refunded: 0, skipped: 0, failed: 0 };
-  const rows = await db.partyCheckout.findMany({
-    where: { partyId, status: { in: ['completed', 'refund-required'] } },
-    select: { id: true },
-    take: 5000,
-  });
-  for (const row of rows) result[await refundPartyCheckout(row.id, reason, stripe)]++;
+  const pageSize = options.pageSize ?? REFUND_PARTY_PAGE_SIZE;
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  // Collect first, then refund, so pagination does not walk a list we are
+  // mutating (a refunded row leaves the status filter).
+  for (;;) {
+    const rows = await db.partyCheckout.findMany({
+      where: { partyId, status: { in: ['completed', 'refund-required'] } },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: pageSize,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+    });
+    if (rows.length === 0) break;
+    ids.push(...rows.map((row) => row.id));
+    if (rows.length < pageSize) break;
+    cursor = rows[rows.length - 1].id;
+  }
+  for (const id of ids) result[await refundPartyCheckout(id, reason, stripe)]++;
   if (result.failed > 0) console.error('[party-refund] some refunds failed and will need a retry', { partyId, ...result });
   return result;
 }

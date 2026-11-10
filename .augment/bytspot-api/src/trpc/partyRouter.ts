@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import { refundParty } from '../services/stripeRisk';
+import { closeShouldRefund, refundParty } from '../services/stripeRisk';
 import { PARTY_CHECKOUT_TERMS } from '../lib/checkoutTerms';
 import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
@@ -1388,22 +1388,36 @@ export const partyControlRouter = router({
    * machinery that already exempts confirmed guests and the host. `status` is
    * deliberately untouched — every other party query reads `published`, so a
    * terminal status here would revoke every guest's pass.
+   *
+   * REA X2 re-review: if the night was not delivered (no check-ins and the
+   * party has not ended), paid guests are refunded, same as cancel. Closing
+   * after a check-in or after endsAt keeps the money; the host must cancel
+   * to refund then. A retry uses the original closedAt so the choice stays
+   * put, and refundParty is idempotent.
    */
   close: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-control-close' }))
     .input(z.object({ partyId: z.string().min(1).max(128) }))
     .mutation(async ({ ctx, input }) => {
       const party = await hostControlledParty(input.partyId, ctx.user.userId);
-      if (party.closedAt) return { partyId: party.id, closedAt: party.closedAt.toISOString() };
-      const closedAt = new Date();
-      const updated = await db.party.updateMany({
-        where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: null },
-        data: { closedAt, shareLinkExpiresAt: closedAt },
-      });
-      if (updated.count === 1) return { partyId: party.id, closedAt: closedAt.toISOString() };
-      const current = await hostControlledParty(input.partyId, ctx.user.userId);
-      if (current.closedAt) return { partyId: current.id, closedAt: current.closedAt.toISOString() };
-      throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+      let closedAt = party.closedAt;
+      if (!closedAt) {
+        closedAt = new Date();
+        const updated = await db.party.updateMany({
+          where: { id: party.id, hostUserId: ctx.user.userId, status: 'published', closedAt: null },
+          data: { closedAt, shareLinkExpiresAt: closedAt },
+        });
+        if (updated.count !== 1) {
+          const current = await hostControlledParty(input.partyId, ctx.user.userId);
+          if (!current.closedAt) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party not found for this host.' });
+          closedAt = current.closedAt;
+        }
+      }
+      const checkedIn = await db.partyGuest.count({ where: { partyId: party.id, status: 'checked-in' } });
+      const refunds = closeShouldRefund(party, checkedIn, closedAt)
+        ? await refundParty(party.id, 'Host closed the party before it was delivered')
+        : { refunded: 0, skipped: 0, failed: 0 };
+      return { partyId: party.id, closedAt: closedAt.toISOString(), refunds };
     }),
 
   /**

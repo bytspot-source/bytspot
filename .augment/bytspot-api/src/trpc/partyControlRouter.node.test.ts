@@ -33,6 +33,7 @@ beforeEach(() => {
   party.findMany = async () => [];
   party.updateMany = async () => ({ count: 1 });
   partyGuest.count = async () => 0;
+  (db.partyCheckout as any).findMany = async () => [];
   partyGuest.findMany = async () => [];
   partyGuest.findUnique = async () => null;
   partyGuest.findFirst = async () => null;
@@ -552,6 +553,54 @@ test('REA X2: cancelling a party closes it, expires the link and refunds every p
     const again = await createCaller({ ...hostContext, clientRateLimitKey: 'test-cancel-host' }).events.control.cancel({ partyId: 'party-1' });
     assert.deepEqual(again.refunds, { refunded: 0, skipped: 0, failed: 0 });
     assert.equal(refunds.length, 1);
+  } finally {
+    stripeHandle.client = originalClient;
+  }
+});
+
+test('REA X2: closing a party that has not been delivered refunds paid guests', async () => {
+  const { stripeHandle } = await import('../vendor/payout');
+  const originalClient = stripeHandle.client;
+  const refunds: any[] = [];
+  stripeHandle.client = () => ({ refunds: { create: async (params: any, options: any) => { refunds.push({ params, options }); return { id: 're_1' }; } } }) as any;
+  const checkout = { id: 'co-1', partyId: 'party-1', partyGuestId: 'guest-1', userId: 'guest-user', ticketTierName: 'GA', sessionId: null, status: 'completed', paymentIntentId: 'pi_1' };
+  const partyCheckout = db.partyCheckout as any;
+  partyCheckout.findMany = async ({ where }: any) => (where.status.in.includes(checkout.status) ? [{ id: checkout.id }] : []);
+  partyCheckout.findUnique = async () => ({ ...checkout });
+  partyCheckout.updateMany = async ({ data }: any) => { Object.assign(checkout, data); return { count: 1 }; };
+  prisma.$transaction = async (callback: any) => callback({ party, partyGuest, partyCheckout, partySessionClaim: { updateMany: async () => ({ count: 0 }) }, partySession: { updateMany: async () => ({ count: 0 }) } });
+  try {
+    const result = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-refund' }).events.control.close({ partyId: 'party-1' });
+    assert.ok(result.closedAt);
+    assert.deepEqual(result.refunds, { refunded: 1, skipped: 0, failed: 0 });
+    assert.equal(refunds[0].options.idempotencyKey, 'party-refund:co-1');
+    assert.equal(checkout.status, 'refunded');
+    // A retry (already closed, still before endsAt, no check-in) does not refund twice.
+    party.findFirst = async () => ({ ...publishedParty, closedAt: new Date(result.closedAt) });
+    const again = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-refund' }).events.control.close({ partyId: 'party-1' });
+    assert.deepEqual(again.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(refunds.length, 1);
+  } finally {
+    stripeHandle.client = originalClient;
+  }
+});
+
+test('REA X2: closing after a check-in or after the party ends keeps the money', async () => {
+  const { stripeHandle } = await import('../vendor/payout');
+  const originalClient = stripeHandle.client;
+  let called = 0;
+  stripeHandle.client = () => { called += 1; return { refunds: { create: async () => ({ id: 're_x' }) } } as any; };
+  try {
+    partyGuest.count = async () => 1;
+    const afterCheckIn = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-keep-1' }).events.control.close({ partyId: 'party-1' });
+    assert.deepEqual(afterCheckIn.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(called, 0);
+
+    partyGuest.count = async () => 0;
+    party.findFirst = async () => ({ ...publishedParty, startsAt: new Date(Date.now() - 5 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 60 * 1000), closedAt: null });
+    const afterEnd = await createCaller({ ...hostContext, clientRateLimitKey: 'test-close-keep-2' }).events.control.close({ partyId: 'party-1' });
+    assert.deepEqual(afterEnd.refunds, { refunded: 0, skipped: 0, failed: 0 });
+    assert.equal(called, 0);
   } finally {
     stripeHandle.client = originalClient;
   }

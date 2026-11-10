@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { Prisma } from '@prisma/client';
 import { db } from '../lib/db';
-import { applyChargeRiskEvent, refundParty, refundPartyCheckout } from './stripeRisk';
+import { applyChargeRiskEvent, closeShouldRefund, refundParty, refundPartyCheckout } from './stripeRisk';
 
 // A small in-memory stand-in for the rows these flows touch.
 type Row = Record<string, any>;
@@ -28,7 +28,18 @@ const apply = (row: Row, data: Row) => {
   }
 };
 const table = (rows: () => Row[]) => ({
-  findMany: async ({ where }: any) => rows().filter((r) => matches(r, where)),
+  findMany: async ({ where, take, skip, cursor, orderBy }: any) => {
+    let hit = rows().filter((r) => matches(r, where));
+    if (orderBy?.id === 'asc') hit.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    if (cursor?.id) {
+      const index = hit.findIndex((r) => r.id === cursor.id);
+      hit = index >= 0 ? hit.slice(index + (skip ?? 0)) : [];
+    } else if (skip) {
+      hit = hit.slice(skip);
+    }
+    if (take != null) hit = hit.slice(0, take);
+    return hit;
+  },
   findUnique: async ({ where }: any) => rows().find((r) => r.id === where.id) ?? null,
   update: async ({ where, data }: any) => { const r = rows().find((x) => x.id === where.id)!; apply(r, data); return r; },
   updateMany: async ({ where, data }: any) => { const hit = rows().filter((r) => matches(r, where)); hit.forEach((r) => apply(r, data)); return { count: hit.length }; },
@@ -161,4 +172,29 @@ test('the webhook auto-refund only touches a payment that could not be honoured'
   assert.equal(await refundPartyCheckout('co2', 'auto', stripe, { statuses: ['refund-required'] }), 'refunded');
   assert.equal(calls.length, 1);
   assert.equal(checkouts[0].status, 'completed');
+});
+
+test('refundParty pages through every paid checkout rather than capping the list', async () => {
+  const { stripe, calls } = fakeStripe();
+  checkouts = Array.from({ length: 5 }, (_, i) => ({
+    id: `co-${i + 1}`, partyId: 'p1', partyGuestId: `g-${i + 1}`, userId: `u-${i + 1}`,
+    ticketTierName: 'GA', sessionId: null, status: 'completed', paymentIntentId: `pi-${i + 1}`,
+  }));
+  guests = checkouts.map((c) => ({ id: c.partyGuestId, status: 'ticketed', accessGranted: true, credential: 'x' }));
+  const result = await refundParty('p1', 'Host cancelled', stripe, { pageSize: 2 });
+  assert.deepEqual(result, { refunded: 5, skipped: 0, failed: 0 });
+  assert.equal(calls.length, 5);
+  assert.deepEqual(calls.map((c) => c.options.idempotencyKey).sort(), [
+    'party-refund:co-1', 'party-refund:co-2', 'party-refund:co-3', 'party-refund:co-4', 'party-refund:co-5',
+  ]);
+});
+
+test('close refunds when the night was not delivered, and keeps the money after a check-in or after it ends', () => {
+  const endsAt = new Date('2026-11-10T23:00:00Z');
+  const before = new Date('2026-11-10T20:00:00Z');
+  const after = new Date('2026-11-10T23:30:00Z');
+  assert.equal(closeShouldRefund({ endsAt }, 0, before), true);
+  assert.equal(closeShouldRefund({ endsAt }, 1, before), false, 'a check-in means it was delivered');
+  assert.equal(closeShouldRefund({ endsAt }, 0, after), false, 'after endsAt the night occurred');
+  assert.equal(closeShouldRefund({ endsAt }, 0, endsAt), false);
 });

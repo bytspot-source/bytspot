@@ -2040,20 +2040,44 @@ test('REA X1: a new host is held to the ticket price and quantity caps', async (
   assert.equal(published.id, 'party-1');
 });
 
-test('REA P1: a 21+ party refuses an RSVP without a 21+ birth date', async () => {
-  party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, templateConfig: { kind: 'standard', hostAge: '21-plus' }, ...linkAlive });
-  user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
-  prisma.$transaction = async () => { throw new Error('must not seat the guest'); };
-  const guest = createCaller({ ...authenticatedContext, user: { userId: 'age-guest', email: 'age@example.test' } });
-  await assert.rejects(() => guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN', message: /21\+/ });
+test('REA P1: with age gates off, a 21+ party does not lock out a guest who has no date of birth', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: false });
+  try {
+    party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, templateConfig: { kind: 'standard', hostAge: '21-plus' }, ...linkAlive });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: null });
+    prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
+    const guest = createCaller({ ...authenticatedContext, user: { userId: 'age-guest-off', email: 'ageoff@example.test' } });
+    const result = await guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+    assert.equal(result.accessGranted, true);
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
+});
 
-  user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
-  prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
-  const result = await guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey });
-  assert.equal(result.accessGranted, true);
+test('REA P1: a 21+ party refuses an RSVP without a 21+ birth date', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  try {
+    party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, templateConfig: { kind: 'standard', hostAge: '21-plus' }, ...linkAlive });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
+    prisma.$transaction = async () => { throw new Error('must not seat the guest'); };
+    const guest = createCaller({ ...authenticatedContext, user: { userId: 'age-guest', email: 'age@example.test' } });
+    await assert.rejects(() => guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN', message: /21\+/ });
+
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    prisma.$transaction = async (callback: any) => callback({ party, partyMedia, partyGuest, partyCheckout });
+    const result = await guest.events.rsvp.create({ partyId: 'party-1', idempotencyKey });
+    assert.equal(result.accessGranted, true);
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
 });
 
 test('REA P1: a bottle session cannot be bought from an unlicensed business, or by an under-21 guest', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  try {
   party.findFirst = async () => ({ id: 'party-1', hostUserId: 'host-x', status: 'published', accessMode: 'free-rsvp', requiredMembershipTier: 'green', capacity: 10, title: 'T', tagline: '', templateConfig: { kind: 'standard' }, ticketTiers: [], ...linkAlive });
   partySession.findFirst = async () => ({ id: 'session-1', sellerId: 'seller-1', priceCents: 30_000, bottleCount: 2, startsAt: new Date(Date.now() + 3_600_000), requiredMembershipTier: null });
   (config as any).stripeSecretKey = 'sk_test_dev';
@@ -2067,6 +2091,27 @@ test('REA P1: a bottle session cannot be bought from an unlicensed business, or 
   (db.vendorSeller as any).findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date() });
   user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
   await assert.rejects(() => guest.events.tickets.createCheckout({ partyId: 'party-1', sessionId: 'session-1', idempotencyKey }), { code: 'FORBIDDEN', message: /21\+/ });
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
+});
+
+test('REA P1: with age gates on, a host under 18 cannot publish', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  try {
+    party.findFirst = async () => ({ ...partyDraft });
+    user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date(), birthDate: new Date('2010-01-01T00:00:00Z'), ageConfirmedAt: null });
+    party.updateMany = async () => { throw new Error('must not publish'); };
+    await assert.rejects(() => caller().events.publish({ partyId: 'party-1', idempotencyKey }), { code: 'FORBIDDEN', message: /18\+/ });
+    user.findUnique = async () => ({ membershipTier: 'green', emailVerifiedAt: new Date(), birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    (db.platformFeeSetting as any).findFirst = async () => null;
+    party.updateMany = async () => ({ count: 1 });
+    const published = await caller().events.publish({ partyId: 'party-1', idempotencyKey });
+    assert.equal(published.id, 'party-1');
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
+  }
 });
 
 test('REA X4: a party draft whose title fails the content filter is refused before anything is written', async () => {

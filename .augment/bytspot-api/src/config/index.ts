@@ -74,9 +74,13 @@ const envSchema = z.object({
   // current published terms; counsel may move the floor to 18.
   MIN_SIGNUP_AGE:         z.coerce.number().int().min(13).max(21).default(13),
   // Off until the iOS/web builds that send age + terms consent ship; when on,
-  // auth.signup refuses a request without them. Gated surfaces enforce age
-  // either way (services/ageGate.ts).
+  // auth.signup refuses a request without them.
   SIGNUP_REQUIRE_AGE_AND_TERMS: z.enum(['true', 'false']).default('false'),
+  // REA P1 re-review: 18+/21+ request, checkout, approve, check-in and host
+  // age gates. Default off so shipping the API before a client that can call
+  // consent.setAge does not lock existing members out of age-gated parties.
+  // Turn on together with the client DOB screen (see bytspot-fixes/XCODE-TODO.md).
+  AGE_GATE_ENFORCED: z.enum(['true', 'false']).default('false'),
   // The Terms version a member must accept. Bump on every published change.
   TERMS_VERSION:          z.string().trim().min(1).max(40).default('2026-10-10'),
   // Inbox told when a payout or a reversal fails. Empty: Sentry only.
@@ -223,6 +227,7 @@ export const config = {
   autoRefundUnhonouredPayments: env.AUTO_REFUND_UNHONOURED_PAYMENTS === 'true',
   minSignupAge: env.MIN_SIGNUP_AGE,
   signupRequireAgeAndTerms: env.SIGNUP_REQUIRE_AGE_AND_TERMS === 'true',
+  ageGateEnforced: env.AGE_GATE_ENFORCED === 'true',
   termsVersion: env.TERMS_VERSION,
   payoutAlertEmail: env.PAYOUT_ALERT_EMAIL,
   frontendUrl: env.FRONTEND_URL,

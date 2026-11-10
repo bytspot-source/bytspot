@@ -62,9 +62,36 @@ export function ageProblem(facts: AgeFacts, minimumAge: number, now = new Date()
 
 export async function assertMemberAge(userId: string, minimumAge: number, now = new Date()): Promise<void> {
   if (minimumAge <= 0) return;
+  // Off by default: shipping the API before a client can call consent.setAge
+  // would otherwise refuse every existing member with no birth date.
+  if (!config.ageGateEnforced) return;
   const user = await db.user.findUnique({ where: { id: userId }, select: { birthDate: true, ageConfirmedAt: true } });
   const problem = ageProblem({ birthDate: user?.birthDate ?? null, ageConfirmedAt: user?.ageConfirmedAt ?? null }, minimumAge, now);
   if (problem) throw new TRPCError({ code: 'FORBIDDEN', message: problem });
+}
+
+/** Host must be 18+ to publish, when age gates are on. */
+export async function assertHostAge(userId: string, now = new Date()): Promise<void> {
+  await assertMemberAge(userId, 18, now);
+}
+
+/**
+ * When age gates are on, any live bottle session on this party still needs a
+ * verified alcohol licence (re-checked at approve and check-in).
+ */
+export async function assertLiveBottleLicences(partyId: string): Promise<void> {
+  if (!config.ageGateEnforced) return;
+  const sessions = await db.partySession.findMany({
+    where: { partyId, withdrawnAt: null, bottleCount: { gt: 0 } },
+    select: { sellerId: true },
+    take: 50,
+  });
+  const sellerIds = [...new Set(sessions.map((session) => session.sellerId))];
+  for (const sellerId of sellerIds) {
+    const seller = await db.vendorSeller.findUnique({ where: { id: sellerId }, select: { alcoholLicenceVerifiedAt: true } });
+    const problem = alcoholLicenceProblem(seller);
+    if (problem) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: problem });
+  }
 }
 
 /** A YYYY-MM-DD birth date a signup or settings form may store, or a reason it may not. */

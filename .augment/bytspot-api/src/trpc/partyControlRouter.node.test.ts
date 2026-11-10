@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import { createCallerFactory } from './trpc';
 import { appRouter } from './router';
+import { config } from '../config';
 import { db } from '../lib/db';
 import type { Context } from './context';
 
@@ -603,5 +604,47 @@ test('REA X2: closing after a check-in or after the party ends keeps the money',
     assert.equal(called, 0);
   } finally {
     stripeHandle.client = originalClient;
+  }
+});
+
+test('REA P1: with age gates on, approve and check-in re-check age and licence', async () => {
+  const previous = config.ageGateEnforced;
+  Object.assign(config, { ageGateEnforced: true });
+  const partySession = db.partySession as any;
+  const vendorSeller = db.vendorSeller as any;
+  party.findFirst = async () => ({ ...publishedParty, templateConfig: { kind: 'standard', hostAge: '21-plus' } });
+  partySession.findMany = async () => [{ sellerId: 'seller-1', bottleCount: 2 }];
+  try {
+    partyGuest.findFirst = async () => ({ id: 'guest-1', partyId: 'party-1', status: 'pending', userId: 'guest-user' });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: new Date() });
+    await assert.rejects(
+      () => caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' }),
+      { code: 'FORBIDDEN', message: /21\+/ },
+    );
+
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    vendorSeller.findUnique = async () => ({ alcoholLicenceVerifiedAt: null });
+    await assert.rejects(
+      () => caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' }),
+      { code: 'PRECONDITION_FAILED', message: /alcohol licence/ },
+    );
+
+    vendorSeller.findUnique = async () => ({ alcoholLicenceVerifiedAt: new Date() });
+    partyGuest.update = async ({ data }: any) => ({ id: 'guest-1', userId: 'guest-user', ...data });
+    const decided = await caller().events.control.decide({ partyId: 'party-1', guestId: 'guest-1', decision: 'approved' });
+    assert.equal(decided.status, 'approved');
+
+    partyGuest.findUnique = async () => ({ id: 'guest-1', partyId: 'party-1', userId: 'guest-user', status: 'approved', accessGranted: true, user: { name: 'Ada' } });
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: null, ageConfirmedAt: null });
+    await assert.rejects(
+      () => caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential }),
+      { code: 'FORBIDDEN', message: /21\+/ },
+    );
+
+    user.findUnique = async () => ({ membershipTier: 'green', birthDate: new Date('1990-01-01T00:00:00Z'), ageConfirmedAt: null });
+    const arrived = await caller().events.control.checkIn({ partyId: 'party-1', attendeeCredential: credential });
+    assert.equal(arrived.status, 'checked-in');
+  } finally {
+    Object.assign(config, { ageGateEnforced: previous });
   }
 });

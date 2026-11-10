@@ -10,7 +10,7 @@ import { alertGuestOfDecision, alertGuestsOfArrivalUpdate, alertGuestsOfRecap, a
 import { currentPlatformFeeBps, effectiveFeeBps, splitHostAndSellerAmount, splitTicketAmount } from '../services/platformFee';
 import { hostCanSellPaidTickets, partySellsPaidTickets } from '../services/hostPayouts';
 import { hostPayoutDelayHours, isNewHost, newHostTierProblem } from '../services/hostTrust';
-import { alcoholLicenceProblem, assertMemberAge, minimumAgeFor, partyAgeRule, sessionSellsAlcohol } from '../services/ageGate';
+import { alcoholLicenceProblem, assertHostAge, assertLiveBottleLicences, assertMemberAge, minimumAgeFor, partyAgeRule, sessionSellsAlcohol } from '../services/ageGate';
 import { hostTypeDefinition } from '../services/hostTaxonomy';
 export { hostTypeIds, hostCategoryIds } from '../services/hostTaxonomy';
 import { db } from '../lib/db';
@@ -710,6 +710,8 @@ export const partyPublish = protectedProcedure
   .input(z.object({ partyId: z.string().min(1), idempotencyKey: z.string().uuid() }))
   .mutation(async ({ ctx, input }) => {
     await requireConfirmedHost(ctx.user.userId);
+    // REA P1 re-review: host 18+ is enforced only when AGE_GATE_ENFORCED is on.
+    await assertHostAge(ctx.user.userId);
     const party = await db.party.findFirst({ where: { id: input.partyId, hostUserId: ctx.user.userId } });
     if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party draft not found.' });
     if (party.idempotencyKey !== input.idempotencyKey) throw new TRPCError({ code: 'CONFLICT', message: 'The publish request does not match this Party draft.' });
@@ -1626,6 +1628,8 @@ export const partyControlRouter = router({
         if (!guest) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party guest not found.' });
         if (guest.status !== 'pending') throw new TRPCError({ code: 'CONFLICT', message: 'Only pending guests can be decided.' });
         if (input.decision === 'approved') {
+          await assertMemberAge(guest.userId, minimumAgeFor(partyAgeRule(party.templateConfig)));
+          await assertLiveBottleLicences(party.id);
           const grantedCount = await tx.partyGuest.count({ where: { partyId: party.id, accessGranted: true } });
           if (grantedCount >= party.capacity) throw new TRPCError({ code: 'CONFLICT', message: 'This Party is at capacity.' });
         }
@@ -1658,6 +1662,8 @@ export const partyControlRouter = router({
           throw new TRPCError({ code: 'NOT_FOUND', message: 'That attendee credential is not recognized for this Party.' });
         }
         if (guest.status === 'checked-in') throw new TRPCError({ code: 'CONFLICT', message: 'This attendee has already been checked in.' });
+        await assertMemberAge(guest.userId, minimumAgeFor(partyAgeRule(party.templateConfig)));
+        await assertLiveBottleLicences(party.id);
         const updated = await tx.partyGuest.updateMany({
           where: { id: guest.id, status: { not: 'checked-in' }, accessGranted: true },
           data: { status: 'checked-in', checkedInAt: new Date() },

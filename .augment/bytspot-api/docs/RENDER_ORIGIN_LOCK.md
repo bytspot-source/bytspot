@@ -16,6 +16,23 @@ own `X-Forwarded-For` and get a fresh per-IP rate-limit bucket on every request.
 - Rate-limit keys use `CF-Connecting-IP` only on requests that carried the
   secret. Everything else keys on `req.ip` as before.
 
+## Blocker: shipped clients call the Render origin directly
+Checked 2026-11-10 in bytspot-beta:
+- iOS `BytspotAPIClient.swift` defaults to `https://bytspot-api.onrender.com`.
+  `Info.plist` and `Clip/Info.plist` list it, and so does the trusted-host check at about line 919.
+- Web `src/utils/trpc.ts` falls back to the same host when `VITE_API_URL` is unset.
+
+**Don't set `ORIGIN_LOCK_SECRET` until** every live client talks to the Cloudflare
+hostname (`api.bytspot.app` is already in the web CSP). That means:
+1. An iOS and App Clip build whose base URL is `https://api.bytspot.app`. Xcode
+   work isn't done on this branch because it can't be built or tested here.
+2. Web deployed with `VITE_API_URL=https://api.bytspot.app`.
+3. Enough users on the new iOS build. Older builds will get a 403 on every call
+   once the lock is on, so pair it with a forced-update prompt.
+
+Until then the other X7 fixes still apply: Places needs sign-in, public reads
+are rate-limited, and stats are coarse.
+
 ## Daniel: turn it on (order matters)
 1. Generate a secret, at least 32 characters, on your own machine, for example
    `openssl rand -base64 48`. Don't paste it into chat or a ticket.

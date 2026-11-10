@@ -75,7 +75,17 @@ export async function applyChargeRiskEvent(event: Stripe.Event, now = new Date()
   if (!RISK_EVENT_TYPES.has(event.type)) return false;
   const paymentIntentId = paymentIntentOf(event);
   if (!paymentIntentId) {
-    console.warn('[stripe-risk] event without a payment intent', { type: event.type });
+    // Still record the event so it is not silently dropped (Stripe will not
+    // retry a 200). There is no checkout to attach it to.
+    console.warn('[stripe-risk] event without a payment intent', { type: event.type, id: event.id });
+    await db.$transaction(async (tx) => {
+      try {
+        await tx.stripeWebhookEvent.create({ data: { id: event.id, type: event.type } });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return;
+        throw error;
+      }
+    });
     return true;
   }
   await db.$transaction(async (tx) => {

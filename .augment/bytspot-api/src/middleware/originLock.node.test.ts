@@ -22,7 +22,9 @@ async function serve(lockSecret: string) {
 test('REA X7: with the lock on, direct-to-origin calls are refused; health checks are not', async () => {
   const { base, close } = await serve(secret);
   try {
-    assert.equal((await fetch(`${base}/trpc/x`)).status, 403);
+    const denied = await fetch(`${base}/trpc/x`);
+    assert.equal(denied.status, 403);
+    assert.deepEqual(await denied.json(), { error: 'Use https://api.bytspot.app.' });
     assert.equal((await fetch(`${base}/trpc/x`, { headers: { [ORIGIN_AUTH_HEADER]: 'wrong' } })).status, 403);
     assert.equal((await fetch(`${base}/health`)).status, 200);
     const ok = await fetch(`${base}/trpc/x`, { headers: { [ORIGIN_AUTH_HEADER]: secret, 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '1.2.3.4' } });

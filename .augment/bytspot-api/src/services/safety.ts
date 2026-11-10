@@ -93,6 +93,13 @@ export async function blockMember(blockerId: string, blockedId: string, now = ne
 export type ReportTarget = { ownerId: string; snapshot: Prisma.InputJsonObject };
 
 /** What is being reported, as it stands now, or null if there is nothing to report. */
+/** Concierge answers are not stored, so the id must still look like one. */
+const CONCIERGE_RESPONSE_ID = /^[A-Za-z0-9_.:-]{6,128}$/;
+
+export function isConciergeResponseId(id: string): boolean {
+  return CONCIERGE_RESPONSE_ID.test(id);
+}
+
 export async function reportTarget(kind: ReportKind, id: string): Promise<ReportTarget | null> {
   switch (kind) {
     case 'user': {
@@ -149,7 +156,9 @@ export async function reportTarget(kind: ReportKind, id: string): Promise<Report
     }
     case 'concierge':
       // Concierge answers are not stored; the reporter's excerpt is the
-      // evidence, attached by the router.
+      // evidence, attached by the router. A badly shaped id is treated as
+      // missing so the queue cannot be filled with arbitrary tokens.
+      if (!isConciergeResponseId(id)) return null;
       return { ownerId: CONCIERGE_OWNER_ID, snapshot: { responseId: id } };
   }
 }

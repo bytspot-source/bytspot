@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'crypto';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { config } from '../config';
@@ -70,8 +71,48 @@ export function isAllowedRedirect(target: string): boolean {
  * Google's media endpoint only accepts the API key as a query parameter — so
  * any URL a client could fetch directly would carry the key with it.
  */
-export function photoProxyUrl(photoName: string, width = DEFAULT_WIDTH): string {
-  return `${config.publicApiUrl}/places/photo?name=${encodeURIComponent(photoName)}&w=${clampWidth(width)}`;
+export const PHOTO_SIGN_TTL_SECONDS = 10 * 60;
+
+export function signPlacesPhoto(name: string, width: number, exp: number, secret = config.jwtSecret): string {
+  return createHmac('sha256', secret).update(`${name}\n${width}\n${exp}`).digest('base64url');
+}
+
+export function placesPhotoSignatureOk(
+  name: string,
+  width: number,
+  expRaw: unknown,
+  sig: unknown,
+  now = Date.now(),
+  secret = config.jwtSecret,
+): boolean {
+  const exp = Number(expRaw);
+  if (!Number.isFinite(exp) || exp * 1000 < now) return false;
+  if (typeof sig !== 'string' || sig.length < 16) return false;
+  const expected = signPlacesPhoto(name, width, exp, secret);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** When PLACES_PHOTO_REQUIRE_AUTH is on, unsigned or expired URLs are refused. */
+export function placesPhotoAuthProblem(
+  query: { name?: unknown; w?: unknown; exp?: unknown; sig?: unknown },
+  requireAuth = config.placesPhotoRequireAuth,
+  now = Date.now(),
+): string | null {
+  if (!requireAuth) return null;
+  const name = typeof query.name === 'string' ? query.name : '';
+  if (!placesPhotoSignatureOk(name, clampWidth(query.w), query.exp, query.sig, now)) {
+    return 'This photo link has expired. Open the place again.';
+  }
+  return null;
+}
+
+export function photoProxyUrl(photoName: string, width = DEFAULT_WIDTH, now = Date.now()): string {
+  const w = clampWidth(width);
+  const exp = Math.floor(now / 1000) + PHOTO_SIGN_TTL_SECONDS;
+  const sig = signPlacesPhoto(photoName, w, exp);
+  return `${config.publicApiUrl}/places/photo?name=${encodeURIComponent(photoName)}&w=${w}&exp=${exp}&sig=${encodeURIComponent(sig)}`;
 }
 
 async function resolvePhotoUri(photoName: string, width: number): Promise<string | null> {
@@ -122,7 +163,7 @@ async function resolvePhotoUri(photoName: string, width: number): Promise<string
  */
 const photoLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 120,
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many photo requests' },
@@ -131,6 +172,8 @@ const photoLimiter = rateLimit({
 placesPhotoRouter.get('/places/photo', photoLimiter, async (req, res) => {
   const { name } = req.query;
   if (!isPhotoName(name)) return res.status(400).json({ error: 'Invalid photo name' });
+  const authProblem = placesPhotoAuthProblem(req.query);
+  if (authProblem) return res.status(401).json({ error: authProblem });
   if (!config.googlePlacesApiKey) return res.status(404).json({ error: 'Not found' });
 
   const width = clampWidth(req.query.w);

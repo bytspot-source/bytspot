@@ -3,8 +3,6 @@ import { z } from 'zod';
 import { db } from '../lib/db';
 import { normalizeEmail } from '../lib/contactHash';
 import { mailerIsConfigured, sendVendorSignInCode } from '../lib/email';
-import { randomBytes } from 'crypto';
-
 /** Indirection so tests can stand in for the mailer (REA V1). */
 export const vendorAuthMailer = { isConfigured: mailerIsConfigured, sendCode: sendVendorSignInCode };
 import { captureError } from '../lib/observability';
@@ -12,6 +10,7 @@ import { signVendorAccessToken } from '../vendor/accessToken';
 import { AUTH } from '../vendor/contract';
 import {
   createChallenge,
+  createDecoyChallenge,
   ipSendCooldownSecs,
   ipSubmitCooldownSecs,
   recordIpSend,
@@ -162,11 +161,12 @@ router.post('/vendor/auth/code', async (req, res) => {
     // address has a seat.
     await recordSend(email);
 
+    // REA V1 timing: both answers go through the same challenge-creation
+    // work (HMAC + two Redis writes) so a seated address is not faster or
+    // slower to respond than an unknown one.
     if (!user || seats === 0) {
-      // Indistinguishable from success: a random id in the same format as a
-      // real one (the old all-zero id gave the answer away), same status, and
-      // no email. Submitting it reads exactly like a wrong code.
-      res.status(200).json({ challengeId: `chal_${randomBytes(16).toString('hex')}` });
+      const decoy = await createDecoyChallenge();
+      res.status(200).json({ challengeId: decoy.id });
       return;
     }
 

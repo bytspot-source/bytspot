@@ -69,6 +69,10 @@ const envSchema = z.object({
   // REA X7: shared secret Cloudflare adds to every request; unset = origin lock off.
   ORIGIN_LOCK_SECRET: z.string().default('').refine((v) => v === '' || v.length >= 32, 'ORIGIN_LOCK_SECRET must be at least 32 characters'),
   PLACES_REQUIRE_AUTH: z.enum(['true', 'false']).default('true'),
+  // Off so shipped clients can still load <img src="/places/photo?..."> without
+  // a signature. When on, the URL must carry a short-lived HMAC (minted by
+  // photoProxyUrl). Turn on after clients only use URLs from the API.
+  PLACES_PHOTO_REQUIRE_AUTH: z.enum(['true', 'false']).default('false'),
   AUTO_REFUND_UNHONOURED_PAYMENTS: z.enum(['true', 'false']).default('true'),
   // REA X6/P1. A birth date under this refuses signup. 13 matches the
   // current published terms; counsel may move the floor to 18.
@@ -224,6 +228,7 @@ export const config = {
   ticketResaleMaxMarkupBps: env.TICKET_RESALE_MAX_MARKUP_BPS,
   originLockSecret: env.ORIGIN_LOCK_SECRET,
   placesRequireAuth: env.PLACES_REQUIRE_AUTH === 'true',
+  placesPhotoRequireAuth: env.PLACES_PHOTO_REQUIRE_AUTH === 'true',
   autoRefundUnhonouredPayments: env.AUTO_REFUND_UNHONOURED_PAYMENTS === 'true',
   minSignupAge: env.MIN_SIGNUP_AGE,
   signupRequireAgeAndTerms: env.SIGNUP_REQUIRE_AGE_AND_TERMS === 'true',

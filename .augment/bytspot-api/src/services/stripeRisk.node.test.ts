@@ -151,6 +151,15 @@ test('events the risk handler does not own are passed on', async () => {
   assert.equal(await applyChargeRiskEvent(event('evt_x', 'checkout.session.completed', {})), false);
 });
 
+test('a risk event with no payment intent is recorded and not silently dropped', async () => {
+  assert.equal(await applyChargeRiskEvent(event('evt_nopi', 'charge.dispute.created', { status: 'needs_response' })), true);
+  assert.equal(events.has('evt_nopi'), true);
+  assert.equal(checkouts[0].disputedAt, undefined);
+  // Redelivery is a no-op once the event id is stored.
+  await applyChargeRiskEvent(event('evt_nopi', 'charge.dispute.created', { status: 'needs_response' }));
+  assert.equal(checkouts[0].disputedAt, undefined);
+});
+
 function fakeStripe(fail = false) {
   const calls: Array<{ params: Row; options: Row }> = [];
   const stripe = {

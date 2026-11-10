@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampWidth, isAllowedRedirect, isPhotoName, photoProxyUrl } from './placesPhoto';
+import { clampWidth, isAllowedRedirect, isPhotoName, placesPhotoAuthProblem, photoProxyUrl, signPlacesPhoto, PHOTO_SIGN_TTL_SECONDS } from './placesPhoto';
 import { mapPlace, nearbySearchCacheKey, placesRouter } from '../trpc/placesRouter';
 import { config } from '../config';
 
@@ -29,9 +29,9 @@ test('No photo URL a client receives carries the API key', async () => {
     assert.equal(serialized.includes(secret), false, 'nearbySearch leaked the Places key');
     // The photo is still reachable: proxied through this server, not dropped.
     assert.equal(nearby.places.length, 1);
-    assert.deepEqual((nearby.places[0] as { photoUrls: string[] }).photoUrls, [
-      `${config.publicApiUrl}/places/photo?name=places%2FChIJtest%2Fphotos%2FAeJbb3cPHOTOREF&w=800`,
-    ]);
+    const photoUrls = (nearby.places[0] as { photoUrls: string[] }).photoUrls;
+    assert.equal(photoUrls.length, 1);
+    assert.match(photoUrls[0], /\/places\/photo\?name=places%2FChIJtest%2Fphotos%2FAeJbb3cPHOTOREF&w=800&exp=\d+&sig=/);
 
     const single = await caller.photoUrl({ photoName: 'places/ChIJtest/photos/AeJbb3cPHOTOREF', maxWidth: 400 });
     assert.equal(JSON.stringify(single).includes(secret), false, 'photoUrl leaked the Places key');
@@ -96,7 +96,7 @@ test('The proxy URL points at this server and encodes the name', () => {
   assert.ok(url.startsWith(`${config.publicApiUrl}/places/photo?`));
   // Unencoded slashes would break out of the query parameter.
   assert.ok(url.includes('name=places%2FChIJtest%2Fphotos%2FAeJbb3c'));
-  assert.ok(url.endsWith('&w=400'));
+  assert.match(url, /[?&]w=400&exp=\d+&sig=/);
 });
 
 /**
@@ -125,4 +125,18 @@ test('Each photo carries its photographer credit, in the same order', () => {
   });
   assert.equal(place.photoUrls.length, 2);
   assert.deepEqual(place.photoAttributions, ['Ada L., Sam K.', '']);
+});
+
+test('photo proxy URLs carry a short-lived signature, required only when the flag is on', () => {
+  const url = photoProxyUrl('places/ChIJtest/photos/AeJbb3cPHOTOREF', 800, 1_000_000);
+  const parsed = new URL(url);
+  assert.equal(parsed.searchParams.get('w'), '800');
+  const exp = Number(parsed.searchParams.get('exp'));
+  const sig = parsed.searchParams.get('sig');
+  assert.equal(exp, 1000 + PHOTO_SIGN_TTL_SECONDS);
+  assert.equal(placesPhotoAuthProblem({ name: 'places/ChIJtest/photos/AeJbb3cPHOTOREF', w: 800 }, false), null, 'unsigned is allowed while the flag is off');
+  assert.match(placesPhotoAuthProblem({ name: 'places/ChIJtest/photos/AeJbb3cPHOTOREF', w: 800 }, true, 1_000_000)!, /expired/);
+  assert.equal(placesPhotoAuthProblem({ name: 'places/ChIJtest/photos/AeJbb3cPHOTOREF', w: 800, exp, sig }, true, 1_000_000), null);
+  assert.match(placesPhotoAuthProblem({ name: 'places/ChIJtest/photos/AeJbb3cPHOTOREF', w: 800, exp, sig: 'tampered-signature-value' }, true, 1_000_000)!, /expired/);
+  assert.equal(signPlacesPhoto('places/ChIJtest/photos/AeJbb3cPHOTOREF', 800, exp), sig);
 });

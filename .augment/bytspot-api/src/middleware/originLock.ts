@@ -46,6 +46,6 @@ export function originLock(secret = config.originLockSecret) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!secret || EXEMPT.some((pattern) => pattern.test(req.path))) return next();
     if (matches(req.headers[ORIGIN_AUTH_HEADER], secret)) return next();
-    res.status(403).json({ error: 'Use https://api.bytspot.com.' });
+    res.status(403).json({ error: 'Use https://api.bytspot.app.' });
   };
 }

@@ -217,6 +217,8 @@ test('REA X4: Plans, party media, notes, businesses and concierge answers can be
   writes = [];
   await member().safety.report({ kind: 'concierge', targetId: 'resp-1', reason: 'illegal-item', excerpt: 'where to buy...' });
   assert.equal(writes.find((w) => w.op === 'report.create')!.args.data.snapshot.excerpt, 'where to buy...');
+  await assert.rejects(() => member().safety.report({ kind: 'concierge', targetId: 'no', reason: 'illegal-item', excerpt: 'x' }), { code: 'NOT_FOUND' });
+  await assert.rejects(() => member().safety.report({ kind: 'concierge', targetId: 'not a valid id!!!', reason: 'illegal-item', excerpt: 'x' }), { code: 'NOT_FOUND' });
 });
 
 test('REA X4: the admin queue shows the response deadline for each item', async () => {

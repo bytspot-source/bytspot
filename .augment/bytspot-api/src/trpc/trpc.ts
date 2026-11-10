@@ -1,5 +1,6 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import type Redis from 'ioredis';
+import { config } from '../config';
 import { getRedis } from '../lib/redis';
 import { isSessionRevoked, isTokenSignedOut } from '../services/accountDeletion';
 import { ProviderLinkRequired } from '../services/providerLink';
@@ -161,9 +162,22 @@ export function globalBudgetMiddleware(opts: { windowMs: number; max: () => numb
     let count: number | null = null;
     const redis = getRedis();
     if (redis) {
-      try { count = await incrementRedisRateLimit(redis, `rate-limit:${key}`, opts.windowMs); } catch { count = null; }
+      try {
+        count = await incrementRedisRateLimit(redis, `rate-limit:${key}`, opts.windowMs);
+      } catch {
+        // Fail closed: a Redis outage must not lift the daily cap (the old
+        // in-process fallback was per instance and not global).
+        throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: opts.message });
+      }
+    } else if (config.nodeEnv === 'production') {
+      // Production is expected to have Redis. Without it the breaker cannot
+      // be global, so we refuse rather than count in-process.
+      throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: opts.message });
+    } else {
+      // Dev and test: no Redis, so a process-local counter is documented and
+      // accepted.
+      count = incrementLocalRateLimit(key, opts.windowMs);
     }
-    if (count === null) count = incrementLocalRateLimit(key, opts.windowMs);
     if (count === null || count > max) throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: opts.message });
     return next();
   });

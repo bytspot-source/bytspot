@@ -168,25 +168,31 @@ export const adminPlacesRouter = router({
 
   /**
    * Lists a place, or updates its link and category. The admin has opened the
-   * link, so saving stamps today as its check date. Listing makes the venue
-   * discoverable even if it already existed as a hidden Party arrival point.
+   * link, so saving stamps today as its check date. A place with no OpenTable or
+   * Resy page is listed without one, which clears any link it had. Listing makes
+   * the venue discoverable even if it already existed as a hidden Party arrival point.
    */
   save: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-save' }))
     .input(z.object({
       placeId: z.string().trim().regex(PLACE_ID),
-      provider: z.enum(TABLE_BOOKING_PROVIDERS as [string, ...string[]]),
-      url: z.string().trim().min(1).max(500),
+      provider: z.enum(TABLE_BOOKING_PROVIDERS as [string, ...string[]]).nullable().optional(),
+      url: z.string().trim().min(1).max(500).nullable().optional(),
       category: z.enum(LISTED_CATEGORIES),
     }))
     .mutation(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
-      const problem = tableBookingUrlError(input.provider, input.url);
+      const provider = input.provider ?? null;
+      const url = input.url ?? null;
+      if (Boolean(provider) !== Boolean(url)) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: provider ? 'Paste the booking link.' : 'Pick OpenTable or Resy.' });
+      }
+      const problem = provider && url ? tableBookingUrlError(provider, url) : null;
       if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });
       const now = new Date();
       const listing = {
         discoverable: true, category: input.category,
-        bookingProvider: input.provider, bookingUrl: input.url, bookingCheckedAt: now,
+        bookingProvider: provider, bookingUrl: url, bookingCheckedAt: provider ? now : null,
       };
 
       let venue = await db.venue.findUnique({ where: { googlePlaceId: input.placeId }, select: { id: true, listedAt: true } });
@@ -228,7 +234,7 @@ export const adminPlacesRouter = router({
 
       auditAdminAction({
         actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.save',
-        detail: { venueId: venue.id, provider: input.provider },
+        detail: { venueId: venue.id, provider: provider ?? 'none' },
       });
       await Promise.all([refreshTableBookingLinks(), forgetVenueLists()]);
       return { venueId: venue.id };

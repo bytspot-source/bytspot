@@ -177,6 +177,17 @@ test('saving a place lists it with its link, and a foreign link is refused', asy
       // A place listed before keeps the date it was first listed.
       assert.equal('listedAt' in updated.data, false);
       assert.equal(tableBookingLinkFor('ChIJ_new')?.label, 'Resy');
+
+      // A place with no OpenTable or Resy page is still listed, and loses any link it had.
+      await assert.rejects(
+        () => adminCaller().admin.places.save({ placeId: 'ChIJ_new', provider: 'resy', category: 'restaurant' }),
+        { code: 'BAD_REQUEST' },
+      );
+      await adminCaller().admin.places.save({ placeId: 'ChIJ_new', category: 'restaurant' });
+      assert.equal(updated.data.discoverable, true);
+      assert.equal(updated.data.bookingProvider, null);
+      assert.equal(updated.data.bookingUrl, null);
+      assert.equal(updated.data.bookingCheckedAt, null);
     } finally {
       restores.reverse().forEach((restore) => restore());
     }

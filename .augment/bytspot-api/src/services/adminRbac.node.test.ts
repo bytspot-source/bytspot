@@ -144,6 +144,29 @@ test('only an admin reaches Admin Places and Vendors', async () => {
   });
 });
 
+test('search names the Bytspot venue a Google place is already tied to', async () => {
+  await withAdmin(async () => {
+    const restores = [
+      stub(config, 'googlePlacesApiKey', 'test-key'),
+      stub(globalThis, 'fetch', async () => new Response(JSON.stringify({ places: [
+        { id: 'ChIJ_tied', displayName: { text: 'Vidash Taste' }, formattedAddress: '185 Veterans Memorial Hwy SE', location: { latitude: 33.81, longitude: -84.56 }, primaryType: 'restaurant' },
+        { id: 'ChIJ_free', displayName: { text: 'Free Grill' }, formattedAddress: '2 Main St', location: { latitude: 33.8, longitude: -84.5 }, primaryType: 'restaurant' },
+      ] }), { status: 200 })),
+      stub(db.venue, 'findMany', async () => [{ id: 'ven_cs', name: 'Colony Square', googlePlaceId: 'ChIJ_tied', listedAt: new Date(), discoverable: true }]),
+    ];
+    try {
+      const { places } = await adminCaller().admin.places.search({ query: 'vidash search names tied venue' });
+      const tied = places.find((p: any) => p.placeId === 'ChIJ_tied');
+      const free = places.find((p: any) => p.placeId === 'ChIJ_free');
+      assert.equal(tied?.venueName, 'Colony Square');
+      assert.equal(tied?.listed, true);
+      assert.equal(free?.venueName, null);
+    } finally {
+      restores.reverse().forEach((restore) => restore());
+    }
+  });
+});
+
 test('saving a place lists it with its link, and a foreign link is refused', async () => {
   await withAdmin(async () => {
     let created: any = null;

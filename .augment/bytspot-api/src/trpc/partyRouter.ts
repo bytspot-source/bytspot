@@ -1942,9 +1942,12 @@ export const partyTicketsRouter = router({
         ? splitHostAndSellerAmount(reservation.amountCents - reservation.sessionAmountCents, reservation.sessionAmountCents, ticketFeeBps)
         : { ...splitTicketAmount(reservation.amountCents, ticketFeeBps), sellerNetCents: null };
       const stripe = new Stripe(config.stripeSecretKey);
+      // A member's Stripe customer lets Checkout offer the cards they saved.
+      const buyer = await db.user.findUnique({ where: { id: ctx.user.userId }, select: { stripeCustomerId: true } });
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
+        ...(buyer?.stripeCustomerId ? { customer: buyer.stripeCustomerId } : {}),
         // Itemised, so the guest sees the door and the table as the two
         // separate things they are rather than one unexplained total.
         line_items: [

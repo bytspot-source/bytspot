@@ -45,6 +45,7 @@ import { curatedVenueMedia } from '../services/venueMedia';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { currentPlatformFeeBps, defaultFeeBps, FEE_SCOPES, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE, VENDOR_BOOKING_FEE_SCOPE } from '../services/platformFee';
 import { payoutsRouter } from './payoutsRouter';
+import { paymentsRouter } from './paymentsRouter';
 import { runCrowdAlerts } from '../services/crowdAlerts';
 import { claimPackedAlert, entersPacked } from '../services/crowdTransition';
 import { runCrowdSimulation } from '../services/crowdSimulator';
@@ -1791,6 +1792,7 @@ export const appRouter = router({
   safety: safetyRouter,
   mapReports: mapReportsRouter,
   payouts: payoutsRouter,
+  payments: paymentsRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

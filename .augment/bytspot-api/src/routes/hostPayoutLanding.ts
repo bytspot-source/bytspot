@@ -10,13 +10,13 @@ const hostPayoutLandingRouter = Router();
  */
 export const APP_RETURN_URL = 'bytspot://payouts/host';
 
-export function hostPayoutPage(title: string, body: string): string {
+export function hostPayoutPage(title: string, body: string, returnUrl: string = APP_RETURN_URL): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex"><title>${title} · Bytspot</title>
 <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#000;color:#fff;font:16px/1.5 -apple-system,system-ui,sans-serif;text-align:center;padding:24px}
 a{display:inline-block;margin-top:20px;padding:12px 24px;border-radius:14px;background:#67e8f9;color:#000;font-weight:700;text-decoration:none}</style>
-</head><body><main><h1>${title}</h1><p>${body}</p><a href="${APP_RETURN_URL}">Back to Bytspot</a></main></body></html>`;
+</head><body><main><h1>${title}</h1><p>${body}</p><a href="${returnUrl}">Back to Bytspot</a></main></body></html>`;
 }
 
 function send(res: Response, html: string) {

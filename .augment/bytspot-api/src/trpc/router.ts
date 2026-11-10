@@ -101,6 +101,7 @@ import { salesRouter } from './salesRouter';
 import { mapReportsRouter } from './mapReportsRouter';
 import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
 import { venueParking } from '../services/parkingFreshness';
+import { assertPaidCheckoutAllowedForTrpc } from '../lib/paidCheckout';
 
 function signToken(userId: string, email: string): string {
   return jwt.sign({ userId, email }, config.jwtSecret, {
@@ -1291,9 +1292,15 @@ const subscriptionRouter = router({
   createCheckout: protectedProcedure
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 3, label: 'subscription:checkout' }))
     .mutation(async ({ ctx }) => {
+    // Apple 3.1.1: Platinum is a digital unlock, so the iOS app must never
+    // reach a Stripe subscription. The app hides the offer; the API refuses too.
+    if (ctx.clientPlatform === 'ios') {
+      throw new TRPCError({ code: 'FORBIDDEN', message: 'Membership is not available in the iOS app.' });
+    }
     if (!config.stripeSecretKey) {
       return { url: null as string | null, demoMode: true, message: 'Stripe not configured' };
     }
+    assertPaidCheckoutAllowedForTrpc();
     const stripe = new Stripe(config.stripeSecretKey);
     const userId = ctx.user.userId;
 
@@ -1358,6 +1365,7 @@ const tipsRouter = router({
       if (!config.stripeSecretKey) {
         return { clientSecret: null as string | null, demoMode: true, message: 'Stripe not configured' };
       }
+      assertPaidCheckoutAllowedForTrpc();
       const stripe = new Stripe(config.stripeSecretKey);
       const { valetId, amount } = input;
 

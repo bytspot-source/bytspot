@@ -17,7 +17,8 @@
     "places:find": "tsx src/scripts/findPlaceIds.ts",
     "test": "tsx --test src/**/*.node.test.ts",
     "audit:gate": "node scripts/audit-gate.mjs",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "audit:paid-grants": "tsx src/scripts/auditPaidGrants.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

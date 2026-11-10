@@ -9,6 +9,7 @@ import { currentPlatformFeeBps, splitBookingAmount, VENDOR_BOOKING_FEE_SCOPE } f
 import { zonedInstant } from './availability';
 import { newPassCode } from './bookings';
 import { stripeHandle } from './payout';
+import { paidCheckoutBlockReason } from '../lib/paidCheckout';
 
 /**
  * Tickets a business sells itself, one date at a time: its Sunday special on
@@ -271,6 +272,8 @@ export async function startTicketCheckout(input: { ticketId: string; userId: str
   const now = input.now ?? new Date();
   const stripe = stripeHandle.client();
   if (!stripe) throw new PaymentsUnavailable();
+  // REA X5: never sell a pass for a test-mode charge in production.
+  if (paidCheckoutBlockReason()) throw new PaymentsUnavailable();
 
   const ticket = await db.vendorTicket.findFirst({
     where: { id: input.ticketId, ...LIVE_TICKET },

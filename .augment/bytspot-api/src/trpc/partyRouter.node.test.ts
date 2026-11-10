@@ -1985,3 +1985,23 @@ test('A Party with no sessions says so with an empty floor, not a missing one', 
   const invite = await createCaller(anonymousContext).events.invite({ partyId: 'party-1' });
   assert.deepEqual(invite.sessions, []);
 });
+
+test('REA X5: production refuses a party checkout on a Stripe test key before any reservation', async () => {
+  party.findFirst = async () => ({
+    id: 'party-1', status: 'published', accessMode: 'paid-ticket', requiredMembershipTier: 'green', capacity: 40, title: 'First Listen', tagline: '', ...linkAlive,
+    ticketTiers: [{ name: 'First Drop', priceCents: 2500, quantity: 40, requiredMembershipTier: 'green' }],
+  });
+  const previousEnv = config.nodeEnv;
+  (config as any).nodeEnv = 'production';
+  (config as any).stripeSecretKey = 'sk_test_party';
+  prisma.$transaction = async () => { throw new Error('must not reserve inventory'); };
+  try {
+    await assert.rejects(
+      () => createCaller({ ...authenticatedContext, user: { userId: 'x5-buyer', email: 'x5@example.test' } })
+        .events.tickets.createCheckout({ partyId: 'party-1', ticketTierName: 'First Drop', idempotencyKey }),
+      { code: 'PRECONDITION_FAILED', message: /not live/ },
+    );
+  } finally {
+    (config as any).nodeEnv = previousEnv;
+  }
+});

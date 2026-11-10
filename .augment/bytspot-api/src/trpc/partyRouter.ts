@@ -21,6 +21,7 @@ import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from
 import { isBlockedBetween } from '../services/safety';
 import { MAX_REQUEST_NOTES_PER_TICKET } from '../services/partyRequestNotes';
 import { musicInput, musicListing, musicSetTimeProblem, storedMusic } from '../services/partyMusic';
+import { assertPaidCheckoutAllowedForTrpc } from '../lib/paidCheckout';
 
 const maxAlbumImages = 6;
 const partyKinds = ['listening-party', 'comedy-night', 'premiere', 'private-party', 'fan-meetup', 'release-party', 'pop-up'] as const;
@@ -1834,6 +1835,7 @@ export const partyTicketsRouter = router({
         throw new TRPCError({ code: 'CONFLICT', message: 'This Party Pass is already confirmed.' });
       }
       if (!config.stripeSecretKey) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Party Checkout is not configured.' });
+      assertPaidCheckoutAllowedForTrpc();
 
       const now = new Date();
       const reservation = await serializableTransaction(async (tx) => {

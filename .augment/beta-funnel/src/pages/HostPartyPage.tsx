@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { AppStoreButton } from '../components/AppStoreButton';
 import { DocumentTitle } from '../components/DocumentTitle';
+import { TERMS_URL } from '../lib/site';
 
 const HOST_STEPS = [
   {
@@ -54,11 +55,10 @@ export function HostPartyPage() {
           <ul className="mt-4 list-disc space-y-2 pl-5 text-[15px] leading-relaxed text-[var(--bone-muted)]">
             <li>It is not a list of Atlanta venue partners. Bytspot does not claim those here.</li>
             <li>
-              Paid passes, refunds, and payouts are covered in legal drafts that are still
-              pending counsel — see the{' '}
-              <Link to="/legal" className="text-[var(--cyan)] underline-offset-2 hover:underline">
-                legal drafts
-              </Link>
+              Paid passes, refunds, and payouts are covered in the{' '}
+              <a href={TERMS_URL} className="text-[var(--cyan)] underline-offset-2 hover:underline">
+                Terms of Service
+              </a>
               .
             </li>
           </ul>

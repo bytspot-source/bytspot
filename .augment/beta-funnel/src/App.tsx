@@ -6,13 +6,8 @@ import { HomePage } from './pages/HomePage';
 import { HowItWorksPage } from './pages/HowItWorksPage';
 import { HostPartyPage } from './pages/HostPartyPage';
 import { InvitePage } from './pages/InvitePage';
-import {
-  HostTermsPage,
-  LegalIndexPage,
-  PrivacyPage,
-  TermsOfSalePage,
-  TermsPage,
-} from './pages/LegalPages';
+import { ExternalRedirect } from './components/ExternalRedirect';
+import { PRIVACY_URL, TERMS_URL } from './lib/site';
 import { WelcomePage } from './pages/WelcomePage';
 import { NotFoundPage } from './pages/NotFoundPage';
 
@@ -29,11 +24,9 @@ function App() {
           <Route path="/party" element={<Navigate to="/host" replace />} />
           <Route path="/invite" element={<InvitePage />} />
           <Route path="/welcome" element={<WelcomePage />} />
-          <Route path="/legal" element={<LegalIndexPage />} />
-          <Route path="/terms" element={<TermsPage />} />
-          <Route path="/privacy" element={<PrivacyPage />} />
-          <Route path="/terms-of-sale" element={<TermsOfSalePage />} />
-          <Route path="/host-terms" element={<HostTermsPage />} />
+          <Route path="/legal" element={<ExternalRedirect to={TERMS_URL} />} />
+          <Route path="/terms" element={<ExternalRedirect to={TERMS_URL} />} />
+          <Route path="/privacy" element={<ExternalRedirect to={PRIVACY_URL} />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </SiteShell>

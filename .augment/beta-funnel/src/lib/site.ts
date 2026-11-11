@@ -13,11 +13,13 @@ export const NAV_LINKS = [
   { to: '/invite', label: 'Invites' },
 ] as const;
 
+/** The published policies, the same pages the App Store listing and the app link to. */
+export const TERMS_URL = 'https://bytspot.app/terms';
+export const PRIVACY_URL = 'https://bytspot.app/privacy';
+
 export const LEGAL_LINKS = [
-  { to: '/terms', label: 'Terms of Service', draft: true },
-  { to: '/privacy', label: 'Privacy Policy', draft: true },
-  { to: '/terms-of-sale', label: 'Terms of Sale', draft: true },
-  { to: '/host-terms', label: 'Host Terms', draft: true },
+  { href: TERMS_URL, label: 'Terms of Service' },
+  { href: PRIVACY_URL, label: 'Privacy Policy' },
 ] as const;
 
 /** Featured first: parties and plans lead the product story. */

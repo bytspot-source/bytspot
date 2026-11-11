@@ -22,30 +22,20 @@ export function SiteFooter() {
           <Link className="text-[var(--bone-muted)] hover:text-[var(--bone)]" to="/invite">
             Invites
           </Link>
-          <Link className="text-[var(--bone-muted)] hover:text-[var(--bone)]" to="/legal">
-            Legal drafts
-          </Link>
         </div>
       </div>
       <div className="mx-auto flex max-w-6xl flex-col gap-3 border-t border-[var(--line)] px-5 py-6 text-xs text-[var(--bone-muted)] md:flex-row md:items-center md:justify-between md:px-8">
         <p>© 2026 Bytspot · Atlanta, GA</p>
         <ul className="flex flex-wrap gap-x-4 gap-y-2">
           {LEGAL_LINKS.map((link) => (
-            <li key={link.to}>
-              <Link className="hover:text-[var(--bone)]" to={link.to}>
+            <li key={link.href}>
+              <a className="hover:text-[var(--bone)]" href={link.href}>
                 {link.label}
-                <span className="ml-1 text-[10px] uppercase tracking-wider text-[var(--danger)]">
-                  draft
-                </span>
-              </Link>
+              </a>
             </li>
           ))}
         </ul>
       </div>
-      <p className="mx-auto max-w-6xl px-5 pb-8 text-[11px] leading-relaxed text-[var(--bone-muted)] md:px-8">
-        Legal pages are draft shells pending counsel review. They are not published terms and are
-        not in force.
-      </p>
     </footer>
   );
 }

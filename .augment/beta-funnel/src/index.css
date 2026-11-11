@@ -87,12 +87,6 @@ body {
   animation-delay: var(--star-delay, 0s);
 }
 
-.draft-banner {
-  border: 1px solid rgba(232, 180, 180, 0.45);
-  background: rgba(88, 28, 28, 0.45);
-  color: #F7E4E4;
-}
-
 /* High-contrast text utilities that don't rely on low-opacity white */
 .prose-mute {
   color: var(--bone-muted);

@@ -56,6 +56,7 @@ test('A shared link previews as the party, not as "Bytspot"', async () => {
   assert.match(html, /<meta property="og:title" content="Champagne pop">/);
   assert.match(html, /<meta property="og:description" content="Ava Reed[^"]*The Roof, Midtown">/);
   assert.match(html, /<title>Champagne pop · Bytspot<\/title>/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
 });
 
 test('The Smart App Banner opens the party, not the app root', async () => {
@@ -64,15 +65,15 @@ test('The Smart App Banner opens the party, not the app root', async () => {
   assert.match(banner, /app-argument=\S*\/party\/party-1/);
 });
 
-test('The pass CTA leaves bytspot.app, because a same-domain link cannot invoke the Clip', async () => {
+test('The primary CTA is Open in Bytspot, with an App Store fallback, and never a second-domain hand-off', async () => {
   const { html } = await get('party-1');
-  const cta = /<a class="cta" href="([^"]+)">([^<]+)<\/a>/.exec(html);
-  assert.equal(cta?.[2], 'Open Pass');
-  // iOS suppresses Universal Links to the page's own domain, so a CTA pointing
-  // back at the share URL can only ever reload the page.
-  assert.match(cta?.[1] ?? '', /^https:\/\/appclip\.apple\.com\/id\?/);
-  assert.match(cta?.[1] ?? '', /p=com\.bytspot\.app\.Clip/);
-  assert.match(cta?.[1] ?? '', /partyId=party-1/);
+  const primary = /<a class="cta cta-primary" href="([^"]+)">([^<]+)<\/a>/.exec(html);
+  const secondary = /<a class="cta cta-secondary" href="([^"]+)">([^<]+)<\/a>/.exec(html);
+  assert.equal(primary?.[2], 'Open in Bytspot');
+  assert.equal(primary?.[1], 'https://bytspot.app/party/party-1');
+  assert.equal(secondary?.[2], 'Get Bytspot on the App Store');
+  assert.match(secondary?.[1] ?? '', /apps\.apple\.com\/app\/id6761876421/);
+  assert.doesNotMatch(html, /appclip\.apple\.com|app-clip-bundle-id|App Clip/i);
 });
 
 test('An in-app browser is told to open Safari, and the page stays script-free', async () => {
@@ -212,4 +213,44 @@ test('A host who clears the subtitle publishes no subtitle', async () => {
   assert.doesNotMatch(page.html, /One moment\. Your people\./);
   // The empty paragraph goes with it rather than leaving a gap under the title.
   assert.doesNotMatch(page.html, /<p class="tagline"><\/p>/);
+});
+
+test('An Android or desktop visitor is told Bytspot is on iPhone, and still sees the public party details', async () => {
+  const android = await get('party-1', 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/120.0.0.0 Mobile Safari/537.36');
+  assert.equal(android.status, 200);
+  assert.match(android.html, /Champagne pop/);
+  assert.match(android.html, /The Roof, Midtown/);
+  assert.match(android.html, /Bytspot is on iPhone for now/);
+  assert.doesNotMatch(android.html, /coming soon|coming to Android/i);
+
+  const desktop = await get('party-1', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0 Safari/537.36');
+  assert.match(desktop.html, /Bytspot is on iPhone for now/);
+
+  const iphone = await get('party-1', 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1');
+  assert.doesNotMatch(iphone.html, /Bytspot is on iPhone for now/);
+});
+
+test('A host name is escaped into the preview and the page', async () => {
+  party.findFirst = async () => ({ ...published, host: { name: '<script>alert(1)</script>' } });
+  const { html } = await get('party-1');
+  assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
+  assert.match(html, /Hosted by &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /og:description" content="&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test('The public page does not grow new fields: no capacity, coordinates, or age rule', async () => {
+  party.findFirst = async () => ({
+    ...published,
+    capacity: 40,
+    latitude: 33.7726,
+    longitude: -84.3655,
+    templateConfig: { ageRule: '21-plus' },
+    ageNotice: '21+ / ID required',
+  });
+  const { html } = await get('party-1');
+  assert.doesNotMatch(html, /\bcapacity\b|sold out|spots left/i);
+  assert.doesNotMatch(html, /33\.7726|-84\.3655|latitude|longitude/);
+  // Age notes exist on the authenticated pass, not on this unauthenticated page.
+  assert.doesNotMatch(html, /21\+|ID required|ageNotice|age rule/i);
+  assert.doesNotMatch(html, /App Clip|appclip\.apple\.com|app-clip-bundle-id/i);
 });

@@ -45,12 +45,14 @@ beforeEach(() => {
   privateSale.findFirst = async (args: any) => { lastWhere = args.where; return open; };
 });
 
-test('The sale page hands the App Clip the sale link, never the home page', async () => {
+test('The sale page hands the Smart App Banner the sale link, never the home page', async () => {
   const { status, html, csp, cache } = await get('sale-1');
   assert.equal(status, 200);
-  assert.match(html, /app-clip-bundle-id=com\.bytspot\.app\.Clip, app-clip-display=card, app-argument=https:\/\/bytspot\.app\/sale\/sale-1"/);
+  assert.match(html, /apple-itunes-app" content="app-id=6761876421, app-argument=https:\/\/bytspot\.app\/sale\/sale-1"/);
+  assert.doesNotMatch(html, /app-clip-bundle-id|appclip\.apple\.com|App Clip/i);
   assert.doesNotMatch(html, /app-argument=https:\/\/bytspot\.app\/"/);
-  assert.match(html, /PRIVATE SALE/);
+  assert.match(html, /Private sale/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
   assert.match(html, /Vintage denim jacket/);
   assert.match(html, /\$45 · from Ava/);
   assert.match(html, /og:image" content="[^"]*\/media\/sales\/photo-1"/);
@@ -82,7 +84,7 @@ test('A database failure is not reported as an ended sale', async () => {
   privateSale.findFirst = async () => { throw new Error('db down'); };
   const { status, html } = await get('sale-1');
   assert.equal(status, 500);
-  assert.match(html, /can't load this right now/);
+  assert.match(html, /can&#39;t load this right now/);
 });
 
 test('Seller-controlled text is escaped, never executed', async () => {
@@ -104,4 +106,33 @@ test('An over-long id is refused before the database', async () => {
 test('Prices read like the app', () => {
   assert.equal(priceLabel(4500), '$45');
   assert.equal(priceLabel(4550), '$45.50');
+});
+
+test('An Android or desktop visitor is told Bytspot is on iPhone, and still sees the sale', async () => {
+  const android = await get('sale-1', 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/120.0.0.0 Mobile Safari/537.36');
+  assert.equal(android.status, 200);
+  assert.match(android.html, /Vintage denim jacket/);
+  assert.match(android.html, /Bytspot is on iPhone for now/);
+  assert.doesNotMatch(android.html, /coming soon|coming to Android/i);
+  assert.match(android.html, /Bytspot doesn't hold, move or protect money/);
+
+  const desktop = await get('sale-1', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0 Safari/537.36');
+  assert.match(desktop.html, /Bytspot is on iPhone for now/);
+});
+
+test('A seller name is escaped, and a closed sale still hides the listing', async () => {
+  privateSale.findFirst = async () => ({ ...open, seller: { name: '<script>alert(1)</script> Reed' } });
+  const { html } = await get('sale-1');
+  assert.doesNotMatch(html, /<script>alert/);
+  assert.match(html, /from &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /Reed/);
+});
+
+test('The page does not claim Bytspot takes payment, and never grows meet-point fields', async () => {
+  const { html } = await get('sale-1');
+  assert.match(html, /Bytspot doesn't hold, move or protect money/);
+  assert.doesNotMatch(html, /escrow|protected payment|Bytspot holds|we hold your money/i);
+  assert.doesNotMatch(html, /Ponce City Market|Old Fourth Ward|33\.77|-84\.36/);
+  assert.match(html, /Open in Bytspot/);
+  assert.match(html, /Get Bytspot on the App Store/);
 });

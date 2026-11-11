@@ -247,7 +247,7 @@ model BookingLinkTap {
   id        String   @id @default(cuid())
   venueId   String   @map("venue_id")
   userId    String?  @map("user_id")
-  /// "venue" (the venue screen), "plan" (a Plan item) or "concierge" (an approved Concierge action).
+  /// "venue" (the venue screen), "plan" (a Plan item), "party" (a Party's arrival venue) or "concierge" (an approved Concierge action).
   surface   String
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -334,6 +334,9 @@ model Party {
   lat                    Float?
   lng                    Float?
   arrivalVenueId         String?   @map("arrival_venue_id")
+  /// Host's choice to show admitted guests how to book the arrival venue
+  /// (its OpenTable or Resy link). The host always sees it.
+  venueBookingForGuests  Boolean   @default(false) @map("venue_booking_for_guests")
   locationDisclosure     String    @default("public") @map("location_disclosure")
   capacity               Int
   accessMode             String    @map("access_mode")

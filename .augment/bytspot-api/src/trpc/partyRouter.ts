@@ -945,7 +945,7 @@ export function placeVenueSlug(name: string, placeId: string): string {
 async function authorizedPartyArrival(partyId: string, userId: string) {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
-    include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true } } },
+    include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true, googlePlaceId: true, bookingProvider: true, bookingUrl: true, controlledAt: true } } },
   });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   const isHost = party.hostUserId === userId;
@@ -957,7 +957,25 @@ async function authorizedPartyArrival(partyId: string, userId: string) {
     if (!guest?.accessGranted) throw new TRPCError({ code: 'FORBIDDEN', message: 'Party access is required before arrival guidance is available.' });
   }
   if (!party.arrivalVenue) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'Arrival guidance is not enabled for this Party.' });
-  return party;
+  return { ...party, isHost };
+}
+
+/**
+ * How to book the arrival venue outside Bytspot. Only a listed place has a
+ * hand-checked OpenTable or Resy link; a Bytspot-controlled venue takes asks
+ * in the app instead, so it never sends guests elsewhere. The host always
+ * sees it; guests only when the host turned it on.
+ */
+export function partyVenueBooking(
+  venue: { googlePlaceId: string | null; bookingProvider: string | null; bookingUrl: string | null; controlledAt: Date | null },
+  viewer: { isHost: boolean; forGuests: boolean },
+) {
+  if (!viewer.isHost && !viewer.forGuests) return null;
+  const controlled = venue.controlledAt !== null;
+  const booking = !controlled && venue.bookingUrl && (venue.bookingProvider === 'opentable' || venue.bookingProvider === 'resy')
+    ? { provider: venue.bookingProvider, url: venue.bookingUrl }
+    : null;
+  return { placeId: venue.googlePlaceId?.replace(/^places\//, '') ?? null, controlled, booking };
 }
 
 async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {
@@ -1779,7 +1797,22 @@ export const partyArrivalRouter = router({
         partyId: party.id,
         destination: { venueId: venue.id, name: venue.name, address: venue.address, latitude: venue.lat, longitude: venue.lng },
         map: { provider: 'apple-maps', directionsUrl: directions.toString() },
+        isHost: party.isHost,
+        bookingForGuests: party.venueBookingForGuests,
+        venueBooking: partyVenueBooking(venue, { isHost: party.isHost, forGuests: party.venueBookingForGuests }),
       };
+    }),
+
+  setBookingForGuests: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'party-arrival-booking-for-guests' }))
+    .input(z.object({ partyId: z.string().min(1).max(128), enabled: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const updated = await db.party.updateMany({
+        where: { id: input.partyId, hostUserId: ctx.user.userId, status: 'published', arrivalVenueId: { not: null } },
+        data: { venueBookingForGuests: input.enabled },
+      });
+      if (updated.count !== 1) throw new TRPCError({ code: 'NOT_FOUND', message: 'Published Party with an arrival venue not found for this host.' });
+      return { partyId: input.partyId, bookingForGuests: input.enabled };
     }),
 
   handoff: protectedProcedure

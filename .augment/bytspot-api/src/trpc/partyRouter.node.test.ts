@@ -449,6 +449,54 @@ test('Party arrival guidance requires an access-granted guest and a bound venue'
   assert.match(context.map.directionsUrl, /^https:\/\/maps\.apple\.com\//);
 });
 
+test('The host sees how to book a listed arrival venue; guests only once the host turns it on', async () => {
+  const arrivalVenue = {
+    id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388,
+    googlePlaceId: 'ChIJsample', bookingProvider: 'opentable', bookingUrl: 'https://www.opentable.com/r/sample', controlledAt: null,
+  };
+  let forGuests = false;
+  let hostUserId = 'test-user-id';
+  party.findFirst = async () => ({ id: 'party-1', hostUserId, requiredMembershipTier: 'green', venueBookingForGuests: forGuests, arrivalVenue });
+
+  const host = await caller().events.arrival.context({ partyId: 'party-1' });
+  assert.equal(host.isHost, true);
+  assert.deepEqual(host.venueBooking, { placeId: 'ChIJsample', controlled: false, booking: { provider: 'opentable', url: 'https://www.opentable.com/r/sample' } });
+
+  hostUserId = 'someone-else';
+  partyGuest.findUnique = async () => ({ status: 'rsvp', accessGranted: true });
+  const guestBefore = await caller().events.arrival.context({ partyId: 'party-1' });
+  assert.equal(guestBefore.venueBooking, null, 'guests do not see it until the host turns it on');
+
+  forGuests = true;
+  const guestAfter = await caller().events.arrival.context({ partyId: 'party-1' });
+  assert.equal(guestAfter.venueBooking?.booking?.provider, 'opentable');
+});
+
+test('A Bytspot-controlled or unlisted arrival venue never offers an outside booking link', async () => {
+  const { partyVenueBooking } = await import('./partyRouter');
+  const host = { isHost: true, forGuests: false };
+  assert.deepEqual(
+    partyVenueBooking({ googlePlaceId: 'p', bookingProvider: 'resy', bookingUrl: 'https://resy.com/x', controlledAt: new Date() }, host),
+    { placeId: 'p', controlled: true, booking: null },
+  );
+  assert.deepEqual(
+    partyVenueBooking({ googlePlaceId: 'p', bookingProvider: null, bookingUrl: null, controlledAt: null }, host),
+    { placeId: 'p', controlled: false, booking: null },
+  );
+  assert.equal(partyVenueBooking({ googlePlaceId: 'p', bookingProvider: 'other', bookingUrl: 'https://x.test', controlledAt: null }, host)?.booking, null);
+});
+
+test('Only the host of a published Party with an arrival venue can show its booking to guests', async () => {
+  let update: any;
+  party.updateMany = async (input: any) => { update = input; return { count: 1 }; };
+  assert.deepEqual(await caller().events.arrival.setBookingForGuests({ partyId: 'party-1', enabled: true }), { partyId: 'party-1', bookingForGuests: true });
+  assert.deepEqual(update.where, { id: 'party-1', hostUserId: 'test-user-id', status: 'published', arrivalVenueId: { not: null } });
+  assert.deepEqual(update.data, { venueBookingForGuests: true });
+
+  party.updateMany = async () => ({ count: 0 });
+  await assert.rejects(() => caller().events.arrival.setBookingForGuests({ partyId: 'party-1', enabled: true }), { code: 'NOT_FOUND' });
+});
+
 test('Party handoff derives its destination from the bound venue and enforces premium membership', async () => {
   party.findFirst = async () => ({
     id: 'party-1', requiredMembershipTier: 'green', arrivalVenue: { id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388 },

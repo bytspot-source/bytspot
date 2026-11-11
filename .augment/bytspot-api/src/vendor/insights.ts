@@ -48,6 +48,9 @@ export interface AnalyticsSummary {
   refunds: number;
   /** Booked to be paid at the venue, at the offered price. */
   payAtVenueCents: number;
+  /** Location-checked Bytspot check-ins at the business's linked places, and how many guests made them. */
+  checkIns: number;
+  checkInGuests: number;
   top: { windowId: string; title: string; booked: number; valueCents: number }[];
 }
 
@@ -56,7 +59,9 @@ export function summarizeAnalytics(input: {
   events: AnalyticsEvent[];
   offers: AnalyticsOffer[];
   checkouts: AnalyticsCheckout[];
+  checkIns?: { userId: string }[];
 }): AnalyticsSummary {
+  const checkIns = input.checkIns ?? [];
   const count = (kind: string) => input.events.filter((event) => event.kind === kind).length;
   const offers = count('OFFERED');
   const booked = count('ACCEPTED');
@@ -83,6 +88,8 @@ export function summarizeAnalytics(input: {
     netCents: completed.reduce((total, checkout) => total + checkout.sellerNetCents, 0),
     refunds: input.checkouts.filter((checkout) => checkout.status === 'refunded').length,
     payAtVenueCents: accepted.filter((offer) => offer.payAt === 'venue').reduce((total, offer) => total + offer.priceCents, 0),
+    checkIns: checkIns.length,
+    checkInGuests: new Set(checkIns.map((checkIn) => checkIn.userId)).size,
     top: [...byWindow.values()].sort((a, b) => b.booked - a.booked || b.valueCents - a.valueCents).slice(0, 5),
   };
 }
@@ -98,7 +105,12 @@ function titleFor(window: { skuTemplateId: string; title: string | null; duratio
 
 export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now: Date = new Date()): Promise<AnalyticsSummary> {
   const since = new Date(now.getTime() - days * 86_400_000);
-  const [events, offers, checkouts, tickets] = await Promise.all([
+  const linked = await db.vendorLocation.findMany({
+    where: { sellerId, menuVenueId: { not: null } },
+    select: { menuVenueId: true },
+  });
+  const venueIds = linked.map((location) => location.menuVenueId).filter((id): id is string => Boolean(id));
+  const [events, offers, checkouts, tickets, checkIns] = await Promise.all([
     db.demandEvent.findMany({ where: { sellerId, occurredAt: { gte: since } }, select: { kind: true } }),
     db.offer.findMany({
       where: { sellerId, state: 'ACCEPTED', updatedAt: { gte: since } },
@@ -119,6 +131,13 @@ export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now:
       where: { sellerId, createdAt: { gte: since }, status: { in: ['completed', 'refunded'] } },
       select: { status: true, amountCents: true, sellerNetCents: true },
     }),
+    // A self-reported tap from home is not a guest at the door.
+    venueIds.length
+      ? db.checkIn.findMany({
+          where: { venueId: { in: venueIds }, proof: { not: 'self_reported' }, createdAt: { gte: since } },
+          select: { userId: true },
+        })
+      : Promise.resolve([]),
   ]);
   return summarizeAnalytics({
     days,
@@ -131,6 +150,7 @@ export async function loadAnalytics(sellerId: string, days: AnalyticsRange, now:
       payAt: offer.payAt,
     })),
     checkouts: [...checkouts, ...tickets],
+    checkIns,
   });
 }
 

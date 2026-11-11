@@ -48,14 +48,6 @@
       {
         "file": ".augment/beta-funnel/public/favicon.svg",
         "kind": "svg"
-      },
-      {
-        "file": ".augment/beta-funnel/public/banner-3x3-vibecheck.html",
-        "kind": "svg"
-      },
-      {
-        "file": ".augment/beta-funnel/public/car-banner-vibecheck.html",
-        "kind": "svg"
       }
     ]
   },

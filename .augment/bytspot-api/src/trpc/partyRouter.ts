@@ -975,7 +975,7 @@ export function partyVenueBooking(
   const booking = !controlled && venue.bookingUrl && (venue.bookingProvider === 'opentable' || venue.bookingProvider === 'resy')
     ? { provider: venue.bookingProvider, url: venue.bookingUrl }
     : null;
-  return { placeId: venue.googlePlaceId, controlled, booking };
+  return { placeId: venue.googlePlaceId?.replace(/^places\//, '') ?? null, controlled, booking };
 }
 
 async function hasPremiumMobilityEntitlement(userId: string): Promise<boolean> {

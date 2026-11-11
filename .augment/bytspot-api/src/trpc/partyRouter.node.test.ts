@@ -480,7 +480,7 @@ test('A Bytspot-controlled or unlisted arrival venue never offers an outside boo
     { placeId: 'p', controlled: true, booking: null },
   );
   assert.deepEqual(
-    partyVenueBooking({ googlePlaceId: 'p', bookingProvider: null, bookingUrl: null, controlledAt: null }, host),
+    partyVenueBooking({ googlePlaceId: 'places/p', bookingProvider: null, bookingUrl: null, controlledAt: null }, host),
     { placeId: 'p', controlled: false, booking: null },
   );
   assert.equal(partyVenueBooking({ googlePlaceId: 'p', bookingProvider: 'other', bookingUrl: 'https://x.test', controlledAt: null }, host)?.booking, null);

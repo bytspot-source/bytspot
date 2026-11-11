@@ -362,7 +362,7 @@ export async function sendEmailAddedNotice(to: string, maskedAddedEmail: string)
           ${escapeHtml(maskedAddedEmail)} was added to your Bytspot account. You can remove it in the app under Profile › Personal Information › Emails.
         </p>
         <p style="color: #555; font-size: 13px; margin-top: 32px;">
-          If this wasn't you, contact safety@bytspot.com.
+          If this wasn't you, contact bytspotapp@gmail.com.
         </p>
       </div>
     `,
@@ -388,7 +388,7 @@ export async function sendAccountEmailChangedNotice(to: string, maskedNewEmail: 
           Your Bytspot account email was changed to ${escapeHtml(maskedNewEmail)}. The previous one is still on your account and you can remove it in the app under Profile › Personal Information › Emails.
         </p>
         <p style="color: #555; font-size: 13px; margin-top: 32px;">
-          If this wasn't you, contact safety@bytspot.com.
+          If this wasn't you, contact bytspotapp@gmail.com.
         </p>
       </div>
     `,

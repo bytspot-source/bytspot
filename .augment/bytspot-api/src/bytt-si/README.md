@@ -70,7 +70,13 @@ check still run after ranking.
 
 ## Route
 
-`concierge.plan` (`trpc/conciergePlanRouter.ts`): authenticated mutation, 10/min per user, input `{ message, location? }`, output `{ version: 1, status: 'ok' | 'unavailable', reply, result }`. Open to every signed-in user when `CONCIERGE_PLAN_ENABLED=true`; it does not use the discovery flag or pilot list. Model: `CONCIERGE_PLAN_MODEL` (default `gpt-4o-mini`), key `OPENAI_API_KEY`. Nothing is saved or booked; the client saves via `plans.create` / `plans.createWithBookables`, and `plans.feasibility` stays authoritative.
+`concierge.plan` (`trpc/conciergePlanRouter.ts`): authenticated mutation, 10/min per user, input `{ message, location? }`, output `{ version: 1, status: 'ok' | 'unavailable', reply, result }`. Requires `CONCIERGE_PLAN_ENABLED=true` and the same pilot gate as discovery (`CONCIERGE_AUDIENCE` / `CONCIERGE_PILOT_USER_IDS`). An empty pilot list opens it to no one. Model: `CONCIERGE_PLAN_MODEL` (default `gpt-4o-mini`), key `OPENAI_API_KEY`. Nothing is saved or booked; the client saves via `plans.create` / `plans.createWithBookables`, and `plans.feasibility` stays authoritative.
+
+## Opening suggestions
+
+`concierge.suggestions` is a separate BYTT-SI entry: one system prompt (`suggestions/prompt/system.md`) and four skills (`context`, `plans`, `history`, `prime_path`), using the same swappable `LLMProvider`. The server writes every label, prompt, and crowd sentence. The model only picks ids from that list. With no model, no key, or no location, a curated list is returned and is never empty. See `CONCIERGE_SUGGESTIONS.md`.
+
+Prime Path is not reimplemented here. The `prime_path` skill reports which needs the existing ranker can feature from confirmable Bytspot parties. A chip says so only in `primePath.note`, and only when `concierge.plan` is open for that guest. Discover listings are not Prime Path picks.
 
 ## Swapping the LLM
 

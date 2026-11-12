@@ -89,6 +89,7 @@ import { placesRouter, gpPost, mapPlace, MappedPlace, SEARCH_FIELDS as GP_SEARCH
 import { mobilityRouter } from './mobilityRouter';
 import { conciergeDiscoveryRouter } from './conciergeRouter';
 import { conciergePlanRouter } from './conciergePlanRouter';
+import { conciergeSuggestionsRouter } from './conciergeSuggestionsRouter';
 import { conciergeProcedure, throwConciergeRefusal } from '../services/conciergeAccess';
 import { planRouter } from './planRouter';
 import { coffeeRouter } from './coffeeRouter';
@@ -1288,6 +1289,7 @@ STRICT RULES:
 const conciergeRouter = router({
   ...conciergeDiscoveryRouter._def.record,
   ...conciergePlanRouter._def.record,
+  ...conciergeSuggestionsRouter._def.record,
   /** POST /concierge/chat → concierge.chat mutation (auth required — costs $, rate limited) */
   // REA C2: bounded input, daily quota, global breaker, optional consent gate,
   // output moderation. CONCIERGE_CHAT_ENABLED=false retires it outright.

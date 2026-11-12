@@ -4,8 +4,9 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
-  conciergeActionRequest, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
+  conciergeActionRequest, launchMarketPlanPoint, normalizeConciergeStarter, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
 } from './conciergeDiscovery';
+import { LAUNCH_MARKET } from '../bytt-si/suggestions/area';
 import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
 
@@ -874,6 +875,42 @@ test('a named area that is far, missing, slow or unsupported keeps the location 
   assert.equal(single.status, 'needs_location');
   assert.equal(areaCalls, 0, 'a single search with a place name keeps the existing prompt');
   assert.equal(searches, 0);
+});
+
+test('starter phrases become a Plan or an events search, and Help plan tonight stays a first stop', async () => {
+  assert.equal(normalizeConciergeStarter('Dinner tonight'), 'Plan dinner tonight');
+  assert.equal(normalizeConciergeStarter('Something to do nearby'), 'Events nearby');
+  assert.equal(normalizeConciergeStarter('Plan the night in Midtown.'), 'Plan dinner and drinks tonight in Midtown');
+  assert.equal(normalizeConciergeStarter('Help plan tonight'), 'Help plan tonight');
+  assert.deepEqual(proposedPlanNeeds([normalizeConciergeStarter('Plan the night')])?.needs.map((need) => need.need), ['dining', 'nightlife']);
+  assert.equal(proposedPlanNeeds(['Help plan tonight']), null);
+
+  const dinner = await service({ places: planPlaces() })(input('Dinner tonight'));
+  assert.equal(dinner.proposedPlan?.needs.join(','), 'dining');
+  assert.match(dinner.reply, /Proposed Plan/);
+  const night = await service({ places: planPlaces() })(input('Plan the night'));
+  assert.deepEqual(night.proposedPlan?.needs, ['dining', 'nightlife']);
+  const something = await service({ places: async (search) => {
+    assert.equal(search.query, 'event venue');
+    return { source: 'google', places: [place({ placeId: 'hall', name: 'Real Hall', primaryType: 'event_venue', types: ['event_venue'] })] };
+  } })(input('Something to do nearby'));
+  assert.equal(something.proposedPlan, null);
+  assert.equal(something.cards[0]?.name, 'Real Hall');
+});
+
+test('a Midtown plan still runs when the area lookup is down and the guest is in the launch market', async () => {
+  const searched: Array<{ query: string; lat: number }> = [];
+  const guest = { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+  const response = await service({ places: planPlaces(searched), area: async () => null })({
+    location: guest, messages: [{ role: 'user', content: 'dinner and drinks in Midtown' }],
+  });
+  assert.equal(response.status, 'ready');
+  assert.ok(searched.length === 2 && searched.every((search) => search.lat === LAUNCH_MARKET.lat));
+  assert.equal(response.proposedPlan?.area?.label, 'Midtown');
+  assert.match(response.reply, /launch-market point, because no area lookup was available/);
+  assert.doesNotMatch(response.reply, /as Google places it/);
+  assert.equal(launchMarketPlanPoint('Boston', guest), null);
+  assert.equal(launchMarketPlanPoint('Midtown', HERE), null);
 });
 
 test('planArea reads the named area and ignores times, near me and bare at', () => {

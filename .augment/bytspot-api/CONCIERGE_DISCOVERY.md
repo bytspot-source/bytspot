@@ -151,4 +151,8 @@ Budget ranking, event-session inventory, vendor bookable requests, server-side P
 
 ## Release B (behind a flag): `concierge.plan`
 
-BYTT-SI proposed Plans. Separate mutation; `concierge.chat` is unchanged, and `concierge.discover` keeps its own deterministic Proposed Plan (above). Disabled unless `CONCIERGE_PLAN_ENABLED=true`; when on, open to every signed-in user (no discovery flag or pilot list). Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.
+BYTT-SI proposed Plans. Separate mutation; `concierge.chat` is unchanged, and `concierge.discover` keeps its own deterministic Proposed Plan (above). Disabled unless `CONCIERGE_PLAN_ENABLED=true`. When on, it uses the same pilot gate as discovery (`CONCIERGE_AUDIENCE` / `CONCIERGE_PILOT_USER_IDS`); an empty pilot list opens it to no one. Read-only: proposes, never saves or books; `planFeasibility` is applied to every proposal and remains the check on saved Plans. See `src/bytt-si/README.md`.
+
+Opening chips are `concierge.suggestions` (see `CONCIERGE_SUGGESTIONS.md`), not the three phrases that used to be hardcoded in the app. Those phrases are still accepted: "Dinner tonight" is treated as "Plan dinner tonight", "Plan the night" as "Plan dinner and drinks tonight", and "Something to do nearby" as "Events nearby". "Help plan tonight" stays a single restaurant search.
+
+A Plan that names Midtown, from a guest already within 80 km of Midtown Atlanta, still searches the launch-market point when the area lookup is missing or fails. The reply says that point is the launch market, not a Google placement. A guest outside that radius still gets the location prompt.

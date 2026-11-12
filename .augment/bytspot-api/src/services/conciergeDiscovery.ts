@@ -8,6 +8,7 @@ import { tableBookingUrlError, type TableBookingLink } from './tableBookingLinks
 import {
   avoidLabel, mergePreferences, normalizePreferences, preferenceFilterInput, preferenceFit, priceSigns, type AvoidTag,
 } from './preferenceFit';
+import { LAUNCH_MARKET } from '../bytt-si/suggestions/area';
 
 export const coordinateSchema = z.object({
   lat: z.number().finite().min(-90).max(90),
@@ -154,6 +155,48 @@ export interface ConciergeDependencies {
 /** A named area further than this from the guest is not trusted (another city's Midtown). */
 export const PLAN_AREA_MAX_METERS = 80_000;
 export const PLAN_AREA_TIMEOUT_MS = 3000;
+
+const LAUNCH_AREA_NAME = /^(?:midtown|midtown atlanta|atlanta midtown)$/i;
+
+/**
+ * When the guest is already in the launch market and names Midtown, but the area
+ * lookup is missing, use the known Midtown Atlanta point. Callers must say so.
+ * A guest outside the launch market still gets the location prompt.
+ */
+export function launchMarketPlanPoint(areaName: string, guest: Coordinate): Coordinate | null {
+  if (!LAUNCH_AREA_NAME.test(areaName.trim())) return null;
+  const point = { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+  return withinSearch(guest, point, PLAN_AREA_MAX_METERS) ? point : null;
+}
+
+/**
+ * The shipped starter chips, and "plan the night", do not match a Proposed Plan
+ * on their own. Rewrite only the first wording of those phrases so Discover
+ * runs the Plan (or an events search) the guest asked for.
+ */
+export function normalizeConciergeStarter(content: string): string {
+  const bare = content.trim().replace(/[.!?]+$/, '').trim();
+  const lower = bare.toLowerCase();
+  if (lower === 'dinner tonight') return 'Plan dinner tonight';
+  if (lower === 'something to do nearby') return 'Events nearby';
+  if (/^plan(?:\s+(?:my|our|the))?\s+night\b/i.test(bare) && !/\b(?:dinner|drinks?|coffee|show|lunch|breakfast|bars?)\b/i.test(bare)) {
+    return bare.replace(/^plan(?:\s+(?:my|our|the))?\s+night\b/i, 'Plan dinner and drinks tonight');
+  }
+  return content;
+}
+
+export function withStarterPrompts(input: ConciergeInput): ConciergeInput {
+  let rewritten = false;
+  return {
+    ...input,
+    messages: input.messages.map((message) => {
+      if (rewritten || message.role !== 'user') return message;
+      rewritten = true;
+      const content = normalizeConciergeStarter(message.content);
+      return content === message.content ? message : { ...message, content };
+    }),
+  };
+}
 
 type Intent = Pick<ConciergeSearch, 'query' | 'rail' | 'mode'>;
 const CATEGORIES: Array<[RegExp, string]> = [
@@ -536,7 +579,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
 
   /** One search per need, the nearest unused card for each, offered as a Plan. Nothing is saved here. */
   async function proposePlan(input: ConciergeInput & { location: Coordinate }, local: LocalPlan, wanted: PlanNeedRequest,
-    areaName: string | null = null): Promise<ConciergeResponse> {
+    areaName: string | null = null, areaBasis: 'lookup' | 'launch_market' = 'lookup'): Promise<ConciergeResponse> {
     const { action } = local;
     const where = areaName ? `near ${areaName}` : 'nearby';
     const said = local.messages.join(' ');
@@ -584,7 +627,9 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     // "The first one" after a Proposed Plan means its first stop, in stop order.
     if (action) return answerAction(action, cards, caveats, PLAN_REFINEMENTS);
     const gaps = missing.length ? ` I could not find a place for ${listWords(missing)} ${where}; after you save the Plan you can ask local businesses.` : '';
-    const area = areaName ? ` Searched near ${areaName} as Google places it; distances are from there.` : '';
+    const area = !areaName ? '' : areaBasis === 'launch_market'
+      ? ` Searched near ${areaName} using the Midtown Atlanta launch-market point, because no area lookup was available. Distances are from there.`
+      : ` Searched near ${areaName} as Google places it; distances are from there.`;
     return result('ready', `Proposed Plan: ${named.join(', then ')}.${gaps}${area} ${caveats}`, cards, PLAN_REFINEMENTS, null, plan);
   }
 
@@ -597,7 +642,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
   }
 
   return async (raw: ConciergeInput): Promise<ConciergeResponse> => {
-    const input = conciergeDiscoverInput.parse(raw);
+    const input = withStarterPrompts(conciergeDiscoverInput.parse(raw));
     if (!input.location) return discoverOne(input);
     const local = planConcierge(input);
     if (local.blocked) return discoverOne(input);
@@ -605,10 +650,15 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     const wanted = proposedPlanNeeds(local.messages);
     if (!wanted) return discoverOne(input);
     if (!local.needsLocation) return proposePlan({ ...input, location: input.location }, local, wanted);
-    // A Plan in a named area is searched around that area's point, only when Google finds it near the guest.
+    // A Plan in a named area is searched around that area's point, only when the lookup finds it near the guest.
     const areaName = planArea(local.messages);
     const point = areaName ? await resolveArea(areaName, input.location) : null;
-    return point && areaName ? proposePlan({ ...input, location: point }, local, wanted, areaName) : discoverOne(input);
+    if (point && areaName) return proposePlan({ ...input, location: point }, local, wanted, areaName, 'lookup');
+    // Launch market only: a guest already near Midtown who said "Midtown" still gets a Plan when the lookup is down.
+    const launch = areaName ? launchMarketPlanPoint(areaName, input.location) : null;
+    return launch && areaName
+      ? proposePlan({ ...input, location: launch }, local, wanted, areaName, 'launch_market')
+      : discoverOne(input);
   };
 }
 

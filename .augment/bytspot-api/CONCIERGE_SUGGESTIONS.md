@@ -16,7 +16,7 @@ Same gate as `concierge.discover`:
 
 Anyone outside that gate gets `status: "unavailable"`, `suggestions: []`, and the same "not enabled" reply as discovery. No model call.
 
-`CONCIERGE_PLAN_ENABLED` does not gate this query. It decides whether a chip may use `destination: "concierge_plan"`. That route is also pilot-gated. Without `OPENAI_API_KEY`, `concierge.plan` answers unavailable and these chips stay on the curated list (`source: "curated"`).
+`CONCIERGE_PLAN_ENABLED` does not gate this query. A chip uses `destination: "concierge_plan"` only when that route can run for this guest. Without a model key, with a consent or email refusal, or once the shared daily or global Concierge budget is used up, the chips stay curated and no model call is made. A suggestions request that does call the model spends one turn on the same `concierge-daily` and `concierge-global-daily` counters as `concierge.plan`.
 
 A missing location, a missing model key, a declined AI consent, or a failed model call still returns three suggestions. The list is empty only when the gate is closed.
 
@@ -43,7 +43,7 @@ When `status` is `ok`:
 | `area.sentence` | Show this if you mention the area. It already says when the location was not shared. |
 | `when` | `{ timezone: "America/New_York", hour, dayOfWeek, weekday }`. `dayOfWeek` is 0 (Sunday) through 6. |
 | `primePath.status` | `ok` if Bytspot parties near the guest were ranked. `unavailable` means the check did not run. That is not "nothing nearby". |
-| `primePath.confirmableNeeds` | Needs the existing Prime Path ranker can feature (`coffee`, `dining`, `nightlife`, `events`). Empty when status is `unavailable`. |
+| `primePath.confirmableNeeds` | Needs the existing Prime Path ranker can feature (`coffee`, `dining`, `nightlife`, `events`) from supply that overlaps tonight in Atlanta. A later event is not listed. Empty when status is `unavailable`. |
 | `suggestions` | 1–3 chips. One has `startsPlan: true`. |
 
 Each suggestion:
@@ -67,7 +67,7 @@ Each suggestion:
 | `destination` | Client call |
 | --- | --- |
 | `discover` | `concierge.discover` with `messages: [{ role: "user", content: prompt }]`, and `location` when the guest has confirmed one. |
-| `concierge_plan` | `concierge.plan` with `{ message: prompt, location? }`. This is the BYTT-SI plan. Prime Path makes the final pick per need. Requires `CONCIERGE_PLAN_ENABLED` and the pilot gate. |
+| `concierge_plan` | `concierge.plan` with `{ message: prompt, location? }`. This is the BYTT-SI plan. Prime Path makes the final pick per need. The server only uses this destination when that route can run for this guest: the plan flag, the pilot gate, a model key, email or consent if those are required, and room in the shared daily and global Concierge budgets. Otherwise the chip stays on Discover. |
 | `share_plan` | Open the existing Plan `planId` and its share link. Do not send `prompt` to Discover. |
 
 `plan_the_night` uses `destination: "discover"` and `prompt: "Plan dinner and drinks tonight"`. A ready Discover response then includes `proposedPlan` (dinner and drinks). Nothing is saved until the guest confirms. Saving is still `plans.create` (title, intent, needs, party size, area) and `plans.attach` per stop, then `plans.feasibility`. The share link is the Plan's existing invite link. The chip does not send it.
@@ -100,6 +100,6 @@ OPENAI_API_KEY=<set on the server>
 GOOGLE_PLACES_API_KEY=<set on the server>
 ```
 
-`CONCIERGE_AUDIENCE=everyone` skips the id list. An open audience also requires a confirmed email before `concierge.plan` runs. `CONCIERGE_REQUIRE_AI_CONSENT=true` requires `consent.setAiConsent` before any model call. Suggestions then stay on the curated list and are not sent to the model.
+`CONCIERGE_AUDIENCE=everyone` skips the id list. An open audience also requires a confirmed email before `concierge.plan` runs. `CONCIERGE_REQUIRE_AI_CONSENT=true` requires `consent.setAiConsent` before any model call. Suggestions then stay on the curated list and are not sent to the model. `CONCIERGE_DAILY_QUOTA` (default 20 per guest) and `CONCIERGE_GLOBAL_DAILY_MAX` (default 2000) cover suggestions that call the model as well as `concierge.plan`.
 
 `CONCIERGE_PLAN_MODEL` defaults to `gpt-4o-mini`.

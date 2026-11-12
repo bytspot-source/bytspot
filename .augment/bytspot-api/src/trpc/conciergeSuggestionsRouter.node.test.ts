@@ -8,7 +8,8 @@ import { db } from '../lib/db';
 import { appRouter } from './router';
 import { resetLocalRateLimitForTests } from './trpc';
 import type { Context } from './context';
-import { conciergeSuggestionsOutput, createConciergeSuggestionsRouter } from './conciergeSuggestionsRouter';
+import { reserveConciergeModelTurn } from '../services/conciergeAccess';
+import { conciergeSuggestionsOutput, createConciergeSuggestionsRouter, prepareSuggestion } from './conciergeSuggestionsRouter';
 
 (db.user as { findUnique: unknown }).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
 
@@ -104,4 +105,43 @@ test('a scripted model is the source, and the prompt is what Discover turns into
   assert.equal(out.area.label, 'Midtown');
   assert.equal(out.suggestions[1].prompt, 'Coffee nearby');
   await assert.rejects(() => router.createCaller(member).suggestions({ location: { lat: 33.781, lng: -84.3833 }, venues: [] } as never), { code: 'BAD_REQUEST' });
+});
+
+test('a model turn shares the Concierge daily and global budgets, and a closed plan route is not offered', async () => {
+  resetLocalRateLimitForTests();
+  const userId = 'budget-suggest-user';
+  Object.assign(config, {
+    conciergeDiscoveryEnabled: true, conciergePlanEnabled: true, conciergeAudience: 'everyone', openaiApiKey: '',
+  });
+  assert.equal((await prepareSuggestion(userId)).planRouteEnabled, false, 'no key, so concierge.plan cannot run');
+
+  Object.assign(config, { openaiApiKey: 'test-not-a-real-key' });
+  (db.user as { findUnique: unknown }).findUnique = async () => ({ emailVerifiedAt: null, aiConsentAt: null });
+  try {
+    assert.equal((await prepareSuggestion(userId)).model, null);
+    assert.equal((await prepareSuggestion(userId)).planRouteEnabled, false);
+  } finally {
+    (db.user as { findUnique: unknown }).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
+  }
+
+  for (let n = 0; n < config.conciergeDailyQuota; n++) assert.equal(await reserveConciergeModelTurn(userId), true);
+  assert.equal(await reserveConciergeModelTurn(userId), false);
+  const blocked = await prepareSuggestion(userId);
+  assert.equal(blocked.model, null);
+  assert.equal(blocked.planRouteEnabled, false);
+  await assert.rejects(
+    () => appRouter.createCaller({ user: { userId, email: 'member@example.test' }, clientRateLimitKey: 'budget-suggest' }).concierge.plan({ message: 'Plan dinner tonight' }),
+    { code: 'TOO_MANY_REQUESTS', message: /concierge-daily/ },
+  );
+
+  resetLocalRateLimitForTests();
+  const previousMax = config.conciergeGlobalDailyMax;
+  Object.assign(config, { conciergeGlobalDailyMax: 1 });
+  try {
+    assert.equal(await reserveConciergeModelTurn('global-suggest-a'), true);
+    assert.equal(await reserveConciergeModelTurn('global-suggest-b'), false);
+    assert.equal((await prepareSuggestion('global-suggest-c')).model, null);
+  } finally {
+    Object.assign(config, { conciergeGlobalDailyMax: previousMax });
+  }
 });

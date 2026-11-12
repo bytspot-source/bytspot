@@ -1,7 +1,10 @@
 import { TRPCError } from '@trpc/server';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { globalBudgetMiddleware, rateLimitMiddleware, protectedProcedure } from '../trpc/trpc';
+import { getRedis } from '../lib/redis';
+import {
+  globalBudgetMiddleware, incrementLocalRateLimit, incrementRedisRateLimit, rateLimitMiddleware, rateLimitSubject, protectedProcedure,
+} from '../trpc/trpc';
 
 /**
  * REA review 2026-11-10 (C1, C3). Who may reach an LLM-backed concierge
@@ -36,6 +39,43 @@ export const CONCIERGE_REFUSAL_TEXT: Record<ConciergeRefusal, string> = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * One step of the shared Concierge counters. `failClosed` matches the global
+ * breaker: a Redis miss in production refuses, instead of counting per process.
+ * A non-positive max is unlimited, same as globalBudgetMiddleware.
+ */
+async function consumeConciergeCounter(key: string, max: number, failClosed: boolean): Promise<boolean> {
+  if (max <= 0) return true;
+  let count: number | null = null;
+  const redis = getRedis();
+  if (redis) {
+    try {
+      count = await incrementRedisRateLimit(redis, `rate-limit:${key}`, DAY_MS);
+    } catch {
+      if (failClosed) return false;
+      count = null;
+    }
+  }
+  if (count === null) {
+    if (failClosed && config.nodeEnv === 'production') return false;
+    count = incrementLocalRateLimit(key, DAY_MS);
+  }
+  return count !== null && count <= max;
+}
+
+/**
+ * Reserve one model turn against the same daily and global counters as
+ * concierge.plan and concierge.chat. False means the turn is spent or the
+ * breaker is closed: the caller must not call the model.
+ */
+export async function reserveConciergeModelTurn(userId: string): Promise<boolean> {
+  const dailyOk = await consumeConciergeCounter(
+    `concierge-daily:${rateLimitSubject(userId, '')}`, config.conciergeDailyQuota, false,
+  );
+  if (!dailyOk) return false;
+  return consumeConciergeCounter('budget:concierge-global-daily', config.conciergeGlobalDailyMax, true);
+}
 
 /** The quota and breaker every LLM-backed concierge procedure shares. */
 export const conciergeProcedure = (label: string, perMinute: number) => protectedProcedure

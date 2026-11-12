@@ -6,7 +6,7 @@ import { coordinateSchema } from '../services/conciergeDiscovery';
 import { createSuggestionPorts, suggestForGuest } from '../services/conciergeSuggestions';
 import type { Context } from './context';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
-import { conciergeRefusal } from '../services/conciergeAccess';
+import { conciergeRefusal, reserveConciergeModelTurn } from '../services/conciergeAccess';
 import { conciergeOpenTo } from './conciergeRouter';
 import { conciergePlanOpenTo } from './conciergePlanRouter';
 
@@ -62,23 +62,36 @@ export function createConciergeSuggestionsRouter(deps: ConciergeSuggestionsDepen
   });
 }
 
-async function modelFor(userId: string) {
+/**
+ * A model turn only when a key is set, the guest may use it, and the shared
+ * daily and global Concierge budgets still have room. Otherwise null: the
+ * curated list is used and no provider call is made.
+ */
+export async function suggestionModelFor(userId: string) {
   if (!config.openaiApiKey) return null;
   const refusal = await conciergeRefusal(userId);
   if (refusal) return null;
+  if (!(await reserveConciergeModelTurn(userId))) return null;
   return new OpenAIProvider({ apiKey: config.openaiApiKey, model: config.conciergePlanModel, timeoutMs: 2_000 });
+}
+
+/** The plan chip is offered only when concierge.plan can actually run for this guest. */
+export async function prepareSuggestion(userId: string): Promise<{ model: Awaited<ReturnType<typeof suggestionModelFor>>; planRouteEnabled: boolean }> {
+  const model = await suggestionModelFor(userId);
+  return { model, planRouteEnabled: conciergePlanOpenTo(userId) && model !== null };
 }
 
 export const conciergeSuggestionsRouter = createConciergeSuggestionsRouter({
   suggest: async (ctx, input, now) => {
     if (!ctx.user) return Promise.reject(new Error('Concierge suggestions require a signed-in guest'));
     const userId = ctx.user.userId;
+    const { model, planRouteEnabled } = await prepareSuggestion(userId);
     return suggestForGuest({
       now: now.toISOString(),
       userId,
       latitude: input.location?.lat ?? null,
       longitude: input.location?.lng ?? null,
-      planRouteEnabled: conciergePlanOpenTo(userId),
-    }, createSuggestionPorts(ctx), await modelFor(userId));
+      planRouteEnabled,
+    }, createSuggestionPorts(ctx), model);
   },
 });

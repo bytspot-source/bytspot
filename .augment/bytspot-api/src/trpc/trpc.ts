@@ -109,6 +109,12 @@ export function incrementLocalRateLimit(key: string, windowMs: number, now = Dat
 }
 
 /** Test-only reset; no production call sites. */
+/** The current count in a local window, without adding to it. */
+export function peekLocalRateLimit(key: string, now = Date.now()): number {
+  const bucket = rateBuckets.get(key);
+  return bucket && bucket.resetAt > now ? bucket.count : 0;
+}
+
 export function resetLocalRateLimitForTests(label?: string): void {
   if (!label) { rateBuckets.clear(); return; }
   for (const key of rateBuckets.keys()) if (key.startsWith(`${label}:`)) rateBuckets.delete(key);

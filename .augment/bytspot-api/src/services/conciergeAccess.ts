@@ -1,7 +1,10 @@
 import { TRPCError } from '@trpc/server';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { globalBudgetMiddleware, rateLimitMiddleware, protectedProcedure } from '../trpc/trpc';
+import { getRedis } from '../lib/redis';
+import {
+  globalBudgetMiddleware, incrementLocalRateLimit, incrementRedisRateLimit, peekLocalRateLimit, rateLimitMiddleware, rateLimitSubject, protectedProcedure,
+} from '../trpc/trpc';
 
 /**
  * REA review 2026-11-10 (C1, C3). Who may reach an LLM-backed concierge
@@ -36,6 +39,73 @@ export const CONCIERGE_REFUSAL_TEXT: Record<ConciergeRefusal, string> = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * One step of the shared Concierge counters. `failClosed` matches the global
+ * breaker: a Redis miss in production refuses, instead of counting per process.
+ * A non-positive max is unlimited, same as globalBudgetMiddleware.
+ */
+async function consumeConciergeCounter(key: string, max: number, failClosed: boolean): Promise<boolean> {
+  if (max <= 0) return true;
+  let count: number | null = null;
+  const redis = getRedis();
+  if (redis) {
+    try {
+      count = await incrementRedisRateLimit(redis, `rate-limit:${key}`, DAY_MS);
+    } catch {
+      if (failClosed) return false;
+      count = null;
+    }
+  }
+  if (count === null) {
+    if (failClosed && config.nodeEnv === 'production') return false;
+    count = incrementLocalRateLimit(key, DAY_MS);
+  }
+  return count !== null && count <= max;
+}
+
+/** Model-written suggestion lists per guest per day. Separate from the guest's Concierge turns. */
+export const CONCIERGE_SUGGESTIONS_DAILY_MAX = 10;
+
+/** Whether the guest still has Concierge turns today, without spending one. */
+export async function conciergeTurnsLeft(userId: string): Promise<boolean> {
+  if (config.conciergeDailyQuota <= 0) return true;
+  const key = `concierge-daily:${rateLimitSubject(userId, '')}`;
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const raw = await redis.get(`rate-limit:${key}`);
+      return Number(raw ?? 0) < config.conciergeDailyQuota;
+    } catch { /* fall back to the local count */ }
+  }
+  return peekLocalRateLimit(key) < config.conciergeDailyQuota;
+}
+
+/**
+ * Reserve one model call for opening suggestions. It never spends the guest's
+ * Concierge turns: it uses its own small daily allowance, and the shared global
+ * breaker so total model spend stays capped. False means use the curated list.
+ */
+export async function reserveConciergeSuggestionTurn(userId: string): Promise<boolean> {
+  const ownOk = await consumeConciergeCounter(
+    `concierge-suggestions-daily:${rateLimitSubject(userId, '')}`, CONCIERGE_SUGGESTIONS_DAILY_MAX, false,
+  );
+  if (!ownOk) return false;
+  return consumeConciergeCounter('budget:concierge-global-daily', config.conciergeGlobalDailyMax, true);
+}
+
+/**
+ * Reserve one model turn against the same daily and global counters as
+ * concierge.plan and concierge.chat. False means the turn is spent or the
+ * breaker is closed: the caller must not call the model.
+ */
+export async function reserveConciergeModelTurn(userId: string): Promise<boolean> {
+  const dailyOk = await consumeConciergeCounter(
+    `concierge-daily:${rateLimitSubject(userId, '')}`, config.conciergeDailyQuota, false,
+  );
+  if (!dailyOk) return false;
+  return consumeConciergeCounter('budget:concierge-global-daily', config.conciergeGlobalDailyMax, true);
+}
 
 /** The quota and breaker every LLM-backed concierge procedure shares. */
 export const conciergeProcedure = (label: string, perMinute: number) => protectedProcedure

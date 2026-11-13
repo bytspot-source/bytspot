@@ -3,7 +3,7 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import {
-  globalBudgetMiddleware, incrementLocalRateLimit, incrementRedisRateLimit, rateLimitMiddleware, rateLimitSubject, protectedProcedure,
+  globalBudgetMiddleware, incrementLocalRateLimit, incrementRedisRateLimit, peekLocalRateLimit, rateLimitMiddleware, rateLimitSubject, protectedProcedure,
 } from '../trpc/trpc';
 
 /**
@@ -62,6 +62,36 @@ async function consumeConciergeCounter(key: string, max: number, failClosed: boo
     count = incrementLocalRateLimit(key, DAY_MS);
   }
   return count !== null && count <= max;
+}
+
+/** Model-written suggestion lists per guest per day. Separate from the guest's Concierge turns. */
+export const CONCIERGE_SUGGESTIONS_DAILY_MAX = 10;
+
+/** Whether the guest still has Concierge turns today, without spending one. */
+export async function conciergeTurnsLeft(userId: string): Promise<boolean> {
+  if (config.conciergeDailyQuota <= 0) return true;
+  const key = `concierge-daily:${rateLimitSubject(userId, '')}`;
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const raw = await redis.get(`rate-limit:${key}`);
+      return Number(raw ?? 0) < config.conciergeDailyQuota;
+    } catch { /* fall back to the local count */ }
+  }
+  return peekLocalRateLimit(key) < config.conciergeDailyQuota;
+}
+
+/**
+ * Reserve one model call for opening suggestions. It never spends the guest's
+ * Concierge turns: it uses its own small daily allowance, and the shared global
+ * breaker so total model spend stays capped. False means use the curated list.
+ */
+export async function reserveConciergeSuggestionTurn(userId: string): Promise<boolean> {
+  const ownOk = await consumeConciergeCounter(
+    `concierge-suggestions-daily:${rateLimitSubject(userId, '')}`, CONCIERGE_SUGGESTIONS_DAILY_MAX, false,
+  );
+  if (!ownOk) return false;
+  return consumeConciergeCounter('budget:concierge-global-daily', config.conciergeGlobalDailyMax, true);
 }
 
 /**

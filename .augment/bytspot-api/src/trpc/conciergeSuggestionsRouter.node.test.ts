@@ -8,7 +8,7 @@ import { db } from '../lib/db';
 import { appRouter } from './router';
 import { resetLocalRateLimitForTests } from './trpc';
 import type { Context } from './context';
-import { reserveConciergeModelTurn } from '../services/conciergeAccess';
+import { CONCIERGE_SUGGESTIONS_DAILY_MAX, reserveConciergeModelTurn, reserveConciergeSuggestionTurn } from '../services/conciergeAccess';
 import { conciergeSuggestionsOutput, createConciergeSuggestionsRouter, prepareSuggestion } from './conciergeSuggestionsRouter';
 
 (db.user as { findUnique: unknown }).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
@@ -107,7 +107,7 @@ test('a scripted model is the source, and the prompt is what Discover turns into
   await assert.rejects(() => router.createCaller(member).suggestions({ location: { lat: 33.781, lng: -84.3833 }, venues: [] } as never), { code: 'BAD_REQUEST' });
 });
 
-test('a model turn shares the Concierge daily and global budgets, and a closed plan route is not offered', async () => {
+test('suggestions keep their own daily cap, share only the global breaker, and a closed plan route is not offered', async () => {
   resetLocalRateLimitForTests();
   const userId = 'budget-suggest-user';
   Object.assign(config, {
@@ -124,10 +124,15 @@ test('a model turn shares the Concierge daily and global budgets, and a closed p
     (db.user as { findUnique: unknown }).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
   }
 
-  for (let n = 0; n < config.conciergeDailyQuota; n++) assert.equal(await reserveConciergeModelTurn(userId), true);
+  // Loading suggestions never spends the guest's Concierge turns.
+  const opened = await prepareSuggestion(userId);
+  assert.notEqual(opened.model, null);
+  assert.equal(opened.planRouteEnabled, true);
+  for (let n = 0; n < config.conciergeDailyQuota; n++) assert.equal(await reserveConciergeModelTurn(userId), true, `turn ${n + 1} is still the guest's`);
   assert.equal(await reserveConciergeModelTurn(userId), false);
+  // Turns spent: suggestions still load, but the plan chip is not offered.
   const blocked = await prepareSuggestion(userId);
-  assert.equal(blocked.model, null);
+  assert.notEqual(blocked.model, null);
   assert.equal(blocked.planRouteEnabled, false);
   await assert.rejects(
     () => appRouter.createCaller({ user: { userId, email: 'member@example.test' }, clientRateLimitKey: 'budget-suggest' }).concierge.plan({ message: 'Plan dinner tonight' }),
@@ -135,11 +140,18 @@ test('a model turn shares the Concierge daily and global budgets, and a closed p
   );
 
   resetLocalRateLimitForTests();
+  for (let n = 0; n < CONCIERGE_SUGGESTIONS_DAILY_MAX; n++) assert.equal(await reserveConciergeSuggestionTurn('own-cap'), true);
+  assert.equal(await reserveConciergeSuggestionTurn('own-cap'), false, 'suggestions have their own daily cap');
+  assert.equal((await prepareSuggestion('own-cap')).model, null);
+  assert.equal(await reserveConciergeModelTurn('own-cap'), true, 'which leaves the guest\'s turns untouched');
+
+  resetLocalRateLimitForTests();
   const previousMax = config.conciergeGlobalDailyMax;
   Object.assign(config, { conciergeGlobalDailyMax: 1 });
   try {
     assert.equal(await reserveConciergeModelTurn('global-suggest-a'), true);
     assert.equal(await reserveConciergeModelTurn('global-suggest-b'), false);
+    assert.equal(await reserveConciergeSuggestionTurn('global-suggest-d'), false, 'suggestions share the global breaker');
     assert.equal((await prepareSuggestion('global-suggest-c')).model, null);
   } finally {
     Object.assign(config, { conciergeGlobalDailyMax: previousMax });

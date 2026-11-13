@@ -16,7 +16,7 @@ Same gate as `concierge.discover`:
 
 Anyone outside that gate gets `status: "unavailable"`, `suggestions: []`, and the same "not enabled" reply as discovery. No model call.
 
-`CONCIERGE_PLAN_ENABLED` does not gate this query. A chip uses `destination: "concierge_plan"` only when that route can run for this guest. Without a model key, with a consent or email refusal, or once the shared daily or global Concierge budget is used up, the chips stay curated and no model call is made. A suggestions request that does call the model spends one turn on the same `concierge-daily` and `concierge-global-daily` counters as `concierge.plan`.
+`CONCIERGE_PLAN_ENABLED` does not gate this query. A chip uses `destination: "concierge_plan"` only when that route can run for this guest. Without a model key, with a consent or email refusal, or once the guest's Concierge turns for today are used up, the plan chip is not offered. Suggestions never spend the guest's `concierge-daily` turns: a request that calls the model uses its own allowance (`concierge-suggestions-daily`, 10 per guest per day) and the shared `concierge-global-daily` breaker. When either is used up, the chips stay curated and no model call is made.
 
 A missing location, a missing model key, a declined AI consent, or a failed model call still returns three suggestions. The list is empty only when the gate is closed.
 

@@ -1,3 +1,4 @@
+import { bookingUrlError, type BookingProvider } from '../../services/bookingProviders';
 import type { RideLink } from '../types';
 
 /**
@@ -22,17 +23,7 @@ export function rideLinks(destination: { latitude: number; longitude: number; na
   ];
 }
 
-const TABLE_HOSTS: Record<'opentable' | 'resy', string[]> = {
-  opentable: ['opentable.com', 'www.opentable.com'],
-  resy: ['resy.com'],
-};
-
-/** Same rule as tableBookingLinks.ts `tableBookingUrlError`: https and the provider's own host. */
-export function isValidTableLink(provider: string, url: string): provider is 'opentable' | 'resy' {
-  const hosts = TABLE_HOSTS[provider as 'opentable' | 'resy'];
-  if (!hosts) return false;
-  try {
-    const parsed = new URL(url.trim());
-    return parsed.protocol === 'https:' && hosts.includes(parsed.hostname);
-  } catch { return false; }
+/** Same rule as the admin's input: https and the provider's own host. */
+export function isValidTableLink(provider: string, url: string): provider is BookingProvider {
+  return bookingUrlError(provider, url) === null;
 }

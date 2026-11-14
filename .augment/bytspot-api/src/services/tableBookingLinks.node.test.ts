@@ -22,9 +22,38 @@ test('a good link passes, for either provider', () => {
   });
 });
 
+test('every new provider accepts a link on its own site, with its own label', () => {
+  const cases: Array<[string, string, string]> = [
+    ['tock', 'https://www.exploretock.com/example', 'Tock'],
+    ['sevenrooms', 'https://www.sevenrooms.com/reservations/example', 'SevenRooms'],
+    ['fareharbor', 'https://fareharbor.com/embeds/book/example/', 'FareHarbor'],
+    ['peek', 'https://book.peek.com/s/example', 'Peek'],
+    ['xola', 'https://checkout.xola.com/index.html#seller/example', 'Xola'],
+    ['bookeo', 'https://bookeo.com/example', 'Bookeo'],
+    ['vagaro', 'https://www.vagaro.com/example', 'Vagaro'],
+    ['booksy', 'https://booksy.com/en-us/123_example', 'Booksy'],
+    ['fresha', 'https://www.fresha.com/a/example', 'Fresha'],
+    ['mindbody', 'https://clients.mindbodyonline.com/classic/ws?studioid=1', 'Mindbody'],
+    ['eventbrite', 'https://www.eventbrite.com/o/example-123', 'Eventbrite'],
+    ['dice', 'https://dice.fm/venue/example', 'DICE'],
+    ['parkwhiz', 'https://www.parkwhiz.com/p/atlanta-parking/example/', 'ParkWhiz'],
+    ['spothero', 'https://spothero.com/destination/atlanta/example', 'SpotHero'],
+    ['blade', 'https://www.blade.com/airports/hartsfield-jackson-atlanta-international', 'Blade'],
+    ['wheelsup', 'https://wheelsup.com/', 'Wheels Up'],
+  ];
+  for (const [provider, url, label] of cases) {
+    assert.equal(tableBookingUrlError(provider, url), null, url);
+    assert.equal(tableBookingLinkFrom(provider, url)?.label, label);
+  }
+  assert.equal(tableBookingLinkFrom('tock', 'https://www.exploretock.com/example', null), null, 'never checked is not shown to guests');
+  assert.equal(tableBookingLinkFrom('tock', 'https://www.exploretock.com/example', new Date())?.label, 'Tock');
+});
+
 test('a link that would put a broken or foreign button on a card is refused', () => {
   const cases: Array<[string, string, RegExp]> = [
-    ['sevenrooms', 'https://sevenrooms.com/x', /OpenTable or Resy/],
+    ['yelp', 'https://www.yelp.com/reservations/x', /booking provider/],
+    ['fareharbor', 'https://fareharbor.com.evil.example/x', /fareharbor\.com/],
+    ['blade', 'https://www.blade.com.evil.example/x', /blade\.com/],
     ['opentable', 'http://www.opentable.com/r/x', /https/],
     ['opentable', 'not a url', /https/],
     ['opentable', 'javascript:alert(1)', /https/],
@@ -75,8 +104,9 @@ test('the list is read from listed, discoverable venues, and a bad row is skippe
   (db.venue as any).findMany = async (args: { where: unknown }) => {
     where = args.where;
     return [
-      { googlePlaceId: 'ChIJ_listed', bookingProvider: 'resy', bookingUrl: 'https://resy.com/cities/atl/listed' },
-      { googlePlaceId: 'ChIJ_foreign', bookingProvider: 'resy', bookingUrl: 'https://evil.example/x' },
+      { googlePlaceId: 'ChIJ_listed', bookingProvider: 'resy', bookingUrl: 'https://resy.com/cities/atl/listed', bookingCheckedAt: new Date() },
+      { googlePlaceId: 'ChIJ_foreign', bookingProvider: 'resy', bookingUrl: 'https://evil.example/x', bookingCheckedAt: new Date() },
+      { googlePlaceId: 'ChIJ_stale', bookingProvider: 'resy', bookingUrl: 'https://resy.com/cities/atl/stale', bookingCheckedAt: new Date(Date.now() - 91 * 24 * 60 * 60 * 1000) },
     ];
   };
   try {
@@ -84,6 +114,7 @@ test('the list is read from listed, discoverable venues, and a bad row is skippe
     assert.deepEqual(where, { discoverable: true, googlePlaceId: { not: null }, bookingUrl: { not: null } });
     assert.equal(tableBookingLinkFor('ChIJ_listed')?.label, 'Resy');
     assert.equal(tableBookingLinkFor('ChIJ_foreign'), null);
+    assert.equal(tableBookingLinkFor('ChIJ_stale'), null, 'a link nobody has checked in 90 days is hidden from guests');
 
     // Fresh for a while: a second read does not go back to the database.
     where = null;

@@ -5,6 +5,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import { distanceMeters, radiusForWalk, sameSpot, type RecommendPlace, type RecommendVenue } from './recommendations';
 import { DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import { tableBookingUrlError, type TableBookingLink } from './tableBookingLinks';
+import { BOOKING_PROVIDERS, BOOKING_PROVIDER_IDS } from './bookingProviders';
 import {
   avoidLabel, mergePreferences, normalizePreferences, preferenceFilterInput, preferenceFit, priceSigns, type AvoidTag,
 } from './preferenceFit';
@@ -58,9 +59,9 @@ export type ConciergeActionType = typeof CONCIERGE_ACTIONS[number];
 export const conciergeActionSchema = z.union([
   z.object({ type: z.enum(['directions', 'website', 'add_to_plan', 'save']) }).strict(),
   z.object({
-    type: z.literal('book_table'), provider: z.enum(['opentable', 'resy']), label: z.enum(['OpenTable', 'Resy']), url: z.string(),
+    type: z.literal('book_table'), provider: z.enum(BOOKING_PROVIDER_IDS), label: z.string().min(1).max(40), url: z.string(),
   }).strict().refine((a) => tableBookingUrlError(a.provider, a.url) === null
-    && (a.provider === 'opentable') === (a.label === 'OpenTable'), 'Only a hand-checked OpenTable or Resy link'),
+    && a.label === BOOKING_PROVIDERS[a.provider].label, 'Only a hand-checked booking link'),
 ]);
 export type ConciergeAction = z.infer<typeof conciergeActionSchema>;
 

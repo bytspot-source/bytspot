@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BOOKING_PROVIDER_IDS, type BookingProvider } from '../services/bookingProviders';
 
 /**
  * Field names mirror bytspot-api prisma `Plan` / `PlanItem` / `Bookable`
@@ -56,7 +57,7 @@ export type PriceBasis = 'bytspot_bookable' | 'provider_listed' | 'estimate';
 
 export type BookingOption =
   | { kind: 'bytspot'; bookableId: string; capability: string; tierName: string; priceCents: number | null; capacity: number | null }
-  | { kind: 'deeplink'; provider: 'opentable' | 'resy'; label: string; url: string; availabilityChecked: false };
+  | { kind: 'deeplink'; provider: BookingProvider; label: string; url: string; availabilityChecked: false };
 
 export interface RideLink { provider: 'uber' | 'lyft'; url: string; fareChecked: false }
 
@@ -168,7 +169,7 @@ const metaSchema = z.object({ provider: z.string(), steps: z.number().int(), too
 const crowdSchema = z.object({ level: z.number(), source: z.enum(['typical', 'live']), label: z.string(), observedAt: z.string().nullable() }).strict();
 const bookingSchema = z.union([
   z.object({ kind: z.literal('bytspot'), bookableId: z.string(), capability: z.string(), tierName: z.string(), priceCents: z.number().int().nullable(), capacity: z.number().int().nullable() }).strict(),
-  z.object({ kind: z.literal('deeplink'), provider: z.enum(['opentable', 'resy']), label: z.string(), url: z.string(), availabilityChecked: z.literal(false) }).strict(),
+  z.object({ kind: z.literal('deeplink'), provider: z.enum(BOOKING_PROVIDER_IDS), label: z.string(), url: z.string(), availabilityChecked: z.literal(false) }).strict(),
 ]);
 const itemSchema = z.object({
   position: z.number().int(), needKind: z.string(), title: z.string(), candidateId: z.string(),

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BOOKING_PROVIDER_IDS } from '../../services/bookingProviders';
 import { isValidTableLink } from '../core/deepLinks';
 import { defineSkill, statusSchema } from './types';
 
@@ -14,13 +15,13 @@ const output = z.object({
     priceCents: z.number().int(), capacity: z.number().int(), fitsParty: z.boolean().nullable(),
   })),
   deeplinks: z.array(z.object({
-    kind: z.literal('deeplink'), provider: z.enum(['opentable', 'resy']), label: z.string(), url: z.string(), availabilityChecked: z.literal(false),
+    kind: z.literal('deeplink'), provider: z.enum(BOOKING_PROVIDER_IDS), label: z.string(), url: z.string(), availabilityChecked: z.literal(false),
   })),
 });
 
 export const bookablesSkill = defineSkill({
   name: 'bookables',
-  description: 'What can be booked for a place: Bytspot bookables (real supply, bookable in-app) and, where listed, an OpenTable/Resy hand-off link. Hand-off links never mean a table is available.',
+  description: 'What can be booked for a place: Bytspot bookables (real supply, bookable in-app) and, where listed, an outside booking hand-off link (OpenTable, Resy, Tock, FareHarbor and the like). Hand-off links never mean a table is available.',
   input, output,
   async run(args, { ports, defaults }) {
     const partySize = args.partySize ?? defaults.partySize;

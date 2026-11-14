@@ -1,3 +1,4 @@
+import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { randomBytes } from 'crypto';
 import { closeShouldRefund, refundParty } from '../services/stripeRisk';
 import { PARTY_CHECKOUT_TERMS } from '../lib/checkoutTerms';
@@ -945,7 +946,7 @@ export function placeVenueSlug(name: string, placeId: string): string {
 async function authorizedPartyArrival(partyId: string, userId: string) {
   const party = await db.party.findFirst({
     where: { id: partyId, status: 'published' },
-    include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true, googlePlaceId: true, bookingProvider: true, bookingUrl: true, controlledAt: true } } },
+    include: { arrivalVenue: { select: { id: true, name: true, address: true, lat: true, lng: true, googlePlaceId: true, bookingProvider: true, bookingUrl: true, bookingCheckedAt: true, controlledAt: true } } },
   });
   if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'Party Pass not found.' });
   const isHost = party.hostUserId === userId;
@@ -962,19 +963,18 @@ async function authorizedPartyArrival(partyId: string, userId: string) {
 
 /**
  * How to book the arrival venue outside Bytspot. Only a listed place has a
- * hand-checked OpenTable or Resy link; a Bytspot-controlled venue takes asks
+ * hand-checked booking link (OpenTable, Resy, Tock, FareHarbor, …); a Bytspot-controlled venue takes asks
  * in the app instead, so it never sends guests elsewhere. The host always
  * sees it; guests only when the host turned it on.
  */
 export function partyVenueBooking(
-  venue: { googlePlaceId: string | null; bookingProvider: string | null; bookingUrl: string | null; controlledAt: Date | null },
+  venue: { googlePlaceId: string | null; bookingProvider: string | null; bookingUrl: string | null; bookingCheckedAt?: Date | null; controlledAt: Date | null },
   viewer: { isHost: boolean; forGuests: boolean },
 ) {
   if (!viewer.isHost && !viewer.forGuests) return null;
   const controlled = venue.controlledAt !== null;
-  const booking = !controlled && venue.bookingUrl && (venue.bookingProvider === 'opentable' || venue.bookingProvider === 'resy')
-    ? { provider: venue.bookingProvider, url: venue.bookingUrl }
-    : null;
+  const link = controlled ? null : tableBookingLinkFrom(venue.bookingProvider, venue.bookingUrl, venue.bookingCheckedAt ?? null);
+  const booking = link ? { provider: link.provider, url: link.url } : null;
   return { placeId: venue.googlePlaceId?.replace(/^places\//, '') ?? null, controlled, booking };
 }
 

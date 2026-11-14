@@ -9,7 +9,7 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
-import { bookingLinkCheck, bookingLinkFresh } from '../services/bookingProviders';
+import { BOOKING_EXPIRY_MAX_MS, bookingLinkCheck, bookingLinkExpired, bookingLinkFresh } from '../services/bookingProviders';
 import { bookingLinksToRecheck } from '../services/bookingRecheck';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
@@ -111,7 +111,7 @@ async function forgetVenueLists(): Promise<void> {
 
 const listedSelect = {
   id: true, name: true, slug: true, address: true, category: true, googlePlaceId: true, discoverable: true,
-  bookingProvider: true, bookingUrl: true, bookingCheckedAt: true, listedAt: true,
+  bookingProvider: true, bookingUrl: true, bookingCheckedAt: true, bookingExpiresAt: true, listedAt: true,
 } satisfies Prisma.VenueSelect;
 
 export const adminPlacesRouter = router({
@@ -167,6 +167,8 @@ export const adminPlacesRouter = router({
           placeId: v.googlePlaceId, hidden: !v.discoverable,
           booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
           checkedAt: v.bookingCheckedAt, listedAt: v.listedAt,
+          expiresAt: v.bookingExpiresAt,
+          bookingExpired: Boolean(v.bookingUrl) && bookingLinkExpired(v.bookingExpiresAt, now.getTime()),
           // Guests stop seeing a link nobody has checked in 90 days; the admin re-saves it to check it again.
           bookingStale: Boolean(v.bookingUrl) && !bookingLinkFresh(v.bookingCheckedAt, now.getTime()),
           bookingDueAt: v.bookingUrl && v.bookingCheckedAt ? bookingLinkCheck(v.bookingCheckedAt, now.getTime()).dueAt : null,
@@ -187,6 +189,8 @@ export const adminPlacesRouter = router({
       placeId: z.string().trim().regex(PLACE_ID),
       provider: z.enum(TABLE_BOOKING_PROVIDERS as [string, ...string[]]).nullable().optional(),
       url: z.string().trim().min(1).max(500).nullable().optional(),
+      /** When the link stops showing (an event's date). Null or omitted: no end. */
+      expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
       category: z.enum(LISTED_CATEGORIES),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -199,9 +203,16 @@ export const adminPlacesRouter = router({
       const problem = provider && url ? tableBookingUrlError(provider, url) : null;
       if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });
       const now = new Date();
+      const expiresAt = provider && input.expiresAt ? new Date(input.expiresAt) : null;
+      if (expiresAt && expiresAt.getTime() <= now.getTime()) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'That end date has already passed.' });
+      }
+      if (expiresAt && expiresAt.getTime() - now.getTime() > BOOKING_EXPIRY_MAX_MS) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Pick an end date within two years.' });
+      }
       const listing = {
         discoverable: true, category: input.category,
-        bookingProvider: provider, bookingUrl: url, bookingCheckedAt: provider ? now : null,
+        bookingProvider: provider, bookingUrl: url, bookingCheckedAt: provider ? now : null, bookingExpiresAt: expiresAt,
       };
 
       let venue = await db.venue.findUnique({ where: { googlePlaceId: input.placeId }, select: { id: true, listedAt: true } });

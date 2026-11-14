@@ -35,7 +35,7 @@ router.get('/venues', async (_req, res) => {
       ...projectVenuePhoto(v),
       control: venueControl(v),
       googlePlaceId: v.googlePlaceId,
-      booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl, v.bookingCheckedAt),
+      booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl, v.bookingCheckedAt, v.bookingExpiresAt),
       crowd: v.crowdLevels[0]
         ? {
             level: v.crowdLevels[0].level,

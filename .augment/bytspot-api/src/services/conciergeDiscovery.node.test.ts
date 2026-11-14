@@ -4,7 +4,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
-  conciergeActionRequest, launchMarketPlanPoint, normalizeConciergeStarter, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput,
+  CONCIERGE_WHERE_REPLY, conciergeActionRequest, launchMarketPlanPoint, normalizeConciergeStarter, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput, type Coordinate,
 } from './conciergeDiscovery';
 import { LAUNCH_MARKET } from '../bytt-si/suggestions/area';
 import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
@@ -870,11 +870,75 @@ test('a named area that is far, missing, slow or unsupported keeps the location 
     assert.equal(response.status, 'needs_location');
     assert.equal(response.proposedPlan, null);
   }
-  let areaCalls = 0;
-  const single = await service({ places, area: async () => { areaCalls++; return HERE; } })(input('coffee in Midtown'));
-  assert.equal(single.status, 'needs_location');
-  assert.equal(areaCalls, 0, 'a single search with a place name keeps the existing prompt');
+  // Another city's Midtown is never used for a single search either.
+  const farMidtown = await service({ places, area: async () => ({ lat: 33.78, lng: -84.38 }) })(input('coffee in Midtown'));
+  assert.equal(farMidtown.status, 'needs_location');
   assert.equal(searches, 0);
+});
+
+test('a single search in a named place near the guest is searched there', async () => {
+  const nearby = { lat: 40.02, lng: -75 };
+  const searched: Coordinate[] = [];
+  const response = await service({
+    area: async (_name, near) => { assert.deepEqual(near, HERE); return nearby; },
+    places: async (search) => {
+      searched.push(search.location);
+      assert.equal(search.query, 'coffee');
+      return { source: 'google', places: [place({ lat: nearby.lat + 0.001, lng: nearby.lng })] };
+    },
+  })(input('coffee in Midtown'));
+  assert.equal(response.status, 'ready');
+  assert.deepEqual(searched, [nearby]);
+  assert.match(response.reply, /near Midtown, as Google places it/);
+  assert.match(response.cards[0].reasons[0], /m from Midtown \(straight-line\)$/);
+});
+
+test('a guest in Atlanta can plan another city: the named city is looked up anywhere and searched there', async () => {
+  const atlanta = { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+  const miami = { lat: 25.7617, lng: -80.1918 };
+  const lookups: Array<Coordinate | null> = [];
+  const area: ConciergeDependencies['area'] = async (name, near) => { lookups.push(near); assert.equal(name, 'Miami'); return miami; };
+  const searched: Array<{ query: string; lat: number }> = [];
+  const plan = await service({ area, places: planPlaces(searched) })({ location: atlanta, messages: [{ role: 'user', content: 'Plan dinner and drinks in Miami Saturday night' }] });
+  assert.equal(conciergeDiscoverOutput.safeParse(plan).success, true);
+  assert.deepEqual(lookups, [atlanta, null], 'near the guest first, then anywhere');
+  assert.ok(searched.length === 2 && searched.every((s) => s.lat === miami.lat));
+  assert.deepEqual(plan.proposedPlan?.area, { label: 'Miami', ...miami });
+
+  const single = await service({ area, places: async (search) => {
+    assert.deepEqual(search.location, miami);
+    return { source: 'google', places: [place({ lat: miami.lat + 0.001, lng: miami.lng })] };
+  } })({ location: atlanta, messages: [{ role: 'user', content: 'brunch in Miami' }] });
+  assert.equal(single.status, 'ready');
+  assert.match(single.reply, /near Miami/);
+});
+
+test('no location: a named place is still searched, and nothing named asks where', async () => {
+  const never = async (): Promise<never> => { assert.fail('Must not search without a place'); };
+  const asked = await service({ venues: never, places: never, plan: never, menuEvidence: never, area: never })({ messages: [{ role: 'user', content: 'coffee' }] });
+  assert.equal(asked.status, 'needs_location');
+  assert.equal(asked.reply, CONCIERGE_WHERE_REPLY);
+
+  const miami = { lat: 25.7617, lng: -80.1918 };
+  const lookups: Array<Coordinate | null> = [];
+  const there = await service({
+    area: async (_name, near) => { lookups.push(near); return near ? null : miami; },
+    places: async (search) => ({ source: 'google', places: [place({ lat: search.location.lat + 0.001, lng: search.location.lng })] }),
+  })({ messages: [{ role: 'user', content: 'tacos in Miami' }] });
+  assert.equal(there.status, 'ready');
+  assert.deepEqual(lookups, [{ lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng }, null]);
+
+  // "Midtown" with no location means the launch market's Midtown, never one found anywhere.
+  const midtownLookups: Array<Coordinate | null> = [];
+  const midtown = await service({
+    area: async (_name, near) => { midtownLookups.push(near); return null; },
+    places: async (search) => {
+      assert.deepEqual(search.location, { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng });
+      return { source: 'google', places: [place({ lat: LAUNCH_MARKET.lat + 0.001, lng: LAUNCH_MARKET.lng })] };
+    },
+  })({ messages: [{ role: 'user', content: 'coffee in Midtown' }] });
+  assert.equal(midtown.status, 'ready');
+  assert.equal(midtownLookups.length, 1, 'a generic name is not looked up anywhere');
 });
 
 test('starter phrases become a Plan or an events search, and Help plan tonight stays a first stop', async () => {

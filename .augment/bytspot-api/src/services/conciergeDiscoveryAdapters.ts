@@ -171,15 +171,16 @@ export async function conciergeTableBookings(placeIds: string[]): Promise<Map<st
   return links;
 }
 
-/** One Google text search biased to the guest, for the point of an area a Plan request names. */
-export async function conciergePlanArea(name: string, near: { lat: number; lng: number }): Promise<{ lat: number; lng: number } | null> {
+/** One Google text search for the point of a place a request names: biased to `near`, or anywhere when it is null. */
+export async function conciergePlanArea(name: string, near: { lat: number; lng: number } | null): Promise<{ lat: number; lng: number } | null> {
   if (!config.googlePlacesApiKey) return null;
   const query = createHash('sha256').update(name.toLowerCase().trim()).digest('hex');
-  const key = `gp:concierge-area:v1:${near.lat.toFixed(2)}:${near.lng.toFixed(2)}:${query}`;
+  const scope = near ? `${near.lat.toFixed(2)}:${near.lng.toFixed(2)}` : 'anywhere';
+  const key = `gp:concierge-area:v1:${scope}:${query}`;
   const { data } = await cachedWithStale(key, 86_400, async () => {
     const found = await gpPost<{ places?: Array<{ location?: { latitude?: number; longitude?: number } }> }>('/places:searchText', {
       textQuery: name, maxResultCount: 1,
-      locationBias: { circle: { center: { latitude: near.lat, longitude: near.lng }, radius: 50_000 } },
+      ...(near ? { locationBias: { circle: { center: { latitude: near.lat, longitude: near.lng }, radius: 50_000 } } } : {}),
     }, 'places.location');
     const location = found.places?.[0]?.location;
     return typeof location?.latitude === 'number' && typeof location?.longitude === 'number'

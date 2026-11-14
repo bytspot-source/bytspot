@@ -48,6 +48,19 @@ export function bookingUrlError(provider: string, url: string): string | null {
   return null;
 }
 
+/** An admin is asked to re-check a link this long before guests stop seeing it. */
+export const BOOKING_LINK_REMIND_MS = 14 * 24 * 60 * 60 * 1000;
+
+export type BookingLinkCheck = 'ok' | 'due_soon' | 'stale';
+
+/** Where a link stands for the admin's re-check list: fine, due within 14 days, or already hidden from guests. */
+export function bookingLinkCheck(checkedAt: Date | null | undefined, now = Date.now()): { status: BookingLinkCheck; dueAt: Date | null } {
+  if (!(checkedAt instanceof Date) || Number.isNaN(checkedAt.getTime())) return { status: 'stale', dueAt: null };
+  const dueAt = new Date(checkedAt.getTime() + BOOKING_LINK_MAX_AGE_MS);
+  if (now > dueAt.getTime()) return { status: 'stale', dueAt };
+  return { status: dueAt.getTime() - now <= BOOKING_LINK_REMIND_MS ? 'due_soon' : 'ok', dueAt };
+}
+
 /** Whether a link checked at `checkedAt` may still be shown to guests. */
 export function bookingLinkFresh(checkedAt: Date | null | undefined, now = Date.now()): boolean {
   return checkedAt instanceof Date && !Number.isNaN(checkedAt.getTime()) && now - checkedAt.getTime() <= BOOKING_LINK_MAX_AGE_MS;

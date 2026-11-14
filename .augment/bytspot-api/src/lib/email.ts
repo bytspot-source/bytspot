@@ -431,6 +431,45 @@ export async function sendSafetyReportAlert(to: string, report: SafetyReportNoti
   });
 }
 
+export interface BookingRecheckNotice {
+  name: string;
+  provider: string;
+  url: string;
+  status: 'due_soon' | 'stale';
+  dueAt: Date | null;
+}
+
+/** The weekly list of booking links to open again before guests stop seeing them. */
+export async function sendBookingRecheckEmail(to: string, items: BookingRecheckNotice[], adminUrl: string): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send the booking re-check list');
+  const day = (date: Date | null) => date
+    ? date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }) : 'never checked';
+  const rows = items.map((item) => `
+        <li style="margin: 0 0 10px;">
+          <a href="${escapeHtml(item.url)}" style="color: #00BFFF;">${escapeHtml(item.name)}</a>
+          <span style="color: #aaa;"> · ${escapeHtml(item.provider)} · ${item.status === 'stale'
+            ? `hidden from guests since ${day(item.dueAt)}` : `hidden from guests on ${day(item.dueAt)}`}</span>
+        </li>`).join('');
+  const hidden = items.filter((item) => item.status === 'stale').length;
+  await resend.emails.send({
+    from: FROM,
+    to,
+    subject: hidden ? `${hidden} booking link${hidden === 1 ? '' : 's'} hidden from guests, ${items.length - hidden} due soon`
+      : `${items.length} booking link${items.length === 1 ? '' : 's'} to re-check this week`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 520px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">Booking links to re-check</h1>
+        <p style="color: #ddd; font-size: 15px; line-height: 1.5; margin: 0 0 16px;">
+          Guests stop seeing a link 90 days after it was last checked. Open each one, make sure it still books that place, then edit and save it in admin.
+        </p>
+        <ul style="padding-left: 18px; font-size: 15px; line-height: 1.4; margin: 0 0 16px;">${rows}</ul>
+        <p style="margin: 0;"><a href="${escapeHtml(adminUrl)}" style="color: #00BFFF;">Open Places in admin</a></p>
+      </div>
+    `,
+  });
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 }

@@ -9,7 +9,8 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
-import { bookingLinkFresh } from '../services/bookingProviders';
+import { bookingLinkCheck, bookingLinkFresh } from '../services/bookingProviders';
+import { bookingLinksToRecheck } from '../services/bookingRecheck';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
@@ -155,16 +156,20 @@ export const adminPlacesRouter = router({
         orderBy: { listedAt: 'desc' },
         take: 500,
       });
-      const numbers = await loadPitchNumbers(venues, new Date());
+      const now = new Date();
+      const [numbers, recheck] = await Promise.all([loadPitchNumbers(venues, now), bookingLinksToRecheck(now)]);
       return {
         pitchWindowDays: PITCH_WINDOW_DAYS,
+        // Links to open again: hidden from guests first, then the ones that soon will be.
+        recheck: recheck.map(({ venueId, status, dueAt }) => ({ venueId, status, dueAt })),
         places: venues.map((v) => ({
           venueId: v.id, name: v.name, slug: v.slug, address: v.address, category: v.category,
           placeId: v.googlePlaceId, hidden: !v.discoverable,
           booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
           checkedAt: v.bookingCheckedAt, listedAt: v.listedAt,
           // Guests stop seeing a link nobody has checked in 90 days; the admin re-saves it to check it again.
-          bookingStale: Boolean(v.bookingUrl) && !bookingLinkFresh(v.bookingCheckedAt),
+          bookingStale: Boolean(v.bookingUrl) && !bookingLinkFresh(v.bookingCheckedAt, now.getTime()),
+          bookingDueAt: v.bookingUrl && v.bookingCheckedAt ? bookingLinkCheck(v.bookingCheckedAt, now.getTime()).dueAt : null,
           numbers: numbers.get(v.id)!,
         })),
       };

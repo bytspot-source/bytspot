@@ -5,7 +5,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import { distanceMeters, radiusForWalk, sameSpot, type RecommendPlace, type RecommendVenue } from './recommendations';
 import { DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
 import { tableBookingUrlError, type TableBookingLink } from './tableBookingLinks';
-import { BOOKING_PROVIDERS, BOOKING_PROVIDER_IDS } from './bookingProviders';
+import { BOOKING_PROVIDERS, BOOKING_PROVIDER_IDS, isAviationProvider } from './bookingProviders';
 import {
   avoidLabel, mergePreferences, normalizePreferences, preferenceFilterInput, preferenceFit, priceSigns, type AvoidTag,
 } from './preferenceFit';
@@ -93,11 +93,21 @@ export const conciergeProposedPlanSchema = z.object({
     .strict().nullable().default(null),
 }).strict();
 export type ConciergeProposedPlan = z.infer<typeof conciergeProposedPlanSchema>;
+/** A way to fly to the city a request is for: a listed airport or terminal near the guest with a hand-checked flight link. */
+export const conciergeTravelOptionSchema = z.object({
+  placeId: z.string().regex(/^[A-Za-z0-9_-]{1,255}$/).nullable(), name: z.string().min(1).max(120),
+  provider: z.enum(BOOKING_PROVIDER_IDS), label: z.string().min(1).max(40), url: z.string(),
+}).strict().refine((t) => isAviationProvider(t.provider) && tableBookingUrlError(t.provider, t.url) === null
+  && t.label === BOOKING_PROVIDERS[t.provider].label, 'Only a hand-checked flight link');
+export type ConciergeTravelOption = z.infer<typeof conciergeTravelOptionSchema>;
+
 export const conciergeDiscoverOutput = z.object({
   version: z.literal(1), reply: z.string(), status: z.enum(['ready', 'needs_location', 'unavailable', 'empty']),
   cards: z.array(conciergeCardSchema).max(3), refinements: z.array(z.string()).max(4),
   proposal: conciergeProposalSchema.nullable().default(null),
   proposedPlan: conciergeProposedPlanSchema.nullable().default(null),
+  /** Only when the request is for a city far from the guest. */
+  travel: z.array(conciergeTravelOptionSchema).max(3).default([]),
 }).strict().superRefine((response, ctx) => {
   for (const card of response.cards) {
     const types = card.actions.map((a) => a.type);
@@ -152,7 +162,10 @@ export interface ConciergeDependencies {
   menuEvidence?(search: ConciergeSearch): Promise<MenuEvidenceResult[]>;
   /** The point Google gives for a place a request names: biased to `near`, or anywhere when `near` is null. Null when not found. */
   area?(name: string, near: Coordinate | null): Promise<Coordinate | null>;
+  /** Listed places near `origin` with a hand-checked flight link, nearest first. */
+  travel?(origin: Coordinate): Promise<ConciergeTravelOption[]>;
 }
+export const CONCIERGE_TRAVEL_TIMEOUT_MS = 1000;
 /** A named area further than this from the guest is not trusted (another city's Midtown). */
 export const PLAN_AREA_MAX_METERS = 80_000;
 /** Names that exist in many cities. They are only trusted near the guest, or near the launch market. */
@@ -639,6 +652,20 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     return result('ready', `Proposed Plan: ${named.join(', then ')}.${gaps}${area} ${caveats}`, cards, PLAN_REFINEMENTS, null, plan);
   }
 
+  /**
+   * Another city: offer the flight links listed near where the guest is, or near
+   * the launch market without a location. A nearby search never gets them.
+   */
+  async function withTravel(response: ConciergeResponse, guest: Coordinate | null, destination: Coordinate): Promise<ConciergeResponse> {
+    const origin = guest ?? { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+    if (response.status !== 'ready' || !dependencies.travel || withinSearch(origin, destination, PLAN_AREA_MAX_METERS)) return response;
+    try {
+      const found = await withDeadline(Promise.resolve().then(() => dependencies.travel!(origin)), CONCIERGE_TRAVEL_TIMEOUT_MS);
+      const travel = found.filter((option) => conciergeTravelOptionSchema.safeParse(option).success).slice(0, 3);
+      return travel.length ? conciergeDiscoverOutput.parse({ ...response, travel }) : response;
+    } catch { return response; }
+  }
+
   async function lookupArea(name: string, near: Coordinate | null): Promise<Coordinate | null> {
     if (!dependencies.area || !conciergeSearchSchema.shape.query.safeParse(name).success) return null;
     try {
@@ -681,9 +708,10 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     const destination = areaName ? await resolveDestination(areaName, input.location ?? null) : null;
     if (destination && areaName) {
       const there = { ...input, location: destination.point };
-      return wanted
+      const response = await (wanted
         ? proposePlan(there, local, wanted, areaName, destination.basis)
-        : discoverOne(there, { areaLabel: areaName });
+        : discoverOne(there, { areaLabel: areaName }));
+      return withTravel(response, input.location ?? null, destination.point);
     }
     return input.location ? discoverOne(input) : result('needs_location', CONCIERGE_WHERE_REPLY);
   };

@@ -913,6 +913,41 @@ test('a guest in Atlanta can plan another city: the named city is looked up anyw
   assert.match(single.reply, /near Miami/);
 });
 
+test('a trip to another city offers flight links near the guest; a nearby request never does', async () => {
+  const atlanta = { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+  const miami = { lat: 25.7617, lng: -80.1918 };
+  const blade = { placeId: 'ChIJatl', name: 'Hartsfield-Jackson Atlanta International Airport', provider: 'blade' as const, label: 'Blade',
+    url: 'https://www.blade.com/airports/hartsfield-jackson-atlanta-international' };
+  const origins: Coordinate[] = [];
+  const travel: ConciergeDependencies['travel'] = async (origin) => {
+    origins.push(origin);
+    return [blade, { ...blade, provider: 'opentable' as never, label: 'OpenTable', url: 'https://www.opentable.com/r/x' }, { ...blade, url: 'https://evil.example/blade' }];
+  };
+  const trip = await service({ travel, area: async (_name, near) => (near ? null : miami), places: planPlaces() })(
+    { location: atlanta, messages: [{ role: 'user', content: 'Plan dinner and drinks in Miami Saturday night' }] });
+  assert.equal(conciergeDiscoverOutput.safeParse(trip).success, true);
+  assert.deepEqual(trip.travel, [blade], 'only hand-checked flight links survive');
+  assert.deepEqual(origins, [atlanta], 'flights leave from where the guest is');
+
+  const single = await service({ travel, area: async (_name, near) => (near ? null : miami),
+    places: async (search) => ({ source: 'google', places: [place({ lat: search.location.lat + 0.001, lng: search.location.lng })] }) })(
+    { location: atlanta, messages: [{ role: 'user', content: 'brunch in Miami' }] });
+  assert.deepEqual(single.travel, [blade]);
+
+  origins.length = 0;
+  const nearby = await service({ travel, area: async () => ({ lat: atlanta.lat + 0.01, lng: atlanta.lng }), places: planPlaces() })(
+    { location: atlanta, messages: [{ role: 'user', content: 'dinner and drinks in Midtown' }] });
+  assert.deepEqual(nearby.travel, []);
+  const plain = await service({ travel, places: planPlaces() })({ location: atlanta, messages: [{ role: 'user', content: 'dinner and drinks' }] });
+  assert.deepEqual(plain.travel, []);
+  assert.deepEqual(origins, [], 'a nearby request never looks for flights');
+
+  const slow = await service({ travel: async () => { throw new Error('down'); }, area: async (_name, near) => (near ? null : miami), places: planPlaces() })(
+    { location: atlanta, messages: [{ role: 'user', content: 'Plan dinner in Miami' }] });
+  assert.equal(slow.status, 'ready');
+  assert.deepEqual(slow.travel, [], 'a failed lookup still returns the Plan');
+});
+
 test('no location: a named place is still searched, and nothing named asks where', async () => {
   const never = async (): Promise<never> => { assert.fail('Must not search without a place'); };
   const asked = await service({ venues: never, places: never, plan: never, menuEvidence: never, area: never })({ messages: [{ role: 'user', content: 'coffee' }] });

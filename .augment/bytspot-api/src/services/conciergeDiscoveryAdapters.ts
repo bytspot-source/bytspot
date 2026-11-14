@@ -8,6 +8,7 @@ import {
   PLAN_AREA_MAX_METERS, withinSearch, type ConciergeDependencies, type ConciergeSearch, type ConciergeTravelOption,
 } from './conciergeDiscovery';
 import { distanceMeters } from './recommendations';
+import { areaTimeZone } from './areaTimeZone';
 import {
   AVIATION_BOOKING_PROVIDERS, BOOKING_PROVIDERS, bookingLinkExpired, bookingLinkFresh, bookingUrlError, type BookingProvider,
 } from './bookingProviders';
@@ -223,4 +224,4 @@ export async function conciergeTravelOptions(origin: { lat: number; lng: number 
 
 export const discoverConcierge = createConciergeDiscovery({ venues: conciergeVenues, places: conciergePlacesSearch,
   reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence, tableBookings: conciergeTableBookings,
-  area: conciergePlanArea, travel: conciergeTravelOptions });
+  area: conciergePlanArea, travel: conciergeTravelOptions, timeZone: (point) => areaTimeZone(point) });

@@ -5,8 +5,12 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import {
   conciergePlanSchema, conciergeSearchSchema, CONCIERGE_PLAN_TIMEOUT_MS, createConciergeDiscovery, googleIdentity,
-  type ConciergeDependencies, type ConciergeSearch,
+  PLAN_AREA_MAX_METERS, withinSearch, type ConciergeDependencies, type ConciergeSearch, type ConciergeTravelOption,
 } from './conciergeDiscovery';
+import { distanceMeters } from './recommendations';
+import {
+  AVIATION_BOOKING_PROVIDERS, BOOKING_PROVIDERS, bookingLinkExpired, bookingLinkFresh, bookingUrlError, type BookingProvider,
+} from './bookingProviders';
 import { DISCOVERY_RAILS } from './discoveryTaxonomy';
 import { conciergePlacesSearch, discoveryBounds } from './conciergePlaces';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
@@ -189,6 +193,34 @@ export async function conciergePlanArea(name: string, near: { lat: number; lng: 
   return data;
 }
 
+/**
+ * Listed places within 80 km of `origin` with a fresh, hand-checked flight
+ * link (Blade, Wheels Up), nearest first. Expired or unchecked links are left out.
+ */
+export async function conciergeTravelOptions(origin: { lat: number; lng: number }): Promise<ConciergeTravelOption[]> {
+  const latSpan = PLAN_AREA_MAX_METERS / 111_000;
+  const lngSpan = latSpan / Math.max(0.2, Math.cos((origin.lat * Math.PI) / 180));
+  const rows = await db.venue.findMany({
+    where: {
+      discoverable: true, listedAt: { not: null }, bookingProvider: { in: [...AVIATION_BOOKING_PROVIDERS] }, bookingUrl: { not: null },
+      lat: { gte: origin.lat - latSpan, lte: origin.lat + latSpan }, lng: { gte: origin.lng - lngSpan, lte: origin.lng + lngSpan },
+    },
+    select: { name: true, googlePlaceId: true, lat: true, lng: true, bookingProvider: true, bookingUrl: true, bookingCheckedAt: true, bookingExpiresAt: true },
+    take: 20,
+  });
+  return rows
+    .filter((row) => row.bookingProvider && row.bookingUrl && !bookingUrlError(row.bookingProvider, row.bookingUrl)
+      && bookingLinkFresh(row.bookingCheckedAt) && !bookingLinkExpired(row.bookingExpiresAt)
+      && withinSearch(origin, { lat: row.lat, lng: row.lng }, PLAN_AREA_MAX_METERS))
+    .sort((a, b) => distanceMeters(origin, a) - distanceMeters(origin, b))
+    .slice(0, 3)
+    .map((row) => ({
+      placeId: row.googlePlaceId?.replace(/^places\//, '') ?? null, name: row.name.slice(0, 120),
+      provider: row.bookingProvider as BookingProvider, label: BOOKING_PROVIDERS[row.bookingProvider as BookingProvider].label,
+      url: row.bookingUrl!.trim(),
+    }));
+}
+
 export const discoverConcierge = createConciergeDiscovery({ venues: conciergeVenues, places: conciergePlacesSearch,
   reconcile: conciergeReconcilePlaces, plan: conciergePlanner, menuEvidence: findMenuEvidence, tableBookings: conciergeTableBookings,
-  area: conciergePlanArea });
+  area: conciergePlanArea, travel: conciergeTravelOptions });

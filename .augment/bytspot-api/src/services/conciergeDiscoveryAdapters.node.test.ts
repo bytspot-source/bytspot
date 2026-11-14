@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { db } from '../lib/db';
-import { conciergeReconcilePlaces, conciergeVenues } from './conciergeDiscoveryAdapters';
+import { conciergeReconcilePlaces, conciergeTravelOptions, conciergeVenues } from './conciergeDiscoveryAdapters';
 import type { ConciergeSearch } from './conciergeDiscovery';
 import type { RecommendPlace, RecommendVenue } from './recommendations';
 
@@ -136,4 +136,36 @@ test('coffee aliases use exact categories while dish and explicit name searches 
     await conciergeVenues({ ...search, mode: 'name', query: "Joe's Coffee" });
     assert.deepEqual(filters, [{ name: { contains: "Joe's Coffee", mode: 'insensitive' } }]);
   });
+});
+
+test('flight options are fresh, hand-checked flight links near the origin, nearest first', async () => {
+  const venue = db.venue as unknown as { findMany: unknown };
+  const original = venue.findMany;
+  let where: any;
+  const now = new Date();
+  const old = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+  const row = (over: Record<string, unknown>) => ({ name: 'Airport', googlePlaceId: 'places/ChIJa', lat: 33.64, lng: -84.43,
+    bookingProvider: 'blade', bookingUrl: 'https://www.blade.com/airports/atl', bookingCheckedAt: now, bookingExpiresAt: null, ...over });
+  venue.findMany = async (args: any) => {
+    where = args.where;
+    return [
+      row({ name: 'Far Field', lat: 34.6, googlePlaceId: 'ChIJfar' }),
+      row({ name: 'Hartsfield-Jackson' }),
+      row({ name: 'PDK', lat: 33.875, lng: -84.302, bookingProvider: 'wheelsup', bookingUrl: 'https://wheelsup.com/', googlePlaceId: 'ChIJpdk' }),
+      row({ name: 'Unchecked', bookingCheckedAt: old }),
+      row({ name: 'Foreign', bookingUrl: 'https://evil.example/blade' }),
+      row({ name: 'Ended', bookingExpiresAt: new Date(Date.now() - 1000) }),
+    ];
+  };
+  try {
+    const options = await conciergeTravelOptions({ lat: 33.749, lng: -84.388 });
+    assert.deepEqual(where.bookingProvider, { in: ['blade', 'wheelsup'] });
+    assert.equal(where.discoverable, true);
+    assert.deepEqual(options.map((o) => [o.name, o.label, o.placeId]), [
+      ['Hartsfield-Jackson', 'Blade', 'ChIJa'],
+      ['PDK', 'Wheels Up', 'ChIJpdk'],
+    ]);
+  } finally {
+    venue.findMany = original;
+  }
 });

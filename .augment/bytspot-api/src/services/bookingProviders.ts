@@ -61,6 +61,17 @@ export function bookingLinkCheck(checkedAt: Date | null | undefined, now = Date.
   return { status: dueAt.getTime() - now <= BOOKING_LINK_REMIND_MS ? 'due_soon' : 'ok', dueAt };
 }
 
+/**
+ * Flights and charters. Their links are for getting to another city, so guests
+ * never see them on a place; they are offered only with a Plan or search for a
+ * city far from the guest (Concierge "Getting there").
+ */
+export const AVIATION_BOOKING_PROVIDERS: readonly BookingProvider[] = ['blade', 'wheelsup'];
+
+export function isAviationProvider(value: string | null | undefined): boolean {
+  return typeof value === 'string' && (AVIATION_BOOKING_PROVIDERS as readonly string[]).includes(value);
+}
+
 /** Providers whose links are usually for one event, so the admin is asked for the event's date. */
 export const EVENT_BOOKING_PROVIDERS: readonly BookingProvider[] = ['eventbrite', 'dice'];
 

@@ -51,6 +51,9 @@ test('every new provider accepts a link on its own site, with its own label', ()
   assert.equal(tableBookingLinkFrom('eventbrite', event, new Date(), new Date(Date.now() + 60_000))?.label, 'Eventbrite');
   assert.equal(tableBookingLinkFrom('eventbrite', event, new Date(), new Date(Date.now() - 60_000)), null, 'an event that is over is not shown');
   assert.equal(tableBookingLinkFrom('eventbrite', event, new Date(), null)?.label, 'Eventbrite', 'no end never expires');
+  const flight = 'https://www.blade.com/airports/hartsfield-jackson-atlanta-international';
+  assert.equal(tableBookingLinkFrom('blade', flight, new Date()), null, 'a flight link is never a place button for guests');
+  assert.equal(tableBookingLinkFrom('blade', flight)?.label, 'Blade', 'admins still see it');
 });
 
 test('a link that would put a broken or foreign button on a card is refused', () => {

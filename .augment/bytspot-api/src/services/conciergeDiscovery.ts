@@ -149,11 +149,15 @@ export interface ConciergeDependencies {
   reconcile?(places: RecommendPlace[]): Promise<{ venues: RecommendVenue[]; hiddenPlaceIds: string[] }>;
   plan?(context: ConciergePlanContext, options: { signal: AbortSignal }): Promise<unknown>;
   menuEvidence?(search: ConciergeSearch): Promise<MenuEvidenceResult[]>;
-  /** The point Google gives for an area a Plan request names, searched near the guest. Null when not found. */
-  area?(name: string, near: Coordinate): Promise<Coordinate | null>;
+  /** The point Google gives for a place a request names: biased to `near`, or anywhere when `near` is null. Null when not found. */
+  area?(name: string, near: Coordinate | null): Promise<Coordinate | null>;
 }
 /** A named area further than this from the guest is not trusted (another city's Midtown). */
 export const PLAN_AREA_MAX_METERS = 80_000;
+/** Names that exist in many cities. They are only trusted near the guest, or near the launch market. */
+const GENERIC_AREA = /^(?:the\s+)?(?:downtown|midtown|uptown|old town|city cent(?:er|re)|the city|east side|west side|north side|south side|the strip|the beach)$/i;
+/** With no location and nothing named, Concierge asks where. */
+export const CONCIERGE_WHERE_REPLY = 'Where should I look? Name a city or neighborhood, like “dinner in Midtown” or “brunch in Miami”, or share your location.';
 export const PLAN_AREA_TIMEOUT_MS = 3000;
 
 const LAUNCH_AREA_NAME = /^(?:midtown|midtown atlanta|atlanta midtown)$/i;
@@ -315,7 +319,7 @@ export function proposedPlanNeeds(messages: string[]): PlanNeedRequest | null {
   return { needs, partySize: partySize !== null && partySize >= 1 && partySize <= 20 ? partySize : null };
 }
 
-const AREA_STOP = /^(?:with|without|but|and|under|open|for|tonight|today|tomorrow|this|then|after|before|not|no|please)$/i;
+const AREA_STOP = /^(?:with|without|but|and|under|open|for|tonight|today|tomorrow|this|then|after|before|not|no|please|on|next|weekend|night|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)$/i;
 
 /** The area a Plan request names ("in Midtown", "near Piedmont Park", "downtown"), or null. Times never count. */
 export function planArea(messages: string[]): string | null {
@@ -389,7 +393,7 @@ type LocalPlan = Omit<ConciergePlan, 'query' | 'rail' | 'mode'> & {
 
 /** Useful no-key fallback. Unknown text stays search text, never implicit GPS
  * consent. New standalone requests replace prior intent; refinements retain it. */
-export function planConcierge(input: ConciergeInput): LocalPlan {
+export function planConcierge(input: ConciergeInput, options: { areaResolved?: boolean } = {}): LocalPlan {
   const preferred = CATEGORIES.find(([pattern]) => pattern.test(input.quizAnswers?.vibe ?? ''));
   const defaultIntent = categoryIntent(preferred?.[1] ?? 'restaurant');
   let intent = defaultIntent;
@@ -453,8 +457,9 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
     if (UNSAFE.test(text)) { blocked = true; continue; }
     const locality = text.search(LOCALITY);
     if (locality >= 0 || BARE_CITY.test(text)) {
-      needsLocation = true;
-      locationConfirmed = false;
+      // A place the server already resolved is searched there; otherwise the guest is asked.
+      needsLocation = !options.areaResolved;
+      locationConfirmed = Boolean(options.areaResolved);
       // Remove the location phrase, not trailing dietary/budget refinements.
       // This query is only eligible after explicit supplied-location consent.
       text = text.replace(/\b(?:in|near|around|at|within|visiting|traveling|travelling)\s+.*?(?=\b(?:with|without|but|and|under|open|vegan|vegetarian|gluten|quiet|cheap|not|no)\b|$)/gi, ' ')
@@ -494,8 +499,8 @@ export function planConcierge(input: ConciergeInput): LocalPlan {
   };
 }
 
-async function boundedPlan(input: ConciergeInput, dependencies: ConciergeDependencies): Promise<LocalPlan> {
-  const fallback = planConcierge(input);
+async function boundedPlan(input: ConciergeInput, dependencies: ConciergeDependencies, areaResolved = false): Promise<LocalPlan> {
+  const fallback = planConcierge(input, { areaResolved });
   if (!dependencies.plan || fallback.needsLocation || fallback.blocked) return fallback;
   const controller = new AbortController();
   const base = conciergePlanSchema.parse({
@@ -633,40 +638,64 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
     return result('ready', `Proposed Plan: ${named.join(', then ')}.${gaps}${area} ${caveats}`, cards, PLAN_REFINEMENTS, null, plan);
   }
 
-  async function resolveArea(name: string, near: Coordinate): Promise<Coordinate | null> {
+  async function lookupArea(name: string, near: Coordinate | null): Promise<Coordinate | null> {
     if (!dependencies.area || !conciergeSearchSchema.shape.query.safeParse(name).success) return null;
     try {
       const point = coordinateSchema.safeParse(await withDeadline(Promise.resolve().then(() => dependencies.area!(name, near)), PLAN_AREA_TIMEOUT_MS));
-      return point.success && withinSearch(near, point.data, PLAN_AREA_MAX_METERS) ? point.data : null;
+      return point.success ? point.data : null;
     } catch { return null; }
+  }
+
+  /**
+   * Where a named place is. Near the guest first (or near the launch market when
+   * there is no location). A name like "Miami" that is not near is then looked up
+   * anywhere; a generic name like "Midtown" never is, so another city's Midtown
+   * cannot stand in for the one the guest meant.
+   */
+  async function resolveDestination(name: string, guest: Coordinate | null): Promise<{ point: Coordinate; basis: 'lookup' | 'launch_market' } | null> {
+    const anchor = guest ?? { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+    const near = await lookupArea(name, anchor);
+    if (near && withinSearch(anchor, near, PLAN_AREA_MAX_METERS)) return { point: near, basis: 'lookup' };
+    if (!GENERIC_AREA.test(name.trim())) {
+      const anywhere = await lookupArea(name, null);
+      if (anywhere) return { point: anywhere, basis: 'lookup' };
+    }
+    const launch = launchMarketPlanPoint(name, anchor);
+    return launch ? { point: launch, basis: 'launch_market' } : null;
   }
 
   return async (raw: ConciergeInput): Promise<ConciergeResponse> => {
     const input = withStarterPrompts(conciergeDiscoverInput.parse(raw));
-    if (!input.location) return discoverOne(input);
-    const local = planConcierge(input);
+    // Reading the request needs no location; the anchor is only used for wording, never to search.
+    const local = planConcierge({ ...input, location: input.location ?? { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng } });
     if (local.blocked) return discoverOne(input);
     // An act on shown results resolves against the Plan's stops when the earlier request was a Plan.
     const wanted = proposedPlanNeeds(local.messages);
-    if (!wanted) return discoverOne(input);
-    if (!local.needsLocation) return proposePlan({ ...input, location: input.location }, local, wanted);
-    // A Plan in a named area is searched around that area's point, only when the lookup finds it near the guest.
+    if (!local.needsLocation) {
+      if (!input.location) return result('needs_location', CONCIERGE_WHERE_REPLY);
+      return wanted ? proposePlan({ ...input, location: input.location }, local, wanted) : discoverOne(input);
+    }
+    // A named place is searched where it is: nearby, or another city the guest is planning for.
     const areaName = planArea(local.messages);
-    const point = areaName ? await resolveArea(areaName, input.location) : null;
-    if (point && areaName) return proposePlan({ ...input, location: point }, local, wanted, areaName, 'lookup');
-    // Launch market only: a guest already near Midtown who said "Midtown" still gets a Plan when the lookup is down.
-    const launch = areaName ? launchMarketPlanPoint(areaName, input.location) : null;
-    return launch && areaName
-      ? proposePlan({ ...input, location: launch }, local, wanted, areaName, 'launch_market')
-      : discoverOne(input);
+    const destination = areaName ? await resolveDestination(areaName, input.location ?? null) : null;
+    if (destination && areaName) {
+      const there = { ...input, location: destination.point };
+      return wanted
+        ? proposePlan(there, local, wanted, areaName, destination.basis)
+        : discoverOne(there, { areaLabel: areaName });
+    }
+    return input.location ? discoverOne(input) : result('needs_location', CONCIERGE_WHERE_REPLY);
   };
 }
 
 function createConciergeSearch(dependencies: ConciergeDependencies) {
-  return async (raw: ConciergeInput): Promise<ConciergeResponse> => {
+  /** `areaLabel` is set when the server resolved a place the guest named; `location` is then that place. */
+  return async (raw: ConciergeInput, options: { areaLabel?: string } = {}): Promise<ConciergeResponse> => {
     const input = conciergeDiscoverInput.parse(raw);
-    if (!input.location) return result('needs_location', 'Share or choose a location to find real places nearby.');
-    const plan = await boundedPlan(input, dependencies);
+    if (!input.location) return result('needs_location', CONCIERGE_WHERE_REPLY);
+    const areaLabel = options.areaLabel ? options.areaLabel.slice(0, 80) : null;
+    const where = areaLabel ? `near ${areaLabel}` : 'nearby';
+    const plan = await boundedPlan(input, dependencies, areaLabel !== null);
     if (plan.needsLocation) return result('needs_location',
       'I cannot safely resolve that location or place name. Choose a location and confirm “use my current location”, or give a place name in quotes to search near your supplied location.',
       [], ['Use my current location']);
@@ -756,7 +785,9 @@ function createConciergeSearch(dependencies: ConciergeDependencies) {
       // reconciliation alone cannot transfer a reviewed dish to a different place.
       const evidenceByDish = new Map(menuRows.filter((row) => row.venue.id === v?.id).map((row) => [row.evidence.dishId, row.evidence]));
       const menuEvidence = actualRail === 'eat_drink' ? [...evidenceByDish.values()].slice(0, 3) : [];
-      const reasons = [`${Math.round(distanceMeters(search.location, spot))} m away (straight-line)`];
+      const reasons = [areaLabel
+        ? `${Math.round(distanceMeters(search.location, spot))} m from ${areaLabel} (straight-line)`
+        : `${Math.round(distanceMeters(search.location, spot))} m away (straight-line)`];
       if (stale && p) reasons.push('Cached place information; opening status unverified');
       else if (p?.isOpen === true) reasons.push('Open now according to Google');
       if (fit.priceReason) reasons.push(fit.priceReason);
@@ -799,11 +830,13 @@ function createConciergeSearch(dependencies: ConciergeDependencies) {
       'Search terms guide discovery, but listing matches do not verify every requested preference.',
     ].filter(Boolean).join(' ');
     if (!selected.length) return result(failed || stale || menuFailed ? 'unavailable' : 'empty',
-      `${failed || stale || menuFailed ? 'I could not verify matching places nearby. Please try again.' : `No matching places were found within ${search.radius} m of your supplied location.`} ${caveats}`,
+      `${failed || stale || menuFailed ? `I could not verify matching places ${where}. Please try again.` : `No matching places were found within ${search.radius} m of ${areaLabel ?? 'your supplied location'}.`} ${caveats}`,
       [], ['Coffee nearby', 'Restaurants nearby']);
     const refinements = ['Closer', 'Coffee nearby', 'Restaurants nearby'];
     if (plan.action) return answerAction(plan.action, selected, caveats, refinements);
-    return result('ready', `Here are nearby place listings within ${search.radius} m of your supplied location. Details only; availability is not guaranteed. ${caveats}`,
+    return result('ready', areaLabel
+      ? `Here are place listings near ${areaLabel}, as Google places it. Details only; availability is not guaranteed. ${caveats}`
+      : `Here are nearby place listings within ${search.radius} m of your supplied location. Details only; availability is not guaranteed. ${caveats}`,
       selected, refinements);
   };
 }

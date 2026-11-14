@@ -179,6 +179,32 @@ services:
       - key: SENTRY_DSN
         sync: false
 
+  # ─── Booking links: weekly list of links to re-check before guests lose them ─
+  # Guests stop seeing a booking link 90 days after it was last checked. Every
+  # Monday morning (Atlanta), the admin inbox gets the hidden ones and the ones
+  # due within 14 days. Sends nothing when nothing is due.
+  - type: cron
+    name: bytspot-booking-recheck
+    runtime: node
+    branch: main
+    rootDir: .augment/bytspot-api
+    schedule: "0 14 * * 1"
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: node dist/scripts/sendBookingRecheck.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BYTSPOT_RUNTIME
+        value: job
+      - key: DATABASE_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SAFETY_ALERT_EMAIL
+        value: bytspotapp@gmail.com
+      - key: SENTRY_DSN
+        sync: false
+
   # ─── Party payouts: host and business shares, after the party ends ─────────
   # Sends nothing unless PARTY_PAYOUTS_ENABLED=true. Each transfer is keyed per
   # sale and recipient, so an overlapping or retried run never pays twice.

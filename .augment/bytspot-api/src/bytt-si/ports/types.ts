@@ -1,3 +1,4 @@
+import type { BookingProvider } from '../../services/bookingProviders';
 /**
  * Data ports. The engine and skills only see these interfaces; production
  * adapters wrap the bytspot-api services (see README "Wiring real ports").
@@ -77,7 +78,7 @@ export interface BookableRecord {
   capacity: number;
 }
 export interface BookablesPort {
-  forPlace(placeId: string): Promise<{ bookables: BookableRecord[]; tableLink: { provider: 'opentable' | 'resy'; label: string; url: string } | null }>;
+  forPlace(placeId: string): Promise<{ bookables: BookableRecord[]; tableLink: { provider: BookingProvider; label: string; url: string } | null }>;
 }
 
 export interface PersonRecord { userId: string; displayName: string; preferences: string[] }

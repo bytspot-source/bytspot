@@ -9,6 +9,7 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
+import { bookingLinkFresh } from '../services/bookingProviders';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
 import { assertBytspotAdmin, auditAdminAction } from '../services/adminRbac';
@@ -162,6 +163,8 @@ export const adminPlacesRouter = router({
           placeId: v.googlePlaceId, hidden: !v.discoverable,
           booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
           checkedAt: v.bookingCheckedAt, listedAt: v.listedAt,
+          // Guests stop seeing a link nobody has checked in 90 days; the admin re-saves it to check it again.
+          bookingStale: Boolean(v.bookingUrl) && !bookingLinkFresh(v.bookingCheckedAt),
           numbers: numbers.get(v.id)!,
         })),
       };
@@ -186,7 +189,7 @@ export const adminPlacesRouter = router({
       const provider = input.provider ?? null;
       const url = input.url ?? null;
       if (Boolean(provider) !== Boolean(url)) {
-        throw new TRPCError({ code: 'BAD_REQUEST', message: provider ? 'Paste the booking link.' : 'Pick OpenTable or Resy.' });
+        throw new TRPCError({ code: 'BAD_REQUEST', message: provider ? 'Paste the booking link.' : 'Pick a booking provider.' });
       }
       const problem = provider && url ? tableBookingUrlError(provider, url) : null;
       if (problem) throw new TRPCError({ code: 'BAD_REQUEST', message: problem });

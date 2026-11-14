@@ -452,7 +452,7 @@ test('Party arrival guidance requires an access-granted guest and a bound venue'
 test('The host sees how to book a listed arrival venue; guests only once the host turns it on', async () => {
   const arrivalVenue = {
     id: 'venue-1', name: 'Sample Venue', address: '1 Example Way', lat: 33.749, lng: -84.388,
-    googlePlaceId: 'ChIJsample', bookingProvider: 'opentable', bookingUrl: 'https://www.opentable.com/r/sample', controlledAt: null,
+    googlePlaceId: 'ChIJsample', bookingProvider: 'opentable', bookingUrl: 'https://www.opentable.com/r/sample', bookingCheckedAt: new Date(), controlledAt: null,
   };
   let forGuests = false;
   let hostUserId = 'test-user-id';
@@ -484,6 +484,12 @@ test('A Bytspot-controlled or unlisted arrival venue never offers an outside boo
     { placeId: 'p', controlled: false, booking: null },
   );
   assert.equal(partyVenueBooking({ googlePlaceId: 'p', bookingProvider: 'other', bookingUrl: 'https://x.test', controlledAt: null }, host)?.booking, null);
+  const fresh = new Date();
+  assert.deepEqual(partyVenueBooking({ googlePlaceId: 'p', bookingProvider: 'fareharbor', bookingUrl: 'https://fareharbor.com/embeds/book/acme/', bookingCheckedAt: fresh, controlledAt: null }, host)?.booking,
+    { provider: 'fareharbor', url: 'https://fareharbor.com/embeds/book/acme/' });
+  const stale = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000);
+  assert.equal(partyVenueBooking({ googlePlaceId: 'p', bookingProvider: 'fareharbor', bookingUrl: 'https://fareharbor.com/embeds/book/acme/', bookingCheckedAt: stale, controlledAt: null }, host)?.booking, null,
+    'a link nobody has checked in 90 days is hidden');
 });
 
 test('Only the host of a published Party with an arrival venue can show its booking to guests', async () => {

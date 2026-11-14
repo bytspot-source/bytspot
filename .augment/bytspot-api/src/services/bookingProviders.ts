@@ -61,6 +61,17 @@ export function bookingLinkCheck(checkedAt: Date | null | undefined, now = Date.
   return { status: dueAt.getTime() - now <= BOOKING_LINK_REMIND_MS ? 'due_soon' : 'ok', dueAt };
 }
 
+/** Providers whose links are usually for one event, so the admin is asked for the event's date. */
+export const EVENT_BOOKING_PROVIDERS: readonly BookingProvider[] = ['eventbrite', 'dice'];
+
+/** The latest end an admin may set: two years out. */
+export const BOOKING_EXPIRY_MAX_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+
+/** Whether an event link's end has passed. No end never expires. */
+export function bookingLinkExpired(expiresAt: Date | null | undefined, now = Date.now()): boolean {
+  return expiresAt instanceof Date && !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() <= now;
+}
+
 /** Whether a link checked at `checkedAt` may still be shown to guests. */
 export function bookingLinkFresh(checkedAt: Date | null | undefined, now = Date.now()): boolean {
   return checkedAt instanceof Date && !Number.isNaN(checkedAt.getTime()) && now - checkedAt.getTime() <= BOOKING_LINK_MAX_AGE_MS;

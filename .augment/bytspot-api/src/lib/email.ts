@@ -435,7 +435,7 @@ export interface BookingRecheckNotice {
   name: string;
   provider: string;
   url: string;
-  status: 'due_soon' | 'stale';
+  status: 'due_soon' | 'stale' | 'expired';
   dueAt: Date | null;
 }
 
@@ -448,10 +448,11 @@ export async function sendBookingRecheckEmail(to: string, items: BookingRecheckN
   const rows = items.map((item) => `
         <li style="margin: 0 0 10px;">
           <a href="${escapeHtml(item.url)}" style="color: #00BFFF;">${escapeHtml(item.name)}</a>
-          <span style="color: #aaa;"> · ${escapeHtml(item.provider)} · ${item.status === 'stale'
-            ? `hidden from guests since ${day(item.dueAt)}` : `hidden from guests on ${day(item.dueAt)}`}</span>
+          <span style="color: #aaa;"> · ${escapeHtml(item.provider)} · ${item.status === 'expired'
+            ? `event over ${day(item.dueAt)}: add the next one or remove it`
+            : item.status === 'stale' ? `hidden from guests since ${day(item.dueAt)}` : `hidden from guests on ${day(item.dueAt)}`}</span>
         </li>`).join('');
-  const hidden = items.filter((item) => item.status === 'stale').length;
+  const hidden = items.filter((item) => item.status !== 'due_soon').length;
   await resend.emails.send({
     from: FROM,
     to,

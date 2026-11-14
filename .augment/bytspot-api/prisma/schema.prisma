@@ -210,6 +210,8 @@ model Venue {
   bookingProvider    String?   @map("booking_provider")
   bookingUrl         String?   @map("booking_url")
   bookingCheckedAt   DateTime? @map("booking_checked_at")
+  /// When an event's booking link stops being shown (the event is over). Null: no end.
+  bookingExpiresAt   DateTime? @map("booking_expires_at")
   /// Set when a Bytspot admin listed the place, which also makes it a lead.
   listedAt           DateTime? @map("listed_at")
   listedByUserId     String?   @map("listed_by_user_id")

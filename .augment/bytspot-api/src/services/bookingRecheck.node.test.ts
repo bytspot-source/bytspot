@@ -31,6 +31,8 @@ test('the re-check list has hidden links first, then the soonest due, and nothin
       { id: 'soon', name: 'Soon Spa', bookingProvider: 'vagaro', bookingUrl: 'https://www.vagaro.com/soon', bookingCheckedAt: ago(80) },
       { id: 'hidden', name: 'Hidden Tours', bookingProvider: 'fareharbor', bookingUrl: 'https://fareharbor.com/hidden/', bookingCheckedAt: ago(120) },
       { id: 'sooner', name: 'Sooner Bar', bookingProvider: 'tock', bookingUrl: 'https://www.exploretock.com/sooner', bookingCheckedAt: ago(88) },
+      { id: 'over', name: 'Over Show', bookingProvider: 'dice', bookingUrl: 'https://dice.fm/event/over', bookingCheckedAt: ago(5), bookingExpiresAt: ago(2) },
+      { id: 'coming', name: 'Coming Show', bookingProvider: 'dice', bookingUrl: 'https://dice.fm/event/coming', bookingCheckedAt: ago(5), bookingExpiresAt: ago(-3) },
     ];
   };
   try {
@@ -38,6 +40,7 @@ test('the re-check list has hidden links first, then the soonest due, and nothin
     assert.deepEqual(where, { listedAt: { not: null }, discoverable: true, bookingUrl: { not: null } });
     assert.deepEqual(items.map((item) => [item.venueId, item.status, item.provider]), [
       ['hidden', 'stale', 'FareHarbor'],
+      ['over', 'expired', 'DICE'],
       ['sooner', 'due_soon', 'Tock'],
       ['soon', 'due_soon', 'Vagaro'],
     ]);

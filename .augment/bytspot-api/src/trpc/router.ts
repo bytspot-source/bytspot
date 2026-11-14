@@ -864,7 +864,7 @@ const venuesRouter = router({
             // The exact Google place, so a client can add it to a Plan by place
             // and name its admin-listed OpenTable or Resy link.
             googlePlaceId: v.googlePlaceId,
-            booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl, v.bookingCheckedAt),
+            booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl, v.bookingCheckedAt, v.bookingExpiresAt),
             entryType: (v.entryType ?? 'free') as 'free' | 'paid',
             entryPrice: v.entryPrice ?? null,
             ticketUrl: v.ticketUrl ?? null,
@@ -931,7 +931,7 @@ const venuesRouter = router({
         ...projectVenuePhoto(venue),
         control: venueControl(venue),
         googlePlaceId: venue.googlePlaceId,
-        booking: tableBookingLinkFrom(venue.bookingProvider, venue.bookingUrl, venue.bookingCheckedAt),
+        booking: tableBookingLinkFrom(venue.bookingProvider, venue.bookingUrl, venue.bookingCheckedAt, venue.bookingExpiresAt),
         entryType: (venue.entryType ?? 'free') as 'free' | 'paid',
         entryPrice: venue.entryPrice ?? null,
         ticketUrl: venue.ticketUrl ?? null,

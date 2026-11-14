@@ -211,6 +211,19 @@ test('saving a place lists it with its link, and a foreign link is refused', asy
       assert.equal(updated.data.bookingProvider, null);
       assert.equal(updated.data.bookingUrl, null);
       assert.equal(updated.data.bookingCheckedAt, null);
+      assert.equal(updated.data.bookingExpiresAt, null);
+
+      // An event link carries its end; a past or far-off end is refused, and no link means no end.
+      const event = { placeId: 'ChIJ_new', provider: 'eventbrite', url: 'https://www.eventbrite.com/e/show-123', category: 'restaurant' } as const;
+      const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      await adminCaller().admin.places.save({ ...event, expiresAt: nextWeek });
+      assert.equal(updated.data.bookingExpiresAt.toISOString(), nextWeek);
+      await assert.rejects(() => adminCaller().admin.places.save({ ...event, expiresAt: new Date(Date.now() - 60_000).toISOString() }),
+        { code: 'BAD_REQUEST', message: /already passed/ });
+      await assert.rejects(() => adminCaller().admin.places.save({ ...event, expiresAt: new Date(Date.now() + 3 * 365 * 24 * 60 * 60 * 1000).toISOString() }),
+        { code: 'BAD_REQUEST', message: /two years/ });
+      await adminCaller().admin.places.save({ placeId: 'ChIJ_new', category: 'restaurant', expiresAt: nextWeek });
+      assert.equal(updated.data.bookingExpiresAt, null);
     } finally {
       restores.reverse().forEach((restore) => restore());
     }

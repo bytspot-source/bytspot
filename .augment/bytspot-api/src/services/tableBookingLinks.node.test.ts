@@ -47,6 +47,10 @@ test('every new provider accepts a link on its own site, with its own label', ()
   }
   assert.equal(tableBookingLinkFrom('tock', 'https://www.exploretock.com/example', null), null, 'never checked is not shown to guests');
   assert.equal(tableBookingLinkFrom('tock', 'https://www.exploretock.com/example', new Date())?.label, 'Tock');
+  const event = 'https://www.eventbrite.com/e/show-123';
+  assert.equal(tableBookingLinkFrom('eventbrite', event, new Date(), new Date(Date.now() + 60_000))?.label, 'Eventbrite');
+  assert.equal(tableBookingLinkFrom('eventbrite', event, new Date(), new Date(Date.now() - 60_000)), null, 'an event that is over is not shown');
+  assert.equal(tableBookingLinkFrom('eventbrite', event, new Date(), null)?.label, 'Eventbrite', 'no end never expires');
 });
 
 test('a link that would put a broken or foreign button on a card is refused', () => {

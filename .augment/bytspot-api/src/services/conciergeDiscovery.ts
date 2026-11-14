@@ -89,8 +89,11 @@ export const conciergeProposedPlanSchema = z.object({
   /** Needs with no place found; the guest can ask local businesses after saving. */
   openNeeds: z.array(z.string().min(1).max(40)).max(3),
   /** The named area the stops were searched around; the app saves the Plan there instead of the guest's location. */
-  area: z.object({ label: z.string().min(1).max(80), lat: coordinateSchema.shape.lat, lng: coordinateSchema.shape.lng })
-    .strict().nullable().default(null),
+  area: z.object({
+    label: z.string().min(1).max(80), lat: coordinateSchema.shape.lat, lng: coordinateSchema.shape.lng,
+    /** The IANA zone the area keeps, so a start time is picked there. Null when unknown. */
+    timeZone: z.string().min(1).max(64).nullable().default(null),
+  }).strict().nullable().default(null),
 }).strict();
 export type ConciergeProposedPlan = z.infer<typeof conciergeProposedPlanSchema>;
 /** A way to fly to the city a request is for: a listed airport or terminal near the guest with a hand-checked flight link. */
@@ -164,6 +167,8 @@ export interface ConciergeDependencies {
   area?(name: string, near: Coordinate | null): Promise<Coordinate | null>;
   /** Listed places near `origin` with a hand-checked flight link, nearest first. */
   travel?(origin: Coordinate): Promise<ConciergeTravelOption[]>;
+  /** The IANA zone a point keeps, or null when unknown. */
+  timeZone?(point: Coordinate): Promise<string | null>;
 }
 export const CONCIERGE_TRAVEL_TIMEOUT_MS = 1000;
 /** A named area further than this from the guest is not trusted (another city's Midtown). */
@@ -641,7 +646,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       title: `${title.charAt(0).toUpperCase()}${title.slice(1)}`.slice(0, 80),
       intent: compact(local.messages[0] ?? title).slice(0, 280) || title,
       needs: wanted.needs.map((need) => need.need), partySize: wanted.partySize, stops, openNeeds,
-      area: areaName ? { label: areaName.slice(0, 80), lat: input.location.lat, lng: input.location.lng } : null,
+      area: areaName ? { label: areaName.slice(0, 80), lat: input.location.lat, lng: input.location.lng, timeZone: null } : null,
     };
     // "The first one" after a Proposed Plan means its first stop, in stop order.
     if (action) return answerAction(action, cards, caveats, PLAN_REFINEMENTS);
@@ -663,6 +668,17 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       const found = await withDeadline(Promise.resolve().then(() => dependencies.travel!(origin)), CONCIERGE_TRAVEL_TIMEOUT_MS);
       const travel = found.filter((option) => conciergeTravelOptionSchema.safeParse(option).success).slice(0, 3);
       return travel.length ? conciergeDiscoverOutput.parse({ ...response, travel }) : response;
+    } catch { return response; }
+  }
+
+  /** A Proposed Plan for a named area carries the zone that area keeps. A failed lookup leaves it null. */
+  async function withAreaTimeZone(response: ConciergeResponse): Promise<ConciergeResponse> {
+    const area = response.proposedPlan?.area;
+    if (!area || !dependencies.timeZone) return response;
+    try {
+      const timeZone = await withDeadline(Promise.resolve().then(() => dependencies.timeZone!({ lat: area.lat, lng: area.lng })), CONCIERGE_TRAVEL_TIMEOUT_MS);
+      if (!timeZone) return response;
+      return conciergeDiscoverOutput.parse({ ...response, proposedPlan: { ...response.proposedPlan, area: { ...area, timeZone } } });
     } catch { return response; }
   }
 
@@ -711,7 +727,7 @@ export function createConciergeDiscovery(dependencies: ConciergeDependencies) {
       const response = await (wanted
         ? proposePlan(there, local, wanted, areaName, destination.basis)
         : discoverOne(there, { areaLabel: areaName }));
-      return withTravel(response, input.location ?? null, destination.point);
+      return withTravel(await withAreaTimeZone(response), input.location ?? null, destination.point);
     }
     return input.location ? discoverOne(input) : result('needs_location', CONCIERGE_WHERE_REPLY);
   };

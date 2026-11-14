@@ -847,7 +847,7 @@ test('a Plan in a named area searches around the point Google gives near the gue
   assert.deepEqual(asked, ['Midtown']);
   assert.ok(searched.length === 2 && searched.every((s) => s.lat === midtown.lat));
   assert.equal(response.proposedPlan?.partySize, 4);
-  assert.deepEqual(response.proposedPlan?.area, { label: 'Midtown', ...midtown });
+  assert.deepEqual(response.proposedPlan?.area, { label: 'Midtown', ...midtown, timeZone: null });
   assert.deepEqual(response.proposedPlan?.stops.map((s) => s.title), ['Real Kitchen', 'Real Bar']);
   assert.match(response.reply, /Searched near Midtown as Google places it; distances are from there\./);
 
@@ -893,6 +893,28 @@ test('a single search in a named place near the guest is searched there', async 
   assert.match(response.cards[0].reasons[0], /m from Midtown \(straight-line\)$/);
 });
 
+test('a Plan for another city carries the zone that city keeps; a failed lookup leaves it null', async () => {
+  const atlanta = { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
+  const la = { lat: 34.0522, lng: -118.2437 };
+  const asked: Coordinate[] = [];
+  const timeZone: ConciergeDependencies['timeZone'] = async (point) => { asked.push(point); return 'America/Los_Angeles'; };
+  const area: ConciergeDependencies['area'] = async (_name, near) => (near ? null : la);
+  const plan = await service({ area, timeZone, places: planPlaces() })(
+    { location: atlanta, messages: [{ role: 'user', content: 'Plan dinner and drinks in LA Saturday night' }] });
+  assert.equal(conciergeDiscoverOutput.safeParse(plan).success, true);
+  assert.equal(plan.proposedPlan?.area?.timeZone, 'America/Los_Angeles');
+  assert.deepEqual(asked, [la], 'looked up at the city, not at the guest');
+
+  const failed = await service({ area, timeZone: async () => { throw new Error('down'); }, places: planPlaces() })(
+    { location: atlanta, messages: [{ role: 'user', content: 'Plan dinner and drinks in LA' }] });
+  assert.equal(failed.status, 'ready');
+  assert.equal(failed.proposedPlan?.area?.timeZone, null);
+
+  asked.length = 0;
+  await service({ timeZone, places: planPlaces() })({ location: atlanta, messages: [{ role: 'user', content: 'dinner and drinks' }] });
+  assert.deepEqual(asked, [], 'a Plan with no named area never looks one up');
+});
+
 test('a guest in Atlanta can plan another city: the named city is looked up anywhere and searched there', async () => {
   const atlanta = { lat: LAUNCH_MARKET.lat, lng: LAUNCH_MARKET.lng };
   const miami = { lat: 25.7617, lng: -80.1918 };
@@ -903,7 +925,7 @@ test('a guest in Atlanta can plan another city: the named city is looked up anyw
   assert.equal(conciergeDiscoverOutput.safeParse(plan).success, true);
   assert.deepEqual(lookups, [atlanta, null], 'near the guest first, then anywhere');
   assert.ok(searched.length === 2 && searched.every((s) => s.lat === miami.lat));
-  assert.deepEqual(plan.proposedPlan?.area, { label: 'Miami', ...miami });
+  assert.deepEqual(plan.proposedPlan?.area, { label: 'Miami', ...miami, timeZone: null }, 'no zone lookup wired, so none is claimed');
 
   const single = await service({ area, places: async (search) => {
     assert.deepEqual(search.location, miami);

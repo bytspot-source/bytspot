@@ -15,6 +15,7 @@ import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
 import { buildItinerary, type ItineraryStopInput, type TimeSource } from '../services/itinerary';
+import { areaTimeZone } from '../services/areaTimeZone';
 import { ensureTableBookingLinks, tableBookingLinkFor } from '../services/tableBookingLinks';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
 import { resolvePlaceHours, resolvePlaceLocation } from './placesRouter';
@@ -390,6 +391,11 @@ function planHasProtectedSupply(plan: LoadedPlan, facts: PartyBookingFacts): boo
     || Boolean(item.partyId && facts.deletionBlocked.has(`${item.partyId}:${plan.creatorUserId}`))
     || itemIsBooked(item)
     || (item.status === 'held' && Boolean(item.partyId || item.coffeeReservationId)));
+}
+
+/** Adds the zone the Plan's area keeps, so the app shows and picks times there. Null without a location. */
+async function withPlanTimeZone<T extends { latitude: number | null; longitude: number | null }>(plan: T): Promise<T & { timeZone: string | null }> {
+  return { ...plan, timeZone: await areaTimeZone({ lat: plan.latitude, lng: plan.longitude }) };
 }
 
 function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
@@ -920,7 +926,7 @@ export const planRouter = router({
     .query(async ({ ctx, input }) => {
       const plan = await loadPlanForParticipant(input.planId, ctx.user.userId);
       await ensureTableBookingLinks();
-      return serializePlan(plan, new Date(), ctx.user.userId, await partyBookingFacts([plan]));
+      return withPlanTimeZone(serializePlan(plan, new Date(), ctx.user.userId, await partyBookingFacts([plan])));
     }),
 
   /**
@@ -993,7 +999,8 @@ export const planRouter = router({
             : source.guestBookedFor ? 'guestBooking' : null;
         return { leg, timeSource, hours: item.placeId ? hours.get(item.placeId) ?? null : null };
       });
-      return buildItinerary(stops, { startsAt: plan.startsAt, endsAt: plan.endsAt });
+      const timeZone = await areaTimeZone({ lat: plan.latitude, lng: plan.longitude });
+      return buildItinerary(stops, { startsAt: plan.startsAt, endsAt: plan.endsAt, timeZone });
     }),
 
   /**
@@ -1137,7 +1144,7 @@ export const planRouter = router({
     const visible = plans.filter((plan) => !plan.deletedAt);
     const facts = await partyBookingFacts(visible);
     await ensureTableBookingLinks();
-    return { plans: visible.map((plan) => serializePlan(plan, now, ctx.user.userId, facts)) };
+    return { plans: await Promise.all(visible.map((plan) => withPlanTimeZone(serializePlan(plan, now, ctx.user.userId, facts)))) };
   }),
 
   /**
@@ -1212,7 +1219,7 @@ export const planRouter = router({
         return serializePlan(plan, now, ctx.user.userId, granted);
       }, 'Another change to this Plan is in flight. Try again.');
       if (seatedPlanId) dispatchPlanJoined({ planId: seatedPlanId, joinerUserId: ctx.user.userId });
-      return joined;
+      return withPlanTimeZone(joined);
     }),
 
   /** Soft removal only: retain all supply/history and the create key. Never

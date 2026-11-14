@@ -36,6 +36,8 @@ export interface ItineraryStopInput {
 export interface ItineraryConstraints {
   startsAt: Date | null;
   endsAt: Date | null;
+  /** The zone the Plan's area keeps. Opening hours and times are read there. Defaults to the launch market. */
+  timeZone?: string | null;
 }
 
 export interface ItineraryStop {
@@ -65,6 +67,8 @@ export interface Itinerary {
   skipped: { itemId: string; title: string }[];
   /** Only when a different order is clearly shorter and no less workable. */
   suggestedOrder: { itemIds: string[]; savesMeters: number } | null;
+  /** The zone the times and opening hours were read in. */
+  timeZone: string;
 }
 
 export const STOP_BUFFER_MINS = 10;
@@ -100,14 +104,14 @@ const TIME_ZONE = 'America/New_York';
 const WEEK_MINS = 7 * 24 * 60;
 const WEEKDAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
-const clockLabel = (at: Date) =>
-  new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE, hour: 'numeric', minute: '2-digit' }).format(at);
+const clockLabel = (at: Date, timeZone: string) =>
+  new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: '2-digit' }).format(at);
 
 const addMins = (at: Date, mins: number) => new Date(at.getTime() + mins * 60_000);
 
-function localMinuteOfWeek(at: Date): number {
+function localMinuteOfWeek(at: Date, timeZone: string): number {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TIME_ZONE, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(at);
   const part = (type: string) => parts.find((entry) => entry.type === type)?.value ?? '';
   return (WEEKDAYS[part('weekday')] ?? 0) * 1440 + Number(part('hour')) * 60 + Number(part('minute'));
@@ -156,6 +160,7 @@ function lengthOf(leg: PlanLeg): { mins: number; source: 'stated' | 'estimated' 
 }
 
 function schedule(stops: readonly ItineraryStopInput[], plan: ItineraryConstraints): { stops: ItineraryStop[]; anchored: boolean } {
+  const zone = plan.timeZone || TIME_ZONE;
   const first = stops[0];
   const anchor = plan.startsAt ?? (first?.leg.startsAt && first.timeSource ? first.leg.startsAt : null);
   let cursor: Date | null = anchor;
@@ -181,9 +186,9 @@ function schedule(stops: readonly ItineraryStopInput[], plan: ItineraryConstrain
       if (cursor && previousOut) {
         const travelMins = travel?.atLeastMins ?? 0;
         if (fixed < cursor) {
-          issues.push(`Starts at ${clockLabel(fixed)}, before you'd finish ${previousOut.title}.`);
+          issues.push(`Starts at ${clockLabel(fixed, zone)}, before you'd finish ${previousOut.title}.`);
         } else if (fixed < addMins(cursor, travelMins)) {
-          issues.push(`Starts at ${clockLabel(fixed)}. There isn't time to get here from ${previousOut.title}.`);
+          issues.push(`Starts at ${clockLabel(fixed, zone)}. There isn't time to get here from ${previousOut.title}.`);
         } else {
           waitMins = Math.max(0, Math.round((fixed.getTime() - addMins(cursor, travelMins + STOP_BUFFER_MINS).getTime()) / 60_000));
         }
@@ -196,7 +201,7 @@ function schedule(stops: readonly ItineraryStopInput[], plan: ItineraryConstrain
       const earliest = previousOut ? addMins(cursor, (travel?.atLeastMins ?? 0) + STOP_BUFFER_MINS) : cursor;
       arriveAt = earliest;
       if (hours && hours !== 'always') {
-        const minute = localMinuteOfWeek(earliest);
+        const minute = localMinuteOfWeek(earliest, zone);
         if (minutesUntilClose(hours, minute) === null) {
           const wait = minutesUntilOpen(hours, minute);
           const opensAt = addMins(earliest, wait);
@@ -204,7 +209,7 @@ function schedule(stops: readonly ItineraryStopInput[], plan: ItineraryConstrain
             arriveAt = opensAt;
             waitMins = wait;
           } else {
-            issues.push(`Closed at ${clockLabel(earliest)}.`);
+            issues.push(`Closed at ${clockLabel(earliest, zone)}.`);
           }
         }
       }
@@ -212,13 +217,13 @@ function schedule(stops: readonly ItineraryStopInput[], plan: ItineraryConstrain
 
     const leaveAt = arriveAt ? addMins(arriveAt, length.mins) : null;
     if (arriveAt && leaveAt && hours && hours !== 'always' && !fixed) {
-      const untilClose = minutesUntilClose(hours, localMinuteOfWeek(arriveAt));
+      const untilClose = minutesUntilClose(hours, localMinuteOfWeek(arriveAt, zone));
       if (untilClose !== null && untilClose < length.mins) {
-        issues.push(`Closes at ${clockLabel(addMins(arriveAt, untilClose))}.`);
+        issues.push(`Closes at ${clockLabel(addMins(arriveAt, untilClose), zone)}.`);
       }
     }
     if (leaveAt && plan.endsAt && leaveAt > plan.endsAt) {
-      issues.push(`Runs past your Plan's end at ${clockLabel(plan.endsAt)}.`);
+      issues.push(`Runs past your Plan's end at ${clockLabel(plan.endsAt, zone)}.`);
     }
 
     out.push({
@@ -292,10 +297,12 @@ export function buildItinerary(inputs: readonly ItineraryStopInput[], plan: Itin
   const skipped = inputs.filter((input) => NOT_A_STOP.has(input.leg.needKind))
     .map((input) => ({ itemId: input.leg.itemId, title: input.leg.title }));
   const stops = inputs.filter((input) => !NOT_A_STOP.has(input.leg.needKind));
-  if (stops.length === 0) return { status: 'empty', stops: [], skipped, suggestedOrder: null };
+  const timeZone = plan.timeZone || TIME_ZONE;
+  if (stops.length === 0) return { status: 'empty', stops: [], skipped, suggestedOrder: null, timeZone };
 
   const timed = schedule(stops, plan);
   return {
+    timeZone,
     status: timed.anchored ? 'timed' : 'needsStart',
     stops: timed.stops,
     skipped,

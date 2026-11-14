@@ -73,6 +73,20 @@ test('a stop that opens later is placed at opening, with the wait shown', () => 
   assert.deepEqual(only.issues, []);
 });
 
+test('a Plan in another city reads hours and times in that city\'s zone', () => {
+  // 2026-10-03T02:00Z is 7:00 PM Friday in Los Angeles (PDT) and 10:00 PM in Atlanta.
+  const laPlan = { startsAt: at('2026-10-03T02:00:00Z'), endsAt: null, timeZone: 'America/Los_Angeles' };
+  const dinner = stop({ needKind: 'dining', latitude: 34.05, longitude: -118.24 }, { hours: friday([17, 0], [21, 0]) });
+  const la = buildItinerary([dinner], laPlan);
+  assert.equal(la.timeZone, 'America/Los_Angeles');
+  assert.deepEqual(la.stops[0].issues, [], 'open at 7 PM LA time');
+  const asIfAtlanta = buildItinerary([dinner], { ...laPlan, timeZone: null });
+  assert.equal(asIfAtlanta.timeZone, 'America/New_York');
+  assert.deepEqual(asIfAtlanta.stops[0].issues, ['Closed at 10:00 PM.'], 'the old Atlanta reading');
+  const closing = stop({ needKind: 'dining', latitude: 34.05, longitude: -118.24 }, { hours: friday([17, 0], [19, 30]) });
+  assert.deepEqual(buildItinerary([closing], laPlan).stops[0].issues, ['Closes at 7:30 PM.'], 'labels are LA clock times');
+});
+
 test('a stop that closes before the estimated length ends says when', () => {
   const cafe = stop({ needKind: 'dining', ...A }, { hours: friday([7, 0], [19, 0]) });
   const [only] = buildItinerary([cafe], plan).stops;

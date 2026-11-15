@@ -23,18 +23,56 @@ import {
 import { resolvePlaceCore, textSearchCore } from './placesRouter';
 import { placeVenueSlug } from './partyRouter';
 import { venueControl } from '../services/venueControl';
+import type { DiscoveryRail } from '../services/discoveryTaxonomy';
 
-/** What a listed place is filed under. Each one maps to a Discover rail on web and iOS. */
-export const LISTED_CATEGORIES = ['restaurant', 'bar', 'club', 'cafe'] as const;
-export type ListedCategory = (typeof LISTED_CATEGORIES)[number];
+/**
+ * What a listed place is filed under, grouped by the Discover rail it lands on.
+ * Every id is an alias in contracts/discovery-taxonomy.json, so web, iOS and
+ * the server put it on the same pill.
+ */
+export const LISTED_CATEGORY_RAILS = {
+  eat_drink: ['restaurant', 'cafe', 'coffee', 'market', 'catering'],
+  nightlife: ['bar', 'club'],
+  events: ['event', 'music', 'entertainment'],
+  experience: ['attraction', 'museum', 'tour', 'park', 'outdoor', 'sports'],
+  wellness: ['spa', 'gym', 'fitness', 'recovery'],
+  shop_style: ['retail', 'fashion', 'styling'],
+  create_learn: ['class', 'workshop', 'studio'],
+  social: ['community', 'meetup'],
+  stay: ['hotel', 'lodging'],
+  move: ['transport', 'parking', 'automotive'],
+  celebrate: ['celebration', 'wedding'],
+  services: ['service'],
+} as const satisfies Partial<Record<DiscoveryRail, readonly string[]>>;
+export const LISTED_CATEGORIES = Object.values(LISTED_CATEGORY_RAILS).flat() as [ListedCategory, ...ListedCategory[]];
+export type ListedCategory = (typeof LISTED_CATEGORY_RAILS)[keyof typeof LISTED_CATEGORY_RAILS][number];
 
 const PLACE_ID = /^[A-Za-z0-9_-]{1,255}$/;
 const PITCH_WINDOW_DAYS = 30;
 
+/** Google's primary type to a listed category, when it names one more specific than its rail. */
+const GOOGLE_TYPE_CATEGORY: Readonly<Record<string, ListedCategory>> = {
+  night_club: 'club', bakery: 'cafe', tea_house: 'cafe', food_court: 'market', market: 'market',
+  museum: 'museum', art_gallery: 'museum', tourist_attraction: 'attraction', amusement_park: 'attraction',
+  zoo: 'attraction', aquarium: 'attraction', park: 'park', national_park: 'park', botanical_garden: 'park',
+  hiking_area: 'outdoor', stadium: 'sports', sports_complex: 'sports', golf_course: 'sports', bowling_alley: 'sports',
+  event_venue: 'event', concert_hall: 'music', live_music_venue: 'music',
+  performing_arts_theater: 'entertainment', movie_theater: 'entertainment', comedy_club: 'entertainment',
+  spa: 'spa', massage: 'spa', sauna: 'spa', gym: 'gym', fitness_center: 'gym', yoga_studio: 'fitness',
+  clothing_store: 'fashion', shoe_store: 'fashion', jewelry_store: 'fashion', store: 'retail', shopping_mall: 'retail',
+  book_store: 'retail', beauty_salon: 'styling', hair_salon: 'styling', hair_care: 'styling', nail_salon: 'styling', barber_shop: 'styling',
+  art_studio: 'studio', community_center: 'community', cultural_center: 'community',
+  hotel: 'hotel', resort_hotel: 'hotel', motel: 'lodging', bed_and_breakfast: 'lodging', lodging: 'lodging', hostel: 'lodging',
+  airport: 'transport', transit_station: 'transport', train_station: 'transport', bus_station: 'transport',
+  parking: 'parking', parking_lot: 'parking', parking_garage: 'parking', car_rental: 'automotive',
+  wedding_venue: 'wedding', banquet_hall: 'celebration',
+  laundry: 'service', car_repair: 'service', car_wash: 'service', plumber: 'service', electrician: 'service',
+};
+
 /** A starting guess from Google's type; the admin can change it before saving. */
 export function categoryForPlaceType(primaryType: string | null | undefined): ListedCategory {
   const type = (primaryType ?? '').toLowerCase();
-  if (type === 'night_club') return 'club';
+  if (Object.hasOwn(GOOGLE_TYPE_CATEGORY, type)) return GOOGLE_TYPE_CATEGORY[type];
   if (type.includes('cafe') || type.includes('coffee')) return 'cafe';
   if (type === 'bar' || type.endsWith('_bar') || type === 'pub' || type === 'wine_bar') return 'bar';
   return 'restaurant';

@@ -40,7 +40,12 @@ test('every new provider accepts a link on its own site, with its own label', ()
     ['spothero', 'https://spothero.com/destination/atlanta/example', 'SpotHero'],
     ['blade', 'https://www.blade.com/airports/hartsfield-jackson-atlanta-international', 'Blade'],
     ['wheelsup', 'https://wheelsup.com/', 'Wheels Up'],
+    ['airbnb', 'https://www.airbnb.com/rooms/12345678', 'Airbnb'],
+    ['hipcamp', 'https://www.hipcamp.com/en-US/land/georgia-example-cabin-123', 'Hipcamp'],
+    ['bookingcom', 'https://www.booking.com/hotel/us/example-inn.html', 'Booking.com'],
+    ['bookretreats', 'https://bookretreats.com/r/example-yoga-retreat', 'BookRetreats'],
   ];
+  assert.match(tableBookingUrlError('airbnb', 'https://airbnb.example.com/rooms/1') ?? '', /not on airbnb\.com/, 'a lookalike host is refused');
   for (const [provider, url, label] of cases) {
     assert.equal(tableBookingUrlError(provider, url), null, url);
     assert.equal(tableBookingLinkFrom(provider, url)?.label, label);

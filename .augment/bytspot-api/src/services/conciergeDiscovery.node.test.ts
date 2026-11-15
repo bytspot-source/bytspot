@@ -536,7 +536,7 @@ test('all canonical aliases and thirteen rails match the shared taxonomy', () =>
     shop_style: ['shopping', 'retail', 'fashion', 'styling'], experience: ['culture', 'outdoor', 'sports', 'museum', 'attraction', 'tour', 'park'],
     social: ['community', 'meetup', 'fan-meetup'], events: ['entertainment', 'event', 'event pass', 'music'],
     wellness: ['fitness', 'spa', 'gym', 'recovery'], create_learn: ['class', 'workshop', 'tutoring', 'studio', 'education'],
-    nightlife: ['bar', 'club', 'night_club'], stay: ['boutique_apartment', 'boutique stay', 'hotel', 'lodging'],
+    nightlife: ['bar', 'club', 'night_club'], stay: ['boutique_apartment', 'boutique stay', 'hotel', 'lodging', 'cabin', 'retreat'],
     move: ['mobility', 'automotive', 'transport', 'parking', 'stall'], celebrate: ['party', 'private-party', 'celebration', 'wedding', 'birthday'],
     services: ['service', 'green', 'local-service'],
   };

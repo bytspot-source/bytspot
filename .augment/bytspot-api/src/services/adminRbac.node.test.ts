@@ -351,6 +351,8 @@ test('a first guess at the category comes from Google, and the admin can change 
   assert.equal(categoryForPlaceType('airport'), 'transport');
   assert.equal(categoryForPlaceType('hotel'), 'hotel');
   assert.equal(categoryForPlaceType('live_music_venue'), 'music');
+  assert.equal(categoryForPlaceType('campground'), 'cabin');
+  assert.equal(discoveryRail('retreat'), 'stay');
 });
 
 test('every Filed under choice lands on the Discover pill it is grouped under', () => {

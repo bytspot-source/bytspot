@@ -25,6 +25,10 @@ export const BOOKING_PROVIDERS = {
   spothero: { label: 'SpotHero', hosts: ['spothero.com'] },
   blade: { label: 'Blade', hosts: ['blade.com', 'www.blade.com'] },
   wheelsup: { label: 'Wheels Up', hosts: ['wheelsup.com', 'www.wheelsup.com'] },
+  airbnb: { label: 'Airbnb', hosts: ['airbnb.com', 'www.airbnb.com'] },
+  hipcamp: { label: 'Hipcamp', hosts: ['hipcamp.com', 'www.hipcamp.com'] },
+  bookingcom: { label: 'Booking.com', hosts: ['booking.com', 'www.booking.com'] },
+  bookretreats: { label: 'BookRetreats', hosts: ['bookretreats.com', 'www.bookretreats.com'] },
 } as const satisfies Record<string, { label: string; hosts: readonly string[] }>;
 
 export type BookingProvider = keyof typeof BOOKING_PROVIDERS;

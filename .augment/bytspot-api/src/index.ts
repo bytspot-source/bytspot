@@ -11,6 +11,7 @@ import { logAdminBootstrapIds } from './services/adminRbac';
 // tRPC
 import { appRouter } from './trpc/router';
 import { createContext, globalRateLimitKey } from './trpc/context';
+import { TRPC_HTTP_OPTIONS } from './trpc/httpOptions';
 import { originLock } from './middleware/originLock';
 
 // REST Routes — only keep endpoints that have no tRPC equivalent or are used externally
@@ -101,6 +102,7 @@ app.use(
   trpcExpress.createExpressMiddleware({
     router: appRouter,
     createContext,
+    ...TRPC_HTTP_OPTIONS,
   }),
 );
 

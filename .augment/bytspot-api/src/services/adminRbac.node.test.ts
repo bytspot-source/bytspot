@@ -5,7 +5,8 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import { createCallerFactory, resetLocalRateLimitForTests } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
-import { categoryForPlaceType, pitchNumbersFor } from '../trpc/adminPlacesRouter';
+import { categoryForPlaceType, LISTED_CATEGORIES, LISTED_CATEGORY_RAILS, pitchNumbersFor } from '../trpc/adminPlacesRouter';
+import { discoveryRail } from './discoveryTaxonomy';
 import { vendorConsoleOrigin } from '../trpc/adminVendorsRouter';
 import { tableBookingLinkFor } from './tableBookingLinks';
 
@@ -345,6 +346,21 @@ test('a first guess at the category comes from Google, and the admin can change 
   assert.equal(categoryForPlaceType('night_club'), 'club');
   assert.equal(categoryForPlaceType('coffee_shop'), 'cafe');
   assert.equal(categoryForPlaceType(null), 'restaurant');
+  assert.equal(categoryForPlaceType('spa'), 'spa');
+  assert.equal(categoryForPlaceType('museum'), 'museum');
+  assert.equal(categoryForPlaceType('airport'), 'transport');
+  assert.equal(categoryForPlaceType('hotel'), 'hotel');
+  assert.equal(categoryForPlaceType('live_music_venue'), 'music');
+});
+
+test('every Filed under choice lands on the Discover pill it is grouped under', () => {
+  for (const [rail, categories] of Object.entries(LISTED_CATEGORY_RAILS)) {
+    for (const category of categories) assert.equal(discoveryRail(category), rail, category);
+  }
+  assert.equal(new Set(LISTED_CATEGORIES).size, LISTED_CATEGORIES.length);
+  for (const type of ['night_club', 'spa', 'airport', 'wedding_venue', 'parking_lot', 'italian_restaurant', 'yoga_studio']) {
+    assert.ok(LISTED_CATEGORIES.includes(categoryForPlaceType(type)), type);
+  }
 });
 
 test('approving a finished business puts it live once, and records who approved it', async () => {

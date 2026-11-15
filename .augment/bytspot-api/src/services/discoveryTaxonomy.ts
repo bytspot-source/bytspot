@@ -19,7 +19,7 @@ export const DISCOVERY_ALIASES: Readonly<Record<string, DiscoveryRail>> = {
   fitness: 'wellness', spa: 'wellness', gym: 'wellness', recovery: 'wellness',
   class: 'create_learn', workshop: 'create_learn', tutoring: 'create_learn', studio: 'create_learn', education: 'create_learn',
   bar: 'nightlife', club: 'nightlife', night_club: 'nightlife',
-  boutique_apartment: 'stay', 'boutique stay': 'stay', hotel: 'stay', lodging: 'stay',
+  boutique_apartment: 'stay', 'boutique stay': 'stay', hotel: 'stay', lodging: 'stay', cabin: 'stay', retreat: 'stay',
   mobility: 'move', automotive: 'move', transport: 'move', parking: 'move', stall: 'move',
   party: 'celebrate', 'private-party': 'celebrate', celebration: 'celebrate', wedding: 'celebrate', birthday: 'celebrate',
   service: 'services', green: 'services', 'local-service': 'services',

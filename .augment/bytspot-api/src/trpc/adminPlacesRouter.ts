@@ -23,6 +23,7 @@ import {
 import { resolvePlaceCore, textSearchCore } from './placesRouter';
 import { placeVenueSlug } from './partyRouter';
 import { venueControl } from '../services/venueControl';
+import { pitchUrl, signPitchCode } from '../services/pitchLink';
 import type { DiscoveryRail } from '../services/discoveryTaxonomy';
 
 /**
@@ -108,7 +109,7 @@ export function pitchNumbersFor(
   }]));
 }
 
-async function loadPitchNumbers(venues: { id: string; googlePlaceId: string | null }[], now: Date): Promise<Map<string, PitchNumbers>> {
+export async function loadPitchNumbers(venues: { id: string; googlePlaceId: string | null }[], now: Date): Promise<Map<string, PitchNumbers>> {
   const since = new Date(now.getTime() - PITCH_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const venueIds = venues.map((v) => v.id);
   const placeIds = venues.map((v) => v.googlePlaceId).filter((id): id is string => Boolean(id));
@@ -399,5 +400,25 @@ export const adminPlacesRouter = router({
       });
       await Promise.all([refreshTableBookingLinks(), forgetVenueLists()]);
       return { hidden: input.hidden };
+    }),
+
+  /**
+   * A link to send a listed place that is not on Bytspot yet: a page with what
+   * Bytspot guests did there and a way to join. Expires after PITCH_LINK_DAYS.
+   */
+  pitchLink: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-pitch' }))
+    .input(z.object({ venueId: z.string().min(1).max(64) }))
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const venue = await db.venue.findFirst({
+        where: { id: input.venueId, listedAt: { not: null } },
+        select: { id: true, googlePlaceId: true, controlledAt: true },
+      });
+      if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'That place is not listed.' });
+      if (venueControl(venue) === 'bytspot') throw new TRPCError({ code: 'BAD_REQUEST', message: 'This place is already a Bytspot business.' });
+      const { code, expiresAt } = signPitchCode(venue.id);
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.pitchLink', detail: { venueId: venue.id } });
+      return { url: pitchUrl(code), expiresAt, numbers: (await loadPitchNumbers([venue], new Date())).get(venue.id)! };
     }),
 });

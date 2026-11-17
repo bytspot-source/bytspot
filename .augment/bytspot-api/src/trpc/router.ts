@@ -97,6 +97,8 @@ import { demandRouter } from './demandRouter';
 import { inventoryRouter } from './inventoryRouter';
 import { ticketsRouter } from './ticketsRouter';
 import { adminPlacesRouter } from './adminPlacesRouter';
+import { adminGrowthRouter } from './adminGrowthRouter';
+import { pitchRouter } from './pitchRouter';
 import { adminVendorsRouter } from './adminVendorsRouter';
 import { adminSafetyRouter } from './adminSafetyRouter';
 import { safetyRouter } from './safetyRouter';
@@ -1589,6 +1591,7 @@ const providersRouter = router({
 const adminRouter = router({
   places: adminPlacesRouter,
   vendors: adminVendorsRouter,
+  growth: adminGrowthRouter,
   safety: adminSafetyRouter,
   /** admin.platformFee query — the live rate plus recent changes. */
   platformFee: protectedProcedure
@@ -1892,6 +1895,7 @@ export const appRouter = router({
   mapReports: mapReportsRouter,
   payouts: payoutsRouter,
   payments: paymentsRouter,
+  pitch: pitchRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

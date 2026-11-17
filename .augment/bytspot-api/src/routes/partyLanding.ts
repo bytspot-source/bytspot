@@ -2,6 +2,7 @@ import { Router, type Response } from 'express';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { captureError } from '../lib/observability';
+import { noteShareView } from '../services/shareViews';
 import { shareLinkExpired, shareLinkExpiry } from '../trpc/partyRouter';
 import {
   appStoreCta,
@@ -170,6 +171,7 @@ partyLandingRouter.get('/party/:partyId', async (req, res) => {
   // guest-and-host exceptions cannot apply here: this response is cacheable
   // and the caller is unauthenticated, so it only ever renders the public view.
   if (!party || shareLinkExpired(party)) return sendNotFound(res);
+  noteShareView('party', party.id, req.get('user-agent'));
 
   const cover = party.media[0];
   // An approval door on Discover is reachable by strangers; its place waits for approval.

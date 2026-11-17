@@ -73,6 +73,7 @@ model User {
   partyGuests           PartyGuest[]
   createdPlans          Plan[]                @relation("planCreator")
   planSeats             PlanParticipant[]
+  activeDays            UserActiveDay[]
   coffeeSpots           CoffeeSpot[]          @relation("coffeeSpotOwner")
   coffeeReservations    CoffeeReservation[]   @relation("coffeeReservationRequester")
   partyCheckouts        PartyCheckout[]
@@ -2456,4 +2457,29 @@ model StripeWebhookEvent {
   processedAt DateTime @default(now()) @map("processed_at")
 
   @@map("stripe_webhook_events")
+}
+
+/// One row per member per day they used the signed-in app. Only the day is
+/// kept, never what they did, so it measures whether people come back.
+model UserActiveDay {
+  userId String   @map("user_id")
+  day    DateTime @db.Date
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, day])
+  @@index([day])
+  @@map("user_active_days")
+}
+
+/// A browser opened a Plan or Party share page (the app not installed, or not
+/// opened). Link-preview bots are not counted. No visitor detail is kept.
+model ShareLinkView {
+  id       String   @id @default(cuid())
+  kind     String
+  targetId String   @map("target_id")
+  viewedAt DateTime @default(now()) @map("viewed_at")
+
+  @@index([viewedAt])
+  @@map("share_link_views")
 }

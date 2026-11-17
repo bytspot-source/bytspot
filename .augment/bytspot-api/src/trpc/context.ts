@@ -5,6 +5,7 @@ import { config } from '../config';
 import { AuthPayload } from '../middleware/auth';
 import { rateLimitSubject } from './trpc';
 import { trustedClientIp } from '../middleware/originLock';
+import { noteActive } from '../services/activity';
 
 /**
  * Creates the tRPC context from the Express request.
@@ -54,6 +55,7 @@ export async function createContext({
   req,
 }: trpcExpress.CreateExpressContextOptions): Promise<{ user: AuthPayload | null; clientRateLimitKey: string; clientPlatform?: ClientPlatform }> {
   const user = bearerUser(req.headers.authorization);
+  noteActive(user?.userId);
   return { user, clientRateLimitKey: clientRateLimitKey(trustedClientIp(req)), clientPlatform: clientPlatformOf(req.headers) };
 }
 

@@ -2,6 +2,7 @@ import { Router, type Response } from 'express';
 import { config } from '../config';
 import { db } from '../lib/db';
 import { captureError } from '../lib/observability';
+import { noteShareView } from '../services/shareViews';
 import { planEffectiveEnd } from '../trpc/planRouter';
 import {
   APP_STORE_ID,
@@ -155,6 +156,7 @@ planLandingRouter.get('/plan/:planId', async (req, res) => {
 
   // A closed link reads the same as a Plan that never existed.
   if (!plan || planLinkClosed(plan, new Date())) return sendNotFound(res);
+  noteShareView('plan', plan.id, req.get('user-agent'));
 
   const base = `${config.partyShareBaseUrl}/plan/${encodeURIComponent(plan.id)}`;
   const html = renderPage({

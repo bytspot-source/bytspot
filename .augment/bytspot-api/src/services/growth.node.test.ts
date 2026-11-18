@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { activeDayOf, createActivityRecorder } from './activity';
-import { retentionFor, weekStarts } from './growth';
+import { bucketBounds, rangeShape, retentionFor, weekStarts } from './growth';
 import { isLinkPreviewAgent, noteShareView } from './shareViews';
 
 test('a member is written at most once a day, and a failed write waits for the next day', async () => {
@@ -28,6 +28,23 @@ test('weeks start on Monday UTC, oldest first, ending with this week', () => {
   assert.deepEqual(weeks, ['2026-11-02', '2026-11-09', '2026-11-16']);
   assert.equal(activeDayOf(weekStarts(new Date('2026-11-16T00:00:00Z'), 1)[0]), '2026-11-16', 'a Monday is its own week');
   assert.equal(activeDayOf(weekStarts(new Date('2026-11-22T23:59:00Z'), 1)[0]), '2026-11-16', 'Sunday belongs to the week before');
+});
+
+test('ranges up to 3 months go by week, longer ones by calendar month, ending with the current one', () => {
+  const now = new Date('2026-11-18T15:00:00Z');
+  assert.deepEqual(rangeShape('8w'), { bucket: 'week', count: 8 });
+  const quarter = bucketBounds(now, '3m');
+  assert.equal(quarter.bucket, 'week');
+  assert.equal(quarter.starts.length, 13);
+  assert.equal(activeDayOf(quarter.starts.at(-1)!), '2026-11-16');
+  const year = bucketBounds(now, '12m');
+  assert.equal(year.bucket, 'month');
+  assert.deepEqual(year.starts.map(activeDayOf).slice(0, 2), ['2025-12-01', '2026-01-01']);
+  assert.equal(activeDayOf(year.starts.at(-1)!), '2026-11-01');
+  assert.equal(activeDayOf(year.ends.at(-1)!), '2026-12-01');
+  assert.equal(activeDayOf(year.ends[1]), '2026-02-01', 'February ends on March 1');
+  assert.deepEqual(bucketBounds(new Date('2026-03-31T12:00:00Z'), '6m').starts.map(activeDayOf),
+    ['2025-10-01', '2025-11-01', '2025-12-01', '2026-01-01', '2026-02-01', '2026-03-01'], 'month arithmetic crosses the year');
 });
 
 test('coming-back figures count only members whose window has passed', () => {

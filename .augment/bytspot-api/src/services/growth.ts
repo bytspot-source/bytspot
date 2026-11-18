@@ -10,6 +10,20 @@ import { db } from '../lib/db';
 import { activeDayOf } from './activity';
 
 export const GROWTH_WEEKS = 8;
+
+/** How far back the Growth tab looks. Up to 3 months is shown by week, longer by month. */
+export const GROWTH_RANGES = ['8w', '3m', '6m', '12m'] as const;
+export type GrowthRange = (typeof GROWTH_RANGES)[number];
+export type GrowthBucket = 'week' | 'month';
+
+export function rangeShape(range: GrowthRange): { bucket: GrowthBucket; count: number } {
+  switch (range) {
+    case '3m': return { bucket: 'week', count: 13 };
+    case '6m': return { bucket: 'month', count: 6 };
+    case '12m': return { bucket: 'month', count: 12 };
+    default: return { bucket: 'week', count: GROWTH_WEEKS };
+  }
+}
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface GrowthWeek {
@@ -43,6 +57,9 @@ export interface RetentionCohort {
 
 export interface GrowthReport {
   generatedAt: string;
+  range: GrowthRange;
+  /** Whether each column (and each coming-back row) is a week starting Monday or a calendar month. `weekStart` is its first day either way. */
+  bucket: GrowthBucket;
   /** First day active-user tracking recorded anything; null before the first signed-in visit. */
   trackingSince: string | null;
   totalMembers: number;
@@ -55,6 +72,21 @@ export function weekStarts(now: Date, count = GROWTH_WEEKS): Date[] {
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const monday = today - ((now.getUTCDay() + 6) % 7) * DAY_MS;
   return Array.from({ length: count }, (_, i) => new Date(monday - (count - 1 - i) * 7 * DAY_MS));
+}
+
+/** The 1st of each of the last `count` months (UTC), oldest first, ending with this month. */
+export function monthStarts(now: Date, count: number): Date[] {
+  return Array.from({ length: count }, (_, i) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (count - 1 - i), 1)));
+}
+
+/** Where each bucket starts and where it ends (the next bucket's start). */
+export function bucketBounds(now: Date, range: GrowthRange): { bucket: GrowthBucket; starts: Date[]; ends: Date[] } {
+  const { bucket, count } = rangeShape(range);
+  const starts = bucket === 'week' ? weekStarts(now, count) : monthStarts(now, count);
+  const ends = starts.map((start) => (bucket === 'week'
+    ? new Date(start.getTime() + 7 * DAY_MS)
+    : new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))));
+  return { bucket, starts, ends };
 }
 
 const plusDays = (day: string, days: number) => activeDayOf(new Date(Date.parse(`${day}T00:00:00Z`) + days * DAY_MS));
@@ -109,11 +141,12 @@ async function countWeek(start: Date, end: Date): Promise<GrowthWeek> {
   };
 }
 
-export async function loadGrowthReport(now = new Date()): Promise<GrowthReport> {
-  const starts = weekStarts(now);
-  const ends = starts.map((start) => new Date(start.getTime() + 7 * DAY_MS));
+export async function loadGrowthReport(now = new Date(), range: GrowthRange = '8w'): Promise<GrowthReport> {
+  const { bucket, starts, ends } = bucketBounds(now, range);
   const weeks: GrowthWeek[] = [];
-  for (let i = 0; i < starts.length; i += 1) weeks.push(await countWeek(starts[i], ends[i]));
+  for (let i = 0; i < starts.length; i += 3) {
+    weeks.push(...await Promise.all(starts.slice(i, i + 3).map((start, j) => countWeek(start, ends[i + j]))));
+  }
 
   const [first, totalMembers] = await Promise.all([
     db.userActiveDay.findFirst({ orderBy: { day: 'asc' }, select: { day: true } }),
@@ -134,5 +167,5 @@ export async function loadGrowthReport(now = new Date()): Promise<GrowthReport> 
       now)).filter((cohort) => cohort.signedUp > 0);
   }
 
-  return { generatedAt: now.toISOString(), trackingSince, totalMembers, weeks, retention };
+  return { generatedAt: now.toISOString(), range, bucket, trackingSince, totalMembers, weeks, retention };
 }

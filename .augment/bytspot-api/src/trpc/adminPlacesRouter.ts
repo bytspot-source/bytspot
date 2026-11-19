@@ -25,6 +25,7 @@ import { placeVenueSlug } from './partyRouter';
 import { venueControl } from '../services/venueControl';
 import { pitchUrl, signPitchCode } from '../services/pitchLink';
 import type { DiscoveryRail } from '../services/discoveryTaxonomy';
+import { placesListInput, queryPlaces, type PlaceRow } from '../services/adminLists';
 
 /**
  * What a listed place is filed under, grouped by the Discover rail it lands on.
@@ -184,21 +185,42 @@ export const adminPlacesRouter = router({
       };
     }),
 
-  /** Every place an admin listed, with the numbers to show the restaurant. */
+  /**
+   * Listed places, one page at a time: searched, filtered and sorted on the
+   * server, with A-Z letters that have places and the "Needs attention" counts.
+   */
   list: protectedProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-list' }))
-    .query(async ({ ctx }) => {
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'admin-places-list' }))
+    .input(placesListInput.optional())
+    .query(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.list' });
-      const venues = await db.venue.findMany({
-        where: { listedAt: { not: null } },
-        select: listedSelect,
-        orderBy: { listedAt: 'desc' },
-        take: 500,
-      });
       const now = new Date();
+      const since = new Date(now.getTime() - PITCH_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+      const [rows, tapRows, checkInRows] = await Promise.all([
+        db.venue.findMany({
+          where: { listedAt: { not: null } },
+          select: {
+            id: true, name: true, address: true, category: true, discoverable: true, bookingProvider: true, bookingUrl: true,
+            bookingCheckedAt: true, bookingExpiresAt: true, listedAt: true, controlledAt: true,
+          },
+          take: 10_000,
+        }),
+        db.bookingLinkTap.groupBy({ by: ['venueId'], where: { createdAt: { gte: since } }, _count: { _all: true } }),
+        db.checkIn.groupBy({ by: ['venueId'], where: { createdAt: { gte: since }, proof: { not: 'self_reported' } }, _count: { _all: true } }),
+      ]);
+      const last30 = {
+        taps: new Map(tapRows.map((r) => [r.venueId, r._count._all])),
+        checkIns: new Map(checkInRows.map((r) => [r.venueId, r._count._all])),
+      };
+      const found = queryPlaces(rows.map((r) => ({ ...r, address: r.address ?? '' }) as PlaceRow), last30, input ?? {}, now);
+      const pageRows = await db.venue.findMany({ where: { id: { in: found.ids } }, select: listedSelect });
+      const order = new Map(found.ids.map((id, i) => [id, i]));
+      const venues = pageRows.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
       const [numbers, recheck] = await Promise.all([loadPitchNumbers(venues, now), bookingLinksToRecheck(now)]);
+      const parsed = placesListInput.parse(input ?? {});
       return {
+        total: found.total, offset: parsed.offset, limit: parsed.limit, letters: found.letters, attention: found.attention,
         pitchWindowDays: PITCH_WINDOW_DAYS,
         // Links to open again: hidden from guests first, then the ones that soon will be.
         recheck: recheck.map(({ venueId, status, dueAt }) => ({ venueId, status, dueAt })),

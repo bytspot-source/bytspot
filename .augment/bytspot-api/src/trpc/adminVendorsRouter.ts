@@ -19,6 +19,7 @@ import {
   closeSeller, createSellerWithOwner, pauseSeller, PAUSE_REASON_MAX, renewOwnerInvite, restoreSeller, VendorDecisionRefused,
 } from '../vendor/adminDecisions';
 import { INVITE_EXPIRY_HOURS } from '../vendor/team';
+import { queryVendors, vendorsListInput } from '../services/adminLists';
 import {
   linkMenuVenue, linkMenuVenueSchema, menuDishDto, menuMediaSelect, MenuEvidenceError,
   reviewMenuDish, reviewMenuDishSchema,
@@ -113,24 +114,43 @@ export const adminVendorsRouter = router({
       } catch (error) { return menuAdminError(error); }
     }),
 
-  /** Businesses waiting on approval first, then the rest, newest first. */
+  /**
+   * Businesses, one page at a time: waiting on approval first by default, then
+   * newest. Searched, filtered and sorted on the server, with A-Z letters and
+   * the "Needs attention" counts.
+   */
   list: protectedProcedure
-    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-vendors-list' }))
-    .query(async ({ ctx }) => {
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'admin-vendors-list' }))
+    .input(vendorsListInput.optional())
+    .query(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.list' });
       const sellers = await db.vendorSeller.findMany({
         where: { state: { not: 'CLOSED' } },
         include: {
           locations: { include: { menuVenue: { select: { name: true, address: true } } } },
-          seats: { where: { role: 'owner', state: 'INVITED' }, select: { id: true } },
+          seats: { where: { role: 'owner', state: 'INVITED' }, select: { id: true, invitedAt: true } },
         },
         orderBy: { createdAt: 'desc' },
-        take: 500,
+        take: 10_000,
       });
       const live = new Set(requirementsForState('ACTIVE'));
-      const bands = await bandSummaries(sellers.map((seller) => seller.id));
-      const rows = sellers.map((seller) => {
+      const light = sellers.map((seller) => ({
+        seller,
+        sellerId: seller.id,
+        legalName: seller.legalName?.trim() || 'Unnamed business',
+        contactEmail: seller.contactEmail,
+        state: seller.state,
+        awaitingApproval: awaitingApproval(seller, seller.locations),
+        pausedAt: seller.pausedAt,
+        createdAt: seller.createdAt,
+        ownerInvitedAt: seller.seats[0]?.invitedAt ?? null,
+        locations: seller.locations.filter((l) => l.state !== 'CLOSED').map((l) => ({ label: l.label, address: l.address })),
+      }));
+      const found = queryVendors(light, input ?? {});
+      const parsed = vendorsListInput.parse(input ?? {});
+      const bands = await bandSummaries(found.page.map((row) => row.sellerId));
+      const rows = found.page.map(({ seller }) => {
         const satisfied = satisfiedRequirements(seller, seller.locations);
         return {
           sellerId: seller.id,
@@ -155,8 +175,10 @@ export const adminVendorsRouter = router({
           bands: bands.get(seller.id) ?? { total: 0, active: 0, lost: 0, ranges: [] },
         };
       });
-      rows.sort((a, b) => Number(b.awaitingApproval) - Number(a.awaitingApproval));
-      return { sellers: rows, awaiting: rows.filter((r) => r.awaitingApproval).length };
+      return {
+        sellers: rows, awaiting: found.attention.waiting,
+        total: found.total, offset: parsed.offset, limit: parsed.limit, letters: found.letters, attention: found.attention,
+      };
     }),
 
   /** Approves a business. It goes live now if it is finished, or when it finishes. */

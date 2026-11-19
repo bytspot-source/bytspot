@@ -269,12 +269,12 @@ export const adminVendorsRouter = router({
     .input(sellerIdInput.extend({ confirmName: z.string().max(200) }))
     .mutation(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
-      const { seller, blockers } = await closeSeller(input.sellerId, ctx.user.userId, input.confirmName).catch(decisionError);
+      const { seller, blockers, deleted } = await closeSeller(input.sellerId, ctx.user.userId, input.confirmName).catch(decisionError);
       auditAdminAction({
         actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.vendors.close',
-        detail: { sellerId: seller.id, closed: blockers.length === 0, blockers: blockers.length },
+        detail: { sellerId: seller.id, legalName: seller.legalName ?? '', closed: blockers.length === 0, deleted, blockers: blockers.length },
       });
-      return { closed: blockers.length === 0, blockers };
+      return { closed: blockers.length === 0, deleted, blockers };
     }),
 
   /** Creates a business and emails its owner an invite to finish setting it up. */

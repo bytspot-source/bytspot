@@ -48,8 +48,46 @@ export function bookingUrlError(provider: string, url: string): string | null {
   let parsed: URL | null = null;
   try { parsed = new URL(url.trim()); } catch { /* reported below */ }
   if (!parsed || parsed.protocol !== 'https:') return 'Paste the full https:// link.';
+  const share = SHARE_HOSTS[parsed.hostname];
+  if (share) return `That is a ${share} share link. Open it in a browser and copy the full ${rule.hosts[0]} address from the address bar.`;
   if (!(rule.hosts as readonly string[]).includes(parsed.hostname)) return `That link is not on ${rule.hosts[0]}.`;
+  if (url.trim().length > BOOKING_URL_MAX) return `That link is too long (over ${BOOKING_URL_MAX} characters). Open the place's own page and copy that address.`;
   return null;
+}
+
+/** The longest link kept after cleaning. Search and share links can run to thousands of characters. */
+export const BOOKING_URL_MAX = 1000;
+/** The longest link an admin may paste before cleaning. */
+export const BOOKING_URL_PASTE_MAX = 8000;
+
+/** A stay listing opens without its search state, and its query is mostly dates and tracking. */
+const PATH_ONLY_PROVIDERS = new Set<string>(['airbnb', 'hipcamp', 'bookingcom', 'bookretreats']);
+/** Share, ad and search-session keys that never change which page a link opens. */
+const TRACKING_KEY = /^(utm_[a-z]+|fbclid|gclid|gbraid|wbraid|msclkid|mc_[a-z]+|_ga|_gl|ref|ref_|referrer|source|source_impression_id|previous_page_section_name|federated_search_id|search_mode|s|unique_share_id|sid|srpvid|srepoch|ucfs|arphpl|dest_id|dest_type|hapos|hpos|sr_order|sb_price_type|all_sr_blocks|highlighted_blocks|matching_block_id|aid|label)$/i;
+
+/** Short share hosts that hide the real page. They are refused with a way to find the full link. */
+const SHARE_HOSTS: Record<string, string> = {
+  'abnb.me': 'Airbnb', 'airbnb.app.link': 'Airbnb', 'booking.page.link': 'Booking.com',
+};
+
+/**
+ * The link to store: share, ad and search tracking removed, and for a stay
+ * (Airbnb, Hipcamp, Booking.com, BookRetreats) only the listing's own page.
+ * Returns the input unchanged when it is not a URL, so bookingUrlError reports it.
+ */
+export function cleanBookingUrl(provider: string, url: string): string {
+  let parsed: URL;
+  try { parsed = new URL(url.trim()); } catch { return url.trim(); }
+  parsed.hash = '';
+  if (PATH_ONLY_PROVIDERS.has(provider)) {
+    parsed.search = '';
+  } else {
+    for (const key of [...parsed.searchParams.keys()]) if (TRACKING_KEY.test(key)) parsed.searchParams.delete(key);
+  }
+  if (parsed.pathname.length > 1 && parsed.pathname.endsWith('/') && PATH_ONLY_PROVIDERS.has(provider)) {
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  }
+  return parsed.toString();
 }
 
 /** An admin is asked to re-check a link this long before guests stop seeing it. */

@@ -143,3 +143,24 @@ test('the list is read from listed, discoverable venues, and a bad row is skippe
     (db.venue as any).findMany = original;
   }
 });
+
+test('long stay links are cut to the listing page and tracking is removed from the rest', async () => {
+  const { cleanBookingUrl, bookingUrlError, BOOKING_URL_MAX } = await import('./bookingProviders');
+  const airbnb = 'https://www.airbnb.com/rooms/12345678?adults=2&check_in=2026-12-04&check_out=2026-12-06&source_impression_id=p3_1731'
+    + '&previous_page_section_name=1000&federated_search_id=' + 'a'.repeat(400) + '&guests=1#availability';
+  assert.equal(cleanBookingUrl('airbnb', airbnb), 'https://www.airbnb.com/rooms/12345678');
+  const booking = 'https://www.booking.com/hotel/us/hotel-clermont-atlanta.html?aid=304142&label=gen173nr-' + 'x'.repeat(600)
+    + '&sid=abc&checkin=2026-12-04&checkout=2026-12-06&group_adults=2&no_rooms=1&dest_id=20015732&srpvid=f1&ucfs=1&arphpl=1';
+  assert.equal(cleanBookingUrl('bookingcom', booking), 'https://www.booking.com/hotel/us/hotel-clermont-atlanta.html');
+  assert.equal(cleanBookingUrl('hipcamp', 'https://www.hipcamp.com/en-US/land/georgia-x-123/?adults=2&utm_source=share'),
+    'https://www.hipcamp.com/en-US/land/georgia-x-123');
+  assert.equal(cleanBookingUrl('opentable', 'https://www.opentable.com/r/x-atlanta?corrid=1&utm_source=ig&fbclid=Z&covers=2'),
+    'https://www.opentable.com/r/x-atlanta?corrid=1&covers=2', 'only tracking keys go from other providers');
+  assert.equal(cleanBookingUrl('fareharbor', 'https://fareharbor.com/embeds/book/prestigehelicopters/?full-items=yes&flow=no'),
+    'https://fareharbor.com/embeds/book/prestigehelicopters/?full-items=yes&flow=no');
+  assert.equal(cleanBookingUrl('airbnb', 'not a link'), 'not a link');
+
+  assert.match(bookingUrlError('airbnb', 'https://abnb.me/AbCdEf') ?? '', /share link.*full airbnb\.com address/);
+  assert.match(bookingUrlError('opentable', 'https://www.opentable.com/r/' + 'x'.repeat(BOOKING_URL_MAX)) ?? '', /too long/);
+  assert.equal(bookingUrlError('airbnb', cleanBookingUrl('airbnb', airbnb)), null);
+});

@@ -85,20 +85,56 @@ export async function closeBlockers(sellerId: string, now: Date = new Date()): P
   return blockers;
 }
 
+/** A typed business name, compared without case, extra spaces or the kind of apostrophe and quote marks. */
+export function sameBusinessName(typed: string, name: string): boolean {
+  const plain = (value: string) => value.normalize('NFKC').replace(/[\u2018\u2019\u02BC\u0060\u00B4]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
+  return plain(typed) === plain(name);
+}
+
 /**
- * Closes a business for good. The typed name must match, so a misclick on the
- * wrong row cannot close it. Its places stop being any venue's business, so
- * the venue can be given to another one.
+ * True when nothing ever happened with this business: no guest asked it, it
+ * made no offer, sold no ticket, ran no party session, was paid nothing and
+ * holds no bands or tags. Only then is deleting it outright safe.
  */
-export async function closeSeller(sellerId: string, actorId: string, confirmName: string, now: Date = new Date()): Promise<{ seller: VendorSeller; blockers: string[] }> {
+export async function sellerHasHistory(sellerId: string): Promise<boolean> {
+  const counts = await Promise.all([
+    db.offer.count({ where: { sellerId } }),
+    db.vendorTicketOrder.count({ where: { sellerId } }),
+    db.partySession.count({ where: { sellerId } }),
+    db.partyPayoutTransfer.count({ where: { sellerId } }),
+    db.demand.count({ where: { targetWindow: { sellerId } } }),
+    db.vendorBand.count({ where: { sellerId } }),
+    db.vendorPatch.count({ where: { sellerId } }),
+    db.vendorBandVisit.count({ where: { sellerId } }),
+  ]);
+  return counts.some((count) => count > 0);
+}
+
+/**
+ * Deletes a business. The typed name must match, so a misclick on the wrong
+ * row cannot remove it. With no history (a test or mistaken sign-up) it is
+ * removed outright, with its seats, places, windows and media, so the owner
+ * can be invited again from scratch. Otherwise it is closed for good: past
+ * bookings and payouts are kept, and its places stop being any venue's
+ * business so the venue can be given to another one.
+ */
+export async function closeSeller(sellerId: string, actorId: string, confirmName: string, now: Date = new Date()): Promise<{ seller: VendorSeller; blockers: string[]; deleted: boolean }> {
   const seller = await openSeller(sellerId);
   const name = seller.legalName?.trim() || 'Unnamed business';
-  if (confirmName.trim().toLowerCase() !== name.toLowerCase()) {
+  if (!sameBusinessName(confirmName, name)) {
     throw new VendorDecisionRefused(`Type ${name} to confirm.`, 'BAD_REQUEST');
   }
   if (!sellerCanTransition(seller.state as SellerState, 'CLOSED')) throw new VendorDecisionRefused('This business cannot be closed.', 'CONFLICT');
   const blockers = await closeBlockers(seller.id, now);
-  if (blockers.length > 0) return { seller, blockers };
+  if (blockers.length > 0) return { seller, blockers, deleted: false };
+  if (!(await sellerHasHistory(seller.id))) {
+    await db.$transaction(async (tx) => {
+      const removed = await tx.vendorSeller.deleteMany({ where: { id: seller.id, state: seller.state } });
+      if (removed.count !== 1) throw new VendorDecisionRefused('This business changed. Refresh and try again.', 'CONFLICT');
+    });
+    return { seller, blockers: [], deleted: true };
+  }
   const closed = await db.$transaction(async (tx) => {
     const moved = await tx.vendorSeller.updateMany({
       where: { id: seller.id, state: seller.state },
@@ -108,7 +144,7 @@ export async function closeSeller(sellerId: string, actorId: string, confirmName
     await tx.vendorLocation.updateMany({ where: { sellerId: seller.id }, data: { menuVenueId: null } });
     return tx.vendorSeller.findUniqueOrThrow({ where: { id: seller.id } });
   });
-  return { seller: closed, blockers: [] };
+  return { seller: closed, blockers: [], deleted: false };
 }
 
 /**

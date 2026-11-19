@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { db } from '../lib/db';
-import { closeBlockers, closeSeller, createSellerWithOwner, pauseSeller, renewOwnerInvite, restoreSeller, VendorDecisionRefused } from './adminDecisions';
+import { closeBlockers, closeSeller, createSellerWithOwner, pauseSeller, renewOwnerInvite, restoreSeller, sameBusinessName, VendorDecisionRefused } from './adminDecisions';
 
 const restores: Array<() => void> = [];
 function stub(target: any, key: string, implementation: (...args: any[]) => any) {
@@ -9,10 +9,10 @@ function stub(target: any, key: string, implementation: (...args: any[]) => any)
   restores.push(() => { target[key] = original; });
 }
 const now = new Date('2026-11-09T18:00:00.000Z');
-let seller: any, writes: any[], counts: { tickets: number; settling: number; payouts: number }, offers: any[];
+let seller: any, writes: any[], counts: { tickets: number; settling: number; payouts: number }, offers: any[], history: number;
 
 beforeEach(() => {
-  writes = []; offers = []; counts = { tickets: 0, settling: 0, payouts: 0 };
+  writes = []; offers = []; counts = { tickets: 0, settling: 0, payouts: 0 }; history = 1;
   seller = { id: 's1', legalName: 'Kitchen', contactEmail: 'owner@example.test', state: 'ACTIVE', approvedAt: now, pausedReason: null };
   stub(db.vendorSeller, 'findUnique', async () => seller);
   stub(db.vendorSeller, 'findUniqueOrThrow', async () => seller);
@@ -29,6 +29,13 @@ beforeEach(() => {
   stub(db.vendorTicketOrder, 'count', async (args: any) => (args.where.status === 'settling' ? counts.settling : counts.tickets));
   stub(db.partyPayoutTransfer, 'count', async () => counts.payouts);
   stub(db as any, '$transaction', async (run: any) => run(db));
+  stub(db.vendorSeller, 'deleteMany', async (args: any) => {
+    writes.push({ op: 'delete', ...args });
+    return { count: args.where.id === seller.id && args.where.state === seller.state ? 1 : 0 };
+  });
+  for (const model of ['offer', 'partySession', 'demand', 'vendorBand', 'vendorPatch', 'vendorBandVisit'] as const) {
+    stub((db as any)[model], 'count', async () => history);
+  }
 });
 afterEach(() => { for (const restore of restores.splice(0).reverse()) restore(); });
 
@@ -88,6 +95,27 @@ test('close with nothing pending closes, stamps the admin and frees the venue bi
   const unbind = writes.find((write) => write.op === 'location');
   assert.deepEqual(unbind.where, { sellerId: 's1' });
   assert.deepEqual(unbind.data, { menuVenueId: null });
+});
+
+test('a business with no history is deleted outright, not just closed', async () => {
+  history = 0;
+  const result = await closeSeller('s1', 'admin', 'Kitchen', now);
+  assert.equal(result.deleted, true);
+  assert.deepEqual(writes.map((write) => write.op), ['delete']);
+  assert.deepEqual(writes[0].where, { id: 's1', state: 'ACTIVE' });
+  history = 1;
+  writes = [];
+  const kept = await closeSeller('s1', 'admin', 'Kitchen', now);
+  assert.equal(kept.deleted, false, 'any history keeps the record and closes it');
+  assert.equal(kept.seller.state, 'CLOSED');
+});
+
+test('the typed name ignores case, spaces and the kind of apostrophe', async () => {
+  assert.equal(sameBusinessName("rumi's  kitchen ", 'Rumi\u2019s Kitchen'), true);
+  assert.equal(sameBusinessName('Rumi\u2019s Kitchen', "Rumi's Kitchen"), true);
+  assert.equal(sameBusinessName('Rumis Kitchen', "Rumi's Kitchen"), false);
+  seller.legalName = 'Rumi\u2019s Kitchen';
+  assert.equal((await closeSeller('s1', 'admin', "rumi's kitchen", now)).blockers.length, 0);
 });
 
 test('create invites the owner by normalized email and refuses a duplicate', async () => {

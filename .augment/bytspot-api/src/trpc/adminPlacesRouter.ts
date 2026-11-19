@@ -9,7 +9,9 @@ import { TRPCError } from '@trpc/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { router, protectedProcedure, rateLimitMiddleware } from './trpc';
-import { BOOKING_EXPIRY_MAX_MS, bookingLinkCheck, bookingLinkExpired, bookingLinkFresh } from '../services/bookingProviders';
+import {
+  BOOKING_EXPIRY_MAX_MS, BOOKING_URL_PASTE_MAX, bookingLinkCheck, bookingLinkExpired, bookingLinkFresh, cleanBookingUrl,
+} from '../services/bookingProviders';
 import { bookingLinksToRecheck } from '../services/bookingRecheck';
 import { db } from '../lib/db';
 import { getRedis } from '../lib/redis';
@@ -250,7 +252,7 @@ export const adminPlacesRouter = router({
     .input(z.object({
       placeId: z.string().trim().regex(PLACE_ID),
       provider: z.enum(TABLE_BOOKING_PROVIDERS as [string, ...string[]]).nullable().optional(),
-      url: z.string().trim().min(1).max(500).nullable().optional(),
+      url: z.string().trim().min(1).max(BOOKING_URL_PASTE_MAX).nullable().optional(),
       /** When the link stops showing (an event's date). Null or omitted: no end. */
       expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
       category: z.enum(LISTED_CATEGORIES),
@@ -258,7 +260,7 @@ export const adminPlacesRouter = router({
     .mutation(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
       const provider = input.provider ?? null;
-      const url = input.url ?? null;
+      const url = provider && input.url ? cleanBookingUrl(provider, input.url) : input.url ?? null;
       if (Boolean(provider) !== Boolean(url)) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: provider ? 'Paste the booking link.' : 'Pick a booking provider.' });
       }
@@ -319,7 +321,7 @@ export const adminPlacesRouter = router({
         detail: { venueId: venue.id, provider: provider ?? 'none' },
       });
       await Promise.all([refreshTableBookingLinks(), forgetVenueLists()]);
-      return { venueId: venue.id };
+      return { venueId: venue.id, url };
     }),
 
   /** Every venue guests can see, each marked Bytspot-controlled or listed. */

@@ -28,7 +28,7 @@ const envSchema = z.object({
   REDIS_URL:              z.string().default(''),
   VAPID_PUBLIC_KEY:       z.string().default(''),
   VAPID_PRIVATE_KEY:      z.string().default(''),
-  VAPID_EMAIL:            z.string().default('mailto:bytspotapp@gmail.com'),
+  VAPID_EMAIL:            z.string().default('mailto:update@bytspot.com'),
   RESEND_API_KEY:         z.string().default(''),
   STRIPE_SECRET_KEY:      z.string().default(''),
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),

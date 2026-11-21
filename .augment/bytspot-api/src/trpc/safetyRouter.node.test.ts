@@ -154,7 +154,7 @@ test('the queue groups reports by item, oldest first, with the owner history', a
       { targetKind: 'party', targetId: 'p1', ownerId: 'host-id', reason: 'violence', note: 'threats', snapshot: { title: 'Rooftop' }, status: 'open', decidedAt: null, createdAt: new Date(2) },
     ];
   };
-  user.findMany = async () => [{ id: 'host-id', name: 'Host', email: 'host@bytspot.com', createdAt: new Date(0), suspendedAt: null }];
+  user.findMany = async () => [{ id: 'host-id', name: 'Host', email: 'update@bytspot.com', createdAt: new Date(0), suspendedAt: null }];
   report.groupBy = async () => [{ ownerId: 'host-id', status: 'open', _count: { _all: 2 } }, { ownerId: 'host-id', status: 'removed', _count: { _all: 1 } }];
   party.findMany = async () => [{ id: 'p1' }];
   const { items } = await admin().admin.safety.reports();

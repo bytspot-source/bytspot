@@ -11,7 +11,7 @@ const createCaller = createCallerFactory(appRouter);
 // Nobody has blocked anybody unless a test says so.
 (db.userBlock as any).findMany = async () => [];
 (db.userBlock as any).findFirst = async () => null;
-const hostContext: Context = { user: { userId: 'host-user', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-control-host' };
+const hostContext: Context = { user: { userId: 'host-user', email: 'update@bytspot.com' }, clientRateLimitKey: 'test-control-host' };
 const guestContext: Context = { user: { userId: 'guest-user', email: 'guest@bytspot.com' }, clientRateLimitKey: 'test-control-guest' };
 const credential = 'A'.repeat(43);
 const idempotencyKey = '00000000-0000-4000-8000-000000000011';

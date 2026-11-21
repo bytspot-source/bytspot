@@ -69,7 +69,7 @@ services:
         sync: false
       # Inbox that gets an email for every new member report.
       - key: SAFETY_ALERT_EMAIL
-        value: bytspotapp@gmail.com
+        value: update@bytspot.com
       - key: JWT_SECRET
         sync: false
       - key: STRIPE_SECRET_KEY
@@ -201,7 +201,7 @@ services:
       - key: RESEND_API_KEY
         sync: false
       - key: SAFETY_ALERT_EMAIL
-        value: bytspotapp@gmail.com
+        value: update@bytspot.com
       - key: SENTRY_DSN
         sync: false
 

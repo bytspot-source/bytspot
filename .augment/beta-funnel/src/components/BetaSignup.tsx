@@ -98,8 +98,9 @@ function HeaderSection() {
         <MapPin className="w-3 h-3 text-cyan-400" />
         <span className="text-[11px] font-bold text-white/90 tracking-widest uppercase">Atlanta Beta &bull; Midtown</span>
       </div>
-      <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white tracking-tight leading-[1.1]">Plan the night.{' '}<span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-cyan-400">Send one link.</span>{' '}Everyone's in.</h1>
-      <p className="text-[15px] sm:text-[17px] text-white/70 max-w-sm mx-auto leading-relaxed">Make a plan with friends, host a party with a shareable pass, and find the right spot nearby — Atlanta, starting in Midtown.</p>
+      <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white tracking-tight leading-[1.1]">Find the spot. Make the plan. Send the link.</h1>
+      <p className="text-[15px] sm:text-[17px] text-white/70 max-w-sm mx-auto leading-relaxed">Bytspot is an intent app for people to find spots and plan outings.</p>
+      <p className="text-[15px] sm:text-[17px] text-white/70 max-w-sm mx-auto leading-relaxed">Tell Bytspot what you want to do, like a chill date night under $50 near Midtown, and it finds spots that fit and builds a plan you can share with friends.</p>
       {/* P2: Feature bullets */}
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 pt-1">
         <span className="flex items-center gap-1.5 text-[11px] text-white/50"><Users className="w-3.5 h-3.5 text-purple-400" />Group Plans</span>
@@ -115,6 +116,12 @@ function HeaderSection() {
           <span>Download on the App Store</span>
         </a>
       </div>
+      <nav className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 pt-1 text-[12px]">
+        <a className="text-white/50 hover:text-white" href="/support">Support</a>
+        <a className="text-white/50 hover:text-white" href="https://bytspot.app/terms">Terms</a>
+        <a className="text-white/50 hover:text-white" href="https://bytspot.app/privacy">Privacy</a>
+        <a className="text-white/50 hover:text-white" href="https://bytspot.app/refunds">Refunds</a>
+      </nav>
     </div>
   );
 }
@@ -127,21 +134,21 @@ function ProductMockCard() {
           <div className="absolute inset-0 bg-gradient-to-t from-[#1C1C1E]/90 to-transparent" />
           <div className="relative z-10 w-full flex justify-between items-end">
             <div><h3 className="text-white font-bold text-lg">Ponce City Market</h3><div className="flex items-center gap-1 text-white/60 text-xs"><MapPin className="w-3 h-3" /><span>Midtown, Atlanta</span></div></div>
-            <div className="px-2 py-1 rounded-md bg-white/10 backdrop-blur-md border border-white/10"><span className="text-xs font-medium text-emerald-400">Open Now</span></div>
+            <div className="px-2 py-1 rounded-md bg-white/10 backdrop-blur-md border border-white/10"><span className="text-xs font-medium text-emerald-400">Sample</span></div>
           </div>
         </div>
         <div className="p-4 space-y-4">
           <div className="space-y-2">
-            <div className="flex justify-between text-xs font-medium text-white/60 uppercase tracking-wide"><div className="flex items-center gap-1.5"><Users className="w-3.5 h-3.5" /><span>Crowd Level</span></div><span className="text-orange-400">Active</span></div>
+            <div className="flex justify-between text-xs font-medium text-white/60 uppercase tracking-wide"><div className="flex items-center gap-1.5"><Users className="w-3.5 h-3.5" /><span>Typical busyness</span></div><span className="text-orange-400">By hour</span></div>
             <div className="flex gap-1 h-2"><div className="flex-1 rounded-full bg-cyan-500/20" /><div className="flex-1 rounded-full bg-orange-500 shadow-[0_0_10px_rgba(249,115,22,0.5)]" /><div className="flex-1 rounded-full bg-red-500/20" /></div>
-            <div className="flex justify-between text-[10px] text-white/40"><span>Chill</span><span>Active</span><span>Packed</span></div>
-            <div className="text-center pt-1"><span className="text-[10px] text-white/60 font-medium">Busy but moving</span></div>
+            <div className="flex justify-between text-[10px] text-white/40"><span>Quieter</span><span>Usual</span><span>Busier</span></div>
+            <div className="text-center pt-1"><span className="text-[10px] text-white/60 font-medium">A usual pattern for that hour, not a live count</span></div>
           </div>
           <div className="h-px bg-white/10" />
           <div className="grid grid-cols-3 gap-2">
-            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-white/5 border border-white/5 text-center"><div className="bg-cyan-500/20 p-1.5 rounded-full mb-1.5"><Car className="w-4 h-4 text-cyan-400" /></div><span className="text-xs font-bold text-white">42</span><span className="text-[10px] text-white/50">Spots</span></div>
-            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-white/5 border border-white/5 text-center"><div className="bg-white/10 p-1.5 rounded-full mb-1.5"><Clock className="w-4 h-4 text-white" /></div><span className="text-xs font-bold text-white">6 min</span><span className="text-[10px] text-white/50">Uber ETA</span></div>
-            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-white/5 border border-white/5 text-center"><div className="bg-purple-500/20 p-1.5 rounded-full mb-1.5"><KeyRound className="w-4 h-4 text-purple-400" /></div><span className="text-xs font-bold text-purple-400">Yes</span><span className="text-[10px] text-white/50">Valet</span></div>
+            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-white/5 border border-white/5 text-center"><div className="bg-cyan-500/20 p-1.5 rounded-full mb-1.5"><Car className="w-4 h-4 text-cyan-400" /></div><span className="text-xs font-bold text-white">Map</span><span className="text-[10px] text-white/50">Routes</span></div>
+            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-white/5 border border-white/5 text-center"><div className="bg-white/10 p-1.5 rounded-full mb-1.5"><Clock className="w-4 h-4 text-white" /></div><span className="text-xs font-bold text-white">Plan</span><span className="text-[10px] text-white/50">One link</span></div>
+            <div className="flex flex-col items-center justify-center p-2 rounded-xl bg-white/5 border border-white/5 text-center"><div className="bg-purple-500/20 p-1.5 rounded-full mb-1.5"><KeyRound className="w-4 h-4 text-purple-400" /></div><span className="text-xs font-bold text-purple-400">Pass</span><span className="text-[10px] text-white/50">To share</span></div>
           </div>
         </div>
       </div>
@@ -231,7 +238,7 @@ function SuccessState({ alreadySignedUp, onComplete, standalone }: { alreadySign
           <p className="text-[12px] text-white/40 mb-3">Share with friends in Midtown</p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button
-              onClick={() => { const t = encodeURIComponent("Plan the night on Bytspot — send one link and everyone's in. Atlanta, starting in Midtown:"); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }}
+              onClick={() => { const t = encodeURIComponent('Find the spot. Make the plan. Send the link. Bytspot is an intent app for people to find spots and plan outings.'); const u = encodeURIComponent(window.location.href); window.open(`https://twitter.com/intent/tweet?text=${t}&url=${u}`, '_blank'); }}
               className="min-h-[44px] px-5 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white/70 text-[13px] hover:bg-white/10 active:bg-white/15 transition-colors flex items-center gap-1.5"
             >Share on X<ExternalLink className="w-3 h-3" /></button>
             <button

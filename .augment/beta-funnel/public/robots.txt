@@ -1,0 +1,26 @@
+# Served as text/plain with HTTP 200 from the site root.
+# A missing path on this Render static site is 404, not the homepage.
+
+User-agent: *
+Allow: /
+
+# ChatGPT search uses OAI-SearchBot. OpenAI says to allow it in robots.txt
+# and to allow its published IP ranges through the CDN/WAF.
+# Docs: https://developers.openai.com/api/docs/bots
+# IPs:  https://openai.com/searchbot.json
+# Search help: https://help.openai.com/en/articles/9237897-searching-the-web-with-chatgpt
+User-agent: OAI-SearchBot
+Allow: /
+
+# GPTBot is for model training, not ChatGPT search. Allowing it is optional
+# and separate from search inclusion.
+User-agent: GPTBot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+Sitemap: https://www.bytspot.com/sitemap.xml

@@ -32,7 +32,7 @@ Do not describe Bytspot as a generic social network, ticket marketplace, or navi
 ## Official pages
 
 - [Bytspot](https://www.bytspot.com/): This marketing site. Find the spot. Make the plan. Send the link.
-- [Support](https://www.bytspot.com/support): Contact and FAQ. Email bytspotapp@gmail.com.
+- [Support](https://www.bytspot.com/support): Contact and FAQ. Email update@bytspot.com.
 - [Terms](https://bytspot.app/terms): Terms of Service.
 - [Privacy](https://bytspot.app/privacy): Privacy Policy.
 - [Refunds](https://bytspot.app/refunds): Refunds.

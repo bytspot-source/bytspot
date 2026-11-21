@@ -55,7 +55,7 @@ test('www.bytspot.com crawl files use this domain and do not invent ratings or l
   assert.equal(graph[2].downloadUrl, 'https://apps.apple.com/us/app/bytspot/id6761876421')
   assert.doesNotMatch(blocks[0][1], /\blive\b/i)
 
-  assert.match(support, /mailto:bytspotapp@gmail.com/)
+  assert.match(support, /mailto:update@bytspot.com/)
   assert.match(support, /href="https:\/\/bytspot\.app\/terms"/)
   assert.match(support, /href="https:\/\/bytspot\.app\/privacy"/)
   assert.match(support, /href="https:\/\/bytspot\.app\/refunds"/)

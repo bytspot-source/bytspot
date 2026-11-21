@@ -894,7 +894,7 @@ test('Closed rooms 404 unconfirmed arrivals even if the share link was extended,
   assert.equal(pass.guest.accessGranted, true);
 
   partyGuest.findUnique = async () => null;
-  const hostCaller = createCaller({ user: { userId: 'host-user', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-party-host' });
+  const hostCaller = createCaller({ user: { userId: 'host-user', email: 'update@bytspot.com' }, clientRateLimitKey: 'test-party-host' });
   const hostPass = await hostCaller.events.pass.resolve({ partyId: 'party-1' });
   assert.equal(hostPass.action, 'view-pass');
   assert.equal(hostPass.guest.accessGranted, true);
@@ -1313,7 +1313,7 @@ test('A staged recap is invisible to everyone except its host', async () => {
   await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
 
   // The host reviews their own unpublished album.
-  const hostView = await createCaller({ user: { userId: 'host-1', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-recap-host' }).events.recap.get({ partyId: 'party-1' });
+  const hostView = await createCaller({ user: { userId: 'host-1', email: 'update@bytspot.com' }, clientRateLimitKey: 'test-recap-host' }).events.recap.get({ partyId: 'party-1' });
   assert.equal(hostView.publishedAt, null);
   assert.equal(hostView.photoURLs.length, 2);
 });
@@ -1374,7 +1374,7 @@ test('A recap closes to guests if the party leaves published, on both read surfa
   partyGuest.findUnique = async () => ({ accessGranted: true });
   await assert.rejects(() => caller().events.recap.get({ partyId: 'party-1' }), { code: 'NOT_FOUND' });
   // The host still reviews their own album.
-  const hostView = await createCaller({ user: { userId: 'host-1', email: 'host@bytspot.com' }, clientRateLimitKey: 'test-recap-host-2' }).events.recap.get({ partyId: 'party-1' });
+  const hostView = await createCaller({ user: { userId: 'host-1', email: 'update@bytspot.com' }, clientRateLimitKey: 'test-recap-host-2' }).events.recap.get({ partyId: 'party-1' });
   assert.equal(hostView.photoURLs.length, 2);
 });
 

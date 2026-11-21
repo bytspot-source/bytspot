@@ -1,2 +1,14 @@
-/*    /index.html   200
+# Render ignores this file. On www.bytspot.com, a file that exists is served
+# and a missing path is 404 text/plain. Measured 21 Nov 2026: an .html file
+# is also served at the extensionless path and at the trailing-slash path
+# (banner-3x3-vibecheck.html, banner-3x3-vibecheck, and banner-3x3-vibecheck/
+# share one etag). public/support.html therefore covers /support and /support/
+# with no dashboard rewrite.
+#
+# Hosts that do honor _redirects (Netlify) serve a real file first, then these
+# rules. The support rules sit above the SPA fallback.
 
+/support    /support.html   200
+/support/   /support.html   200
+
+/*    /index.html   200

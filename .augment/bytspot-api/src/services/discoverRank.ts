@@ -52,6 +52,9 @@ export interface DiscoverRankResult {
   hidden: { id: string; hiddenBy: AvoidTag | 'price' }[];
 }
 
+/** How much more a chosen vibe's match counts than the time-of-day default's. */
+export const VIBE_WEIGHT = 3;
+
 /** Discover rails that answer each vibe. */
 const VIBE_RAILS: Record<string, string[]> = {
   drinks: ['nightlife'],
@@ -89,7 +92,9 @@ export function scoreDiscoverCandidate(
   const types = c.types ?? [];
   const rawGroup = (input.group ?? '').toLowerCase();
   const group = rawGroup === 'date_night' ? 'date' : rawGroup;
-  let score = fit.scoreDelta + vibeMatch(c, profile);
+  // A chosen vibe outweighs rating, so "A good drink" leads with drinks places.
+  const vibeWeight = profile.key === 'general' ? 1 : VIBE_WEIGHT;
+  let score = fit.scoreDelta + vibeMatch(c, profile) * vibeWeight;
 
   if (c.rating !== undefined && c.ratingCount !== undefined && c.ratingCount > 0) {
     score += (bayesRating(c.rating, c.ratingCount) - 4.0) * 6;
@@ -98,7 +103,8 @@ export function scoreDiscoverCandidate(
   }
   if (c.kind === 'venue') score += 0.5;
   if (c.isOpen === true) score += 1;
-  if (c.isOpen === false) score -= 3;
+  // Scaled with the vibe so a closed place of the right kind never tops an open one.
+  if (c.isOpen === false) score -= 3 * vibeWeight;
   if (c.primaryType === 'fast_food_restaurant') score -= 1.5;
 
   // Unlike Home picks, nothing is dropped for distance: the deck is already

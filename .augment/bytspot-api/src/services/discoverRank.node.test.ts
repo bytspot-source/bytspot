@@ -80,3 +80,23 @@ test('places.rankDiscover takes the client preferences and drops junk tags', asy
   assert.deepEqual(result.hidden, [{ id: 'reference:pub', hiddenBy: 'bars' }]);
   await assert.rejects(caller.rankDiscover({ ...here, candidates: [{ ...place('x'), kind: 'nope' as never }] }));
 });
+
+test('A chosen vibe leads over a better-rated place of the wrong kind, among open places', () => {
+  const cafe = place('reference:cafe', { rail: 'coffee', types: ['cafe', 'coffee_shop'], primaryType: 'coffee_shop', rating: 4.7, ratingCount: 3000, isOpen: true });
+  const bar = place('reference:bar', { rail: 'nightlife', types: ['bar'], primaryType: 'cocktail_bar', rating: 4.1, ratingCount: 200, isOpen: true });
+  assert.deepEqual(rankDiscover({ ...here, vibe: 'drinks', hour: 21 }, [cafe, bar]).order, ['reference:bar', 'reference:cafe']);
+  assert.deepEqual(rankDiscover({ ...here, vibe: 'coffee', hour: 9 }, [bar, cafe]).order, ['reference:cafe', 'reference:bar']);
+  const closedBar = { ...bar, id: 'reference:closed-bar', isOpen: false };
+  assert.deepEqual(rankDiscover({ ...here, vibe: 'drinks', hour: 12 }, [closedBar, cafe]).order, ['reference:cafe', 'reference:closed-bar'],
+    'a closed place of the right kind does not top an open one');
+  assert.deepEqual(rankDiscover({ ...here, hour: 21 }, [bar, cafe]).order, ['reference:cafe', 'reference:bar'],
+    'with no vibe chosen, rating still decides');
+});
+
+test('Date night, sent as date_night, ranks like date', () => {
+  const wineBar = place('reference:wine', { rail: 'nightlife', types: ['wine_bar', 'bar'], primaryType: 'wine_bar', rating: 4.3, ratingCount: 400, isOpen: true });
+  const diner = place('reference:diner', { rail: 'dining', types: ['diner', 'restaurant'], primaryType: 'diner', rating: 4.6, ratingCount: 2000, isOpen: true });
+  for (const vibe of ['date', 'date_night', 'Date night']) {
+    assert.deepEqual(rankDiscover({ ...here, vibe, hour: 20 }, [diner, wineBar]).order, ['reference:wine', 'reference:diner'], vibe);
+  }
+});

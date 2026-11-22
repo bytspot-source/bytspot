@@ -41,8 +41,12 @@ const VIBES: Record<string, VibeProfile> = {
 };
 
 /** Intents with no place type of their own (parking, rides, stays) get a time-of-day mix. */
+/** What the app's answers send that the profiles name differently ("Date night" is sent as date_night). */
+const VIBE_ALIASES: Record<string, string> = { date_night: 'date', 'date night': 'date', nightlife: 'drinks', dining: 'food' };
+
 export function vibeProfile(vibe: string | undefined, hour: number | undefined): ResolvedVibe {
-  const key = (vibe ?? '').toLowerCase();
+  const raw = (vibe ?? '').trim().toLowerCase();
+  const key = VIBE_ALIASES[raw] ?? raw;
   if (VIBES[key]) return { ...VIBES[key], key };
   const evening = hour !== undefined && (hour >= 16 || hour < 4);
   return evening

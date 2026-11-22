@@ -29,6 +29,16 @@ const ACCEPTED = [
     reason: 'Build-time only via @prisma/config; fix requires the Prisma 7 major upgrade.',
     until: '2026-12-01',
   },
+  {
+    // Schema.TemplateLiteral ReDoS, published 2026-11. Same path as above:
+    // effect is only loaded by @prisma/config at build and deploy time, and
+    // no request input reaches an Effect schema.
+    source: 1248071,
+    name: 'effect',
+    advisory: 'GHSA-7589-6fvf-x4pw',
+    reason: 'Build-time only via @prisma/config; fix requires the Prisma 7 major upgrade.',
+    until: '2026-12-01',
+  },
 ];
 
 const BLOCKING = new Set(['high', 'critical']);

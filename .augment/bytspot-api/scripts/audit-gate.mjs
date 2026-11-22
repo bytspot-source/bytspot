@@ -10,25 +10,9 @@
 import { execFileSync } from 'node:child_process';
 
 const ACCEPTED = [
-  {
-    // Both reached only through prisma → @prisma/config, which runs during
-    // `prisma generate` / `migrate deploy` — build and deploy time, against
-    // our own schema. Neither is reachable from an HTTP request. The fix is
-    // Prisma 7, a breaking major that needs its own branch and migration
-    // testing rather than a pre-submission bump.
-    source: 1145093,
-    name: 'deepmerge-ts',
-    advisory: 'GHSA-ggr8-5vv4-36mx',
-    reason: 'Build-time only via @prisma/config; fix requires the Prisma 7 major upgrade.',
-    until: '2026-12-01',
-  },
-  {
-    source: 1115356,
-    name: 'effect',
-    advisory: 'GHSA-38f7-945m-qr2g',
-    reason: 'Build-time only via @prisma/config; fix requires the Prisma 7 major upgrade.',
-    until: '2026-12-01',
-  },
+  // deepmerge-ts and effect (via prisma -> @prisma/config) were accepted here
+  // until 2026-12-01. package.json `overrides` now pins them to fixed
+  // versions, so nothing is accepted.
 ];
 
 const BLOCKING = new Set(['high', 'critical']);

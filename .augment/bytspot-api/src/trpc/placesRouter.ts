@@ -156,6 +156,50 @@ export async function resolvePlaceHours(placeId: string): Promise<OpeningPeriod[
   }
 }
 
+export interface PlaceOpenStatus {
+  placeId: string;
+  /** Null when Google lists no hours for the place. */
+  isOpen: boolean | null;
+  closesAt: string | null;
+  opensAt: string | null;
+  /** The place's own UTC offset, so times read in its local clock. */
+  utcOffsetMinutes: number | null;
+}
+
+const OPEN_STATUS_FIELDS = 'id,utcOffsetMinutes,currentOpeningHours.openNow,currentOpeningHours.nextOpenTime,currentOpeningHours.nextCloseTime';
+
+export function openStatusFrom(placeId: string, data: Record<string, unknown>): PlaceOpenStatus {
+  const hours = (data.currentOpeningHours ?? null) as { openNow?: unknown; nextOpenTime?: unknown; nextCloseTime?: unknown } | null;
+  const time = (value: unknown) => (typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : null);
+  const offset = typeof data.utcOffsetMinutes === 'number' && Math.abs(data.utcOffsetMinutes) <= 14 * 60 ? data.utcOffsetMinutes : null;
+  if (!hours || typeof hours.openNow !== 'boolean') return { placeId, isOpen: null, closesAt: null, opensAt: null, utcOffsetMinutes: offset };
+  return {
+    placeId,
+    isOpen: hours.openNow,
+    closesAt: hours.openNow ? time(hours.nextCloseTime) : null,
+    opensAt: hours.openNow ? null : time(hours.nextOpenTime),
+    utcOffsetMinutes: offset,
+  };
+}
+
+/**
+ * Whether a place is open now and when that changes. Cached ten minutes, and
+ * never past the next change, so a place does not read open after it closes.
+ */
+export async function resolveOpenStatus(placeId: string): Promise<PlaceOpenStatus> {
+  const unknown: PlaceOpenStatus = { placeId, isOpen: null, closesAt: null, opensAt: null, utcOffsetMinutes: null };
+  if (!config.googlePlacesApiKey || !/^[A-Za-z0-9_-]{1,255}$/.test(placeId)) return unknown;
+  try {
+    const status = await cached(`gp:${CACHE_VERSION}:open:${placeId}`, 600, async () =>
+      openStatusFrom(placeId, await gpGet<Record<string, unknown>>(`/places/${encodeURIComponent(placeId)}`, OPEN_STATUS_FIELDS, 2500)));
+    const change = Date.parse(status.closesAt ?? status.opensAt ?? '');
+    return Number.isFinite(change) && change <= Date.now() ? { ...unknown, utcOffsetMinutes: status.utcOffsetMinutes } : status;
+  } catch (err) {
+    captureError(err, { provider: 'google-places', operation: 'resolveOpenStatus' });
+    return unknown;
+  }
+}
+
 const openingPointSchema = z.object({
   day: z.number().int().min(0).max(6),
   hour: z.number().int().min(0).max(24),
@@ -550,6 +594,14 @@ export const placesRouter = router({
       });
       await ensureTableBookingLinks();
       return { place: place ? withTableBooking(place) : null };
+    }),
+
+  /** Open or closed now, for the places a screen is showing. Unknown is said, never guessed. */
+  openStatus: placesProxy('places-open-status', 120)
+    .input(z.object({ placeIds: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,255}$/)).min(1).max(25) }))
+    .query(async ({ input }) => {
+      const ids = [...new Set(input.placeIds)];
+      return { statuses: await Promise.all(ids.map(resolveOpenStatus)) };
     }),
 
   /**

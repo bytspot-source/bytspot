@@ -274,3 +274,42 @@ test('Recommendations share one Google search per pool and say when Google is do
     prisma.$queryRaw = originalQueryRaw;
   }
 });
+
+test('Open status says when a place closes or opens, and unknown when Google lists no hours', async () => {
+  const { openStatusFrom } = await import('./placesRouter');
+  assert.deepEqual(
+    openStatusFrom('p1', { utcOffsetMinutes: -300, currentOpeningHours: { openNow: true, nextCloseTime: '2026-11-24T04:00:00Z', nextOpenTime: '2026-11-24T14:00:00Z' } }),
+    { placeId: 'p1', isOpen: true, closesAt: '2026-11-24T04:00:00Z', opensAt: null, utcOffsetMinutes: -300 },
+  );
+  assert.deepEqual(
+    openStatusFrom('p2', { currentOpeningHours: { openNow: false, nextOpenTime: '2026-11-24T14:00:00Z' } }),
+    { placeId: 'p2', isOpen: false, closesAt: null, opensAt: '2026-11-24T14:00:00Z', utcOffsetMinutes: null },
+  );
+  assert.equal(openStatusFrom('p3', {}).isOpen, null);
+  assert.equal(openStatusFrom('p4', { currentOpeningHours: { openNow: true, nextCloseTime: 'soon' } }).closesAt, null);
+});
+
+test('Open status asks Google once per place and is unknown when Google fails', async () => {
+  const originalKey = config.googlePlacesApiKey;
+  const originalFetch = globalThis.fetch;
+  (config as { googlePlacesApiKey: string }).googlePlacesApiKey = 'test-key';
+  const later = new Date(Date.now() + 3 * 3_600_000).toISOString();
+  const asked: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    const id = String(url).split('/places/')[1];
+    asked.push(id);
+    if (id === 'broken') return new Response('denied', { status: 403 });
+    return new Response(JSON.stringify({ id, currentOpeningHours: { openNow: true, nextCloseTime: later } }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const caller = placesRouter.createCaller({ user: { userId: 'u-open', email: 'o@bytspot.com' }, clientRateLimitKey: 'test-open' } as never);
+    const { statuses } = await caller.openStatus({ placeIds: ['okplace', 'okplace', 'broken'] });
+    assert.deepEqual(asked.sort(), ['broken', 'okplace']);
+    assert.equal(statuses.find((s) => s.placeId === 'okplace')?.closesAt, later);
+    assert.equal(statuses.find((s) => s.placeId === 'broken')?.isOpen, null);
+    await assert.rejects(caller.openStatus({ placeIds: ['bad id!'] }));
+  } finally {
+    (config as { googlePlacesApiKey: string }).googlePlacesApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});

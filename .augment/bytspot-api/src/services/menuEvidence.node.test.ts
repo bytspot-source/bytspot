@@ -57,7 +57,7 @@ test('strict submissions reject approval, venue identity, malformed names and mi
 test('name mode, generic/claim queries and invalid coordinates do not access the database', async () => {
   const query = stubDb('$queryRaw', async () => { throw new Error('must not read'); });
   for (const input of [{ ...search, mode: 'name' as const }, { ...search, query: 'coffee' }, { ...search, query: 'best rice' },
-    { ...search, location: { lat: 0, lng: 0 } }, { ...search, location: { lat: NaN, lng: 0 } }, { ...search, radius: Infinity }, { ...search, radius: 5001 }]) {
+    { ...search, location: { lat: 0, lng: 0 } }, { ...search, location: { lat: NaN, lng: 0 } }, { ...search, radius: Infinity }, { ...search, radius: 40_001 }]) {
     assert.deepEqual(await findMenuEvidence(input, now), []);
   }
   assert.equal(query.mock.callCount(), 0);

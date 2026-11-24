@@ -162,7 +162,7 @@ type EvidenceRow = Omit<RecommendVenue, 'crowd'> & { dishId: string; dishName: s
 export async function findMenuEvidence(search: MenuEvidenceSearch, now = new Date()): Promise<MenuEvidenceResult[]> {
   const terms = menuQueryTerms(search.query);
   if (search.mode !== 'category' || !terms.length || !realCoordinates(search.location) || !Number.isFinite(search.radius)
-    || search.radius <= 0 || search.radius > 5000 || !Number.isFinite(now.getTime())) return [];
+    || search.radius <= 0 || search.radius > 40_000 || !Number.isFinite(now.getTime())) return [];
   const bounds = menuSearchBounds(search.location, search.radius);
   const longitude = bounds.lowLng <= bounds.highLng
     ? Prisma.sql`v.lng BETWEEN ${bounds.lowLng} AND ${bounds.highLng}`

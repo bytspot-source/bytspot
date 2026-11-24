@@ -402,3 +402,99 @@ test('a guest sees where their payment for an offer stands', async () => {
     { state: 'refunded', reason: 'Someone took the last one.' },
   );
 });
+
+test('a request one business has not answered can be changed, releasing old offers and keeping it the same request', async () => {
+  const { supplyFor } = await import('../vendor/demandFeed');
+  const { sellableSlots } = await import('../vendor/availability');
+  const window = {
+    id: 'window-1', sellerId: 'seller-1', domain: 'dining', active: true, intent: 'request', skuTemplateId: 'dining.table',
+    slotKind: 'rolling', slotMinutes: 30, leadTimeMins: 60, horizonDays: 7, weekdays: [1, 2, 3, 4, 5, 6, 7],
+    openMins: 0, closeMins: 1440, quantity: 4, priceCents: 0, maxGuests: 6, title: 'Table', durationMins: 90,
+    location: { id: 'loc-1', lat: 33.78, lng: -84.38, radiusMiles: null, timezone: 'America/New_York', state: 'ACTIVE' }, media: [],
+  };
+  (db as any).vendorAvailabilityWindow = {
+    findFirst: async () => ({ id: 'window-1', sellerId: 'seller-1', domain: 'dining', maxGuests: 6 }),
+    findMany: async () => [window],
+  };
+  (db as any).vendorSlotCommitment = { findMany: async () => [] };
+  const now = new Date();
+  const { supply } = await supplyFor('seller-1', now);
+  const slot = sellableSlots(supply[0].slots, 'dining', now).find((candidate) => candidate.startsAt > new Date(now.getTime() + 3 * 3_600_000));
+  assert.ok(slot, 'the stub window sells a slot');
+
+  demand.findFirst = async () => ({ id: 'demand-1', state: 'OFFERED', expiresAt: new Date(Date.now() + 3_600_000), targetWindowId: 'window-1' });
+  const writes: any = {};
+  (db as any).$transaction = async (fn: any) => fn({
+    demand: { updateMany: async (args: any) => ((writes.demand = args), { count: 1 }) },
+    offer: { updateMany: async (args: any) => ((writes.offers = args), { count: 2 }) },
+    demandEvent: { create: async ({ data }: any) => ((writes.event = data), {}) },
+  });
+  const changed = await caller().demand.change({ demandId: 'demand-1', partySize: 3, startsAt: slot!.startsAt, note: 'Window seat' });
+  assert.equal(changed.id, 'demand-1');
+  assert.equal(writes.demand.where.state, 'OFFERED');
+  assert.equal(writes.demand.data.state, 'OPEN');
+  assert.equal(writes.demand.data.partySize, 3);
+  assert.equal(writes.demand.data.earliest.getTime(), slot!.startsAt.getTime());
+  assert.equal(writes.demand.data.note, 'Window seat');
+  assert.deepEqual(writes.offers, { where: { demandId: 'demand-1', state: 'OFFERED' }, data: { state: 'WITHDRAWN' } });
+  assert.equal(writes.event.kind, 'CHANGED');
+
+  // A time the window cannot sell is refused before anything changes.
+  delete writes.demand;
+  await assert.rejects(() => caller().demand.change({ demandId: 'demand-1', partySize: 3, startsAt: new Date(slot!.startsAt.getTime() + 60_000) }), { code: 'CONFLICT' });
+  assert.equal(writes.demand, undefined);
+  await assert.rejects(() => caller().demand.change({ demandId: 'demand-1', partySize: 9, startsAt: slot!.startsAt }), { code: 'BAD_REQUEST' });
+});
+
+test('only a live request to one business can be changed', async () => {
+  const startsAt = new Date(Date.now() + 7_200_000);
+  demand.findFirst = async () => null;
+  await assert.rejects(() => caller().demand.change({ demandId: 'demand-9', partySize: 2, startsAt }), { code: 'NOT_FOUND' });
+  demand.findFirst = async () => ({ id: 'demand-1', state: 'BOOKED', expiresAt: new Date(Date.now() + 3_600_000), targetWindowId: 'window-1' });
+  await assert.rejects(() => caller().demand.change({ demandId: 'demand-1', partySize: 2, startsAt }), { code: 'CONFLICT' });
+  demand.findFirst = async () => ({ id: 'demand-1', state: 'OPEN', expiresAt: new Date(Date.now() + 3_600_000), targetWindowId: null });
+  await assert.rejects(() => caller().demand.change({ demandId: 'demand-1', partySize: 2, startsAt }), { code: 'BAD_REQUEST' });
+});
+
+function acceptedOffer(over: Record<string, unknown> = {}) {
+  return {
+    id: 'offer-1', state: 'ACCEPTED', payAt: 'venue', startsAt: new Date(Date.now() + 3_600_000), windowId: 'window-1',
+    demandId: 'demand-1', checkedInAt: null, location: { label: 'Tribe & Spice' }, checkouts: [], ...over,
+  };
+}
+
+test('cancelling a pay-at-venue booking frees the time, cancels the plan item and tells the business', async () => {
+  (db as any).offer = { findFirst: async () => acceptedOffer(), findUnique: async () => null };
+  const writes: any = {};
+  (db as any).$transaction = async (fn: any) => fn({
+    offer: { updateMany: async (args: any) => ((writes.offer = args), { count: 1 }) },
+    vendorSlotCommitment: { updateMany: async (args: any) => ((writes.slot = args), { count: 1 }) },
+    demand: { updateMany: async (args: any) => ((writes.demand = args), { count: 1 }) },
+    planItem: { updateMany: async (args: any) => ((writes.item = args), { count: 1 }) },
+    demandEvent: { create: async ({ data }: any) => ((writes.event = data), {}) },
+  });
+  const result = await caller().demand.cancelBooking({ offerId: 'offer-1' });
+  assert.equal(result.state, 'CANCELLED');
+  assert.deepEqual(writes.offer.data, { state: 'CANCELLED' });
+  assert.equal(writes.offer.where.state, 'ACCEPTED');
+  assert.deepEqual(writes.slot.data, { committed: { decrement: 1 } });
+  assert.deepEqual(writes.slot.where.committed, { gt: 0 });
+  assert.deepEqual(writes.demand.data, { state: 'WITHDRAWN' });
+  assert.deepEqual(writes.item, { where: { offerId: 'offer-1' }, data: { status: 'cancelled' } });
+  assert.equal(writes.event.kind, 'CANCELLED_BY_GUEST');
+});
+
+test('a paid, started, finished or someone elses booking is not cancelled here', async () => {
+  const offer = (row: unknown) => { (db as any).offer = { findFirst: async () => row, findUnique: async () => null }; };
+  (db as any).$transaction = async () => { throw new Error('must not write'); };
+  offer(null);
+  await assert.rejects(() => caller().demand.cancelBooking({ offerId: 'offer-9' }), { code: 'NOT_FOUND' });
+  offer(acceptedOffer({ payAt: 'bytspot' }));
+  await assert.rejects(() => caller().demand.cancelBooking({ offerId: 'offer-1' }), (err: any) => err.code === 'BAD_REQUEST' && /Contact Tribe & Spice/.test(err.message));
+  offer(acceptedOffer({ checkouts: [{ id: 'c1' }] }));
+  await assert.rejects(() => caller().demand.cancelBooking({ offerId: 'offer-1' }), { code: 'BAD_REQUEST' });
+  offer(acceptedOffer({ startsAt: new Date(Date.now() - 60_000) }));
+  await assert.rejects(() => caller().demand.cancelBooking({ offerId: 'offer-1' }), { code: 'CONFLICT' });
+  offer(acceptedOffer({ state: 'CANCELLED' }));
+  await assert.rejects(() => caller().demand.cancelBooking({ offerId: 'offer-1' }), { code: 'CONFLICT' });
+});

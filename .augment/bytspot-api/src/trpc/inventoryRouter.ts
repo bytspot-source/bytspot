@@ -1,6 +1,6 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
-import { inventoryInput, liveCardsAtVenue, liveInventory, venueInventoryInput } from '../vendor/inventory';
+import { inventoryInput, inventoryTypesInput, liveCard, liveCardsAtVenue, liveInventory, liveRequestTypes, venueInventoryInput } from '../vendor/inventory';
 import { openPatch } from '../vendor/patches';
 import { publicProcedure, rateLimitMiddleware, router } from './trpc';
 
@@ -13,6 +13,22 @@ export const inventoryRouter = router({
     .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'inventory-list' }))
     .input(inventoryInput)
     .query(({ input }) => liveInventory(input)),
+
+  /** Which kinds of Bytspot business take requests near a point, for a Plan's Request a booking. */
+  types: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'inventory-types' }))
+    .input(inventoryTypesInput)
+    .query(async ({ input }) => ({ types: await liveRequestTypes(input) })),
+
+  /** One offering, so a guest can change a request they sent it. */
+  window: publicProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 60, label: 'inventory-window' }))
+    .input(z.object({ windowId: z.string().trim().min(1).max(64) }))
+    .query(async ({ input }) => {
+      const card = await liveCard(input.windowId);
+      if (!card) throw new TRPCError({ code: 'NOT_FOUND', message: 'This is no longer taking requests.' });
+      return card;
+    }),
 
   /** What the businesses attached to one listed place offer, for its detail page. */
   atVenue: publicProcedure

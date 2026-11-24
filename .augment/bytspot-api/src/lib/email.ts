@@ -481,6 +481,8 @@ export interface VendorAskNotice {
   partySize: number;
   when: string;
   note?: string | null;
+  /** The guest changed a request they had already sent. */
+  changed?: boolean;
 }
 
 /**
@@ -497,16 +499,16 @@ export async function sendVendorAskEmail(to: string[], ask: VendorAskNotice): Pr
     await resend.emails.send({
       from: FROM,
       to,
-      subject: `New request: ${guests}, ${ask.when}`,
+      subject: `${ask.changed ? 'Request changed' : 'New request'}: ${guests}, ${ask.when}`,
       html: `
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
-          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">A guest is asking</h1>
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">${ask.changed ? 'A guest changed their request' : 'A guest is asking'}</h1>
           <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
             ${escapeHtml(ask.title)} at ${escapeHtml(ask.placeLabel)}: ${guests}, ${escapeHtml(ask.when)}.
           </p>
           ${ask.note ? `<p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 0 0 8px;">“${escapeHtml(ask.note)}”</p>` : ''}
           <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 0;">
-            Open your Bytspot business console to offer the time or pass. The request expires if nobody answers.
+            ${ask.changed ? 'Any offer you made on the old details was released. ' : ''}Open your Bytspot business console to offer the time or pass. The request expires if nobody answers.
           </p>
         </div>
       `,
@@ -552,6 +554,41 @@ export async function sendVendorBookedEmail(to: string[], booked: VendorBookedNo
     });
   } catch (err: any) {
     console.error('[email] sendVendorBookedEmail failed:', err?.message);
+  }
+}
+
+export interface VendorBookingCancelledNotice {
+  title: string;
+  placeLabel: string;
+  partySize: number;
+  when: string;
+}
+
+/** A guest cancelled a booking the seller had accepted. Logged, not thrown. */
+export async function sendVendorBookingCancelledEmail(to: string[], cancelled: VendorBookingCancelledNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend || to.length === 0) return;
+
+  const guests = `${cancelled.partySize} ${cancelled.partySize === 1 ? 'guest' : 'guests'}`;
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Cancelled: ${guests}, ${cancelled.when}`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+          <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">A guest cancelled</h1>
+          <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 8px;">
+            ${escapeHtml(cancelled.title)} at ${escapeHtml(cancelled.placeLabel)}: ${guests}, ${escapeHtml(cancelled.when)}.
+          </p>
+          <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 0;">
+            The time is open again and counts back toward the window's capacity. Their pass no longer works at the door.
+          </p>
+        </div>
+      `,
+    });
+  } catch (err: any) {
+    console.error('[email] sendVendorBookingCancelledEmail failed:', err?.message);
   }
 }
 

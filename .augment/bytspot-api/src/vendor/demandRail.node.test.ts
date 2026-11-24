@@ -12,7 +12,7 @@ import { buildDemandSnapshot, respondToDemand, NoCapacity, NotFound } from './de
 import { DEMAND_DEFAULTS } from './demand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 import { archivePatch, createPatch, listPatches } from './patches';
-import { liveCardsAt } from './inventory';
+import { liveCard, liveCardsAt, liveRequestTypes } from './inventory';
 import { setWindowWebsite } from './windows';
 
 /**
@@ -1360,6 +1360,50 @@ test('an ask from a Discover card can name a Plan, and the won table is filed in
       assert.equal(item?.planId, planId);
       assert.equal(item?.needKind, 'dining');
       assert.equal(item?.status, 'booked');
+    } finally {
+      await db.planItem.deleteMany({ where: { planId } });
+      await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });
+    }
+  });
+});
+
+test('a guest changes an unanswered ask, then cancels the won booking: the time goes back on sale and the Plan item is cancelled', async (t) => {
+  if (!reachable) return t.skip('no database');
+  const { resetLocalRateLimitForTests } = await import('../trpc/trpc');
+  resetLocalRateLimitForTests();
+
+  await onPrintedPreset(async () => {
+    const planId = await planWithDiningNeed();
+    try {
+      const card = await liveCard(ids.window);
+      assert.ok(card, 'the window is live');
+      const location = await db.vendorLocation.findUniqueOrThrow({ where: { id: ids.location }, select: { lat: true, lng: true } });
+      const types = await liveRequestTypes({ lat: location.lat, lng: location.lng, radiusMiles: 5 });
+      assert.ok(types.some((type) => type.domain === card!.domain && type.count >= 1));
+
+      const asked = await guest().demand.ask({ windowId: ids.window, partySize: 2, startsAt: new Date(card!.upcomingSlots[0].startsAt), planId });
+      const later = card!.upcomingSlots[1] ?? card!.upcomingSlots[0];
+      await guest().demand.change({ demandId: asked.id, partySize: 3, startsAt: new Date(later.startsAt), note: 'Booth please' });
+      const changed = await db.demand.findUniqueOrThrow({ where: { id: asked.id } });
+      assert.equal(changed.partySize, 3);
+      assert.equal(changed.earliest.toISOString(), new Date(later.startsAt).toISOString());
+
+      await buildDemandSnapshot(ids.seller, (await seat()).locations, new Date());
+      await respondToDemand(await seat(), asked.id, { operation: 'OFFER', bookableId: ids.window });
+      const offer = await db.offer.findFirstOrThrow({ where: { demandId: asked.id, state: 'OFFERED' } });
+      await acceptOffer({ offerId: offer.id, userId: ids.user });
+      const committed = async () => (await db.vendorSlotCommitment.findUnique({ where: { windowId_startsAt: { windowId: ids.window, startsAt: offer.startsAt } } }))?.committed ?? 0;
+      const held = await committed();
+
+      const plan = await guest().plans.get({ planId });
+      assert.equal((plan as any).items.find((item: any) => item.offerId === offer.id)?.status, 'booked');
+
+      await guest().demand.cancelBooking({ offerId: offer.id });
+      assert.equal((await db.offer.findUniqueOrThrow({ where: { id: offer.id } })).state, 'CANCELLED');
+      assert.equal(await committed(), held - 1);
+      assert.equal((await db.planItem.findUniqueOrThrow({ where: { offerId: offer.id } })).status, 'cancelled');
+      assert.equal((await db.demand.findUniqueOrThrow({ where: { id: asked.id } })).state, 'WITHDRAWN');
+      await assert.rejects(() => guest().demand.cancelBooking({ offerId: offer.id }), { code: 'CONFLICT' });
     } finally {
       await db.planItem.deleteMany({ where: { planId } });
       await db.demand.deleteMany({ where: { raisedByUserId: ids.user } });

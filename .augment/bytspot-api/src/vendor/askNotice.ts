@@ -1,5 +1,5 @@
 import { db } from '../lib/db';
-import { sendVendorAskEmail, sendVendorBookedEmail } from '../lib/email';
+import { sendVendorAskEmail, sendVendorBookedEmail, sendVendorBookingCancelledEmail } from '../lib/email';
 import { deliverPushNotification } from '../services/notificationDelivery';
 import { priceLabel } from '../services/offerNotifications';
 import { windowTemplate } from './windows';
@@ -41,6 +41,7 @@ export function formatAskWhen(startsAt: Date, timeZone: string | null): string {
 export async function notifyAskSeller(
   windowId: string,
   ask: { partySize: number; startsAt: Date; note?: string | null },
+  options: { changed?: boolean } = {},
 ): Promise<void> {
   try {
     const window = await db.vendorAvailabilityWindow.findUnique({
@@ -66,13 +67,13 @@ export async function notifyAskSeller(
     const when = formatAskWhen(ask.startsAt, window.location.timezone);
     const guests = `${ask.partySize} ${ask.partySize === 1 ? 'guest' : 'guests'}`;
     await Promise.all([
-      sendVendorAskEmail(to, { title, placeLabel: window.location.label, partySize: ask.partySize, when, note: ask.note }),
+      sendVendorAskEmail(to, { title, placeLabel: window.location.label, partySize: ask.partySize, when, note: ask.note, changed: options.changed }),
       // A seat is a Bytspot account, so an owner with the app installed hears
       // about it on their phone as well as in their inbox.
       deliverPushNotification({
         userIds: askNoticeSeatUserIds(window.seller.seats),
         category: 'reservations',
-        title: `New request at ${window.location.label}`,
+        title: options.changed ? `Request changed at ${window.location.label}` : `New request at ${window.location.label}`,
         body: `${guests}, ${when} · ${title}. Answer it in your business console.`,
         url: 'https://bytspot.app/discover',
         type: 'vendor-ask',
@@ -127,5 +128,48 @@ export async function notifyOfferAcceptedSeller(offerId: string, paid?: { seller
     ]);
   } catch (err: any) {
     console.error('[vendor] booked notice failed:', err?.message);
+  }
+}
+
+/** Tell a seller a guest cancelled a booking they had accepted. Never throws. */
+export async function notifyBookingCancelledSeller(offerId: string): Promise<void> {
+  try {
+    const offer = await db.offer.findUnique({
+      where: { id: offerId },
+      select: {
+        startsAt: true,
+        demand: { select: { partySize: true } },
+        location: { select: { label: true, timezone: true } },
+        window: { select: { skuTemplateId: true, title: true } },
+        seller: {
+          select: {
+            contactEmail: true,
+            seats: { select: { role: true, state: true, userId: true, user: { select: { email: true } } } },
+          },
+        },
+      },
+    });
+    if (!offer) return;
+    const to = askNoticeRecipients(
+      offer.seller.contactEmail,
+      offer.seller.seats.map((seat) => ({ role: seat.role, state: seat.state, email: seat.user.email })),
+    );
+    const title = (offer.window && windowTemplate(offer.window)?.title) || 'Your listing';
+    const when = formatAskWhen(offer.startsAt, offer.location.timezone);
+    const partySize = offer.demand.partySize;
+    const guests = `${partySize} ${partySize === 1 ? 'guest' : 'guests'}`;
+    await Promise.all([
+      sendVendorBookingCancelledEmail(to, { title, placeLabel: offer.location.label, partySize, when }),
+      deliverPushNotification({
+        userIds: askNoticeSeatUserIds(offer.seller.seats),
+        category: 'reservations',
+        title: `Cancelled at ${offer.location.label}`,
+        body: `${guests}, ${when} · ${title}. The guest cancelled; the time is open again.`,
+        url: 'https://bytspot.app/discover',
+        type: 'vendor-booking-cancelled',
+      }),
+    ]);
+  } catch (err: any) {
+    console.error('[vendor] cancelled notice failed:', err?.message);
   }
 }

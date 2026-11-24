@@ -8,7 +8,7 @@ import { sellableSlots } from '../vendor/availability';
 import { constraintsFromPlan, needKindForDemandCategory, refusalMessage, type DemandEnvelope } from '../vendor/planDemand';
 import { openNeeds } from './planRouter';
 import { acceptOffer, NotYours, OfferExpired, OfferGone, SlotTaken } from '../vendor/acceptOffer';
-import { notifyAskSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
+import { notifyAskSeller, notifyBookingCancelledSeller, notifyOfferAcceptedSeller } from '../vendor/askNotice';
 import { patchForAsk } from '../vendor/patches';
 
 /**
@@ -126,6 +126,19 @@ async function raiseDemand(
 
 /** How long past the chosen slot a seller may still offer, before the contract's flexibility. */
 const ASK_SPAN_MINS = 15;
+
+/** The slot a window can sell to this party at `startsAt` right now, or a refusal. */
+async function askableSlot(window: { id: string; sellerId: string; domain: string }, partySize: number, startsAt: Date, now: Date) {
+  const { supply } = await supplyFor(window.sellerId, now);
+  const own = supply.find((item) => item.windowId === window.id);
+  const slot = sellableSlots(own?.slots ?? [], window.domain, now).find(
+    (candidate) => candidate.startsAt.getTime() === startsAt.getTime(),
+  );
+  if (!slot || slot.startsAt <= now || slot.remaining < partySize) {
+    throw new TRPCError({ code: 'CONFLICT', message: 'That time just went. Pick another.' });
+  }
+  return slot;
+}
 
 
 /**
@@ -258,14 +271,7 @@ export const demandRouter = router({
         }
       }
 
-      const { supply } = await supplyFor(window.sellerId, now);
-      const own = supply.find((item) => item.windowId === window.id);
-      const slot = sellableSlots(own?.slots ?? [], window.domain, now).find(
-        (candidate) => candidate.startsAt.getTime() === input.startsAt.getTime(),
-      );
-      if (!slot || slot.startsAt <= now || slot.remaining < input.partySize) {
-        throw new TRPCError({ code: 'CONFLICT', message: 'That time just went. Pick another.' });
-      }
+      const slot = await askableSlot(window, input.partySize, input.startsAt, now);
 
       const already = await db.demand.findFirst({
         where: {
@@ -566,5 +572,112 @@ export const demandRouter = router({
       if (!moved) throw new TRPCError({ code: 'CONFLICT', message: 'That request has already finished.' });
 
       return { id: demand.id, state: 'WITHDRAWN' };
+    }),
+
+  /**
+   * Change a request one business has not accepted yet: the time, the group
+   * size or the note. The same request, so it keeps its place and the guest's
+   * open-request count; any offers already made were for the old details, so
+   * they are released and the business is told it changed.
+   */
+  change: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 40, label: 'demand-change' }))
+    .input(z.object({
+      demandId: z.string().trim().min(1).max(64),
+      partySize: z.number().int().min(1).max(DEMAND_DEFAULTS.maxPartySize),
+      startsAt: z.coerce.date(),
+      note: z.string().trim().max(280).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+      const demand = await db.demand.findFirst({
+        where: { id: input.demandId, raisedByUserId: ctx.user.userId },
+        select: { id: true, state: true, expiresAt: true, targetWindowId: true },
+      });
+      if (!demand) throw new TRPCError({ code: 'NOT_FOUND', message: 'Request not found.' });
+      if (!LIVE_STATES.includes(demand.state) || demand.expiresAt <= now) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'That request has already finished.' });
+      }
+      // A request to every matching business is shaped by its Plan, not edited here.
+      if (!demand.targetWindowId) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only a request to one business can be changed. Cancel it and ask again.' });
+      }
+      const window = await db.vendorAvailabilityWindow.findFirst({
+        where: { id: demand.targetWindowId, active: true, intent: ASK_INTENT, location: { state: 'ACTIVE' }, seller: { state: 'ACTIVE' } },
+        select: { id: true, sellerId: true, domain: true, maxGuests: true },
+      });
+      if (!window) throw new TRPCError({ code: 'NOT_FOUND', message: 'This is no longer taking requests.' });
+      if (input.partySize > window.maxGuests) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: `This takes up to ${window.maxGuests} guests.` });
+      }
+      const slot = await askableSlot(window, input.partySize, input.startsAt, now);
+      const latest = new Date(slot.startsAt.getTime() + ASK_SPAN_MINS * 60_000);
+      const contractExpiry = new Date(now.getTime() + DEMAND_DEFAULTS.expiryMins * 60_000);
+      const expiresAt = contractExpiry < latest ? contractExpiry : latest;
+
+      const changed = await db.$transaction(async (tx) => {
+        // Guarded on the state that was read, so a change racing an acceptance cannot undo the booking.
+        const moved = await tx.demand.updateMany({
+          where: { id: demand.id, state: demand.state },
+          data: { state: 'OPEN', partySize: input.partySize, earliest: slot.startsAt, latest, note: input.note || null, expiresAt },
+        });
+        if (moved.count === 0) return false;
+        await tx.offer.updateMany({ where: { demandId: demand.id, state: 'OFFERED' }, data: { state: 'WITHDRAWN' } });
+        await tx.demandEvent.create({ data: { demandId: demand.id, kind: 'CHANGED', detail: { partySize: input.partySize, startsAt: slot.startsAt.toISOString() } } });
+        return true;
+      });
+      if (!changed) throw new TRPCError({ code: 'CONFLICT', message: 'That request has already finished.' });
+
+      void notifyAskSeller(window.id, { partySize: input.partySize, startsAt: slot.startsAt, note: input.note }, { changed: true });
+      return { id: demand.id, state: 'OPEN', expiresAt: expiresAt.toISOString() };
+    }),
+
+  /**
+   * Cancel a booking a business accepted, when it is paid at the venue and has
+   * not started. The time goes back on sale, the pass stops working at the
+   * door, the Plan item is cancelled and the business is told. A booking paid
+   * in Bytspot is refused: refunds are not handled here.
+   */
+  cancelBooking: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 20, label: 'demand-cancel-booking' }))
+    .input(z.object({ offerId: z.string().trim().min(1).max(64) }))
+    .mutation(async ({ ctx, input }) => {
+      const now = new Date();
+      const offer = await db.offer.findFirst({
+        where: { id: input.offerId, demand: { raisedByUserId: ctx.user.userId } },
+        select: {
+          id: true, state: true, payAt: true, startsAt: true, windowId: true, demandId: true, checkedInAt: true,
+          location: { select: { label: true } },
+          checkouts: { where: { status: { in: ['creating', 'pending', 'settling', 'completed'] } }, select: { id: true }, take: 1 },
+        },
+      });
+      // Someone else's booking is indistinguishable from one that does not exist.
+      if (!offer) throw new TRPCError({ code: 'NOT_FOUND', message: 'Booking not found.' });
+      if (offer.state !== 'ACCEPTED') throw new TRPCError({ code: 'CONFLICT', message: 'That booking is no longer active.' });
+      if (offer.checkedInAt || offer.startsAt <= now) {
+        throw new TRPCError({ code: 'CONFLICT', message: 'This booking has already started, so it cannot be cancelled here.' });
+      }
+      if (offer.payAt === 'bytspot' || offer.checkouts.length > 0) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: `This booking was paid in Bytspot. Contact ${offer.location.label} to cancel it.` });
+      }
+
+      const cancelled = await db.$transaction(async (tx) => {
+        const moved = await tx.offer.updateMany({ where: { id: offer.id, state: 'ACCEPTED', checkedInAt: null }, data: { state: 'CANCELLED' } });
+        if (moved.count === 0) return false;
+        if (offer.windowId) {
+          await tx.vendorSlotCommitment.updateMany({
+            where: { windowId: offer.windowId, startsAt: offer.startsAt, committed: { gt: 0 } },
+            data: { committed: { decrement: 1 } },
+          });
+        }
+        await tx.demand.updateMany({ where: { id: offer.demandId, state: 'BOOKED' }, data: { state: 'WITHDRAWN' } });
+        await tx.planItem.updateMany({ where: { offerId: offer.id }, data: { status: 'cancelled' } });
+        await tx.demandEvent.create({ data: { demandId: offer.demandId, offerId: offer.id, kind: 'CANCELLED_BY_GUEST' } });
+        return true;
+      });
+      if (!cancelled) throw new TRPCError({ code: 'CONFLICT', message: 'That booking is no longer active.' });
+
+      void notifyBookingCancelledSeller(offer.id);
+      return { offerId: offer.id, state: 'CANCELLED' as const };
     }),
 });

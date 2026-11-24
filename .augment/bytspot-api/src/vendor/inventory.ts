@@ -226,6 +226,49 @@ export async function liveInventory(input: InventoryInput, now: Date = new Date(
     .slice(0, input.limit);
 }
 
+/** The kinds of business a Plan can file a booking under. Same pairs as planDemand's CATEGORY_FOR_NEED. */
+export const PLAN_REQUEST_DOMAINS = ['coffee', 'dining', 'nightlife', 'shopping', 'fitness', 'events', 'stay'] as const;
+
+export const inventoryTypesInput = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  radiusMiles: z.number().min(0.5).max(50).default(25),
+});
+
+/**
+ * The kinds of business that take requests near a point, with how many live
+ * Bytspot offerings each has. Only kinds a Plan can hold, and only offerings
+ * with a time a guest could ask for now.
+ */
+export async function liveRequestTypes(input: z.infer<typeof inventoryTypesInput>, now: Date = new Date()): Promise<{ domain: string; count: number }[]> {
+  const box = boundingBox(input.lat, input.lng, input.radiusMiles);
+  const windows = await db.vendorAvailabilityWindow.findMany({
+    where: {
+      ...LIVE_WINDOW,
+      intent: 'request',
+      domain: { in: [...PLAN_REQUEST_DOMAINS] },
+      location: { state: 'ACTIVE', lat: { gte: box.minLat, lte: box.maxLat }, lng: { gte: box.minLng, lte: box.maxLng } },
+    },
+    include: CARD_INCLUDE,
+    take: 200,
+  });
+  const cards = (await toCards(windows, now, { lat: input.lat, lng: input.lng }))
+    .filter((card) => card.distanceMiles <= input.radiusMiles);
+  const counts = new Map<string, number>();
+  for (const card of cards) counts.set(card.domain, (counts.get(card.domain) ?? 0) + 1);
+  return PLAN_REQUEST_DOMAINS.filter((domain) => counts.has(domain)).map((domain) => ({ domain, count: counts.get(domain)! }));
+}
+
+/** One live offering's card, or null when it no longer takes requests. */
+export async function liveCard(windowId: string, now: Date = new Date()): Promise<InventoryCard | null> {
+  const windows = await db.vendorAvailabilityWindow.findMany({
+    where: { ...LIVE_WINDOW, id: windowId },
+    include: CARD_INCLUDE,
+    take: 1,
+  });
+  return (await toCards(windows, now))[0] ?? null;
+}
+
 /** Every sellable card at one place, soonest first. */
 export async function liveCardsAt(locationId: string, now: Date = new Date()): Promise<InventoryCard[]> {
   const windows = await db.vendorAvailabilityWindow.findMany({

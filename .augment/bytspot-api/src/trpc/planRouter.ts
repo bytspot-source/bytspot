@@ -448,6 +448,8 @@ function serializePlan(plan: LoadedPlan, now: Date, viewerUserId: string,
       // so a pulled link leaves every Plan at once.
       tableBooking: tableBookingLinkFor(item.placeId),
       placeId: item.placeId ?? null,
+      /** The accepted Bytspot offer behind a booked item, so the guest can cancel it. */
+      offerId: item.offerId ?? null,
       // The guest's own word that they booked it there. Deliberately apart from
       // `booked`, which only ever reflects supply Bytspot settled.
       guestBooking: item.guestBookedAt ? { reportedAt: item.guestBookedAt, bookedFor: item.guestBookedFor } : null,

@@ -4,7 +4,7 @@ import { MENU_REVIEW_MS, type MenuEvidenceResult } from './menuEvidence';
 import test from 'node:test';
 import {
   conciergeDiscoverInput, conciergeDiscoverOutput, conciergeSearchSchema, createConciergeDiscovery,
-  CONCIERGE_WHERE_REPLY, conciergeActionRequest, launchMarketPlanPoint, normalizeConciergeStarter, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput, type Coordinate,
+  CONCIERGE_MAX_RADIUS, CONCIERGE_WIDEN_STEPS, CONCIERGE_WHERE_REPLY, conciergeActionRequest, distanceRequest, milesLabel, launchMarketPlanPoint, normalizeConciergeStarter, planArea, planConcierge, proposedPlanNeeds, withDeadline, withinSearch, type ConciergeDependencies, type ConciergeInput, type Coordinate,
 } from './conciergeDiscovery';
 import { LAUNCH_MARKET } from '../bytt-si/suggestions/area';
 import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTaxonomy';
@@ -155,7 +155,8 @@ test('explicit and implicit cities fail closed, without assuming GPS is that cit
   assert.equal((await discover(input('coffee in Boston', 'closer'))).status, 'needs_location');
   assert.equal(calls, 0);
   await discover(input('coffee in Boston', 'Use my current location'));
-  assert.equal(calls, 2);
+  // Nothing found at the guest's location, so it widened step by step to the limit.
+  assert.equal(calls, 2 * (1 + CONCIERGE_WIDEN_STEPS.length));
 });
 
 test('history refinements retain cuisine/name intent and shrink a bounded radius', () => {
@@ -214,7 +215,7 @@ test('unsupported quoted names clarify instead of throwing or calling dependenci
 test('search schema rejects model-shaped IDs, unsupported rails and unrestricted radius/query', () => {
   const search = planConcierge(input('coffee')).search;
   for (const bad of [
-    { ...search, radius: 5001 }, { ...search, radius: Infinity }, { ...search, radius: 0 },
+    { ...search, radius: CONCIERGE_MAX_RADIUS + 1 }, { ...search, radius: Infinity }, { ...search, radius: 0 },
     { ...search, rail: 'admin' }, { ...search, query: 'x'.repeat(121) },
     { ...search, query: 'https://untrusted.invalid' }, { ...search, ids: ['fake'] },
   ]) assert.equal(conciergeSearchSchema.safeParse(bad).success, false);
@@ -312,7 +313,7 @@ test('ordinary dishes, free text and functional starters work without a planner'
     assert.equal(response.status, 'ready');
     if (/dumplings|khachapuri/.test(text)) assert.match(response.reply, /No reviewed menu match was confirmed/);
     if (/plan/.test(text)) assert.match(response.reply, /first stop.*add a place to one of your Plans; Concierge does not make bookings/);
-    assert.deepEqual(response.refinements, ['Closer', 'Coffee nearby', 'Restaurants nearby']);
+    assert.deepEqual(response.refinements, ['Closer', 'Within 3 miles', 'Coffee nearby', 'Restaurants nearby']);
   }
 });
 
@@ -890,7 +891,7 @@ test('a single search in a named place near the guest is searched there', async 
   assert.equal(response.status, 'ready');
   assert.deepEqual(searched, [nearby]);
   assert.match(response.reply, /near Midtown, as Google places it/);
-  assert.match(response.cards[0].reasons[0], /m from Midtown \(straight-line\)$/);
+  assert.match(response.cards[0].reasons[0], /^0\.1 mi from Midtown \(straight-line\)$/);
 });
 
 test('a Plan for another city carries the zone that city keeps; a failed lookup leaves it null', async () => {
@@ -1042,4 +1043,60 @@ test('planArea reads the named area and ignores times, near me and bare at', () 
   assert.equal(planArea(['dinner in an hour and drinks']), null);
   assert.equal(planArea(['dinner and drinks near me']), null);
   assert.equal(planArea(['dinner and drinks at 7']), null);
+});
+
+test('distance words set how far Concierge looks, up to 25 miles', () => {
+  assert.deepEqual(distanceRequest('coffee within 10 miles', 2000), { radius: 16093, fixed: true, rest: 'coffee' });
+  assert.equal(distanceRequest('sushi 5 km away', 2000)?.radius, 5000);
+  assert.equal(distanceRequest('steak within 100 miles', 2000)?.radius, CONCIERGE_MAX_RADIUS);
+  assert.deepEqual(distanceRequest("bbq worth a drive", 2000), { radius: 15_000, fixed: false, rest: 'bbq' });
+  assert.equal(distanceRequest('look further', 5000)?.radius, 15_000);
+  assert.equal(distanceRequest('coffee', 2000), null);
+  assert.equal(distanceRequest('table for 2', 2000), null);
+  assert.equal(milesLabel(804.672), '0.5 mi');
+  assert.equal(milesLabel(40_000), '25 mi');
+});
+
+test('a named distance is searched as asked and never widened past it', async () => {
+  const radii: number[] = [];
+  const discover = service({ places: async (search) => { radii.push(search.radius); return { places: [], source: 'google' }; } });
+  const response = await discover(input('find tacos within 3 miles'));
+  assert.deepEqual(radii, [4828]);
+  assert.equal(response.status, 'empty');
+  assert.match(response.reply, /within 3 mi of your supplied location/);
+  assert.ok(response.refinements.includes('Within 9 miles'));
+  radii.length = 0;
+  await discover(input('find tacos', 'within 20 miles'));
+  assert.deepEqual(radii, [32_187]);
+});
+
+test('nothing nearby widens step by step and says how far it looked', async () => {
+  const far = { lat: HERE.lat + 0.1, lng: HERE.lng }; // about 7 miles
+  const radii: number[] = [];
+  const response = await service({ places: async (search) => {
+    radii.push(search.radius);
+    return { places: [place({ name: 'Far Coffee', lat: far.lat, lng: far.lng })], source: 'google' };
+  } })(input('coffee'));
+  assert.deepEqual(radii, [2000, 5000, 15_000]);
+  assert.equal(response.status, 'ready');
+  assert.match(response.reply, /^Nothing matched within 1\.2 mi of your supplied location, so I looked up to 9\.3 mi away\./);
+  assert.match(response.cards[0].reasons[0], /^6\.9 mi away \(straight-line\)$/);
+  assert.ok(response.refinements.includes('Within 25 miles'));
+});
+
+test('closer and a failed search never widen', async () => {
+  const radii: number[] = [];
+  await service({ places: async (search) => { radii.push(search.radius); return { places: [], source: 'google' }; } })(input('coffee', 'closer'));
+  assert.deepEqual(radii, [800]);
+  radii.length = 0;
+  await service({ places: async (search) => { radii.push(search.radius); return { places: [], source: 'unavailable' }; } })(input('coffee'));
+  assert.deepEqual(radii, [2000]);
+});
+
+test('more ways of naming a place are understood', () => {
+  assert.equal(planArea(['dinner close to Stone Mountain']), 'Stone Mountain');
+  assert.equal(planArea(['coffee out in Alpharetta']), 'Alpharetta');
+  assert.equal(planArea(['brunch next to Piedmont Park']), 'Piedmont Park');
+  assert.equal(planArea(['tacos 30309']), '30309');
+  assert.equal(planArea(['coffee within 10 miles']), null);
 });

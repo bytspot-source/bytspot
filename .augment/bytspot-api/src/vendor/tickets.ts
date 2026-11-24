@@ -11,6 +11,7 @@ import { zonedInstant } from './availability';
 import { newPassCode } from './bookings';
 import { stripeHandle } from './payout';
 import { paidCheckoutBlockReason } from '../lib/paidCheckout';
+import { refundableUntil } from '../lib/refundWindow';
 
 /**
  * Tickets a business sells itself, one date at a time: its Sunday special on
@@ -514,6 +515,8 @@ export interface MyTicketDto {
   /** The code shown at the door. Present once paid. */
   pass?: string;
   checkedIn: boolean;
+  /** The guest can cancel for a full refund until this instant. Absent when they cannot. */
+  refundableUntil?: string;
 }
 
 /** A guest's tickets: upcoming and the last 30 days, soonest first. */
@@ -551,5 +554,7 @@ export async function myTickets(userId: string, now: Date = new Date()): Promise
       refundReason: row.status === 'refunded' ? (row.refundReason ?? undefined) : undefined,
       pass: row.status === 'completed' ? (row.passCode ?? undefined) : undefined,
       checkedIn: !!row.checkedInAt,
+      refundableUntil: row.status === 'completed' && !row.checkedInAt && refundableUntil(row.ticket.startsAt) > now
+        ? refundableUntil(row.ticket.startsAt).toISOString() : undefined,
     }));
 }

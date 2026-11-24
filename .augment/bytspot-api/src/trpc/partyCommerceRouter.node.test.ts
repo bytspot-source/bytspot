@@ -65,7 +65,7 @@ test('purchases retain pending, paid, expired and refund states without promotin
     query = input;
     return statuses.map((status, i) => ({ id: `purchase-${i}`, status, idempotencyKey: '00000000-0000-4000-8000-000000000001', ticketTierName: null,
       amountCents: 5000, sessionAmountCents: 5000, currency: 'usd', reservationExpiresAt: date,
-      completedAt: status === 'completed' ? date : null, createdAt: date, party, session }));
+      completedAt: status === 'completed' ? date : null, createdAt: date, party: { ...party, cancelledAt: null }, session, guest: { checkedInAt: null } }));
   };
   const result = await signedIn().events.commerce.mine({ kind: 'purchases' });
   assert.deepEqual(query.where, { userId: 'commerce-a' });
@@ -78,6 +78,26 @@ test('purchases retain pending, paid, expired and refund states without promotin
   assert.equal(result.purchases?.[2].session?.withdrawn, true);
   assert.equal('accessGranted' in (result.purchases?.[2] ?? {}), false);
   assert.equal(result.nextCursor, null);
+  assert.ok(result.purchases?.every((p) => p.refundableUntil === null), 'a party that has started is not refundable');
+});
+
+test('a paid purchase says until when it can be cancelled for a refund: 24 hours before the party', async () => {
+  const startsAt = new Date(Date.now() + 3 * 86_400_000);
+  const row = (over: Record<string, unknown>) => ({ id: 'p', status: 'completed', idempotencyKey: '00000000-0000-4000-8000-000000000001', ticketTierName: 'Door',
+    amountCents: 2000, sessionAmountCents: 0, currency: 'usd', reservationExpiresAt: date, completedAt: date, createdAt: date,
+    party: { ...party, startsAt, closedAt: null, cancelledAt: null }, session: null, guest: { checkedInAt: null }, ...over });
+  checkouts.findMany = async () => [
+    row({ id: 'paid' }),
+    row({ id: 'pending', status: 'pending' }),
+    row({ id: 'in', guest: { checkedInAt: date } }),
+    row({ id: 'soon', party: { ...party, startsAt: new Date(Date.now() + 23 * 3_600_000), closedAt: null, cancelledAt: null } }),
+  ];
+  const result = await signedIn().events.commerce.mine({ kind: 'purchases' });
+  const until = Object.fromEntries((result.purchases ?? []).map((p) => [p.id, p.refundableUntil]));
+  assert.equal(until.paid, new Date(startsAt.getTime() - 86_400_000).toISOString());
+  assert.equal(until.pending, null);
+  assert.equal(until.in, null);
+  assert.equal(until.soon, null);
 });
 
 test('claims remain independently retrievable including released and withdrawn sessions', async () => {

@@ -20,7 +20,7 @@ const procedures = appRouter._def.procedures as unknown as Record<string, Proced
 test('Party commerce, performers and authoring are mounted without replacing legacy session reads', () => {
   for (const path of [
     'events.sessions.list', 'events.sessionAuthoring.access', 'events.sessionAuthoring.list',
-    'events.sessionAuthoring.upsert', 'events.sessionAuthoring.withdraw', 'events.commerce.mine',
+    'events.sessionAuthoring.upsert', 'events.sessionAuthoring.withdraw', 'events.commerce.mine', 'events.commerce.cancelPurchase',
     'events.requests.eligibility', 'events.requests.send', 'events.requests.mine', 'events.requests.inbox',
     'events.requests.decide', 'events.requests.screen',
   ]) assert.ok(procedures[path], `Missing procedure: ${path}`);

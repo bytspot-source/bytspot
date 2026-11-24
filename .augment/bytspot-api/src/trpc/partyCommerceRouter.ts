@@ -1,9 +1,13 @@
 import { z } from 'zod';
 import { db } from '../lib/db';
+import { TRPCError } from '@trpc/server';
 import { protectedProcedure, rateLimitMiddleware, router } from './trpc';
+import { refundableUntil } from '../lib/refundWindow';
+import { cancelPartyPurchase, GuestRefundRefused } from '../services/guestRefunds';
 
 // A receipt is not admission. No credentials, checkout URLs, payment-provider
-// identifiers, seller payouts or private locations leave this read-only router.
+// identifiers, seller payouts or private locations leave this router. Its one
+// write is a guest cancelling their own paid purchase for a refund.
 const partySelect = {
   id: true, title: true, startsAt: true, endsAt: true, closedAt: true,
 } as const;
@@ -82,8 +86,8 @@ export const partyCommerceRouter = router({
           select: {
             id: true, status: true, idempotencyKey: true, ticketTierName: true, amountCents: true,
             sessionAmountCents: true, currency: true, reservationExpiresAt: true,
-            completedAt: true, createdAt: true, party: { select: partySelect },
-            session: { select: sessionSelect },
+            completedAt: true, createdAt: true, party: { select: { ...partySelect, cancelledAt: true } },
+            session: { select: sessionSelect }, guest: { select: { checkedInAt: true } },
           },
         });
         const kept = rows.slice(0, input.limit);
@@ -96,6 +100,8 @@ export const partyCommerceRouter = router({
             reservationElapsed: row.reservationExpiresAt <= now,
             completedAt: row.completedAt?.toISOString() ?? null, createdAt: row.createdAt.toISOString(),
             party: partyView(row.party, now), session: row.session ? sessionView(row.session) : null,
+            refundableUntil: row.status === 'completed' && !row.guest.checkedInAt && !row.party.cancelledAt
+              && refundableUntil(row.party.startsAt) > now ? refundableUntil(row.party.startsAt).toISOString() : null,
           })),
           nextCursor: rows.length > input.limit ? kept[kept.length - 1].id : null,
         };
@@ -113,5 +119,18 @@ export const partyCommerceRouter = router({
         })),
         nextCursor: rows.length > input.limit ? kept[kept.length - 1].id : null,
       };
+    }),
+
+  /** Cancel a paid admission or table for a full refund, up to 24 hours before the party starts. */
+  cancelPurchase: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 20, label: 'party-cancel-purchase' }))
+    .input(z.object({ checkoutId: z.string().min(1).max(128) }).strict())
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await cancelPartyPurchase(ctx.user.userId, input.checkoutId);
+      } catch (error) {
+        if (error instanceof GuestRefundRefused) throw new TRPCError({ code: error.code, message: error.message });
+        throw error;
+      }
     }),
 });

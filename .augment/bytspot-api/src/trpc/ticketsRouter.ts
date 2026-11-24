@@ -2,6 +2,7 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { protectedProcedure, publicProcedure, rateLimitMiddleware, router } from './trpc';
 import { guestTicket, myTickets, PaymentsUnavailable, startTicketCheckout, TicketRefused } from '../vendor/tickets';
+import { cancelTicketOrder, GuestRefundRefused } from '../services/guestRefunds';
 
 /** A business's own dated tickets, as guests open, buy and hold them. */
 export const ticketsRouter = router({
@@ -31,4 +32,17 @@ export const ticketsRouter = router({
     }),
 
   mine: protectedProcedure.query(({ ctx }) => myTickets(ctx.user.userId)),
+
+  /** Cancel a paid ticket for a full refund, up to 24 hours before it starts. */
+  cancel: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60 * 60 * 1000, max: 20, label: 'tickets-cancel' }))
+    .input(z.object({ orderId: z.string().trim().min(1).max(64) }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await cancelTicketOrder(ctx.user.userId, input.orderId);
+      } catch (error) {
+        if (error instanceof GuestRefundRefused) throw new TRPCError({ code: error.code, message: error.message });
+        throw error;
+      }
+    }),
 });

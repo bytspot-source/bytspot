@@ -8,6 +8,7 @@
  */
 import { db } from '../lib/db';
 import { activeDayOf } from './activity';
+import { homeTapCounts, type HomeBlock } from './homeTaps';
 
 export const GROWTH_WEEKS = 8;
 
@@ -42,6 +43,8 @@ export interface GrowthWeek {
   shareViews: number;
   bookingTaps: number;
   checkIns: number;
+  /** Taps on each block of the app's Home screen. */
+  homeTaps: Record<HomeBlock, number>;
 }
 
 export interface RetentionCohort {
@@ -135,9 +138,10 @@ async function countWeek(start: Date, end: Date): Promise<GrowthWeek> {
     db.bookingLinkTap.count({ where: { createdAt: inWeek } }),
     db.checkIn.count({ where: { createdAt: inWeek, proof: { not: 'self_reported' } } }),
   ]);
+  const homeTaps = await homeTapCounts(start, end);
   return {
     weekStart: activeDayOf(start), activeUsers: active[0]?.n ?? 0, newUsers, newFromInvites: invited[0]?.n ?? 0,
-    plansCreated, plansWithFriends, planJoins, partyJoins, shareViews, bookingTaps, checkIns,
+    plansCreated, plansWithFriends, planJoins, partyJoins, shareViews, bookingTaps, checkIns, homeTaps,
   };
 }
 

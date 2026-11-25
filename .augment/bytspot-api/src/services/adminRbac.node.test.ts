@@ -394,3 +394,78 @@ test('the verified email links to the vendor console', () => {
   assert.equal(vendorConsoleOrigin(['https://bytspot.app', 'https://vendor.bytspot.app']), 'https://vendor.bytspot.app');
   assert.equal(vendorConsoleOrigin(['http://localhost:5173']), 'https://vendor.bytspot.app');
 });
+
+const manualPlace = {
+  name: 'TryBuzzCall', address: '8735 Dunwoody Place #13893, Atlanta, GA 30350', website: 'https://trybuzzcall.com/',
+  category: 'service' as const, online: true, note: 'Georgia SOS registration active; website live; owner confirmed by phone.', verified: true as const,
+};
+
+test('only an admin can list a place by hand', async () => {
+  await withAdmin(async () => {
+    await assert.rejects(() => guestCaller().admin.places.saveManual(manualPlace), { code: 'FORBIDDEN' });
+  });
+});
+
+test('a place Google cannot find is listed by hand with the note, the admin and no map point when online', async () => {
+  await withAdmin(async () => {
+    const seen: { data?: any } = {};
+    const raw: unknown[] = [];
+    const { geocodeFetch } = await import('../vendor/geocode');
+    const restores = [
+      stub(config, 'googlePlacesApiKey', 'test-key'),
+      stub(geocodeFetch, 'call', async () => new Response(JSON.stringify({ places: [
+        { formattedAddress: '8735 Dunwoody Pl, Atlanta, GA 30350, USA', location: { latitude: 33.9959, longitude: -84.3489 }, types: ['premise'] },
+      ] }), { status: 200 })),
+      stub(db.venue, 'findFirst', async () => null),
+      stub(db.venue, 'create', async ({ data }: any) => { seen.data = data; return { id: 'ven_buzz' }; }),
+      stub(db, '$executeRawUnsafe', async (...args: unknown[]) => { raw.push(args); return 1; }),
+    ];
+    try {
+      await assert.rejects(() => adminCaller().admin.places.saveManual({ ...manualPlace, note: 'ok' }), { code: 'BAD_REQUEST' });
+      await assert.rejects(() => adminCaller().admin.places.saveManual({ ...manualPlace, website: 'http://trybuzzcall.com' }), { code: 'BAD_REQUEST' });
+      await assert.rejects(() => adminCaller().admin.places.saveManual({ ...manualPlace, verified: false } as never), { code: 'BAD_REQUEST' });
+      assert.ok(!('data' in seen), 'nothing is created for a refused listing');
+
+      const saved = await adminCaller().admin.places.saveManual(manualPlace);
+      assert.equal(saved.venueId, 'ven_buzz');
+      assert.equal(seen.data.googlePlaceId, undefined);
+      assert.equal(seen.data.onlineOnly, true);
+      assert.equal(seen.data.website, 'https://trybuzzcall.com/');
+      assert.equal(seen.data.verificationNote, manualPlace.note);
+      assert.equal(seen.data.verifiedByUserId, 'usr_admin');
+      assert.equal(seen.data.listedByUserId, 'usr_admin');
+      assert.equal(seen.data.discoverable, true);
+      assert.equal(seen.data.lat, 33.9959);
+      assert.equal(raw.length, 0, 'an online business gets no PostGIS point, so venues.nearby never returns it');
+
+      await adminCaller().admin.places.saveManual({ ...manualPlace, name: 'Walk-in Shop', online: false, address: '1 Peachtree St, Atlanta, GA' });
+      assert.equal(seen.data.onlineOnly, false);
+      assert.equal(seen.data.address, '1 Peachtree St, Atlanta, GA');
+      assert.equal(raw.length, 1);
+    } finally {
+      restores.reverse().forEach((restore) => restore());
+    }
+  });
+});
+
+test('a hand listing is refused when the address does not exist or the name is already listed', async () => {
+  await withAdmin(async () => {
+    const { geocodeFetch } = await import('../vendor/geocode');
+    let duplicate: any = null;
+    let places: unknown[] = [];
+    const restores = [
+      stub(config, 'googlePlacesApiKey', 'test-key'),
+      stub(geocodeFetch, 'call', async () => new Response(JSON.stringify({ places }), { status: 200 })),
+      stub(db.venue, 'findFirst', async () => duplicate),
+      stub(db.venue, 'create', async () => assert.fail('nothing should be created')),
+    ];
+    try {
+      await assert.rejects(() => adminCaller().admin.places.saveManual(manualPlace), { code: 'BAD_REQUEST' });
+      places = [{ formattedAddress: '8735 Dunwoody Pl, Atlanta, GA 30350, USA', location: { latitude: 34, longitude: -84.3 }, types: ['premise'] }];
+      duplicate = { id: 'ven_existing' };
+      await assert.rejects(() => adminCaller().admin.places.saveManual(manualPlace), { code: 'CONFLICT' });
+    } finally {
+      restores.reverse().forEach((restore) => restore());
+    }
+  });
+});

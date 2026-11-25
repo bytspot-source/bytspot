@@ -220,6 +220,14 @@ model Venue {
   /// means listed: Google details and photos, never the Bytspot display.
   controlledAt       DateTime? @map("controlled_at")
   controlledByUserId String?   @map("controlled_by_user_id")
+  /// A business with no walk-in address, listed by hand because Google has
+  /// none. Guests get no pin, directions or check-in; lat/lng only scope it to an area.
+  onlineOnly         Boolean   @default(false) @map("online_only")
+  website            String?
+  /// What a Bytspot admin checked when listing a place Google could not find.
+  verificationNote   String?   @map("verification_note")
+  verifiedAt         DateTime? @map("verified_at")
+  verifiedByUserId   String?   @map("verified_by_user_id")
   createdAt          DateTime  @default(now()) @map("created_at")
 
   // PostGIS: geometry(Point, 4326) — populated from lat/lng

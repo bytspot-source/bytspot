@@ -6,7 +6,7 @@ import vendorSetupRouter, { businessBlockers, locationBlockers, normalizePhone, 
 import { db } from '../lib/db';
 import { signVendorAccessToken } from '../vendor/accessToken';
 import { LOCATION_DEFAULTS, locationOperation } from '../vendor/contract';
-import { statusFrom, storedPayout } from '../vendor/payout';
+import { ensureAccount, onboardingLink, statusFrom, storedPayout } from '../vendor/payout';
 
 const place = (over: Partial<Parameters<typeof locationBlockers>[0]> = {}) => ({
   label: 'Main',
@@ -194,4 +194,69 @@ test('a business kind and added categories must be ones the contract lists', () 
   assert.deepEqual(businessBlockers({ businessKind: 'spaceport' }), ['Pick one of the kinds listed']);
   assert.deepEqual(businessBlockers({ extraBookableTypes: ['parking', 'yachts'] }), ['That category does not exist']);
   assert.deepEqual(businessBlockers({}), []);
+});
+
+function fakeStripe(v2LinkFails = false) {
+  const calls: { v2Accounts: any[]; v2Links: any[]; v1Links: any[] } = { v2Accounts: [], v2Links: [], v1Links: [] };
+  const stripe = {
+    v2: { core: {
+      accounts: { create: async (params: any, options: any) => { calls.v2Accounts.push({ params, options }); return { id: 'acct_v2' }; } },
+      accountLinks: { create: async (params: any) => {
+        calls.v2Links.push(params);
+        if (v2LinkFails) throw new Error('v1 account');
+        return { url: 'https://connect.stripe.com/setup/v2' };
+      } },
+    } },
+    accounts: { create: async () => assert.fail('the legacy v1 type: express call is refused by Stripe for this platform') },
+    accountLinks: { create: async (params: any) => { calls.v1Links.push(params); return { url: 'https://connect.stripe.com/setup/v1' }; } },
+  };
+  return { stripe: stripe as unknown as Stripe, calls };
+}
+
+test('a vendor payout account is a v2 transfer recipient with Bytspot paying fees and losses', async () => {
+  const { stripe, calls } = fakeStripe();
+  const saved: any[] = [];
+  const original = db.vendorSeller.update;
+  (db.vendorSeller as any).update = async (args: any) => { saved.push(args); return {}; };
+  try {
+    const id = await ensureAccount({ id: 'sel_1', legalName: 'buzzCall', contactEmail: 'owner@example.test', payoutReference: null } as never, stripe);
+    assert.equal(id, 'acct_v2');
+    const { params, options } = calls.v2Accounts[0];
+    assert.equal(params.type, undefined);
+    assert.equal(params.dashboard, 'express');
+    assert.deepEqual(params.defaults.responsibilities, { fees_collector: 'application', losses_collector: 'application' });
+    assert.deepEqual(params.configuration, { recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } } });
+    assert.equal(params.contact_email, 'owner@example.test');
+    assert.deepEqual(params.metadata, { sellerId: 'sel_1' });
+    assert.equal(options.idempotencyKey, 'vendor-payout-account:sel_1');
+    assert.deepEqual(saved[0].data, { payoutReference: 'acct_v2', payoutStatus: 'pending' });
+
+    assert.equal(await ensureAccount({ id: 'sel_1', payoutReference: 'acct_existing' } as never, stripe), 'acct_existing');
+    assert.equal(calls.v2Accounts.length, 1, 'an existing account is reused');
+  } finally {
+    (db.vendorSeller as any).update = original;
+  }
+});
+
+test('onboarding uses a v2 link for the recipient, and falls back to v1 for an older account', async () => {
+  const { stripe: v2, calls: v2Calls } = fakeStripe();
+  const { stripeHandle } = await import('../vendor/payout');
+  const originalClient = stripeHandle.client;
+  try {
+    stripeHandle.client = () => v2;
+    const handoff = await onboardingLink({ id: 'sel_1', payoutReference: 'acct_v2' } as never, 'https://vendor.bytspot.app');
+    assert.deepEqual(handoff, { reference: 'acct_v2', url: 'https://connect.stripe.com/setup/v2' });
+    assert.deepEqual(v2Calls.v2Links[0].use_case.account_onboarding, {
+      configurations: ['recipient'], refresh_url: 'https://vendor.bytspot.app/payout/retry', return_url: 'https://vendor.bytspot.app/payout/done',
+    });
+    assert.equal(v2Calls.v1Links.length, 0);
+
+    const { stripe: old, calls: oldCalls } = fakeStripe(true);
+    stripeHandle.client = () => old;
+    const fallback = await onboardingLink({ id: 'sel_2', payoutReference: 'acct_old' } as never, 'https://vendor.bytspot.app');
+    assert.equal(fallback?.url, 'https://connect.stripe.com/setup/v1');
+    assert.equal(oldCalls.v1Links[0].account, 'acct_old');
+  } finally {
+    stripeHandle.client = originalClient;
+  }
 });

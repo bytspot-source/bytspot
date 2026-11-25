@@ -2,7 +2,7 @@ import type Stripe from 'stripe';
 import type { HostPayoutAccount } from '@prisma/client';
 import { config } from '../config';
 import { db } from '../lib/db';
-import { last4Of, statusFrom, stripeHandle, type PayoutStatus } from '../vendor/payout';
+import { createRecipientAccount, last4Of, recipientOnboardingUrl, statusFrom, stripeHandle, type PayoutStatus } from '../vendor/payout';
 
 /**
  * Host payouts, through the same hosted Stripe Express onboarding businesses
@@ -37,15 +37,11 @@ export async function ensureHostAccount(userId: string, stripe: Stripe): Promise
   const user = await db.user.findFirst({ where: { id: userId, deletedAt: null }, select: { email: true } });
   if (!user) throw new Error('Host account not found.');
 
-  const account = await stripe.accounts.create({
-    type: 'express',
-    email: user.email,
-    business_type: 'individual',
-    // Bytspot stays the merchant of record for every ticket; the host is paid
-    // out of the platform's charge, never charged through their own account.
-    capabilities: { transfers: { requested: true } },
-    metadata: { userId, kind: 'party-host' },
-  }, { idempotencyKey: `host-payout-account:${userId}` });
+  // Bytspot stays the merchant of record for every ticket; the host is paid
+  // out of the platform's charge, never charged through their own account.
+  const account = {
+    id: await createRecipientAccount(stripe, { email: user.email, metadata: { userId, kind: 'party-host' }, idempotencyKey: `host-payout-account-v2:${userId}` }),
+  };
 
   const row = await db.hostPayoutAccount.upsert({
     where: { userId },
@@ -78,13 +74,11 @@ export async function hostOnboardingLink(userId: string): Promise<{ url: string 
   const stripe = stripeHandle.client();
   if (!stripe) return null;
   const account = await ensureHostAccount(userId, stripe);
-  const link = await stripe.accountLinks.create({
-    account,
-    type: 'account_onboarding',
-    refresh_url: `${config.publicApiUrl}${HOST_PAYOUT_REFRESH_PATH}`,
-    return_url: `${config.publicApiUrl}${HOST_PAYOUT_RETURN_PATH}`,
+  const url = await recipientOnboardingUrl(stripe, account, {
+    refresh: `${config.publicApiUrl}${HOST_PAYOUT_REFRESH_PATH}`,
+    return: `${config.publicApiUrl}${HOST_PAYOUT_RETURN_PATH}`,
   });
-  return { url: link.url };
+  return { url };
 }
 
 /** The Stripe Express dashboard, where the host changes their bank. */

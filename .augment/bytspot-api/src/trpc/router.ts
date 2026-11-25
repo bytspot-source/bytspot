@@ -99,6 +99,7 @@ import { ticketsRouter } from './ticketsRouter';
 import { adminPlacesRouter } from './adminPlacesRouter';
 import { adminGrowthRouter } from './adminGrowthRouter';
 import { pitchRouter } from './pitchRouter';
+import { homeRouter } from './homeRouter';
 import { adminVendorsRouter } from './adminVendorsRouter';
 import { adminSafetyRouter } from './adminSafetyRouter';
 import { safetyRouter } from './safetyRouter';
@@ -1896,6 +1897,7 @@ export const appRouter = router({
   payouts: payoutsRouter,
   payments: paymentsRouter,
   pitch: pitchRouter,
+  home: homeRouter,
 });
 
 /** Export type for frontend — this is the magic for end-to-end safety */

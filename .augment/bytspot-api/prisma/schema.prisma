@@ -2472,6 +2472,17 @@ model UserActiveDay {
   @@map("user_active_days")
 }
 
+/// A tap on one block of the app's Home screen. Only the block and the time
+/// are kept, never who tapped or what they opened, to see which blocks are used.
+model HomeTap {
+  id       String   @id @default(cuid())
+  block    String
+  tappedAt DateTime @default(now()) @map("tapped_at")
+
+  @@index([tappedAt])
+  @@map("home_taps")
+}
+
 /// A browser opened a Plan or Party share page (the app not installed, or not
 /// opened). Link-preview bots are not counted. No visitor detail is kept.
 model ShareLinkView {

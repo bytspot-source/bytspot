@@ -46,6 +46,8 @@ const PUBLIC_MUTATIONS = new Set([
   'places.bookingTap',
   // Opening a scanned QR / NFC patch; a guest scans before signing in. Counted on the patch.
   'inventory.openPatch',
+  // A count of taps on a Home block; a guest browses Home before signing in. Block only, nothing about the person.
+  'home.tap',
   // Guarded by the cron secret rather than a session; see routes/cron.ts.
   'cron.crowdAlerts', 'cron.crowdSim',
 ]);

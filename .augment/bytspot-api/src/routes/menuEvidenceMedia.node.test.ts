@@ -258,12 +258,12 @@ function storedCover(reviewStatus: string): any {
     mimeType: 'image/jpeg', byteSize: 4, bytes: null, storageKey: 'vendor/seller/location/location/cover/obj',
     updatedAt: now, location: { id: 'location', state: 'ACTIVE' }, bookable: null, seller: { videoHostingAt: null } };
 }
-async function photo(row: any, authorization?: string) {
+async function photo(row: any, authorization?: string, hasSeat = true) {
   const store = memoryObjectStore();
   await store.put({ key: row.storageKey, bytes: Buffer.from('jpeg'), mimeType: 'image/jpeg' });
   replace(objectStoreHandle, 'get', () => store);
   replace(db.vendorMedia, 'findUnique', async () => row);
-  replace(db.vendorSeat, 'findFirst', async () => ({ id: 'seat' }));
+  replace(db.vendorSeat, 'findFirst', async () => (hasSeat ? { id: 'seat' } : null));
   const out = { status: 200, body: undefined as any, headers: {} as Record<string, unknown>, location: undefined as string | undefined };
   const res = { status(code: number) { out.status = code; return res; }, json(body: unknown) { out.body = body; return res; },
     send(body: unknown) { out.body = body; return res; }, setHeader(key: string, value: unknown) { out.headers[key] = value; return res; },
@@ -272,7 +272,7 @@ async function photo(row: any, authorization?: string) {
   return out;
 }
 
-test('a signed-in vendor or admin gets stored photo bytes, never a cross-origin redirect', async () => {
+test('a signed-in vendor gets stored photo bytes, never a cross-origin redirect', async () => {
   const vendor = `Bearer ${signVendorAccessToken({ userId: 'vendor-user', email: 'vendor@example.test' })}`;
   for (const status of ['pending', 'approved']) {
     const out = await photo(storedCover(status), vendor);
@@ -281,6 +281,19 @@ test('a signed-in vendor or admin gets stored photo bytes, never a cross-origin 
     assert.deepEqual(out.body, Buffer.from('jpeg'));
     assert.equal(out.headers['Cache-Control'], 'private, no-store');
   }
+});
+
+test('a Bytspot admin previews a pending stored photo from the API, with no vendor seat and no redirect', async () => {
+  replace(config, 'adminUserIds', 'preview-admin:BYTSPOT_ADMIN');
+  const admin = `Bearer ${jwt.sign({ userId: 'preview-admin', email: 'admin@example.test' }, config.jwtSecret)}`;
+  const out = await photo(storedCover('pending'), admin, false);
+  assert.equal(out.status, 200);
+  assert.equal(out.location, undefined);
+  assert.deepEqual(out.body, Buffer.from('jpeg'));
+  assert.equal(out.headers['Cache-Control'], 'private, no-store');
+
+  const stranger = `Bearer ${jwt.sign({ userId: 'not-an-admin', email: 'x@example.test' }, config.jwtSecret)}`;
+  assert.equal((await photo(storedCover('pending'), stranger, false)).status, 404);
 });
 
 test('a guest still follows a redirect to an approved stored photo, and cannot see a pending one', async () => {

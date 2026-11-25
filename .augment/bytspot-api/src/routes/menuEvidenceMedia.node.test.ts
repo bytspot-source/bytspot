@@ -8,7 +8,7 @@ import { memoryObjectStore, objectStoreHandle } from '../lib/objectStore';
 import { signVendorAccessToken } from '../vendor/accessToken';
 import { MENU_REVIEW_MS } from '../services/menuEvidence';
 import { createMenuEvidenceMediaHandler } from './menuEvidenceMedia';
-import { handleMenuSource, saveUpload } from './vendorMedia';
+import { handleMenuSource, handleVendorMedia, saveUpload } from './vendorMedia';
 
 const now = new Date('2026-10-18T12:00:00.000Z');
 const revision = String(now.getTime());
@@ -251,4 +251,42 @@ test('successful replacements retain the media ID but never reuse an upload obje
     previousKey = committedKey;
   }
   assert.equal(keys.size, 3);
+});
+
+function storedCover(reviewStatus: string): any {
+  return { id: 'cover', sellerId: 'seller', locationId: 'location', bookableId: null, kind: 'cover', reviewStatus,
+    mimeType: 'image/jpeg', byteSize: 4, bytes: null, storageKey: 'vendor/seller/location/location/cover/obj',
+    updatedAt: now, location: { id: 'location', state: 'ACTIVE' }, bookable: null, seller: { videoHostingAt: null } };
+}
+async function photo(row: any, authorization?: string) {
+  const store = memoryObjectStore();
+  await store.put({ key: row.storageKey, bytes: Buffer.from('jpeg'), mimeType: 'image/jpeg' });
+  replace(objectStoreHandle, 'get', () => store);
+  replace(db.vendorMedia, 'findUnique', async () => row);
+  replace(db.vendorSeat, 'findFirst', async () => ({ id: 'seat' }));
+  const out = { status: 200, body: undefined as any, headers: {} as Record<string, unknown>, location: undefined as string | undefined };
+  const res = { status(code: number) { out.status = code; return res; }, json(body: unknown) { out.body = body; return res; },
+    send(body: unknown) { out.body = body; return res; }, setHeader(key: string, value: unknown) { out.headers[key] = value; return res; },
+    redirect(code: number, url: string) { out.status = code; out.location = url; return res; } };
+  await handleVendorMedia({ params: { mediaId: row.id }, headers: { authorization } } as unknown as Request, res as unknown as Response);
+  return out;
+}
+
+test('a signed-in vendor or admin gets stored photo bytes, never a cross-origin redirect', async () => {
+  const vendor = `Bearer ${signVendorAccessToken({ userId: 'vendor-user', email: 'vendor@example.test' })}`;
+  for (const status of ['pending', 'approved']) {
+    const out = await photo(storedCover(status), vendor);
+    assert.equal(out.status, 200, status);
+    assert.equal(out.location, undefined);
+    assert.deepEqual(out.body, Buffer.from('jpeg'));
+    assert.equal(out.headers['Cache-Control'], 'private, no-store');
+  }
+});
+
+test('a guest still follows a redirect to an approved stored photo, and cannot see a pending one', async () => {
+  const approved = await photo(storedCover('approved'));
+  assert.equal(approved.status, 302);
+  assert.ok(approved.location);
+  const pending = await photo(storedCover('pending'));
+  assert.equal(pending.status, 404);
 });

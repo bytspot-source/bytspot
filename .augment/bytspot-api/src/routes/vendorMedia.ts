@@ -686,7 +686,13 @@ export async function handleMenuSource(req: Request, res: Response) {
 }
 router.get('/media/menu-source/:mediaId/:revision', handleMenuSource);
 
-router.get('/media/vendor/:mediaId', async (req, res) => {
+/**
+ * A guest's <img> follows a redirect to the store. A signed-in vendor or admin
+ * fetches with a bearer token and reads the body in script; a cross-origin
+ * redirect would reach the store with Origin: null, which its CORS refuses, so
+ * those requests get the bytes from here.
+ */
+export async function handleVendorMedia(req: Request, res: Response) {
   try {
     const media = await db.vendorMedia.findUnique({
       where: { id: String(req.params.mediaId) },
@@ -706,7 +712,7 @@ router.get('/media/vendor/:mediaId', async (req, res) => {
       if (!seat) return notFound(res);
     }
 
-    if (media.storageKey && objectStoreConfigured()) {
+    if (media.storageKey && objectStoreConfigured() && !req.headers.authorization) {
       const signed = presignVendorGet({ key: media.storageKey });
       res.setHeader('Cache-Control', published ? 'public, max-age=60' : 'private, no-store');
       return res.redirect(302, signed.url);
@@ -717,13 +723,14 @@ router.get('/media/vendor/:mediaId', async (req, res) => {
     return sendMedia(
       res,
       { mimeType: media.mimeType, bytes },
-      published ? 'public, max-age=86400' : 'private, no-store',
+      published && !req.headers.authorization ? 'public, max-age=86400' : 'private, no-store',
       published,
     );
   } catch (err) {
     captureError(err, { route: 'media/vendor/:mediaId' });
     return notFound(res);
   }
-});
+}
+router.get('/media/vendor/:mediaId', handleVendorMedia);
 
 export default router;

@@ -159,6 +159,9 @@ const listedSelect = {
   onlineOnly: true, website: true, verificationNote: true, verifiedAt: true,
 } satisfies Prisma.VenueSelect;
 
+/** Indirection so tests can substitute the geocoder, same pattern as objectStoreHandle. */
+export const manualPlaceGeocoder = { geocode };
+
 export const VERIFICATION_NOTE_MIN = 10;
 export const VERIFICATION_NOTE_MAX = 1000;
 
@@ -355,7 +358,7 @@ export const adminPlacesRouter = router({
     .input(manualPlaceInput)
     .mutation(async ({ ctx, input }) => {
       const group = assertBytspotAdmin(ctx.user);
-      const found = await geocode(input.address);
+      const found = await manualPlaceGeocoder.geocode(input.address);
       if (!found.ok) throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: 'Could not check the address right now. Try again in a minute.' });
       const spot = found.candidates[0];
       if (!spot) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Google could not find that address. Check the street, city and ZIP.' });

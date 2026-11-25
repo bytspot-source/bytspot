@@ -5,7 +5,7 @@ import { config } from '../config';
 import { db } from '../lib/db';
 import { createCallerFactory, resetLocalRateLimitForTests } from '../trpc/trpc';
 import { appRouter } from '../trpc/router';
-import { categoryForPlaceType, LISTED_CATEGORIES, LISTED_CATEGORY_RAILS, pitchNumbersFor } from '../trpc/adminPlacesRouter';
+import { categoryForPlaceType, LISTED_CATEGORIES, LISTED_CATEGORY_RAILS, manualPlaceGeocoder, pitchNumbersFor } from '../trpc/adminPlacesRouter';
 import { discoveryRail } from './discoveryTaxonomy';
 import { vendorConsoleOrigin } from '../trpc/adminVendorsRouter';
 import { tableBookingLinkFor } from './tableBookingLinks';
@@ -410,12 +410,10 @@ test('a place Google cannot find is listed by hand with the note, the admin and 
   await withAdmin(async () => {
     const seen: { data?: any } = {};
     const raw: unknown[] = [];
-    const { geocodeFetch } = await import('../vendor/geocode');
     const restores = [
-      stub(config, 'googlePlacesApiKey', 'test-key'),
-      stub(geocodeFetch, 'call', async () => new Response(JSON.stringify({ places: [
-        { formattedAddress: '8735 Dunwoody Pl, Atlanta, GA 30350, USA', location: { latitude: 33.9959, longitude: -84.3489 }, types: ['premise'] },
-      ] }), { status: 200 })),
+      stub(manualPlaceGeocoder, 'geocode', async () => ({ ok: true, candidates: [
+        { formatted: '8735 Dunwoody Pl, Atlanta, GA 30350, USA', lat: 33.9959, lng: -84.3489, precision: 'rooftop' },
+      ] })),
       stub(db.venue, 'findFirst', async () => null),
       stub(db.venue, 'create', async ({ data }: any) => { seen.data = data; return { id: 'ven_buzz' }; }),
       stub(db, '$executeRawUnsafe', async (...args: unknown[]) => { raw.push(args); return 1; }),
@@ -450,18 +448,16 @@ test('a place Google cannot find is listed by hand with the note, the admin and 
 
 test('a hand listing is refused when the address does not exist or the name is already listed', async () => {
   await withAdmin(async () => {
-    const { geocodeFetch } = await import('../vendor/geocode');
     let duplicate: any = null;
-    let places: unknown[] = [];
+    let candidates: unknown[] = [];
     const restores = [
-      stub(config, 'googlePlacesApiKey', 'test-key'),
-      stub(geocodeFetch, 'call', async () => new Response(JSON.stringify({ places }), { status: 200 })),
+      stub(manualPlaceGeocoder, 'geocode', async () => ({ ok: true, candidates })),
       stub(db.venue, 'findFirst', async () => duplicate),
       stub(db.venue, 'create', async () => assert.fail('nothing should be created')),
     ];
     try {
       await assert.rejects(() => adminCaller().admin.places.saveManual(manualPlace), { code: 'BAD_REQUEST' });
-      places = [{ formattedAddress: '8735 Dunwoody Pl, Atlanta, GA 30350, USA', location: { latitude: 34, longitude: -84.3 }, types: ['premise'] }];
+      candidates = [{ formatted: '8735 Dunwoody Pl, Atlanta, GA 30350, USA', lat: 34, lng: -84.3, precision: 'rooftop' }];
       duplicate = { id: 'ven_existing' };
       await assert.rejects(() => adminCaller().admin.places.saveManual(manualPlace), { code: 'CONFLICT' });
     } finally {

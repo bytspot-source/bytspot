@@ -837,19 +837,31 @@ function notifyAccountEmailChanged(change: { previous: string; current: string }
   }
 }
 
+/** What guests see instead of an online business's registered (often mailbox) address. */
+export const ONLINE_ADDRESS = 'Online business';
+
 /**
  * ── Venues sub-router ───────────────────────────────────
  */
 const venuesRouter = router({
-  /** GET /venues → venues.list — optional entryType filter */
+  /**
+   * GET /venues → venues.list — optional entryType filter. Online businesses
+   * are left out unless asked for, so a client that would pin them on a map
+   * never receives them.
+   */
   list: publicProcedure
-    .input(z.object({ entryType: z.enum(['free', 'paid']).optional() }).optional())
+    .input(z.object({ entryType: z.enum(['free', 'paid']).optional(), includeOnline: z.boolean().optional() }).optional())
     .query(async ({ input }) => {
       const entryFilter = input?.entryType;
-      const cacheKey = entryFilter ? `venues:all:${entryFilter}` : 'venues:all';
+      const includeOnline = input?.includeOnline === true;
+      const cacheKey = (entryFilter ? `venues:all:${entryFilter}` : 'venues:all') + (includeOnline ? ':online' : '');
       const venues = await cached(cacheKey, 30, async () => {
         const rows = await withLatestCrowd(await db.venue.findMany({
-          where: entryFilter ? { discoverable: true, entryType: entryFilter } : { discoverable: true },
+          where: {
+            discoverable: true,
+            ...(entryFilter ? { entryType: entryFilter } : {}),
+            ...(includeOnline ? {} : { onlineOnly: false }),
+          },
           include: {
             parking: true,
             media: { where: { venue: { controlledAt: { not: null } } }, select: { id: true, kind: true, position: true } },
@@ -859,7 +871,8 @@ const venuesRouter = router({
         return rows.map((v) => {
           const curated = curatedVenueMedia(v, v.media);
           return {
-            id: v.id, name: v.name, slug: v.slug, address: v.address,
+            id: v.id, name: v.name, slug: v.slug, address: v.onlineOnly ? ONLINE_ADDRESS : v.address,
+            online: v.onlineOnly, website: v.website,
             lat: v.lat, lng: v.lng, category: v.category, imageUrl: curated?.imageUrl ?? v.imageUrl,
             ...projectVenuePhoto(curated ?? v),
             ...(curated ? { photoUrls: curated.photoUrls, vibeVideoUrl: curated.vibeVideoUrl } : {}),
@@ -929,7 +942,8 @@ const venuesRouter = router({
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
       const parking = venueParking(venue.parking);
       return {
-        id: venue.id, name: venue.name, slug: venue.slug, address: venue.address,
+        id: venue.id, name: venue.name, slug: venue.slug, address: venue.onlineOnly ? ONLINE_ADDRESS : venue.address,
+        online: venue.onlineOnly, website: venue.website,
         lat: venue.lat, lng: venue.lng, category: venue.category, imageUrl: venue.imageUrl,
         ...projectVenuePhoto(venue),
         control: venueControl(venue),
@@ -1002,6 +1016,7 @@ const venuesRouter = router({
 
       const venue = await db.venue.findUnique({ where: { id: venueId } });
       if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
+      if (venue.onlineOnly) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This business is online only, so there is nowhere to check in.' });
 
       const device = input.lat !== undefined && input.lng !== undefined ? { lat: input.lat, lng: input.lng } : null;
       const { proof, distanceMeters: distanceM } = resolveProof(device, venue);

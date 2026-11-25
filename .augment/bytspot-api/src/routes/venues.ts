@@ -18,7 +18,8 @@ crowdEmitter.setMaxListeners(200); // allow many concurrent SSE clients
 router.get('/venues', async (_req, res) => {
   const venues = await cached('venues:all', 30, async () => {
     const rows = await withLatestCrowd(await db.venue.findMany({
-      where: { discoverable: true },
+      // Older clients pin every row on a map; online businesses have no spot to pin.
+      where: { discoverable: true, onlineOnly: false },
       include: { parking: true },
       orderBy: { name: 'asc' },
     }));
@@ -168,7 +169,7 @@ router.get('/venues/:slug', async (req, res) => {
 
   const venue = await cached(`venue:${slug}`, 15, async () => {
     const found = await db.venue.findFirst({
-      where: { slug, discoverable: true },
+      where: { slug, discoverable: true, onlineOnly: false },
       include: { parking: true },
     });
     // last 24 readings for trend chart

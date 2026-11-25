@@ -24,6 +24,7 @@ import {
 } from '../services/tableBookingLinks';
 import { resolvePlaceCore, textSearchCore } from './placesRouter';
 import { placeVenueSlug } from './partyRouter';
+import { geocode } from '../vendor/geocode';
 import { venueControl } from '../services/venueControl';
 import { pitchUrl, signPitchCode } from '../services/pitchLink';
 import type { DiscoveryRail } from '../services/discoveryTaxonomy';
@@ -149,13 +150,33 @@ export async function loadPitchNumbers(venues: { id: string; googlePlaceId: stri
 /** venues.list caches for 30 seconds; a change an admin just made should show now. */
 async function forgetVenueLists(): Promise<void> {
   const redis = getRedis();
-  if (redis) await redis.del('venues:all', 'venues:all:free', 'venues:all:paid').catch(() => undefined);
+  if (redis) await redis.del('venues:all', 'venues:all:free', 'venues:all:paid', 'venues:all:online', 'venues:all:free:online', 'venues:all:paid:online').catch(() => undefined);
 }
 
 const listedSelect = {
   id: true, name: true, slug: true, address: true, category: true, googlePlaceId: true, discoverable: true,
   bookingProvider: true, bookingUrl: true, bookingCheckedAt: true, bookingExpiresAt: true, listedAt: true,
+  onlineOnly: true, website: true, verificationNote: true, verifiedAt: true,
 } satisfies Prisma.VenueSelect;
+
+/** Indirection so tests can substitute the geocoder, same pattern as objectStoreHandle. */
+export const manualPlaceGeocoder = { geocode };
+
+export const VERIFICATION_NOTE_MIN = 10;
+export const VERIFICATION_NOTE_MAX = 1000;
+
+/** A listing Google has no record of, checked by hand. */
+export const manualPlaceInput = z.object({
+  name: z.string().trim().min(2).max(120),
+  address: z.string().trim().min(5).max(300),
+  website: z.string().trim().max(500).refine((value) => {
+    try { return new URL(value).protocol === 'https:'; } catch { return false; }
+  }, { message: 'Enter the full https:// website.' }),
+  category: z.enum(LISTED_CATEGORIES),
+  online: z.boolean(),
+  note: z.string().trim().min(VERIFICATION_NOTE_MIN, { message: 'Say what you checked.' }).max(VERIFICATION_NOTE_MAX),
+  verified: z.literal(true, { message: 'Confirm you verified this business.' }),
+});
 
 export const adminPlacesRouter = router({
   /** Google matches for a name, each marked when it is already listed or tied to another Bytspot venue. */
@@ -231,6 +252,9 @@ export const adminPlacesRouter = router({
           placeId: v.googlePlaceId, hidden: !v.discoverable,
           booking: tableBookingLinkFrom(v.bookingProvider, v.bookingUrl),
           checkedAt: v.bookingCheckedAt, listedAt: v.listedAt,
+          online: v.onlineOnly, website: v.website,
+          manual: !v.googlePlaceId && Boolean(v.verifiedAt),
+          verificationNote: v.verificationNote, verifiedAt: v.verifiedAt,
           expiresAt: v.bookingExpiresAt,
           bookingExpired: Boolean(v.bookingUrl) && bookingLinkExpired(v.bookingExpiresAt, now.getTime()),
           // Guests stop seeing a link nobody has checked in 90 days; the admin re-saves it to check it again.
@@ -322,6 +346,59 @@ export const adminPlacesRouter = router({
       });
       await Promise.all([refreshTableBookingLinks(), forgetVenueLists()]);
       return { venueId: venue.id, url };
+    }),
+
+  /**
+   * Lists a business Google has no record of, after an admin checked it by hand
+   * and said how. The address is geocoded to scope it to an area; an online
+   * business shows no address, pin, directions or check-in to guests.
+   */
+  saveManual: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 20, label: 'admin-places-save-manual' }))
+    .input(manualPlaceInput)
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const found = await manualPlaceGeocoder.geocode(input.address);
+      if (!found.ok) throw new TRPCError({ code: 'SERVICE_UNAVAILABLE', message: 'Could not check the address right now. Try again in a minute.' });
+      const spot = found.candidates[0];
+      if (!spot) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Google could not find that address. Check the street, city and ZIP.' });
+      const duplicate = await db.venue.findFirst({
+        where: { name: { equals: input.name, mode: 'insensitive' }, listedAt: { not: null } },
+        select: { id: true },
+      });
+      if (duplicate) throw new TRPCError({ code: 'CONFLICT', message: 'A listed place already has that name. Search for it and edit it instead.' });
+      const now = new Date();
+      let venue: { id: string } | null = null;
+      for (let attempt = 0; !venue && attempt < 2; attempt++) {
+        const slug = placeVenueSlug(input.name, randomBytes(4).toString('hex'));
+        try {
+          venue = await db.venue.create({
+            data: {
+              name: input.name, slug, address: input.online ? spot.formatted : input.address,
+              lat: spot.lat, lng: spot.lng, category: input.category, discoverable: true,
+              onlineOnly: input.online, website: input.website,
+              verificationNote: input.note, verifiedAt: now, verifiedByUserId: ctx.user.userId,
+              listedAt: now, listedByUserId: ctx.user.userId,
+            },
+            select: { id: true },
+          });
+        } catch (err) {
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+        }
+      }
+      if (!venue) throw new TRPCError({ code: 'CONFLICT', message: 'That place could not be saved. Try again.' });
+      // An online business has no walk-in spot, so it stays out of the PostGIS "nearby" search.
+      if (!input.online) {
+        try {
+          await db.$executeRawUnsafe('UPDATE "venues" SET "location" = ST_SetSRID(ST_MakePoint($1, $2), 4326) WHERE id = $3', spot.lng, spot.lat, venue.id);
+        } catch { /* PostGIS optional */ }
+      }
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.saveManual',
+        detail: { venueId: venue.id, online: input.online },
+      });
+      await forgetVenueLists();
+      return { venueId: venue.id };
     }),
 
   /** Every venue guests can see, each marked Bytspot-controlled or listed. */

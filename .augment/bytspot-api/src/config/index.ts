@@ -151,7 +151,8 @@ const envSchema = z.object({
   // and refuses video. All four of bucket + keys must be set before writes leave
   // the database; endpoint/region have safe defaults for R2.
   MEDIA_S3_ENDPOINT: z.string().default(''),
-  MEDIA_S3_REGION: z.string().default('auto'),
+  // R2 and AWS both name regions in lowercase; R2 refuses 'Auto' outright.
+  MEDIA_S3_REGION: z.string().default('auto').transform((value) => value.trim().toLowerCase() || 'auto'),
   MEDIA_S3_BUCKET: z.string().default(''),
   MEDIA_S3_ACCESS_KEY_ID: z.string().default(''),
   MEDIA_S3_SECRET_ACCESS_KEY: z.string().default(''),

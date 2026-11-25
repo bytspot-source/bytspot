@@ -74,3 +74,10 @@ test('A job that reads a secret it was not given fails loudly rather than using 
     assert.match(result.output, expected);
   }
 });
+
+test('The media store region is read in lowercase, because R2 refuses "Auto"', () => {
+  for (const [given, expected] of [['Auto', 'auto'], [' WNAM ', 'wnam'], ['us-east-1', 'us-east-1'], ['', 'auto']]) {
+    const result = loadConfig({ MEDIA_S3_REGION: given }, 'console.log("REGION=" + config.mediaS3Region);');
+    assert.match(result.output, new RegExp(`REGION=${expected}\\b`), `${JSON.stringify(given)} should read as ${expected}`);
+  }
+});

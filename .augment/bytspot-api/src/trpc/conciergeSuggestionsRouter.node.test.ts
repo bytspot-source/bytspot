@@ -124,6 +124,9 @@ test('suggestions keep their own daily cap, share only the global breaker, and a
     (db.user as { findUnique: unknown }).findUnique = async () => ({ emailVerifiedAt: new Date(), aiConsentAt: new Date() });
   }
 
+  // Smarter answers off: no model, so nothing is sent to the AI and the curated list is used.
+  assert.equal((await prepareSuggestion(userId, false)).model, null);
+
   // Loading suggestions never spends the guest's Concierge turns.
   const opened = await prepareSuggestion(userId);
   assert.notEqual(opened.model, null);

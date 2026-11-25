@@ -12,6 +12,8 @@ import { conciergePlanOpenTo } from './conciergePlanRouter';
 
 export const conciergeSuggestionsInput = z.object({
   location: coordinateSchema.optional(),
+  /** Smarter answers is on. Off, the curated suggestions are used and no AI is called. */
+  smarter: z.boolean().optional(),
 }).strict();
 
 const unavailable = {
@@ -76,8 +78,8 @@ export async function suggestionModelFor(userId: string) {
 }
 
 /** The plan chip is offered only when concierge.plan can actually run for this guest. */
-export async function prepareSuggestion(userId: string): Promise<{ model: Awaited<ReturnType<typeof suggestionModelFor>>; planRouteEnabled: boolean }> {
-  const model = await suggestionModelFor(userId);
+export async function prepareSuggestion(userId: string, smarter = true): Promise<{ model: Awaited<ReturnType<typeof suggestionModelFor>>; planRouteEnabled: boolean }> {
+  const model = smarter ? await suggestionModelFor(userId) : null;
   const planRouteEnabled = conciergePlanOpenTo(userId) && model !== null && await conciergeTurnsLeft(userId);
   return { model, planRouteEnabled };
 }
@@ -86,7 +88,7 @@ export const conciergeSuggestionsRouter = createConciergeSuggestionsRouter({
   suggest: async (ctx, input, now) => {
     if (!ctx.user) return Promise.reject(new Error('Concierge suggestions require a signed-in guest'));
     const userId = ctx.user.userId;
-    const { model, planRouteEnabled } = await prepareSuggestion(userId);
+    const { model, planRouteEnabled } = await prepareSuggestion(userId, input.smarter === true);
     return suggestForGuest({
       now: now.toISOString(),
       userId,

@@ -11,7 +11,11 @@ import { DISCOVERY_ALIASES, DISCOVERY_RAILS, discoveryRail } from './discoveryTa
 import type { RecommendPlace, RecommendVenue } from './recommendations';
 
 const HERE = { lat: 40, lng: -75 };
+/** Smarter answers on, so planner tests reach the planner. `plain` is the default guest, with it off. */
 function input(...contents: string[]): ConciergeInput {
+  return { location: HERE, messages: contents.map((content) => ({ role: 'user', content })), smarter: true };
+}
+function plain(...contents: string[]): ConciergeInput {
   return { location: HERE, messages: contents.map((content) => ({ role: 'user', content })) };
 }
 function place(over: Partial<RecommendPlace> = {}): RecommendPlace {
@@ -1099,4 +1103,15 @@ test('more ways of naming a place are understood', () => {
   assert.equal(planArea(['brunch next to Piedmont Park']), 'Piedmont Park');
   assert.equal(planArea(['tacos 30309']), '30309');
   assert.equal(planArea(['coffee within 10 miles']), null);
+});
+
+test('with Smarter answers off, nothing is sent to the AI planner and the search still runs', async () => {
+  let planned = 0, searched = 0;
+  const response = await service({
+    plan: async ({ fallback }) => { planned++; return fallback; },
+    places: async (search) => { searched++; assert.equal(search.query, 'dumplings'); return { places: [place({ primaryType: 'chinese_restaurant' })], source: 'google' }; },
+  })(plain('Find dumplings near me'));
+  assert.equal(planned, 0);
+  assert.equal(searched, 1);
+  assert.equal(response.status, 'ready');
 });

@@ -26,6 +26,8 @@ export const conciergeDiscoverInput = z.object({
   }).strict().optional(),
   /** Saved avoid list and price ceiling, sent by the client. */
   preferences: preferenceFilterInput.optional(),
+  /** The guest turned on Smarter answers: their message text may go to the AI planner. Off, nothing leaves Bytspot. */
+  smarter: z.boolean().optional(),
 }).strict();
 
 /** A provider website is a handoff, never proof of a menu or a supported transaction. */
@@ -566,7 +568,7 @@ export function planConcierge(input: ConciergeInput, options: { areaResolved?: b
 
 async function boundedPlan(input: ConciergeInput, dependencies: ConciergeDependencies, areaResolved = false): Promise<LocalPlan> {
   const fallback = planConcierge(input, { areaResolved });
-  if (!dependencies.plan || fallback.needsLocation || fallback.blocked) return fallback;
+  if (!dependencies.plan || input.smarter !== true || fallback.needsLocation || fallback.blocked) return fallback;
   const controller = new AbortController();
   const base = conciergePlanSchema.parse({
     query: fallback.search.query, rail: fallback.search.rail, mode: fallback.search.mode,

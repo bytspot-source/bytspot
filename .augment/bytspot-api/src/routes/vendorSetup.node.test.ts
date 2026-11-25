@@ -6,7 +6,7 @@ import vendorSetupRouter, { businessBlockers, locationBlockers, normalizePhone, 
 import { db } from '../lib/db';
 import { signVendorAccessToken } from '../vendor/accessToken';
 import { LOCATION_DEFAULTS, locationOperation } from '../vendor/contract';
-import { ensureAccount, onboardingLink, statusFrom, storedPayout } from '../vendor/payout';
+import { ensureAccount, onboardingLink, statusFrom, storedPayout, stripeHandle } from '../vendor/payout';
 
 const place = (over: Partial<Parameters<typeof locationBlockers>[0]> = {}) => ({
   label: 'Main',
@@ -240,7 +240,6 @@ test('a vendor payout account is a v2 transfer recipient with Bytspot paying fee
 
 test('onboarding uses a v2 link for the recipient, and falls back to v1 for an older account', async () => {
   const { stripe: v2, calls: v2Calls } = fakeStripe();
-  const { stripeHandle } = await import('../vendor/payout');
   const originalClient = stripeHandle.client;
   try {
     stripeHandle.client = () => v2;

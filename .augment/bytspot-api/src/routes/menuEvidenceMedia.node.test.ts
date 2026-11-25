@@ -273,7 +273,7 @@ async function photo(row: any, authorization?: string) {
 }
 
 test('a signed-in vendor or admin gets stored photo bytes, never a cross-origin redirect', async () => {
-  const vendor = `Bearer ${signVendorAccessToken({ userId: 'vendor-user' })}`;
+  const vendor = `Bearer ${signVendorAccessToken({ userId: 'vendor-user', email: 'vendor@example.test' })}`;
   for (const status of ['pending', 'approved']) {
     const out = await photo(storedCover(status), vendor);
     assert.equal(out.status, 200, status);

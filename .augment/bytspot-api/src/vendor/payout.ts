@@ -63,20 +63,53 @@ export function last4Of(account: Stripe.Account): string | undefined {
   return external?.last4;
 }
 
+/**
+ * A connected account that can only receive transfers, with the Express
+ * dashboard. Bytspot is the merchant of record and pays the fees and any
+ * losses from refunds or disputes, which Stripe only accepts through Accounts v2.
+ */
+export async function createRecipientAccount(
+  stripe: Stripe,
+  input: { email?: string | null; name?: string | null; metadata: Record<string, string>; idempotencyKey?: string },
+): Promise<string> {
+  const account = await stripe.v2.core.accounts.create({
+    ...(input.email ? { contact_email: input.email } : {}),
+    ...(input.name ? { display_name: input.name } : {}),
+    dashboard: 'express',
+    identity: { country: 'us' },
+    defaults: { responsibilities: { fees_collector: 'application', losses_collector: 'application' } },
+    configuration: { recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } } },
+    metadata: input.metadata,
+  }, input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined);
+  return account.id;
+}
+
+/** A single-use link into Stripe's hosted onboarding for a recipient account. */
+export async function recipientOnboardingUrl(stripe: Stripe, account: string, urls: { refresh: string; return: string }): Promise<string> {
+  try {
+    const link = await stripe.v2.core.accountLinks.create({
+      account,
+      use_case: { type: 'account_onboarding', account_onboarding: { configurations: ['recipient'], refresh_url: urls.refresh, return_url: urls.return } },
+    });
+    return link.url;
+  } catch {
+    // An account made before Accounts v2 only takes a v1 link.
+    const link = await stripe.accountLinks.create({ account, type: 'account_onboarding', refresh_url: urls.refresh, return_url: urls.return });
+    return link.url;
+  }
+}
+
 /** The processor's account for this business, created on first use. */
 export async function ensureAccount(seller: VendorSeller, stripe: Stripe): Promise<string> {
   if (seller.payoutReference) return seller.payoutReference;
 
-  const account = await stripe.accounts.create({
-    type: 'express',
-    email: seller.contactEmail ?? undefined,
-    business_profile: { name: seller.legalName ?? undefined },
-    // Bytspot settles with the guest, so the platform owns the charge and the
-    // vendor is paid out of it. An account that could charge independently
-    // would put a second merchant of record on the same booking.
-    capabilities: { transfers: { requested: true } },
-    metadata: { sellerId: seller.id },
+  // Bytspot settles with the guest, so the platform owns the charge and the
+  // vendor is paid out of it. An account that could charge independently
+  // would put a second merchant of record on the same booking.
+  const accountId = await createRecipientAccount(stripe, {
+    email: seller.contactEmail, name: seller.legalName, metadata: { sellerId: seller.id }, idempotencyKey: `vendor-payout-account:${seller.id}`,
   });
+  const account = { id: accountId };
 
   await db.vendorSeller.update({
     where: { id: seller.id },
@@ -140,11 +173,6 @@ export async function onboardingLink(
   if (!stripe) return undefined;
 
   const reference = await ensureAccount(seller, stripe);
-  const link = await stripe.accountLinks.create({
-    account: reference,
-    type: 'account_onboarding',
-    refresh_url: `${origin}/payout/retry`,
-    return_url: `${origin}/payout/done`,
-  });
-  return { reference, url: link.url };
+  const url = await recipientOnboardingUrl(stripe, reference, { refresh: `${origin}/payout/retry`, return: `${origin}/payout/done` });
+  return { reference, url };
 }

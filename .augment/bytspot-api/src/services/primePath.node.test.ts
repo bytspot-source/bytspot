@@ -86,8 +86,10 @@ test('Within one tier, lexicographic sort falls through travel → reliability �
 });
 
 test('The disclosure line states the reason in one line, and only from known facts', () => {
+  // travelMinutes with no measured basis is the straight-line estimate.
   const full = candidate({ travelMinutes: 6, startLabel: '8:00' });
-  assert.equal(primePathReason(full, ctx), '★ Prime Path — fits 4 at 8:00, 6 min away, confirmable now');
+  assert.equal(primePathReason(full, ctx), '★ Prime Path — fits 4 at 8:00, about 6 min (estimate), confirmable now');
+  assert.doesNotMatch(primePathReason(full, ctx)!, /\d+ min away/);
   // Unknown travel and time drop from the line rather than being invented.
   const sparse = candidate({ travelMinutes: null, startLabel: null });
   assert.equal(primePathReason(sparse, ctx), '★ Prime Path — fits 4, confirmable now');
@@ -95,10 +97,22 @@ test('The disclosure line states the reason in one line, and only from known fac
   assert.equal(primePathReason(candidate({ capability: 'details' }), ctx), null);
 });
 
+test('A MapKit drive replaces the straight-line estimate in the reason only', () => {
+  const mapkit = candidate({ travelMinutes: 6, mapkitDriveMinutes: 12, startLabel: '8:00' });
+  assert.equal(primePathReason(mapkit, ctx), '★ Prime Path — fits 4 at 8:00, about 12 min (Apple Maps estimate), confirmable now');
+  // The sort key stays the straight-line minutes. A longer MapKit time on the
+  // nearer path does not hand the slot to a farther one.
+  const near = candidate({ id: 'near', travelMinutes: 5, mapkitDriveMinutes: 40 });
+  const far = candidate({ id: 'far', travelMinutes: 30, mapkitDriveMinutes: 4 });
+  const result = rankPrimePath([far, near], ctx);
+  assert.equal(result.prime?.id, 'near');
+  assert.equal(result.reason, '★ Prime Path — fits 4 at 8:00, about 40 min (Apple Maps estimate), confirmable now');
+});
+
 test('rankPrimePath attaches the disclosure line to the featured path', () => {
   const result = rankPrimePath([candidate({ id: 'only' })], ctx);
   assert.equal(result.prime?.id, 'only');
-  assert.equal(result.reason, '★ Prime Path — fits 4 at 8:00, 6 min away, confirmable now');
+  assert.equal(result.reason, '★ Prime Path — fits 4 at 8:00, about 6 min (estimate), confirmable now');
 });
 
 test('No candidates yields nothing featured, not an empty-shaped default', () => {

@@ -19,8 +19,12 @@ export interface RankableOption {
   bytspot: BytspotOption[];
   /** OpenTable/Resy hand-off links. Never imply availability. */
   deeplinks: DeeplinkOption[];
-  /** From the routing port's estimate when known; null = unknown (never 0). */
+  /** From the routing port when known; null = unknown (never 0). Sort key. */
   travelMinutes: number | null;
+  /** How `travelMinutes` was measured. Guest copy only; the sort ignores it. */
+  travelBasis?: 'estimate' | 'provider';
+  /** MapKit minutes from the guest's phone. Guest copy prefers these. The sort ignores them. */
+  mapkitDriveMinutes?: number | null;
 }
 
 export interface NeedRankingInput {

@@ -66,7 +66,8 @@ describe('bytt-si prime path: ranking per need', () => {
   it('prime from an own party beats an OpenTable link', () => {
     const r = rank([option(openTablePlace('ot'), { deeplinks: [OT_LINK], travelMinutes: 2 }), option(party('p1'), { travelMinutes: 20 })]);
     assert.equal(r.primeId, 'event:p1');
-    assert.match(r.reason!, /^★ Prime Path — fits 4 at 10:00 PM, 20 min away, confirmable now$/);
+    assert.match(r.reason!, /^★ Prime Path — fits 4 at 10:00 PM, about 20 min \(estimate\), confirmable now$/);
+    assert.doesNotMatch(r.reason!, /\d+ min away/);
     assert.deepEqual(r.rankedAlternateIds, []);
     assert.deepEqual(r.unrankedIds, ['place:ot']);
   });
@@ -96,6 +97,15 @@ describe('bytt-si prime path: ranking per need', () => {
     assert.ok(![...r.rankedAlternateIds, ...r.unrankedIds].includes('event:quorum'));
     assert.deepEqual(r.dropped, [{ id: 'event:quorum', why: 'min_party' }]);
   });
+  it('prefers a MapKit drive in the reason and still ranks on the straight-line minutes', () => {
+    const r = rank([
+      option(party('far'), { travelMinutes: 30, mapkitDriveMinutes: 4 }),
+      option(party('near'), { travelMinutes: 8, mapkitDriveMinutes: 22 }),
+    ]);
+    assert.equal(r.primeId, 'event:near');
+    assert.match(r.reason!, /about 22 min \(Apple Maps estimate\)/);
+    assert.doesNotMatch(r.reason!, /8 min|30 min/);
+  });
   it('unknown travel sorts after known travel', () => {
     const r = rank([option(party('unknown'), { travelMinutes: null }), option(party('known'), { travelMinutes: 25 })]);
     assert.equal(r.primeId, 'event:known');
@@ -117,7 +127,8 @@ describe('bytt-si engine + Prime Path', () => {
     const drinks = item(plan, 'drinks');
     assert.equal(drinks.candidateId, 'place:SAMPLE_bar_speakeasy');
     assert.equal(drinks.primePath!.status, 'prime');
-    assert.match(drinks.primePath!.reason!, /^★ Prime Path — fits 4, \d+ min away, confirmable now$/);
+    assert.match(drinks.primePath!.reason!, /^★ Prime Path — fits 4, about \d+ min \(estimate\), confirmable now$/);
+    assert.doesNotMatch(drinks.primePath!.reason!, /\d+ min away/);
     assert.deepEqual(drinks.primePath!.alternates.map((a) => [a.candidateId, a.ranked]), [['place:SAMPLE_bar_rooftop', false], ['place:SAMPLE_bar_champagne', false]]);
     const dining = item(plan, 'dining');
     assert.equal(dining.candidateId, 'place:SAMPLE_dinner_southern');

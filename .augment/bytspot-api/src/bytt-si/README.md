@@ -54,7 +54,7 @@ be the prime.
 
 Per need, the item carries `primePath`:
 
-- `prime`: the ranker's pick, with its reason line (`★ Prime Path — fits 4 at 10:00 PM, 6 min away, confirmable now`). The model can't override it, and a pitch that names an unpicked stop is replaced.
+- `prime`: the ranker's pick, with its reason line (`★ Prime Path — fits 4 at 10:00 PM, about 6 min (estimate), confirmable now`). A MapKit drive is preferred and reads `about 12 min (Apple Maps estimate)`. The model can't override it, and a pitch that names an unpicked stop is replaced.
 - `fallback`: the prime broke the budget, so the next viable alternate (in order) was used; `note` says why.
 - `suggestion`: no prime (deep-link/details only). The model's suggestion among the alternates is labeled as a suggestion and has no badge.
 - `listed`: no prime and no model suggestion; the first alternate in order.

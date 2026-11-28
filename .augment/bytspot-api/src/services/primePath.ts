@@ -17,6 +17,7 @@
 //      the unfalsifiable sum this file refuses.
 
 import type { BookableCapability } from './bookableProjection';
+import { guestTravelLine, knownDriveMinutes } from './travelCopy';
 
 /**
  * A supply option for one need, reduced to the facts the rules read. Nothing
@@ -42,7 +43,12 @@ export interface PrimePathCandidate {
   confirmableNow: boolean;
   // Sort inputs, all non-commercial. `travelMinutes` null means unknown, which
   // sorts after any known travel rather than pretending to be near.
+  // `travelBasis` and `mapkitDriveMinutes` are guest copy only. The sort
+  // never reads them. Omitted basis means the straight-line estimate.
   travelMinutes: number | null;
+  travelBasis?: 'estimate' | 'provider' | 'apple_maps';
+  /** MapKit drive already measured on the guest's phone. Copy prefers this. */
+  mapkitDriveMinutes?: number | null;
   reliability: number;
   continuationValue: number;
   // Typical crowd at this path's arrival. Null or omitted is neutral: it
@@ -140,6 +146,20 @@ function comparePrimePath(a: PrimePathCandidate, b: PrimePathCandidate): number 
 }
 
 /**
+ * The travel phrase a guest may read. A MapKit drive wins over the
+ * straight-line minutes. An estimate is never a bare duration. Unknown
+ * travel is omitted. This does not change sort order.
+ */
+function travelClause(candidate: PrimePathCandidate): string | null {
+  const mapkit = knownDriveMinutes(candidate.mapkitDriveMinutes);
+  if (mapkit !== null) return guestTravelLine(mapkit, 'apple_maps');
+  if (candidate.travelMinutes === null) return null;
+  if (candidate.travelBasis === 'apple_maps') return guestTravelLine(candidate.travelMinutes, 'apple_maps');
+  if (candidate.travelBasis === 'provider') return `${candidate.travelMinutes} min away`;
+  return guestTravelLine(candidate.travelMinutes, 'estimate');
+}
+
+/**
  * The disclosure line (§5.3). Self-limiting: if the reason cannot be written,
  * the caller does not feature the path. A viable candidate always carries the
  * fits-count and confirmable-now facts, so a Mode B prime always has a line;
@@ -149,7 +169,8 @@ export function primePathReason(candidate: PrimePathCandidate, ctx: PlanWindowCo
   if (!isModeB(candidate)) return null;
   const fits = candidate.startLabel ? `fits ${ctx.partySize} at ${candidate.startLabel}` : `fits ${ctx.partySize}`;
   const parts = [fits];
-  if (candidate.travelMinutes !== null) parts.push(`${candidate.travelMinutes} min away`);
+  const travel = travelClause(candidate);
+  if (travel) parts.push(travel);
   parts.push('confirmable now');
   return `★ Prime Path — ${parts.join(', ')}`;
 }

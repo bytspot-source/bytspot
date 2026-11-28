@@ -61,7 +61,8 @@ export function primePathCandidateFor(option: RankableOption, window: NeedRankin
       id: c.id, label: c.name, capability: c.capability, ownInventory: true,
       seats, minParty: c.minParty ?? 1,
       confirmableNow: c.capacity !== null && seats > 0 && inWindow(c.startsAt, c.endsAt, window),
-      travelMinutes: option.travelMinutes, ...NEUTRAL, startLabel: c.startsAt ? clockLabel(c.startsAt) : null,
+      travelMinutes: option.travelMinutes, travelBasis: option.travelBasis, mapkitDriveMinutes: option.mapkitDriveMinutes ?? null,
+      ...NEUTRAL, startLabel: c.startsAt ? clockLabel(c.startsAt) : null,
     }, option, window);
   }
   const own = option.bytspot.filter((b) => isModeB(b.capability)).sort((a, b) => (b.capacity ?? 0) - (a.capacity ?? 0));
@@ -71,7 +72,8 @@ export function primePathCandidateFor(option: RankableOption, window: NeedRankin
   return withArrival({
     id: c.id, label: c.name, capability: best.capability as 'book' | 'request', ownInventory: true,
     seats, minParty: 1, confirmableNow: seats > 0,
-    travelMinutes: option.travelMinutes, ...NEUTRAL, startLabel: null,
+    travelMinutes: option.travelMinutes, travelBasis: option.travelBasis, mapkitDriveMinutes: option.mapkitDriveMinutes ?? null,
+    ...NEUTRAL, startLabel: null,
   }, option, window);
 }
 

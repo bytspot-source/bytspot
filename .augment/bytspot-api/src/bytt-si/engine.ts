@@ -351,11 +351,13 @@ export class ByttSiEngine {
       const options: RankableOption[] = [];
       for (const candidate of pool) {
         const found = candidate.kind === 'place' && candidate.placeId ? await this.bookablesFor(candidate.placeId, ledger, constraints, notices, context) : null;
+        const routed = from ? await this.routeMinutes(from, candidate) : null;
         options.push({
           candidate,
           bytspot: (found?.bytspot ?? []).map(({ fitsParty: _f, ...b }) => b),
           deeplinks: found?.deeplinks ?? [],
-          travelMinutes: from ? await this.routeMinutes(from, candidate) : null,
+          travelMinutes: routed?.minutes ?? null,
+          travelBasis: routed?.basis,
         });
       }
       let ranking: NeedRanking;
@@ -450,11 +452,15 @@ export class ByttSiEngine {
     return found;
   }
 
-  /** Routing estimate only; unknown stays null (never a guessed number). */
-  private async routeMinutes(from: { latitude: number; longitude: number }, to: { latitude: number; longitude: number }): Promise<number | null> {
+  /**
+   * Routing result for ranking. A port failure stays null — the straight-line
+   * guess is not filled in. The minutes are unchanged; `basis` is only for
+   * the guest-facing reason.
+   */
+  private async routeMinutes(from: { latitude: number; longitude: number }, to: { latitude: number; longitude: number }): Promise<{ minutes: number; basis: 'provider' | 'estimate' } | null> {
     try {
       const est = await this.ports.routing.travel(from, to, estimateTravel(from, to).mode);
-      return est ? est.minutes : null;
+      return est ? { minutes: est.minutes, basis: est.basis } : null;
     } catch { return null; }
   }
 
@@ -532,12 +538,18 @@ export class ByttSiEngine {
     if (hosted) {
       schedule = hosted.map((h) => ({ startsAt: h.startsAt, durationMins: h.durationMins, timeSource: h.fixed ? 'fixed' : 'scheduled', travelMinsBefore: h.travelMinsBefore }));
     } else {
-      const travel = await travelBetween(this.ports, picked.map((p) => p.candidate));
-      schedule = scheduleStops({ startsAt: constraints.startsAt, endsAt: constraints.endsAt }, picked.map((p) => ({
+      const legs = await travelBetween(this.ports, picked.map((p) => p.candidate));
+      const spaced = scheduleStops({ startsAt: constraints.startsAt, endsAt: constraints.endsAt }, picked.map((p) => ({
         id: p.candidate.id, title: p.candidate.name,
         durationMins: p.candidate.durationMins ?? p.durationMins ?? DEFAULT_DURATION_MINS[p.candidate.needKind] ?? 90,
         fixedStartsAt: p.candidate.startsAt, preferredStartsAt: p.startsAt,
-      })), travel);
+      })), legs.map((leg) => leg.spacingMinutes));
+      // Guest copy sees statedMinutes only. On a routing failure that is null
+      // even when spacing still used the straight-line estimate.
+      schedule = spaced.map((stop, i) => ({
+        startsAt: stop.startsAt, durationMins: stop.durationMins, timeSource: stop.timeSource,
+        travelMinsBefore: legs[i]?.statedMinutes ?? null,
+      }));
       if (picked.some((p, i) => p.startsAt && !p.candidate.startsAt && schedule[i].timeSource === 'scheduled')) {
         notices.push({ code: 'schedule_adjusted', message: 'Some suggested times did not leave room for travel or fall in your window, so they were moved.' });
       }

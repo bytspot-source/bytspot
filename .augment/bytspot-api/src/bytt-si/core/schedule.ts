@@ -1,3 +1,4 @@
+import { TRAVEL_TIME_UNAVAILABLE } from '../../services/travelCopy';
 import type { CheckResult, Verdict } from '../types';
 import { addMinutes, clockLabel, roundUpTo5 } from './time';
 
@@ -69,7 +70,7 @@ export function scheduleChecks(window: { startsAt: string | null; endsAt: string
     const prev = stops[i - 1]; const cur = stops[i];
     if (!prev.endsAt || !cur.startsAt) { if (overlap === 'fits') { overlap = 'unknown'; overlapDetail = 'Some stops have no time or length.'; } if (travel === 'fits') { travel = 'unknown'; travelDetail = 'Some stops have no time or length.'; } continue; }
     if (t(cur.startsAt) < t(prev.endsAt)) { overlap = 'breaks'; overlapDetail = `${cur.title} starts before ${prev.title} ends.`; continue; }
-    if (cur.travelMinsBefore === null) { if (travel === 'fits') { travel = 'unknown'; travelDetail = `No travel estimate to ${cur.title}.`; } continue; }
+    if (cur.travelMinsBefore === null) { if (travel === 'fits') { travel = 'unknown'; travelDetail = TRAVEL_TIME_UNAVAILABLE; } continue; }
     if (t(cur.startsAt) < t(prev.endsAt) + cur.travelMinsBefore * 60_000) { travel = 'breaks'; travelDetail = `Not enough time to get from ${prev.title} to ${cur.title}.`; }
   }
   checks.push({ check: 'overlap', verdict: overlap, detail: overlapDetail });

@@ -118,21 +118,70 @@ describe('bytt-si scheduling', () => {
     ] }), ctx);
     assert.equal(out.checks.find((c) => c.check === 'overlap')!.verdict, 'breaks');
   });
-  it('falls back to a straight-line estimate when routing is down', async () => {
-    const out = await schedulingSkill.run(schedulingSkill.input.parse({ stops: [
-      { id: 'a', title: 'A', latitude: 33.7845, longitude: -84.3838 }, { id: 'b', title: 'B', latitude: 33.7818, longitude: -84.3825 },
-    ] }), skillContext({ routingDown: true }));
-    assert.ok((out.stops[1].travelMinsBefore ?? 0) > 0);
+  it('labels a straight-line travel time and prefers a MapKit drive', async () => {
+    const stops = [
+      { id: 'a', title: 'A', latitude: 33.7845, longitude: -84.3838 },
+      { id: 'b', title: 'B', latitude: 33.7818, longitude: -84.3825 },
+    ];
+    const ctx = skillContext();
+    ctx.ports.routing.travel = async () => ({ minutes: 40, meters: 1600, basis: 'estimate' as const });
+    const estimated = await schedulingSkill.run(schedulingSkill.input.parse({ stops }), ctx);
+    assert.equal(estimated.stops[1].travelMinsBefore, 40);
+    assert.equal(estimated.stops[1].travelLine, 'about 40 min (estimate)');
+    assert.doesNotMatch(estimated.stops[1].travelLine!, /^\d+ min$/);
+
+    const mapped = await schedulingSkill.run(schedulingSkill.input.parse({
+      stops: [{ ...stops[0] }, { ...stops[1], driveMinutes: 12 }],
+    }), ctx);
+    assert.equal(mapped.stops[1].travelLine, 'about 12 min (Apple Maps estimate)');
+    assert.equal(mapped.stops[1].travelMinsBefore, 12);
+    assert.doesNotMatch(JSON.stringify(mapped.stops[1]), /40 min/);
+  });
+  it('does not publish a guessed duration when routing is down', async () => {
+    const stops = [
+      { id: 'a', title: 'A', latitude: 33.7845, longitude: -84.3838 },
+      { id: 'b', title: 'B', latitude: 33.7818, longitude: -84.3825 },
+    ];
+    const up = await schedulingSkill.run(schedulingSkill.input.parse({ stops }), skillContext());
+    const down = await schedulingSkill.run(schedulingSkill.input.parse({ stops }), skillContext({ routingDown: true }));
+    // Placement may still use the straight-line estimate, so the clock does not collapse.
+    assert.equal(down.stops[1].startsAt, up.stops[1].startsAt);
+    assert.equal(down.stops[1].travelMinsBefore, null);
+    assert.equal(down.stops[1].travelLine, 'Travel time unavailable.');
+    assert.equal(down.checks.find((c) => c.check === 'travel')!.verdict, 'unknown');
+    assert.equal(down.checks.find((c) => c.check === 'travel')!.detail, 'Travel time unavailable.');
+    assert.doesNotMatch(down.stops[1].travelLine!, /\d/);
+    assert.equal(down.verdict, 'unknown');
   });
 });
 
 describe('bytt-si routing', () => {
   it('gives travel and Uber/Lyft deep links with no fares', async () => {
     const out = await routingSkill.run({ to: { latitude: 33.7850, longitude: -84.3832, name: 'SAMPLE Rooftop Lounge', address: null } }, skillContext());
+    routingSkill.output.parse(out);
     assert.equal(out.status, 'ok');
     assert.equal(out.travel!.mode, 'walk');
+    assert.equal(out.travel!.basis, 'estimate');
+    assert.match(out.travel!.line, /^about \d+ min \(estimate\)$/);
+    assert.ok(out.message.startsWith(out.travel!.line));
+    assert.doesNotMatch(out.message, new RegExp(`\\b${out.travel!.minutes} min away\\b`));
     assert.deepEqual(out.rideLinks.map((l) => new URL(l.url).hostname), ['m.uber.com', 'ride.lyft.com']);
     assert.ok(out.rideLinks.every((l) => l.fareChecked === false));
+  });
+  it('prefers a MapKit drive over the straight-line estimate', async () => {
+    const ctx = skillContext();
+    ctx.ports.routing.travel = async () => ({ minutes: 40, meters: 3200, basis: 'estimate' as const });
+    const out = await routingSkill.run({
+      to: { latitude: 33.79, longitude: -84.39, name: 'SAMPLE Hall' },
+      driveMinutes: 12,
+    }, ctx);
+    routingSkill.output.parse(out);
+    assert.equal(out.status, 'ok');
+    assert.equal(out.travel!.minutes, 12);
+    assert.equal(out.travel!.basis, 'apple_maps');
+    assert.equal(out.travel!.line, 'about 12 min (Apple Maps estimate)');
+    assert.ok(out.message.startsWith('about 12 min (Apple Maps estimate)'));
+    assert.doesNotMatch(out.message, /40/);
   });
   it('uses the RoutingPort ride links when the port provides them', async () => {
     const ctx = skillContext({ rideLinks: true });
@@ -143,6 +192,18 @@ describe('bytt-si routing', () => {
     const out = await routingSkill.run({ to: { latitude: 33.785, longitude: -84.383, name: 'X' } }, skillContext({ routingDown: true }));
     assertPartial(out, { status: 'unavailable', travel: null });
     assert.equal(out.rideLinks.length, 2);
+    assert.match(out.message, /^Travel time unavailable\./);
+    assert.doesNotMatch(out.message, /\d+ min/);
+  });
+  it('keeps a MapKit drive when the routing port fails', async () => {
+    const out = await routingSkill.run({
+      to: { latitude: 33.79, longitude: -84.39, name: 'SAMPLE Hall' },
+      driveMinutes: 12,
+    }, skillContext({ routingDown: true }));
+    assert.equal(out.status, 'ok');
+    assert.equal(out.travel!.line, 'about 12 min (Apple Maps estimate)');
+    assert.equal(out.travel!.minutes, 12);
+    assert.doesNotMatch(out.message, /unavailable/i);
   });
 });
 

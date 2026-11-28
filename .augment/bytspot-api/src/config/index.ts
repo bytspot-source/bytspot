@@ -35,6 +35,8 @@ const envSchema = z.object({
   RESEND_API_KEY:         z.string().default(''),
   STRIPE_SECRET_KEY:      z.string().default(''),
   STRIPE_WEBHOOK_SECRET:  z.string().default(''),
+  // The Connect endpoint's signing secret, for account.updated about vendor payout accounts. Optional.
+  STRIPE_CONNECT_WEBHOOK_SECRET: z.string().default(''),
   STRIPE_PREMIUM_PRICE_ID:z.string().default(''),
   // Starting rate only. The live rate is the newest PlatformFeeSetting row,
   // which admins change without a deploy.
@@ -211,6 +213,7 @@ export const config = {
   corsOrigins: env.CORS_ORIGINS.split(',').map((s) => s.trim()),
   stripeSecretKey: env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
+  stripeConnectWebhookSecret: env.STRIPE_CONNECT_WEBHOOK_SECRET,
   stripePremiumPriceId: env.STRIPE_PREMIUM_PRICE_ID,
   defaultPlatformFeeBps: env.DEFAULT_PLATFORM_FEE_BPS,
   vendorBookingFeeBps: env.VENDOR_BOOKING_FEE_BPS,

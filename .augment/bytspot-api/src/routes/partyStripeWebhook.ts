@@ -7,6 +7,8 @@ import { alertHostOfCircleTicketPurchase, dispatchPartyAlert } from '../services
 import { applySubscriptionEvent } from '../services/subscriptionEntitlement';
 import { applyTicketCheckoutEvent } from '../vendor/tickets';
 import { applyChargeRiskEvent, refundPartyCheckout } from '../services/stripeRisk';
+import { applyPayoutAccountEvent } from '../vendor/payout';
+import { advanceSellerById } from './vendorSetup';
 
 const partyStripeWebhookRouter = Router();
 
@@ -184,9 +186,21 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
 
   let event: Stripe.Event;
   try {
-    event = new Stripe(config.stripeSecretKey).webhooks.constructEvent(req.body, signature, config.stripeWebhookSecret);
+    event = constructStripeEvent(req.body, signature);
   } catch {
     res.status(400).json({ error: 'Invalid Stripe signature.' });
+    return;
+  }
+
+  // A business's payout account changed at Stripe: record it and take the business live if it now qualifies.
+  try {
+    if (await applyPayoutAccountEvent(event, advanceSellerById)) {
+      res.json({ received: true });
+      return;
+    }
+  } catch (error) {
+    console.error('[payout-account-webhook] account update failed', error);
+    res.status(500).json({ error: 'Payout account update will be retried.' });
     return;
   }
 
@@ -289,3 +303,17 @@ partyStripeWebhookRouter.post('/webhooks/stripe/party', raw({ type: 'application
 });
 
 export default partyStripeWebhookRouter;
+/**
+ * Payment events are signed with the platform endpoint's secret. Events about
+ * connected accounts come from a Connect endpoint, which Stripe signs with its
+ * own secret, so that one is tried as well when it is set.
+ */
+export function constructStripeEvent(body: Buffer, signature: string): Stripe.Event {
+  const stripe = new Stripe(config.stripeSecretKey);
+  try {
+    return stripe.webhooks.constructEvent(body, signature, config.stripeWebhookSecret);
+  } catch (error) {
+    if (!config.stripeConnectWebhookSecret) throw error;
+    return stripe.webhooks.constructEvent(body, signature, config.stripeConnectWebhookSecret);
+  }
+}

@@ -259,3 +259,28 @@ test('onboarding uses a v2 link for the recipient, and falls back to v1 for an o
     stripeHandle.client = originalClient;
   }
 });
+
+test('a recipient account paid by transfer counts as active once nothing is due', () => {
+  assert.deepEqual(statusFrom(account({ payouts_enabled: false, capabilities: { transfers: 'active' } } as never)), { status: 'active' });
+  assert.notEqual(statusFrom(account({ payouts_enabled: false, capabilities: { transfers: 'pending' } } as never)).status, 'active');
+});
+
+test("Stripe's account.updated writes the payout status and takes the business on, and ignores other accounts", async () => {
+  const { applyPayoutAccountEvent } = await import('../vendor/payout');
+  const sellers = db.vendorSeller as any;
+  const saved = { findFirst: sellers.findFirst, update: sellers.update };
+  const updates: any[] = [];
+  const advanced: string[] = [];
+  sellers.findFirst = async ({ where }: any) => (where.payoutReference === 'acct_known' ? { id: 'seller-1' } : null);
+  sellers.update = async (args: any) => { updates.push(args); return {}; };
+  try {
+    const event = (id: string, type = 'account.updated') => ({ type, data: { object: { ...account(), id } } }) as never;
+    assert.equal(await applyPayoutAccountEvent(event('acct_known'), async (id) => { advanced.push(id); }), true);
+    assert.equal(updates[0].data.payoutStatus, 'active');
+    assert.deepEqual(advanced, ['seller-1']);
+    assert.equal(await applyPayoutAccountEvent(event('acct_other'), async () => assert.fail('not ours')), false);
+    assert.equal(await applyPayoutAccountEvent(event('acct_known', 'charge.refunded'), async () => assert.fail('not an account event')), false);
+  } finally {
+    sellers.findFirst = saved.findFirst; sellers.update = saved.update;
+  }
+});

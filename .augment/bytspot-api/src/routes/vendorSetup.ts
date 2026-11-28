@@ -87,13 +87,22 @@ export function consoleOrigin(req: Request): string {
 
 /** Re-reads the business, moves its lifecycle if it now qualifies, and answers. */
 async function respondWithProfile(req: Request, res: Response, sellerId: string): Promise<void> {
-  const seller = await db.vendorSeller.findUnique({
+  let seller = await db.vendorSeller.findUnique({
     where: { id: sellerId },
     include: { locations: true },
   });
   if (!seller) {
     res.status(404).json({ error: 'No such business' });
     return;
+  }
+  // A payout still waiting on Stripe is asked again, so a finished Stripe form
+  // takes the business live the next time any console screen loads.
+  if (seller.payoutReference && seller.payoutStatus !== 'active') {
+    const before = seller.payoutStatus;
+    const refreshed = await refreshPayout(seller);
+    if (refreshed && refreshed.status !== before) {
+      seller = { ...seller, payoutStatus: refreshed.status, payoutLast4: refreshed.last4 ?? null, payoutDetail: refreshed.detail ?? null };
+    }
   }
   // Advanced on write rather than by a job: the vendor is looking at the screen
   // that told them what was missing, and it has to stop saying so.
@@ -436,6 +445,7 @@ router.post('/vendor/payout/onboarding', requireVendorSeat, requireSetupAccess, 
 router.get('/vendor/payout', requireVendorSeat, async (req, res) => {
   try {
     const payout = await refreshPayout(req.vendor!.seller);
+    if (payout?.status === 'active') await advanceSellerById(req.vendor!.seller.id);
     res.status(200).json({ payout });
   } catch (err) {
     captureError(err, { route: 'vendor/payout' });
@@ -444,4 +454,15 @@ router.get('/vendor/payout', requireVendorSeat, async (req, res) => {
 });
 
 export default router;
+/** Re-reads a business and moves its lifecycle if it now qualifies. Used where nobody is waiting on a profile. */
+export async function advanceSellerById(sellerId: string): Promise<void> {
+  const seller = await db.vendorSeller.findUnique({ where: { id: sellerId }, include: { locations: true } });
+  if (!seller) return;
+  const moved = await advanceSeller(seller, seller.locations);
+  const verified = await markVerified(moved);
+  if (verified.first && moved.contactEmail) {
+    void sendVendorVerifiedEmail(moved.contactEmail, { legalName: moved.legalName ?? 'Your business', consoleUrl: config.corsOrigins[0] });
+  }
+}
+
 export { locationBlockers, locationCanPublish, normalizePhone, normalizeWebsite };

@@ -10,7 +10,8 @@ import { membershipTierRank, meetsRequiredMembershipTier } from '../lib/membersh
 import { bookableCreateData, capabilityForAccessMode, coffeeToBookableSnapshot, partyToBookableSnapshot, type BookableSnapshot } from '../services/bookableProjection';
 import { rankPrimePath } from '../services/primePath';
 import { hostDiscoveryTags } from '../services/hostTaxonomy';
-import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, partySessionPriceFloors, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { candidatesFromPlan, candidatesFromDiscovery, dayPartForNeed, discoverablePartyWhere, filterDiscoverableParties, partySessionPriceFloors, type PartyFacts, type PlanItemFacts, type PrimePathTiming, type DiscoverablePartyFacts } from '../services/primePathCandidates';
+import { latestCrowdByVenue } from '../services/latestCrowd';
 import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
 import { planFeasibility } from '../services/planFeasibility';
@@ -765,6 +766,12 @@ async function insertBookableSelections(client: TxClient, planId: string,
   return { ids, addedTitles };
 }
 
+function primeTiming(plan: { startsAt: Date | null; endsAt: Date | null }, now: Date, needKind: string): PrimePathTiming {
+  const startsAt = plan.startsAt ?? now;
+  const endsAt = plan.endsAt && plan.endsAt > startsAt ? plan.endsAt : new Date(startsAt.getTime() + 6 * 60 * 60 * 1000);
+  return { window: { startsAt, endsAt }, category: dayPartForNeed(needKind), driveMinutes: null };
+}
+
 export const planRouter = router({
   bookables: protectedProcedure
     // Accept catalog/native category strings without treating templates as stock.
@@ -1024,10 +1031,19 @@ export const planRouter = router({
       const [parties, occupancy] = partyIds.length === 0
         ? [[] as PartyFacts[], [] as { partyId: string; _count: { _all: number } }[]]
         : await Promise.all([
-            db.party.findMany({ where: { id: { in: partyIds } }, select: { id: true, capacity: true, status: true, admissionPaused: true, closedAt: true, endsAt: true } }),
+            db.party.findMany({ where: { id: { in: partyIds } }, select: { id: true, capacity: true, status: true, admissionPaused: true, closedAt: true, endsAt: true, startsAt: true, arrivalVenueId: true } }),
             db.partyGuest.groupBy({ by: ['partyId'], where: { partyId: { in: partyIds }, accessGranted: true }, _count: { _all: true } }),
           ]);
-      const partyMap = new Map(parties.map((party) => [party.id, party]));
+      const venueIds = [...new Set(parties.flatMap((party) => party.arrivalVenueId ? [party.arrivalVenueId] : []))];
+      const liveByVenue = venueIds.length > 0 ? await latestCrowdByVenue(venueIds, now) : new Map();
+      const partyMap = new Map(parties.map((party) => {
+        const row = liveByVenue.get(party.arrivalVenueId ?? '');
+        const facts: PartyFacts = {
+          ...party,
+          live: row ? { level: row.level, label: row.label, source: row.source, recordedAt: row.recordedAt } : null,
+        };
+        return [party.id, facts] as const;
+      }));
       const occupancyMap = new Map(occupancy.map((row) => [row.partyId, row._count._all]));
       const readiness = planReadiness(plan.participants);
       // A Plan with no stated size still has to seat the people going, so the
@@ -1111,7 +1127,7 @@ export const planRouter = router({
           latitude: p.lat ?? p.arrivalVenue?.lat ?? null,
           longitude: p.lng ?? p.arrivalVenue?.lng ?? null,
         }));
-        discoveredCandidates = candidatesFromDiscovery(discoverable, discoveryOccMap, { userTier, userCircleIds, attachedPartyIds }, now);
+        discoveredCandidates = candidatesFromDiscovery(discoverable, discoveryOccMap, { userTier, userCircleIds, attachedPartyIds }, now, primeTiming(plan, now, 'nightlife'));
       }
 
       // Rank within each need, preserving item (createdAt) order across needs.
@@ -1122,7 +1138,7 @@ export const planRouter = router({
         byNeed.set(item.needKind, group);
       }
       const needs = [...byNeed.entries()].map(([needKind, items]) => {
-        const attached = candidatesFromPlan(items, partyMap, occupancyMap, { partySize }, now);
+        const attached = candidatesFromPlan(items, partyMap, occupancyMap, { partySize }, now, primeTiming(plan, now, needKind));
         // B4c: merge discovered candidates into the nightlife need.
         const pool = needKind === 'nightlife' ? [...attached, ...discoveredCandidates] : attached;
         return { needKind, ...rankPrimePath(pool, { partySize, goingCount: readiness.going }) };

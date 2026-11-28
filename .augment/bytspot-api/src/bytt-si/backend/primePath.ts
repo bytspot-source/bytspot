@@ -1,6 +1,7 @@
 /**
- * Prime Path adapter for BYTT-SI. Maps BYTT-SI candidates to the existing,
- * unchanged ranker in services/primePath.ts and returns its decision.
+ * Prime Path adapter for BYTT-SI. Maps BYTT-SI candidates to the ranker in
+ * services/primePath.ts and returns its decision. A typical arrival signal is
+ * attached when the need has a day-part curve and the start falls in the window.
  *
  * Honest mapping (nothing is asserted that the data does not state):
  * - Bytspot parties (`party:<id>` events with capability book/request) and
@@ -16,6 +17,7 @@
  * - reliability and continuationValue are neutral (0) — no outcome data yet.
  * - Nothing commercial (price, fees, sponsorship) is an input.
  */
+import { bestTimeForPrimePath, dayPartForNeed } from '../../services/primePathCandidates';
 import { rankPrimePath, type PrimePathCandidate } from '../../services/primePath';
 import { clockLabel } from '../core/time';
 import type { DropReason, NeedRanker, NeedRanking, NeedRankingInput, RankableOption } from '../ranking';
@@ -34,28 +36,43 @@ function inWindow(startsAt: string | null, endsAt: string | null, window: NeedRa
   return true;
 }
 
+function withArrival(candidate: PrimePathCandidate, option: RankableOption, window: NeedRankingInput['window']): PrimePathCandidate {
+  const span = window.startsAt && window.endsAt ? { startsAt: new Date(window.startsAt), endsAt: new Date(window.endsAt) } : null;
+  return {
+    ...candidate,
+    bestTime: bestTimeForPrimePath({
+      category: dayPartForNeed(option.candidate.needKind),
+      slug: option.candidate.placeId ?? option.candidate.id,
+      arrivesAt: option.candidate.startsAt ? new Date(option.candidate.startsAt) : span?.startsAt ?? null,
+      window: span,
+      driveMinutes: option.travelMinutes,
+      now: new Date(),
+    }),
+  };
+}
+
 /** Null = not native Bytspot supply, so Prime Path cannot rank it (alternates only). */
 export function primePathCandidateFor(option: RankableOption, window: NeedRankingInput['window']): PrimePathCandidate | null {
   const c = option.candidate;
   if (c.kind === 'event') {
     if (!c.bookableId?.startsWith('party:') || !isModeB(c.capability)) return null;
     const seats = c.capacity ?? 0;
-    return {
+    return withArrival({
       id: c.id, label: c.name, capability: c.capability, ownInventory: true,
       seats, minParty: c.minParty ?? 1,
       confirmableNow: c.capacity !== null && seats > 0 && inWindow(c.startsAt, c.endsAt, window),
       travelMinutes: option.travelMinutes, ...NEUTRAL, startLabel: c.startsAt ? clockLabel(c.startsAt) : null,
-    };
+    }, option, window);
   }
   const own = option.bytspot.filter((b) => isModeB(b.capability)).sort((a, b) => (b.capacity ?? 0) - (a.capacity ?? 0));
   const best = own[0];
   if (!best) return null;
   const seats = best.capacity ?? 0;
-  return {
+  return withArrival({
     id: c.id, label: c.name, capability: best.capability as 'book' | 'request', ownInventory: true,
     seats, minParty: 1, confirmableNow: seats > 0,
     travelMinutes: option.travelMinutes, ...NEUTRAL, startLabel: null,
-  };
+  }, option, window);
 }
 
 const travelOrder = (a: RankableOption, b: RankableOption) => {

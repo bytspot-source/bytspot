@@ -26,8 +26,8 @@ Budget, schedule feasibility and honesty rules are enforced in code (`core/`). F
 ## Prime Path
 
 The model understands the request and names the needs. The final pick per need
-is made by the existing Prime Path ranker (`services/primePath.ts`, unchanged,
-including its three commitments) through `backend/primePath.ts`, wired as
+is made by the Prime Path ranker (`services/primePath.ts`) through
+`backend/primePath.ts`, wired as
 `EngineOptions.ranker` in `createBackendEngine`. The engine itself only knows the
 `NeedRanker` interface (`ranking.ts`); without a ranker it falls back to the v1
 model selection and the plan says `ranking: 'model'`.
@@ -41,7 +41,8 @@ Candidate mapping (honest facts only):
 | seats | live `spacesRemaining` for parties (never Typical); bookable capacity for bookables; unknown → 0 and not confirmable |
 | minParty | stated minimum if the supply has one, else 1 |
 | confirmableNow | Mode B, seats > 0, and the party's time overlaps the plan window |
-| travelMinutes | RoutingPort estimate from the previous stop (or a location the guest gave); else null, which sorts last |
+| travelMinutes | RoutingPort estimate from the previous stop (or a location the guest gave); else null, which sorts last. When known it is also the drive used to place the arrival. |
+| bestTime | Typical level at that arrival from `bestTimeToGo`, for needs with a day-part curve. Missing is neutral. Sort is bookable, then this estimate, then own inventory. A fresh live reading overrides only the current hour. |
 | reliability, continuationValue | 0 (neutral) |
 | price / anything commercial | never an input |
 

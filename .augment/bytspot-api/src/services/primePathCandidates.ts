@@ -15,7 +15,9 @@ import { capabilityForAccessMode, type BookableCapability } from './bookableProj
 import { meetsRequiredMembershipTier } from '../lib/membershipTier';
 import { sessionPriceFloors, type SessionPriceFloor } from './partySessions';
 import { db } from '../lib/db';
-import type { PrimePathCandidate } from './primePath';
+import { bestTimeToGo, formatAtlantaClock, formatAtlantaIso, type BestTimeLiveReading } from './bestTimeToGo';
+import { typicalWaitMins } from './typicalOccupancy';
+import type { PrimePathBestTime, PrimePathCandidate } from './primePath';
 
 export interface PlanItemFacts {
   id: string;
@@ -34,6 +36,142 @@ export interface PartyFacts {
   admissionPaused: boolean;
   closedAt: Date | null;
   endsAt: Date | null;
+  /** When the guest would arrive. Absent → the best-time signal stays neutral. */
+  startsAt?: Date | null;
+  /** Day-part category when known (bar, coffee, …). Need kind is the fallback. */
+  category?: string | null;
+  /** A crowd row for the arrival venue. Freshness is checked; a stale row is ignored. */
+  live?: BestTimeLiveReading | null;
+  arrivalVenueId?: string | null;
+}
+
+/** Plan window plus the drive the guest already knows. Category is the need's day-part. */
+export interface PrimePathTiming {
+  window: { startsAt: Date; endsAt: Date };
+  category?: string | null;
+  driveMinutes?: number | null;
+}
+
+/**
+ * Bookable need → day-part curve. An unknown need stays null so the ranker
+ * does not invent a midday hum for a helicopter or a stay.
+ */
+export function dayPartForNeed(need: string | null | undefined): string | null {
+  switch ((need ?? '').trim().toLowerCase()) {
+    case 'nightlife':
+    case 'drinks':
+    case 'bar':
+    case 'club':
+      return 'bar';
+    case 'dining':
+    case 'restaurant':
+      return 'restaurant';
+    case 'coffee':
+      return 'coffee';
+    case 'fitness':
+    case 'wellness':
+      return 'fitness';
+    case 'green':
+    case 'park':
+      return 'park';
+    case 'shopping':
+    case 'market':
+      return 'market';
+    default:
+      return null;
+  }
+}
+
+function knownDrive(value: number | null | undefined): number | null {
+  if (value == null || !Number.isInteger(value) || value < 0 || value > 180) return null;
+  return value;
+}
+
+function hourKey(iso: string): string {
+  return iso.slice(0, 13);
+}
+
+/**
+ * Typical level and wait at the arrival inside the plan window, from
+ * bestTimeToGo. A known drive pushes the arrival to now + drive when that is
+ * later than the stated start. A fresh live reading replaces the typical
+ * level only when that arrival is in the current Atlanta hour. Anything
+ * missing, or an arrival outside the window, is null (neutral).
+ */
+export function bestTimeForPrimePath(input: {
+  category: string | null | undefined;
+  slug: string;
+  arrivesAt: Date | null | undefined;
+  window: { startsAt: Date; endsAt: Date } | null | undefined;
+  driveMinutes?: number | null;
+  live?: BestTimeLiveReading | null;
+  now?: Date;
+}): PrimePathBestTime | null {
+  const category = input.category?.trim();
+  const arrivesAt = input.arrivesAt ? new Date(input.arrivesAt) : null;
+  const window = input.window;
+  if (!category || !arrivesAt || Number.isNaN(arrivesAt.getTime()) || !window) return null;
+  if (Number.isNaN(window.startsAt.getTime()) || Number.isNaN(window.endsAt.getTime()) || !(window.startsAt < window.endsAt)) return null;
+  const now = input.now ?? new Date();
+  const drive = knownDrive(input.driveMinutes);
+  const earliest = drive === null ? arrivesAt : new Date(now.getTime() + drive * 60_000);
+  const at = earliest > arrivesAt ? earliest : arrivesAt;
+  if (at < window.startsAt || at >= window.endsAt) return null;
+  const estimate = bestTimeToGo({
+    venue: { category, slug: input.slug },
+    window,
+    driveMinutes: drive,
+    live: input.live ?? null,
+    now,
+    slotMinutes: 30,
+  });
+  const target = at.getTime();
+  const slot = [...estimate.slots]
+    .sort((a, b) => new Date(a.arrivalAt).getTime() - new Date(b.arrivalAt).getTime())
+    .reduce<{ arrivalAt: string; level: number; label: string; waitMins: number } | null>((chosen, next) => (
+      new Date(next.arrivalAt).getTime() <= target ? next : chosen
+    ), null);
+  if (!slot) return null;
+  const currentHour = estimate.rightNow && hourKey(formatAtlantaIso(at)) === hourKey(formatAtlantaIso(now));
+  if (currentHour && estimate.rightNow) {
+    return {
+      level: estimate.rightNow.level,
+      waitMins: typicalWaitMins(estimate.rightNow.level),
+      label: estimate.rightNow.label,
+      source: 'live',
+      reason: estimate.rightNow.line,
+    };
+  }
+  return {
+    level: slot.level,
+    waitMins: slot.waitMins,
+    label: slot.label,
+    source: 'typical',
+    reason: `Typically ${slot.label.toLowerCase()} around ${formatAtlantaClock(new Date(slot.arrivalAt))} (estimate)`,
+  };
+}
+
+function withBestTime(
+  candidate: PrimePathCandidate,
+  arrivesAt: Date | null | undefined,
+  timing: PrimePathTiming | null | undefined,
+  live: BestTimeLiveReading | null | undefined,
+  now: Date,
+  category?: string | null,
+): PrimePathCandidate {
+  if (!timing) return { ...candidate, bestTime: null };
+  return {
+    ...candidate,
+    bestTime: bestTimeForPrimePath({
+      category: category ?? timing.category ?? null,
+      slug: candidate.id,
+      arrivesAt,
+      window: timing.window,
+      driveMinutes: candidate.travelMinutes ?? timing.driveMinutes ?? null,
+      live: live ?? null,
+      now,
+    }),
+  };
 }
 
 const NEUTRAL = { travelMinutes: null, reliability: 0, continuationValue: 0, startLabel: null } as const;
@@ -44,14 +182,14 @@ const NEUTRAL = { travelMinutes: null, reliability: 0, continuationValue: 0, sta
  * paused, still within its window, with room left. A missing party (deleted out
  * from under the item) is simply not confirmable.
  */
-function partyCandidate(item: PlanItemFacts, party: PartyFacts | undefined, granted: number, now: Date): PrimePathCandidate {
+function partyCandidate(item: PlanItemFacts, party: PartyFacts | undefined, granted: number, now: Date, timing?: PrimePathTiming | null): PrimePathCandidate {
   const seats = party ? Math.max(0, party.capacity - granted) : 0;
   const open = !!party
     && party.status === 'published'
     && party.closedAt === null
     && !party.admissionPaused
     && (party.endsAt === null || now < party.endsAt);
-  return {
+  const base: PrimePathCandidate = {
     id: item.id,
     label: item.title,
     capability: item.capability ?? 'details',
@@ -61,6 +199,7 @@ function partyCandidate(item: PlanItemFacts, party: PartyFacts | undefined, gran
     confirmableNow: open && seats > 0,
     ...NEUTRAL,
   };
+  return withBestTime(base, party?.startsAt ?? null, timing, party?.live, now, party?.category ?? timing?.category);
 }
 
 /**
@@ -69,13 +208,13 @@ function partyCandidate(item: PlanItemFacts, party: PartyFacts | undefined, gran
  * hold is live (not expired, not withdrawn). partySize decides seats so the
  * ranker's confirmability filter passes on the hold's own terms.
  */
-function coffeeCandidate(item: PlanItemFacts, partySize: number, now: Date): PrimePathCandidate {
+function coffeeCandidate(item: PlanItemFacts, partySize: number, now: Date, timing?: PrimePathTiming | null): PrimePathCandidate {
   const reservation = item.coffeeReservation;
   const live = !!reservation
     && reservation.status !== 'expired'
     && reservation.status !== 'cancelled'
     && (reservation.holdExpiresAt === null || now < reservation.holdExpiresAt);
-  return {
+  const base: PrimePathCandidate = {
     id: item.id,
     label: item.title,
     capability: item.capability ?? 'request',
@@ -85,6 +224,8 @@ function coffeeCandidate(item: PlanItemFacts, partySize: number, now: Date): Pri
     confirmableNow: live,
     ...NEUTRAL,
   };
+  // A hold has no arrival hour, so the signal stays neutral rather than scoring "now".
+  return withBestTime(base, null, timing, null, now);
 }
 
 /**
@@ -98,14 +239,15 @@ export function candidatesFromPlan(
   occupancy: ReadonlyMap<string, number>,
   ctx: { partySize: number },
   now: Date,
+  timing?: PrimePathTiming | null,
 ): PrimePathCandidate[] {
   const candidates: PrimePathCandidate[] = [];
   for (const item of items) {
     if (item.status === 'cancelled') continue;
     if (item.partyId) {
-      candidates.push(partyCandidate(item, parties.get(item.partyId), occupancy.get(item.partyId) ?? 0, now));
+      candidates.push(partyCandidate(item, parties.get(item.partyId), occupancy.get(item.partyId) ?? 0, now, timing));
     } else if (item.coffeeReservationId) {
-      candidates.push(coffeeCandidate(item, ctx.partySize, now));
+      candidates.push(coffeeCandidate(item, ctx.partySize, now, timing));
     }
     // A details/reference item asserts no supply and is intentionally skipped.
   }
@@ -197,13 +339,14 @@ export function discoveredPartyCandidate(
   party: DiscoverablePartyFacts,
   granted: number,
   now: Date,
+  timing?: PrimePathTiming | null,
 ): PrimePathCandidate {
   const seats = Math.max(0, party.capacity - granted);
   const open = party.status === 'published'
     && party.closedAt === null
     && !party.admissionPaused
     && (party.endsAt === null || now < party.endsAt);
-  return {
+  const base: PrimePathCandidate = {
     id: `discovered:${party.id}`,
     label: party.title,
     capability: capabilityForAccessMode(party.accessMode),
@@ -214,6 +357,7 @@ export function discoveredPartyCandidate(
     discovered: true,
     ...NEUTRAL,
   };
+  return withBestTime(base, party.startsAt, timing, null, now, timing?.category);
 }
 
 /**
@@ -263,9 +407,10 @@ export function candidatesFromDiscovery(
   occupancy: ReadonlyMap<string, number>,
   ctx: { userTier: string; userCircleIds: ReadonlySet<string>; attachedPartyIds: ReadonlySet<string> },
   now: Date,
+  timing?: PrimePathTiming | null,
 ): PrimePathCandidate[] {
   return filterDiscoverableParties(parties, { ...ctx, now })
-    .map((p) => discoveredPartyCandidate(p, occupancy.get(p.id) ?? 0, now));
+    .map((p) => discoveredPartyCandidate(p, occupancy.get(p.id) ?? 0, now, timing));
 }
 
 /**

@@ -44,9 +44,11 @@ export function statusFrom(account: Stripe.Account): { status: PayoutStatus; det
   const overdue = requirements?.currently_due?.length ?? 0;
   const disabledReason = requirements?.disabled_reason ?? undefined;
 
-  if (account.payouts_enabled && overdue === 0) return { status: 'active' };
+  // A recipient account is paid by transfer, so an active transfers capability counts as well as payouts.
+  const canReceive = account.payouts_enabled || account.capabilities?.transfers === 'active';
+  if (canReceive && overdue === 0) return { status: 'active' };
   if (disabledReason) return { status: 'restricted', detail: humanize(disabledReason) };
-  if (!account.payouts_enabled && account.details_submitted) {
+  if (!canReceive && account.details_submitted) {
     return { status: 'pending', detail: 'The processor is reviewing these details' };
   }
   return { status: 'pending' };
@@ -175,4 +177,26 @@ export async function onboardingLink(
   const reference = await ensureAccount(seller, stripe);
   const url = await recipientOnboardingUrl(stripe, reference, { refresh: `${origin}/payout/retry`, return: `${origin}/payout/done` });
   return { reference, url };
+}
+
+/**
+ * Stripe's account.updated for a business's payout account: writes the status
+ * it reports, so the business can go live without waiting for its owner to
+ * reopen the console. False for an event that is not ours.
+ */
+export async function applyPayoutAccountEvent(
+  event: Stripe.Event,
+  advance: (sellerId: string) => Promise<void>,
+): Promise<boolean> {
+  if (event.type !== 'account.updated') return false;
+  const account = event.data.object as Stripe.Account;
+  const seller = await db.vendorSeller.findFirst({ where: { payoutReference: account.id }, select: { id: true } });
+  if (!seller) return false;
+  const { status, detail } = statusFrom(account);
+  await db.vendorSeller.update({
+    where: { id: seller.id },
+    data: { payoutStatus: status, payoutLast4: last4Of(account) ?? null, payoutDetail: detail ?? null },
+  });
+  await advance(seller.id);
+  return true;
 }

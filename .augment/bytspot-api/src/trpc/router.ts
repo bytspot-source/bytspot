@@ -41,7 +41,7 @@ import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
-import { curatedVenueMedia, linkedVendorMedia } from '../services/venueMedia';
+import { curatedVenueMedia, linkedVendorFacts, linkedVendorMedia } from '../services/venueMedia';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { currentPlatformFeeBps, defaultFeeBps, FEE_SCOPES, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE, VENDOR_BOOKING_FEE_SCOPE } from '../services/platformFee';
 import { payoutsRouter } from './payoutsRouter';
@@ -867,9 +867,9 @@ const venuesRouter = router({
             media: { where: { venue: { controlledAt: { not: null } } }, select: { id: true, kind: true, position: true } },
             menuLocation: {
               select: {
-                state: true,
-                seller: { select: { state: true, videoHostingAt: true } },
-                media: { where: { reviewStatus: 'approved', kind: { in: ['cover', 'gallery', 'video'] } }, select: { id: true, kind: true, position: true } },
+                state: true, phone: true, website: true,
+                seller: { select: { state: true, videoHostingAt: true, legalName: true } },
+                media: { where: { reviewStatus: 'approved', kind: { in: ['cover', 'gallery', 'video', 'menu'] } }, select: { id: true, kind: true, position: true } },
               },
             },
           },
@@ -877,12 +877,14 @@ const venuesRouter = router({
         }));
         return rows.map((v) => {
           const curated = curatedVenueMedia(v, v.media, linkedVendorMedia(v.menuLocation));
+          const facts = linkedVendorFacts(v, v.menuLocation);
           return {
             id: v.id, name: v.name, slug: v.slug, address: v.onlineOnly ? ONLINE_ADDRESS : v.address,
             online: v.onlineOnly, website: v.website,
             lat: v.lat, lng: v.lng, category: v.category, imageUrl: curated?.imageUrl ?? v.imageUrl,
             ...projectVenuePhoto(curated ?? v),
             ...(curated ? { photoUrls: curated.photoUrls, vibeVideoUrl: curated.vibeVideoUrl } : {}),
+            ...(facts ? facts : {}),
             control: venueControl(v),
             // The exact Google place, so a client can add it to a Plan by place
             // and name its admin-listed OpenTable or Resy link.

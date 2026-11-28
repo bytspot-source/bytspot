@@ -38,6 +38,8 @@ const PUBLIC_MUTATIONS = new Set([
   'auth.requestPasswordReset', 'auth.resetPassword',
   // The refresh token is the credential; the access token may already have lapsed.
   'auth.refresh', 'auth.signOut',
+  // A listed business asking for an invite has no account yet; the signed pitch link is the check.
+  'pitch.requestJoin',
   // The emailed code is the credential: the member is mid sign-in.
   'auth.confirmLink',
   'betaSignup.signup',

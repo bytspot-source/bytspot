@@ -256,7 +256,7 @@ test('successful replacements retain the media ID but never reuse an upload obje
 function storedCover(reviewStatus: string): any {
   return { id: 'cover', sellerId: 'seller', locationId: 'location', bookableId: null, kind: 'cover', reviewStatus,
     mimeType: 'image/jpeg', byteSize: 4, bytes: null, storageKey: 'vendor/seller/location/location/cover/obj',
-    updatedAt: now, location: { id: 'location', state: 'ACTIVE' }, bookable: null, seller: { videoHostingAt: null } };
+    updatedAt: now, location: { id: 'location', state: 'ACTIVE' }, bookable: null, seller: { state: 'ACTIVE', videoHostingAt: null } };
 }
 async function photo(row: any, authorization?: string, hasSeat = true) {
   const store = memoryObjectStore();
@@ -302,4 +302,11 @@ test('a guest still follows a redirect to an approved stored photo, and cannot s
   assert.ok(approved.location);
   const pending = await photo(storedCover('pending'));
   assert.equal(pending.status, 404);
+});
+
+test("a guest sees nothing from a business that is paused, closed or not live yet", async () => {
+  for (const state of ['SUSPENDED', 'CLOSED', 'PENDING', 'DRAFT']) {
+    const hidden = await photo({ ...storedCover('approved'), seller: { state, videoHostingAt: null } });
+    assert.equal(hidden.status, 404, state);
+  }
 });

@@ -431,6 +431,39 @@ export async function sendSafetyReportAlert(to: string, report: SafetyReportNoti
   });
 }
 
+export interface VendorLeadNotice {
+  placeName: string;
+  placeAddress: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string | null;
+}
+
+/** A listed place asked to join from its pitch link. Contact details are escaped before they reach HTML. */
+export async function sendVendorLeadEmail(to: string, lead: VendorLeadNotice): Promise<void> {
+  const resend = getResend();
+  if (!resend) throw new Error('RESEND_API_KEY is not configured; cannot send a business join request');
+
+  await resend.emails.send({
+    from: FROM,
+    to,
+    replyTo: lead.contactEmail,
+    subject: `${lead.placeName} wants to join Bytspot`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; background: #0d0d0d; color: #fff; border-radius: 16px; padding: 32px;">
+        <h1 style="font-size: 22px; font-weight: 700; margin: 0 0 8px;">${escapeHtml(lead.placeName)} wants to join</h1>
+        <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 0 0 16px;">${escapeHtml(lead.placeAddress)}</p>
+        <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 4px;">${escapeHtml(lead.contactName)}</p>
+        <p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 4px;">${escapeHtml(lead.contactEmail)}</p>
+        ${lead.contactPhone ? `<p style="color: #ddd; font-size: 16px; line-height: 1.5; margin: 0 0 4px;">${escapeHtml(lead.contactPhone)}</p>` : ''}
+        <p style="color: #aaa; font-size: 15px; line-height: 1.5; margin: 16px 0 0;">
+          They asked from the pitch link. To bring them on, create the business in the admin console under Vendors with this email; they get the invite.
+        </p>
+      </div>
+    `,
+  });
+}
+
 export interface BookingRecheckNotice {
   name: string;
   provider: string;

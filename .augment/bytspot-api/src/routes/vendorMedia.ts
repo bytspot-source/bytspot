@@ -45,7 +45,8 @@ const router = Router();
 const uploadBody = z.object({
   kind: z.string().trim().min(1).max(16),
   position: z.number().int().min(0).max(32).optional(),
-  dataUri: z.string().min(32).max(4_000_000),
+  // An 8 MB menu PDF is about 10.7 million base64 characters.
+  dataUri: z.string().min(32).max(11_000_000),
 });
 
 const videoIntentBody = z.object({
@@ -94,6 +95,12 @@ function videoAvailableFor(vendor: VendorContext): boolean {
   return objectStoreConfigured() && Boolean(vendor.seller.videoHostingAt);
 }
 
+/** Why video is off: Bytspot's storage is not set up, or the business has no video hosting. */
+function videoUnavailableReason(vendor: VendorContext): 'storage' | 'hosting' | null {
+  if (!objectStoreConfigured()) return 'storage';
+  return vendor.seller.videoHostingAt ? null : 'hosting';
+}
+
 /** Every new or replaced file waits for the Bytspot team before guests see it. */
 const AWAITING_REVIEW = { reviewStatus: 'pending', reviewedAt: null, reviewedByUserId: null, reviewNote: null } as const;
 
@@ -103,7 +110,7 @@ async function listMedia(vendor: VendorContext, parent: MediaParent, id: string)
     orderBy: [{ kind: 'asc' }, { position: 'asc' }],
     select: { id: true, kind: true, position: true, mimeType: true, byteSize: true, reviewStatus: true, reviewNote: true, updatedAt: true },
   });
-  return { media: rows.map(mediaDto), videoAvailable: videoAvailableFor(vendor) };
+  return { media: rows.map(mediaDto), videoAvailable: videoAvailableFor(vendor), videoUnavailableReason: videoUnavailableReason(vendor) };
 }
 
 async function compactKind(parent: MediaParent, parentId: string, kind: MediaKind): Promise<void> {
@@ -696,11 +703,12 @@ export async function handleVendorMedia(req: Request, res: Response) {
   try {
     const media = await db.vendorMedia.findUnique({
       where: { id: String(req.params.mediaId) },
-      include: { location: true, bookable: { include: { location: true } }, seller: { select: { videoHostingAt: true } } },
+      include: { location: true, bookable: { include: { location: true } }, seller: { select: { state: true, videoHostingAt: true } } },
     });
     if (!media) return notFound(res);
 
-    const published = parentIsPublic(media) && guestCanSeeMedia(media, media.seller);
+    // A paused, closed or not-yet-live business shows guests nothing.
+    const published = media.seller.state === 'ACTIVE' && parentIsPublic(media) && guestCanSeeMedia(media, media.seller);
     // The Bytspot team previews files waiting for review.
     if (!published && !requestIsAdmin(req.headers.authorization)) {
       const userId = requestVendorUserId(req.headers.authorization);

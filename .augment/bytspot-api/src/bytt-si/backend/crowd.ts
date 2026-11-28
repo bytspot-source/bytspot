@@ -1,3 +1,4 @@
+import { bestTimeToGo } from '../../services/bestTimeToGo';
 import { TYPICAL_SOURCE, typicalCrowd } from '../../services/typicalOccupancy';
 import type { CrowdPort } from '../ports/types';
 
@@ -20,6 +21,16 @@ export function createBackendCrowdPort(): CrowdPort {
       const { hour, dayOfWeek } = atlantaHourAndDay(at);
       const crowd = typicalCrowd(hour, dayOfWeek, place.types[0] ?? place.name);
       return { level: crowd.level, source: TYPICAL_SOURCE };
+    },
+    async bestTime(input) {
+      return bestTimeToGo({
+        venue: { category: input.category, slug: input.slug },
+        window: { startsAt: new Date(input.startsAt), endsAt: new Date(input.endsAt) },
+        slotMinutes: input.slotMinutes,
+        driveMinutes: input.driveMinutes,
+        live: input.live ? { level: input.live.level, source: input.live.source, recordedAt: input.live.recordedAt, label: input.live.label } : null,
+        now: new Date(input.now),
+      });
     },
   };
 }

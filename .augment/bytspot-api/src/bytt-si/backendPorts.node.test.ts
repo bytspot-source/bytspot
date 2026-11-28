@@ -131,6 +131,26 @@ describe('bytt-si backend CrowdPort (typicalOccupancy.ts)', () => {
     const reading = await port.typical({ placeId: 'gp1', name: 'Bar', types: ['bar'] }, '2026-11-07T03:00:00.000Z'); // Fri 10 PM ET
     assert.deepEqual(reading, { level: typicalLevel(22, 5, 'bar'), source: 'typical' });
   });
+  it('best time calls the shared typical estimate and does not invent a drive', async () => {
+    const { bestTimeToGo } = await import('../services/bestTimeToGo');
+    const port = createBackendCrowdPort();
+    const input = {
+      category: 'bar', slug: 'stable-bar-3',
+      startsAt: '2026-11-06T16:00:00-05:00', endsAt: '2026-11-06T23:00:00-05:00',
+      slotMinutes: 30 as const, driveMinutes: null, live: null, now: '2026-11-06T21:10:00-05:00',
+    };
+    const fromPort = await port.bestTime!(input);
+    const direct = bestTimeToGo({
+      venue: { category: input.category, slug: input.slug },
+      window: { startsAt: new Date(input.startsAt), endsAt: new Date(input.endsAt) },
+      slotMinutes: 30, driveMinutes: null, now: new Date(input.now),
+    });
+    assert.deepEqual(fromPort, direct);
+    assert.equal(fromPort.source, 'typical');
+    assert.equal(fromPort.summary, 'Typically quieter before 5:00 PM (estimate)');
+    assert.equal(fromPort.driveMinutes, null);
+    assert.equal(fromPort.rightNow, null);
+  });
 });
 
 describe('bytt-si backend RoutingPort (planLegs / mobility deep links)', () => {

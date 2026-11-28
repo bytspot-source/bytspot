@@ -96,6 +96,10 @@ class Ledger {
   groupSize: number | null = null;
   /** Places left out by the guest's saved preferences, across every search. */
   leftOut = 0;
+  /** Places best_time_to_go attached a fresh live reading to. */
+  readonly livePlaceNames = new Set<string>();
+  /** Places whose arrival estimate is typical only. */
+  readonly typicalPlaceNames = new Set<string>();
   readonly notices: Notice[] = [];
   record(skill: string, input: unknown, output: unknown) {
     if (skill === 'discovery') {
@@ -117,6 +121,12 @@ class Ledger {
     } else if (skill === 'routing') {
       const out = output as { status: string; message: string | null };
       if (out.status === 'unavailable' && out.message) this.notices.push({ code: 'provider_unavailable', message: out.message });
+    } else if (skill === 'best_time_to_go') {
+      const name = String((input as { name?: string }).name ?? '').trim();
+      const out = output as { status?: string; message?: string; rightNow?: unknown };
+      if (out.status === 'unavailable' && out.message) this.notices.push({ code: 'provider_unavailable', message: out.message });
+      if (name && out.rightNow) this.livePlaceNames.add(name);
+      else if (name) this.typicalPlaceNames.add(name);
     }
   }
 }
@@ -137,6 +147,13 @@ function resolvePartySize(constraints: PlanConstraints, groupSize: number | null
 }
 
 const dedupe = (notices: Notice[]) => notices.filter((n, i) => notices.findIndex((m) => m.code === n.code && m.message === n.message) === i);
+
+/** A place with a fresh best-time reading may be described as right now. A typical-only place may not, even if the same run also listed it. */
+function crowdHonestyNames(live: string[], other: string[], ledger: Ledger): { liveNames: string[]; otherNames: string[] } {
+  const liveNames = new Set([...live, ...ledger.livePlaceNames]);
+  const otherNames = [...new Set([...other, ...ledger.typicalPlaceNames])].filter((name) => !liveNames.has(name));
+  return { liveNames: [...liveNames], otherNames };
+}
 
 export class ByttSiEngine {
   private readonly llm: LLMProvider;
@@ -604,7 +621,7 @@ export class ByttSiEngine {
     // Ranked plans: the model's text may not name a stop the ranker did not pick.
     const inPlan = new Set(items.map((i) => i.candidateId));
     const namesUnpicked = ranking === 'prime_path' && [...ledger.candidates.values()].some((c) => !inPlan.has(c.id) && !items.some((i) => i.title.includes(c.name)) && summary.includes(c.name));
-    if (summary !== fallbackSummary && (namesUnpicked || honestyViolations(summary, this.honestyFacts(items, constraints, budget.perPersonCents, budget.totalCents)).length)) {
+    if (summary !== fallbackSummary && (namesUnpicked || honestyViolations(summary, this.honestyFacts(items, constraints, budget.perPersonCents, budget.totalCents, ledger)).length)) {
       notices.push({ code: 'text_replaced', message: "The assistant's description made a claim the data doesn't support, so it was replaced with a plain summary." });
       summary = fallbackSummary;
     }
@@ -640,8 +657,10 @@ export class ByttSiEngine {
         answer = (await this.llm.structured({ name: 'quick_answer', schema: quickAnswerSchema, messages: [...messages, { role: 'user', content: 'Answer in one or two sentences using only the skill results above. JSON {answer}.' }] })).answer;
       } catch { answer = fallback; }
     }
-    const facts = { liveNames: candidates.filter((c) => c.crowd?.source === 'live').map((c) => c.name), otherNames: candidates.filter((c) => c.crowd?.source !== 'live').map((c) => c.name),
-      allowedCents: candidates.flatMap((c) => (c.priceCents === null ? [] : [c.priceCents])) };
+    const facts = {
+      ...crowdHonestyNames(candidates.filter((c) => c.crowd?.source === 'live').map((c) => c.name), candidates.filter((c) => c.crowd?.source !== 'live').map((c) => c.name), ledger),
+      allowedCents: candidates.flatMap((c) => (c.priceCents === null ? [] : [c.priceCents])),
+    };
     if (answer !== fallback && honestyViolations(answer, facts).length) {
       notices.push({ code: 'text_replaced', message: "The assistant's answer made a claim the data doesn't support, so it was replaced." });
       answer = fallback;
@@ -656,12 +675,15 @@ export class ByttSiEngine {
     };
   }
 
-  private honestyFacts(items: ProposedPlanItem[], constraints: PlanConstraints, perPerson: number | null, total: number | null) {
+  private honestyFacts(items: ProposedPlanItem[], constraints: PlanConstraints, perPerson: number | null, total: number | null, ledger: Ledger) {
     const allowed = [perPerson, total, constraints.budgetCents,
       constraints.budgetCents !== null && constraints.partySize ? Math.round(constraints.budgetCents / constraints.partySize) : null,
       ...items.flatMap((i) => (i.priceCents === null ? [] : [i.priceCents, constraints.partySize ? i.priceCents * constraints.partySize : null]))]
       .filter((v): v is number => v !== null);
-    return { liveNames: items.filter((i) => i.crowd?.source === 'live').map((i) => i.title), otherNames: items.filter((i) => i.crowd?.source !== 'live').map((i) => i.title), allowedCents: allowed };
+    return {
+      ...crowdHonestyNames(items.filter((i) => i.crowd?.source === 'live').map((i) => i.title), items.filter((i) => i.crowd?.source !== 'live').map((i) => i.title), ledger),
+      allowedCents: allowed,
+    };
   }
 
   private summarize(items: ProposedPlanItem[], perPerson: number | null, total: number | null, partySize: number | null, estimate: boolean): string {

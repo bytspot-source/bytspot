@@ -5,6 +5,8 @@
  */
 
 const LIVE_CLAIM = /\b(live|real[- ]?time)\b|\b(right now|currently|at the moment)\b[^.]*\b(busy|packed|quiet|chill|crowd|crowded|line|empty|dead)\b|\b(busy|packed|quiet|crowded|empty)\b[^.]*\b(right now|at the moment)\b/i;
+/** "Empty right now" is never a reading we have. Typical data is not a live count, and a live level is chill, not empty. */
+const EMPTY_NOW = /\bempty\b[^.]*\b(right now|currently|at the moment)\b|\b(right now|currently|at the moment)\b[^.]*\bempty\b/i;
 const AVAILABILITY_CLAIM = /\b(table|tables|seats?|spots?) (is |are )?(open|available|free)\b|\b(i|we)('ve| have)? (booked|reserved)\b|\bconfirmed\b/i;
 const DOLLARS = /\$\s?(\d+(?:\.\d{1,2})?)/g;
 
@@ -19,6 +21,7 @@ export interface HonestyFacts {
 
 export function honestyViolations(text: string, facts: HonestyFacts): string[] {
   const problems: string[] = [];
+  if (EMPTY_NOW.test(text)) problems.push('live_claim');
   if (LIVE_CLAIM.test(text)) {
     // A live claim is allowed only about places with live data, and never about a typical one.
     const lower = text.toLowerCase();

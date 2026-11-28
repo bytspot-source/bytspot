@@ -6,6 +6,7 @@ import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
+import { bestTimeForVenueDetail } from '../services/bestTimeToGo';
 import { venueParking } from '../services/parkingFreshness';
 
 const router = Router();
@@ -200,6 +201,12 @@ router.get('/venues/:slug', async (req, res) => {
     parking: parking.spots,
     parkingFreshness: parking.freshness,
     parkingAsOf: parking.asOf,
+    bestTimeToGo: bestTimeForVenueDetail(
+      { category: venue.category, slug: venue.slug },
+      venue.crowdLevels[0]
+        ? { level: venue.crowdLevels[0].level, label: venue.crowdLevels[0].label, source: venue.crowdLevels[0].source, recordedAt: venue.crowdLevels[0].recordedAt }
+        : null,
+    ),
   });
 });
 

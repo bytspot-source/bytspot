@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { bookablesSkill, budgetSkill, discoverySkill, peopleSkill, routingSkill, schedulingSkill, SKILLS, toToolDefinition } from './skills';
+import { bestTimeToGoSkill, bookablesSkill, budgetSkill, discoverySkill, peopleSkill, routingSkill, schedulingSkill, SKILLS, toToolDefinition } from './skills';
 import { assertPartial } from './testing/assert';
 import { skillContext } from './testing/helpers';
 
 describe('bytt-si skill registry', () => {
-  it('exposes exactly the six skills as tools with JSON schemas', () => {
-    assert.deepEqual(SKILLS.map((s) => s.name), ['discovery', 'budget', 'people', 'scheduling', 'routing', 'bookables']);
+  it('exposes the skills as tools with JSON schemas', () => {
+    assert.deepEqual(SKILLS.map((s) => s.name), ['discovery', 'budget', 'people', 'scheduling', 'routing', 'bookables', 'best_time_to_go']);
     for (const skill of SKILLS) {
       const def = toToolDefinition(skill);
       assert.ok(def.description.length > 20);
@@ -162,5 +162,76 @@ describe('bytt-si bookables', () => {
   });
   it('says booking info is unavailable when the port is down', async () => {
     assert.equal((await bookablesSkill.run({ placeId: 'SAMPLE_dinner_southern' }, skillContext({ bookablesDown: true }))).status, 'unavailable');
+  });
+});
+
+describe('bytt-si best_time_to_go', () => {
+  const ask = { name: 'SAMPLE Bar', category: 'bar', slug: 'stable-bar-3' };
+  it('answers when to go with the typical estimate and does not invent a leave-by', async () => {
+    const out = await bestTimeToGoSkill.run({
+      ...ask,
+      startsAt: '2026-11-06T16:00:00-05:00',
+      endsAt: '2026-11-06T23:00:00-05:00',
+      slotMinutes: 30,
+    }, skillContext());
+    bestTimeToGoSkill.output.parse(out);
+    assert.equal(out.status, 'ok');
+    assert.equal(out.source, 'typical');
+    assert.equal(out.summary, 'Typically quieter before 5:00 PM (estimate)');
+    assert.equal(out.message, out.summary);
+    assert.equal(out.rightNow, null);
+    assert.equal(out.driveMinutes, null);
+    assert.equal(out.preferredLeaveBy, null);
+    assert.doesNotMatch(out.message, /right now|empty|live/i);
+    assert.equal(out.slots[0].level, 1);
+    assert.equal(out.slots[0].label, 'Chill');
+    assert.ok(out.slots.every((slot) => slot.leaveBy === undefined));
+  });
+  it('includes leave-by only for a known drive time', async () => {
+    const out = await bestTimeToGoSkill.run({
+      ...ask, startsAt: '2026-11-06T21:00:00-05:00', endsAt: '2026-11-06T21:30:00-05:00', slotMinutes: 30, driveMinutes: 25,
+    }, skillContext());
+    assert.equal(out.slots[0].leaveBy, '2026-11-06T20:35:00-05:00');
+    assert.equal(out.preferredLeaveBy, '2026-11-06T20:35:00-05:00');
+  });
+  it('mentions right now only for a fresh live reading, and never from typical data', async () => {
+    const fresh = await bestTimeToGoSkill.run({
+      ...ask,
+      startsAt: '2026-11-06T16:00:00-05:00',
+      endsAt: '2026-11-06T23:00:00-05:00',
+      slotMinutes: 30,
+      crowd: { level: 4, source: 'sensor', observedAt: '2026-11-06T21:00:00-05:00' },
+    }, skillContext());
+    assert.equal(fresh.rightNow?.line, "Right now it's packed.");
+    assert.match(fresh.message, /Typically quieter before 5:00 PM \(estimate\)\. Right now it's packed\./);
+    assert.doesNotMatch(fresh.summary, /right now/i);
+
+    const stale = await bestTimeToGoSkill.run({
+      ...ask,
+      startsAt: '2026-11-06T16:00:00-05:00',
+      endsAt: '2026-11-06T23:00:00-05:00',
+      crowd: { level: 1, source: 'typical', observedAt: '2026-11-06T21:00:00-05:00', label: 'Empty' },
+    }, skillContext());
+    assert.equal(stale.rightNow, null);
+    assert.doesNotMatch(stale.message, /right now|empty/i);
+  });
+  it('uses the crowd port when it implements best time, and will not repeat an empty claim', async () => {
+    const ctx = skillContext();
+    ctx.ports.crowd = {
+      async typical() { return { level: 1, source: 'typical' }; },
+      async bestTime() {
+        return {
+          source: 'typical', slotMinutes: 30, summary: "It's empty right now",
+          driveMinutes: null, window: { startsAt: '2026-11-06T16:00:00-05:00', endsAt: '2026-11-06T17:00:00-05:00' },
+          preferredArrivalAt: '2026-11-06T16:00:00-05:00', preferredLeaveBy: null,
+          slots: [{ arrivalAt: '2026-11-06T16:00:00-05:00', level: 1, label: 'Chill', waitMins: 0 }],
+          rightNow: null,
+        };
+      },
+    };
+    const out = await bestTimeToGoSkill.run(ask, ctx);
+    assert.equal(out.summary, "It's empty right now");
+    assert.equal(out.message, 'Typically following the usual pattern for this hour (estimate)');
+    assert.doesNotMatch(out.message, /empty|right now/i);
   });
 });

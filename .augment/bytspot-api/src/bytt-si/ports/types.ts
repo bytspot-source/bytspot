@@ -1,4 +1,5 @@
 import type { BookingProvider } from '../../services/bookingProviders';
+import type { BestTimeToGo } from '../../services/bestTimeToGo';
 /**
  * Data ports. The engine and skills only see these interfaces; production
  * adapters wrap the bytspot-api services (see README "Wiring real ports").
@@ -62,9 +63,26 @@ export interface RoutingPort {
   rideLinks?(destination: { latitude: number; longitude: number; name: string; address: string | null }): Array<{ provider: 'uber' | 'lyft'; url: string; fareChecked: false }>;
 }
 
-/** Typical-only crowd patterns. Whatever it returns is always labeled typical. */
+/** Input for CrowdPort.bestTime. Instants are ISO strings; the adapter owns the clock. */
+export interface BestTimePortInput {
+  category: string;
+  slug: string;
+  startsAt: string;
+  endsAt: string;
+  slotMinutes?: 15 | 30;
+  driveMinutes?: number | null;
+  live?: { level: number; source: string; recordedAt: string; label?: string | null } | null;
+  now: string;
+}
+
+/** Typical-only crowd patterns. Whatever `typical` returns is always labeled typical. */
 export interface CrowdPort {
   typical(place: { placeId: string; name: string; types: string[] }, at: string): Promise<CrowdReading | null>;
+  /**
+   * Usual arrival pattern for one place. Optional so a port that only answers
+   * `typical` still typechecks. Implementations call services/bestTimeToGo.
+   */
+  bestTime?(input: BestTimePortInput): Promise<BestTimeToGo>;
 }
 
 /** Mirrors prisma `Bookable`. */

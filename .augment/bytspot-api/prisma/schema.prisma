@@ -248,6 +248,8 @@ model Venue {
   media          VenueMedia[]
   mapReports     MapReport[]
   menuLocation   VendorLocation? @relation("MenuVenue")
+  /// Stops whose venue was known when the item was written or backfilled.
+  planItems      PlanItem[]
 
   @@map("venues")
 }
@@ -1284,6 +1286,14 @@ model PlanItem {
   /// when. Their word only: it never makes the item booked or issues a Pass.
   guestBookedAt       DateTime? @map("guest_booked_at")
   guestBookedFor      DateTime? @map("guest_booked_for")
+  /// The venue this stop is at, when one is known: a party's arrival venue,
+  /// the Venue sharing a place item's Google place id, or a won offer's
+  /// menu venue. Null means unknown. Nash reads it; guests do not.
+  venueId             String?   @map("venue_id")
+  /// When the plan expects to arrive. Same order as a plan leg: the offer's
+  /// start, else the party's start, else the time the guest said they booked.
+  /// A coffee hold states none. Null means unstated, never "now".
+  arrivesAt           DateTime? @map("arrives_at")
   /// Where this item sits in the Plan's sequence, zero-based and per plan.
   /// Deliberately not unique: a racing attach may briefly duplicate a position,
   /// which is a smaller harm than refusing the write. Readers break ties on
@@ -1303,11 +1313,13 @@ model PlanItem {
   coffeeSpot        CoffeeSpot?        @relation(fields: [coffeeSpotId], references: [id], onDelete: Restrict)
   offer             Offer?             @relation(fields: [offerId], references: [id], onDelete: Restrict)
   bookable          Bookable?          @relation(fields: [bookableId], references: [id], onDelete: SetNull)
+  venue             Venue?             @relation(fields: [venueId], references: [id], onDelete: SetNull)
 
   @@unique([planId, selectionKey])
   @@index([coffeeSpotId])
   @@index([planId, createdAt])
   @@index([planId, position], map: "plan_items_plan_position_idx")
+  @@index([venueId, arrivesAt], map: "plan_items_venue_id_arrives_at_idx")
   @@map("plan_items")
 }
 

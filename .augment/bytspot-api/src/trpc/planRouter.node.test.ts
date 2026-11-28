@@ -88,6 +88,8 @@ beforeEach(() => {
   partyGuest.findMany = async () => [];
   partyGuest.groupBy = async () => [];
   party.findMany = async () => [];
+  // A place reference looks up a Venue by Google place id. No match unless a test says so.
+  (db.venue as any).findUnique = async () => null;
 });
 
 // ─── Derived state ────────────────────────────────────────────────────────────
@@ -754,6 +756,9 @@ test('createSolo wraps one supply in a single-need Plan of one, deriving capabil
   // mean current code writes the very rows the nullable column exists to mark
   // as written by older code — and the next item added would sort ahead of it.
   assert.equal(itemData.position, 0);
+  // The room fixture states neither an arrival venue nor a start.
+  assert.equal(itemData.venueId, null);
+  assert.equal(itemData.arrivesAt, null);
 });
 
 test('createSolo is idempotent: a replayed key returns the same Plan and writes nothing new', async () => {
@@ -827,6 +832,8 @@ test('Attaching a coffee reservation derives request, uses the spot name, and re
   assert.equal(seeded.title, 'Highland Bakery');
   assert.equal(seeded.coffeeReservationId, 'r-1');
   assert.equal(seeded.partyId, null);
+  assert.equal(seeded.venueId, null);
+  assert.equal(seeded.arrivesAt, null, 'a coffee hold has no start and no venue');
 
   // A racing attach of the same reservation to another Plan trips the
   // unique constraint on plan_items.coffee_reservation_id.
@@ -889,6 +896,25 @@ test('A place reference takes its destination from the server lookup, never the 
   }
 });
 
+test('attaching a room stamps its arrival venue and start, and a place stamps the Venue that owns that Google place', async () => {
+  plan.findUnique = async () => planFixture();
+  const startsAt = new Date('2026-12-04T23:00:00Z');
+  party.findFirst = async () => ({ id: 'party-1', title: 'The Basement', accessMode: 'free-rsvp', startsAt, arrivalVenueId: 'venue-1' });
+  let seeded: any = null;
+  planItem.create = async ({ data }: any) => { seeded = data; return { id: 'item-1', capability: data.capability, status: 'available' }; };
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'nightlife', partyId: 'party-1' });
+  assert.equal(seeded.venueId, 'venue-1');
+  assert.equal(seeded.arrivesAt.toISOString(), startsAt.toISOString());
+
+  (db.venue as any).findUnique = async ({ where }: any) => (where.googlePlaceId === 'ChIJ_found' ? { id: 'venue-grill' } : null);
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Example Grill', placeId: 'ChIJ_found' });
+  assert.equal(seeded.venueId, 'venue-grill');
+  assert.equal(seeded.arrivesAt, null, 'a place states no time until the guest reports one');
+  await caller().plans.attach({ planId: 'plan-1', needKind: 'dining', title: 'Unknown', placeId: 'ChIJ_missing' });
+  assert.equal(seeded.venueId, null);
+  assert.equal(seeded.arrivesAt, null);
+});
+
 test('a place reference is a destination for 30 days after the server resolved it', () => {
   const now = new Date('2026-10-18T12:00:00Z');
   const place = { placeName: 'Example Grill', placeAddress: '', placeLat: 33.77, placeLng: -84.39 };
@@ -919,12 +945,13 @@ test('"I booked it" is the guest\u2019s word, kept apart from what Bytspot booke
     const reported = await caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-1', booked: true, bookedFor });
     assert.deepEqual(written.where, { id: 'item-1' });
     assert.equal(written.data.guestBookedFor.toISOString(), bookedFor.toISOString());
+    assert.equal(written.data.arrivesAt.toISOString(), bookedFor.toISOString());
     assert.ok(reported.guestBooking?.reportedAt instanceof Date);
     // Nothing about the report touches the booking state Bytspot derives.
     assert.equal('status' in written.data, false);
 
     assert.deepEqual((await caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-1', booked: false })).guestBooking, null);
-    assert.deepEqual(written.data, { guestBookedAt: null, guestBookedFor: null });
+    assert.deepEqual(written.data, { guestBookedAt: null, guestBookedFor: null, arrivesAt: null });
 
     // Only a listed place can be reported, and only by the creator.
     await assert.rejects(() => caller().plans.reportTableBooking({ planId: 'plan-1', itemId: 'item-2', booked: true }), { code: 'BAD_REQUEST' });
@@ -937,6 +964,9 @@ test('"I booked it" is the guest\u2019s word, kept apart from what Bytspot booke
     const item = got.items[0];
     assert.deepEqual(item.tableBooking, { provider: 'resy', label: 'Resy', url: 'https://resy.com/cities/atl/example-grill' });
     assert.deepEqual(item.guestBooking, { reportedAt, bookedFor });
+    // The stamped venue and arrival stay on the row. Guests do not receive them.
+    assert.equal(Object.hasOwn(item, 'venueId'), false);
+    assert.equal(Object.hasOwn(item, 'arrivesAt'), false);
     assert.equal(item.booked, false);
     assert.equal(got.state, 'confirmed');
   } finally {
@@ -1410,6 +1440,19 @@ test('createWithBookables persists both canonical snapshots and no reservation, 
   assert.equal(store.state.snapshots[0].capacity, 0);
   assert.deepEqual(store.state.snapshots[1].fulfillment, { partyId: 'party-1', accessMode: 'free-rsvp' });
   assert.deepEqual(await caller().plans.primePath({ planId: 'plan-1' }).then((r) => r.needs.find((n) => n.needKind === 'coffee')?.prime), null);
+});
+
+test('adding a party stamps the arrival venue and start; coffee stamps neither', async () => {
+  const store = selectionStore();
+  const startsAt = new Date('2026-12-04T23:00:00Z');
+  party.findMany = async () => [publicParty({ startsAt, endsAt: new Date('2026-12-05T02:00:00Z'), arrivalVenueId: 'venue-pcm' })];
+  await caller().plans.createWithBookables(selectedCreate);
+  const coffee = store.state.plan!.items.find((item) => item.selectionKey === 'coffeeSpot:spot-1');
+  const room = store.state.plan!.items.find((item) => item.selectionKey === 'party:party-1');
+  assert.equal(coffee.venueId, null);
+  assert.equal(coffee.arrivesAt, null);
+  assert.equal(room.venueId, 'venue-pcm');
+  assert.equal(room.arrivesAt.toISOString(), startsAt.toISOString());
 });
 
 test('empty selections create a valid plan and add nothing; normalized duplicate input is rejected', async () => {

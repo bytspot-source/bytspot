@@ -14,6 +14,7 @@ import { candidatesFromPlan, candidatesFromDiscovery, dayPartForNeed, discoverab
 import { latestCrowdByVenue } from '../services/latestCrowd';
 import { boundingBoxWhere } from '../services/geoBox';
 import { legsForPlan, sequenceForAppend, type PlanLegSource } from '../services/planLegs';
+import { stampForPlanItem } from '../services/planStops';
 import { planFeasibility } from '../services/planFeasibility';
 import { buildItinerary, type ItineraryStopInput, type TimeSource } from '../services/itinerary';
 import { areaTimeZone } from '../services/areaTimeZone';
@@ -560,6 +561,8 @@ async function resolveSupply(
   coffeeReservationId: string | null;
   reservationCoffeeSpotId: string | null;
   attachedItem: { id: string; planId: string } | null;
+  partyStartsAt: Date | null;
+  partyArrivalVenueId: string | null;
 }> {
   const { partyId, coffeeReservationId } = input;
   if (partyId && coffeeReservationId) {
@@ -571,14 +574,18 @@ async function resolveSupply(
   let snapshot: BookableSnapshot | null = null;
   let reservationCoffeeSpotId: string | null = null;
   let attachedItem: { id: string; planId: string } | null = null;
+  let partyStartsAt: Date | null = null;
+  let partyArrivalVenueId: string | null = null;
 
   if (partyId) {
     const party = await client.party.findFirst({
       where: { id: partyId, status: 'published' },
-      select: { id: true, title: true, accessMode: true, requiredMembershipTier: true },
+      select: { id: true, title: true, accessMode: true, requiredMembershipTier: true, startsAt: true, arrivalVenueId: true },
     });
     if (!party) throw new TRPCError({ code: 'NOT_FOUND', message: 'That room could not be found.' });
     capability = capabilityForSupply({ party });
+    partyStartsAt = party.startsAt;
+    partyArrivalVenueId = party.arrivalVenueId;
     // The room names itself; a caller-supplied title cannot misrepresent it.
     title = party.title;
     snapshot = partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier });
@@ -600,7 +607,7 @@ async function resolveSupply(
   }
 
   if (!title) throw new TRPCError({ code: 'BAD_REQUEST', message: 'This item needs a title.' });
-  return { capability, title, snapshot, partyId, coffeeReservationId, reservationCoffeeSpotId, attachedItem };
+  return { capability, title, snapshot, partyId, coffeeReservationId, reservationCoffeeSpotId, attachedItem, partyStartsAt, partyArrivalVenueId };
 }
 
 // The Bookable snapshot as Prisma create data — one mapping, so attach and
@@ -688,7 +695,7 @@ async function publicBookableParties(client: TxClient, userId: string, now: Date
       closedAt: true, endsAt: true, startsAt: true, accessMode: true,
       requiredMembershipTier: true, audienceCircleIds: true,
       templateId: true, templateConfig: true, locationDisclosure: true, shareLinkExpiresAt: true,
-      venueName: true, lat: true, lng: true,
+      venueName: true, lat: true, lng: true, arrivalVenueId: true,
       arrivalVenue: { select: { lat: true, lng: true } },
     },
     orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], take: ids ? 12 : 50,
@@ -720,6 +727,7 @@ async function resolveBookableSelections(client: TxClient, userId: string, selec
       if (!spot) throw new TRPCError({ code: 'NOT_FOUND', message: 'That offering is not available.' });
       return { selectionKey, needKind: 'coffee', title: spot.name, capability: 'request' as const,
         coffeeSpotId: spot.id, partyId: null,
+        ...stampForPlanItem({}),
         snapshot: coffeeToBookableSnapshot({ coffeeSpotId: spot.id, title: spot.name }) };
     }
     const party = parties.find((p) => p.id === selection.sourceId);
@@ -727,6 +735,7 @@ async function resolveBookableSelections(client: TxClient, userId: string, selec
     const capability = capabilityForSupply({ party });
     return { selectionKey, needKind: categoryForParty(party.templateConfig), title: party.title, capability,
       coffeeSpotId: null, partyId: party.id,
+      ...stampForPlanItem({ partyStartsAt: party.startsAt, partyArrivalVenueId: party.arrivalVenueId }),
       snapshot: partyToBookableSnapshot({ partyId: party.id, title: party.title, capability, accessMode: party.accessMode, requiredMembershipTier: party.requiredMembershipTier }) };
   });
 }
@@ -1585,6 +1594,16 @@ export const planRouter = router({
       if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
       const attachSequence = sequenceForAppend(plan.items);
       await applyPositionRepairs(tx, attachSequence.repairs);
+      // A place item is the only one that names a Google place. The venue, when
+      // Bytspot has listed that place, is what Nash counts. A miss stays null.
+      const placeVenueId = input.placeId
+        ? (await tx.venue.findUnique({ where: { googlePlaceId: input.placeId }, select: { id: true } }))?.id ?? null
+        : null;
+      const stop = stampForPlanItem({
+        partyStartsAt: supply.partyStartsAt,
+        partyArrivalVenueId: supply.partyArrivalVenueId,
+        placeVenueId,
+      });
       const item = await tx.planItem.create({ data: {
         planId: plan.id, needKind: input.needKind, title: supply.title,
         capability: supply.capability, partyId, coffeeReservationId,
@@ -1592,6 +1611,7 @@ export const planRouter = router({
         placeId: input.placeId ?? null,
         placeName: place?.name ?? null, placeAddress: place?.address ?? null,
         placeLat: place?.lat ?? null, placeLng: place?.lng ?? null, placeResolvedAt,
+        venueId: stop.venueId, arrivesAt: stop.arrivesAt,
         position: attachSequence.position,
       } });
       addedTitle = supply.title;
@@ -1674,6 +1694,10 @@ export const planRouter = router({
             },
           });
           if (supply.snapshot) await tx.bookable.create({ data: bookableCreateData(supply.snapshot) });
+          const stop = stampForPlanItem({
+            partyStartsAt: supply.partyStartsAt,
+            partyArrivalVenueId: supply.partyArrivalVenueId,
+          });
           await tx.planItem.create({
             data: {
               planId: plan.id,
@@ -1683,6 +1707,8 @@ export const planRouter = router({
               partyId: supply.partyId,
               coffeeReservationId: supply.coffeeReservationId,
               bookableId: supply.snapshot?.id ?? null,
+              venueId: stop.venueId,
+              arrivesAt: stop.arrivesAt,
               // The first item of a brand new Plan. Stated explicitly: leaving
               // it null would mean this code writes the very rows the nullable
               // column exists to identify as written by older code.
@@ -1728,9 +1754,11 @@ export const planRouter = router({
       if (!tableBookingLinkFor(item.placeId)) {
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'Only a place booked through OpenTable or Resy can be marked booked here.' });
       }
+      // A place reference has no supply time, so the arrival is whatever the
+      // guest just said — including nothing, which clears a time they withdrew.
       const data = input.booked
-        ? { guestBookedAt: now, guestBookedFor: input.bookedFor ?? null }
-        : { guestBookedAt: null, guestBookedFor: null };
+        ? { guestBookedAt: now, guestBookedFor: input.bookedFor ?? null, arrivesAt: input.bookedFor ?? null }
+        : { guestBookedAt: null, guestBookedFor: null, arrivesAt: null };
       await db.planItem.update({ where: { id: item.id }, data });
       return { guestBooking: data.guestBookedAt ? { reportedAt: data.guestBookedAt, bookedFor: data.guestBookedFor } : null };
     }),

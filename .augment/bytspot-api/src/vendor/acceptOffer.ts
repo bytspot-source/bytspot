@@ -5,6 +5,7 @@ import { stateAfterOperation } from './demand';
 import { needKindForDemandCategory } from './planDemand';
 import { bookableCreateData, offerToBookableSnapshot } from '../services/bookableProjection';
 import { sequenceForAppend } from '../services/planLegs';
+import { stampForPlanItem } from '../services/planStops';
 import { newPassCode } from './bookings';
 import { dispatchPlanItemAdded } from '../services/planAlerts';
 
@@ -222,6 +223,10 @@ export async function acceptOffer(input: {
         for (const repair of sequence.repairs) {
           await tx.planItem.update({ where: { id: repair.id }, data: { position: repair.position } });
         }
+        const stop = stampForPlanItem({
+          offerStartsAt: offer.startsAt,
+          offerMenuVenueId: offer.location.menuVenueId,
+        });
         await tx.planItem.create({
           data: {
             planId: plan.id,
@@ -233,6 +238,10 @@ export async function acceptOffer(input: {
             capability: 'book',
             status: 'booked',
             selectionKey: `vendorOffer:${offer.id}`,
+            // The table's agreed time, and the venue when this location serves
+            // one. A location with no menu venue leaves the stop unattributed.
+            venueId: stop.venueId,
+            arrivesAt: stop.arrivesAt,
             // A won table appends to the Plan rather than displacing anything
             // already in it.
             position: sequence.position,

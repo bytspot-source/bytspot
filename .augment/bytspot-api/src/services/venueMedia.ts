@@ -77,6 +77,32 @@ export function curatedVenueMedia(
   };
 }
 
+/**
+ * What a Bytspot-controlled place shows from the business that runs it: its
+ * name, phone, website and first approved menu. Only while its place and
+ * business are live; the team's own website for the place wins.
+ */
+export function linkedVendorFacts(
+  venue: { controlledAt: Date | null; website: string | null },
+  location: {
+    state: string;
+    phone: string | null;
+    website: string | null;
+    seller: { state: string; legalName: string | null };
+    media: VenueMediaRow[];
+  } | null | undefined,
+): { vendorName: string | null; phone: string | null; websiteUrl: string | null; menuUrl: string | null } | null {
+  if (venueControl(venue) !== 'bytspot') return null;
+  if (!location || location.state !== 'ACTIVE' || location.seller.state !== 'ACTIVE') return null;
+  const menu = location.media.filter((row) => row.kind === 'menu').sort((a, b) => a.position - b.position)[0];
+  return {
+    vendorName: location.seller.legalName?.trim() || null,
+    phone: location.phone?.trim() || null,
+    websiteUrl: venue.website?.trim() || location.website?.trim() || null,
+    menuUrl: menu ? vendorMediaUrl(menu.id) : null,
+  };
+}
+
 /** A linked location's media, only while its place and business are live. */
 export function linkedVendorMedia(location: {
   state: string;

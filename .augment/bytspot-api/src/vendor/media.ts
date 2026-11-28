@@ -298,7 +298,7 @@ export const MEDIA_REFUSALS: Record<MediaRefusal, string> = {
   forbidden: 'Your role cannot do that',
   'unknown-kind': 'Unknown media kind',
   'kind-not-on-parent': 'That file does not belong on this',
-  'video-unavailable': 'Video uploads are not available yet',
+  'video-unavailable': 'Bytspot has not switched on video storage yet, so videos cannot be uploaded. Photos and menus still work.',
   'bad-payload': 'Use a JPEG, PNG, WebP, PDF, MP4, WebM, or MOV',
   'too-large': 'That file is too large',
   'at-capacity': 'This already has as many files as it can hold',

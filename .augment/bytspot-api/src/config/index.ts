@@ -97,6 +97,8 @@ const envSchema = z.object({
   // Inbox told about every new member report, so reports are acted on within
   // 24 hours without someone watching the admin console.
   SAFETY_ALERT_EMAIL:     z.string().default(''),
+  // Inbox told when a business asks to join from a pitch link. Empty: the safety inbox.
+  VENDOR_LEAD_EMAIL:      z.string().default(''),
   // REA X4: the proposed, published response time for a report (Apple 1.2
   // "timely responses"). Shown on each admin queue item as respondBy/overdue.
   MODERATION_RESPONSE_HOURS: z.coerce.number().int().min(1).max(168).default(24),
@@ -255,6 +257,7 @@ export const config = {
   adminUserIds: env.ADMIN_USER_IDS,
   adminBootstrapEmails: env.ADMIN_BOOTSTRAP_EMAILS,
   safetyAlertEmail: env.SAFETY_ALERT_EMAIL,
+  vendorLeadEmail: env.VENDOR_LEAD_EMAIL || env.SAFETY_ALERT_EMAIL,
   moderationResponseHours: env.MODERATION_RESPONSE_HOURS,
   openaiApiKey: env.OPENAI_API_KEY,
   cronSecret: env.CRON_SECRET,

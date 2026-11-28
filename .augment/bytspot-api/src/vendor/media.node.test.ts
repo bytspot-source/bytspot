@@ -54,7 +54,8 @@ test('a menu belongs on a place, not a bookable, and video stays closed until ob
   assert.equal(closed.ok, false);
   if (!closed.ok) {
     assert.equal(mediaHttpStatus(closed.reason), 413);
-    assert.equal(MEDIA_REFUSALS[closed.reason], 'Video uploads are not available yet');
+    assert.match(MEDIA_REFUSALS[closed.reason], /not switched on video storage/);
+    assert.doesNotMatch(MEDIA_REFUSALS[closed.reason], /hosting/i);
   }
   assert.deepEqual(planUpload({ parent: 'location', kind: 'video', existing: [], storeConfigured: true }), {
     ok: true,

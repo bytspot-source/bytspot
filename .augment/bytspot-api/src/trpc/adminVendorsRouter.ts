@@ -162,6 +162,9 @@ export const adminVendorsRouter = router({
           approvedAt: seller.approvedAt,
           verifiedAt: seller.verifiedAt,
           videoHostingAt: seller.videoHostingAt,
+          alcoholLicence: seller.alcoholLicenceVerifiedAt
+            ? { number: seller.alcoholLicenceNumber, verifiedAt: seller.alcoholLicenceVerifiedAt }
+            : null,
           pausedAt: seller.pausedAt,
           pausedReason: seller.pausedReason,
           ownerInvitePending: seller.seats.length > 0,

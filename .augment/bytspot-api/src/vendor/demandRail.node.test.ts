@@ -198,13 +198,17 @@ test('a published need reaches the seller who can answer it, and is offered agai
   // Promotion is persisted, not just reported.
   assert.equal((await db.demand.findUnique({ where: { id: published.id } }))!.state, 'MATCHED');
 
-  const after = await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window });
+  // The booking lasts as long as the seller said the offering does, not one slot.
+  await db.vendorAvailabilityWindow.update({ where: { id: ids.window }, data: { durationMins: 75 } });
+  const after = await respondToDemand(await seat(), published.id, { operation: 'OFFER', bookableId: ids.window })
+    .finally(() => db.vendorAvailabilityWindow.update({ where: { id: ids.window }, data: { durationMins: null } }));
   assert.equal(after.demand.find((item) => item.id === published.id)?.state, 'OFFERED');
 
   const offer = await db.offer.findFirst({ where: { demandId: published.id } });
   assert.ok(offer, 'an offer row should exist');
   assert.equal(offer.state, 'OFFERED');
   assert.equal(offer.priceCents, 5000);
+  assert.equal(offer.durationMins, 75);
   // The offered time is a real derived slot inside the window the guest asked
   // for, widened by the flexibility the contract grants and by no more than
   // that. Not simply the earliest thing the seller had.

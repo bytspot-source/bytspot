@@ -72,8 +72,8 @@ app.use(
 // Stripe signatures are calculated over the exact raw request body. This route
 // must remain before express.json(), which would otherwise consume that body.
 app.use(partyStripeWebhookRouter);
-app.use('/vendor/locations', express.json({ limit: '4mb' }));
-app.use('/vendor/bookables', express.json({ limit: '4mb' }));
+app.use('/vendor/locations', express.json({ limit: '11mb' }));
+app.use('/vendor/bookables', express.json({ limit: '11mb' }));
 app.use('/admin/venues', express.json({ limit: '4mb' }));
 app.use(express.json({ limit: '1mb' }));
 
@@ -148,7 +148,7 @@ app.use((_req, res) => {
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   // A body over express.json's limit is the caller's to fix, not a server fault.
   if ((err as { type?: string }).type === 'entity.too.large' && !res.headersSent) {
-    res.status(413).json({ error: 'Too large', blockers: ['That file is too large. Photos must be under 2 MB, menu PDFs under 3 MB and videos under 80 MB.'] });
+    res.status(413).json({ error: 'Too large', blockers: ['That file is too large. Photos must be under 2 MB, menu PDFs under 8 MB and videos under 80 MB.'] });
     return;
   }
   console.error('[error]', req.method, req.path, err);

@@ -459,7 +459,7 @@ export async function respondToDemand(
           windowId: window.id,
           skuTemplateId: window.skuTemplateId,
           startsAt: chosen.startsAt,
-          durationMins: window.slotMinutes,
+          durationMins: windowTemplate(window)?.durationMins ?? window.slotMinutes,
           priceCents: window.priceCents,
           capacity: window.maxGuests,
           payAt: 'venue',

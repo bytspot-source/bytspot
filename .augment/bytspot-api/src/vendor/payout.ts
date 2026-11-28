@@ -54,6 +54,27 @@ export function statusFrom(account: Stripe.Account): { status: PayoutStatus; det
   return { status: 'pending' };
 }
 
+/**
+ * The same three states for an Accounts v2 recipient. Its v1 view lists
+ * requirements for configurations it never asked for, so it would read as
+ * pending forever and send a finished owner back to Stripe in a loop. What
+ * counts is the stripe_transfers capability.
+ */
+export function statusFromV2(account: Stripe.V2.Core.Account): { status: PayoutStatus; detail?: string } {
+  const transfers = account.configuration?.recipient?.capabilities?.stripe_balance?.stripe_transfers;
+  if (!transfers) return { status: 'pending' };
+  if (transfers.status === 'active') return { status: 'active' };
+  const code = transfers.status_details?.[0]?.code;
+  if (code === 'requirements_past_due') return { status: 'pending', detail: 'Stripe needs a few more details' };
+  if (code === 'requirements_pending_verification' || code === 'determining_status') {
+    return { status: 'pending', detail: 'The processor is reviewing these details' };
+  }
+  if (transfers.status === 'restricted' || transfers.status === 'unsupported') {
+    return { status: 'restricted', detail: code ? humanize(code) : undefined };
+  }
+  return { status: 'pending' };
+}
+
 function humanize(reason: string): string {
   // Processor reason codes are dot-cased identifiers. Shown to a vendor, so
   // they are flattened rather than passed through as-is.
@@ -134,9 +155,9 @@ export async function refreshPayout(seller: VendorSeller): Promise<PayoutAccount
   if (!stripe) return storedPayout(seller);
 
   try {
-    const account = await stripe.accounts.retrieve(seller.payoutReference);
-    const { status, detail } = statusFrom(account);
-    const last4 = last4Of(account);
+    const read = await readAccountStatus(stripe, seller.payoutReference);
+    const { status, detail } = read;
+    const last4 = read.last4 ?? seller.payoutLast4 ?? undefined;
 
     await db.vendorSeller.update({
       where: { id: seller.id },
@@ -147,6 +168,18 @@ export async function refreshPayout(seller: VendorSeller): Promise<PayoutAccount
     // The processor being unreachable must not read as "no payout account".
     return storedPayout(seller);
   }
+}
+
+/** An Accounts v2 recipient is read through v2; an account made before it only through v1. */
+async function readAccountStatus(stripe: Stripe, reference: string): Promise<{ status: PayoutStatus; detail?: string; last4?: string }> {
+  try {
+    const account = await stripe.v2.core.accounts.retrieve(reference, { include: ['configuration.recipient', 'requirements'] });
+    if (account.configuration?.recipient) return statusFromV2(account);
+  } catch {
+    // Not a v2 account, or v2 unavailable: read it through v1.
+  }
+  const account = await stripe.accounts.retrieve(reference);
+  return { ...statusFrom(account), last4: last4Of(account) };
 }
 
 export function storedPayout(seller: VendorSeller): PayoutAccount | undefined {
@@ -190,12 +223,16 @@ export async function applyPayoutAccountEvent(
 ): Promise<boolean> {
   if (event.type !== 'account.updated') return false;
   const account = event.data.object as Stripe.Account;
-  const seller = await db.vendorSeller.findFirst({ where: { payoutReference: account.id }, select: { id: true } });
+  const seller = await db.vendorSeller.findFirst({ where: { payoutReference: account.id }, select: { id: true, payoutLast4: true } });
   if (!seller) return false;
-  const { status, detail } = statusFrom(account);
+  // The event carries the v1 view, which misreads a v2 recipient; ask Stripe the way refreshPayout does.
+  const stripe = stripeHandle.client();
+  const read = stripe ? await readAccountStatus(stripe, account.id).catch(() => null) : null;
+  const { status, detail } = read ?? statusFrom(account);
+  const last4 = read ? read.last4 ?? seller.payoutLast4 ?? undefined : last4Of(account);
   await db.vendorSeller.update({
     where: { id: seller.id },
-    data: { payoutStatus: status, payoutLast4: last4Of(account) ?? null, payoutDetail: detail ?? null },
+    data: { payoutStatus: status, payoutLast4: last4 ?? null, payoutDetail: detail ?? null },
   });
   await advance(seller.id);
   return true;

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { handoffUrl } from '../trpc/mobilityRouter';
-import { crowdInfo } from './core/crowd';
+import { bestTimeSpeech, crowdInfo } from './core/crowd';
 import { rideLinks } from './core/deepLinks';
 import { honestyViolations } from './core/honesty';
 import { normalizeConstraints, parseMoneyAndParty } from './core/intent';
@@ -44,6 +44,13 @@ describe('bytt-si crowd labels', () => {
   it('live only with a live source and a time', () => {
     assertPartial(crowdInfo({ level: 2, source: 'user_report', observedAt: '2026-11-06T21:00:00-05:00' }), { source: 'live', label: 'Live: active as of 9:00 PM' });
   });
+  it('speaks a typical estimate, and right now only from a fresh reading', () => {
+    const summary = 'Typically quieter before 9:30 PM (estimate)';
+    assert.equal(bestTimeSpeech({ summary, rightNow: null }), summary);
+    assert.equal(bestTimeSpeech({ summary, rightNow: { label: 'Packed' } }), `${summary}. Right now it's packed.`);
+    assert.equal(bestTimeSpeech({ summary: "It's empty right now", rightNow: null }), 'Typically following the usual pattern for this hour (estimate)');
+    assert.doesNotMatch(bestTimeSpeech({ summary, rightNow: { label: 'Empty' } }), /empty/i);
+  });
 });
 
 describe('bytt-si honesty guard', () => {
@@ -52,6 +59,8 @@ describe('bytt-si honesty guard', () => {
     assert.ok(honestyViolations("It's packed right now", facts).includes('live_claim'));
     assert.ok(honestyViolations('Live crowd: busy', facts).includes('live_claim'));
     assert.deepEqual(honestyViolations('Usually busy around this time', facts), []);
+    assert.ok(honestyViolations('It is empty right now', { liveNames: ['Speakeasy'], otherNames: [], allowedCents: [] }).includes('live_claim'));
+    assert.deepEqual(honestyViolations('Typically quieter before 9:30 PM (estimate)', facts), []);
   });
   it('allows a live claim only about a place with live data', () => {
     const mixed = { liveNames: ['Speakeasy'], otherNames: ['Rooftop'], allowedCents: [] };
@@ -80,9 +89,11 @@ describe('bytt-si system prompt', () => {
     assert.equal(SYSTEM_PROMPT, md);
     assert.equal(loadSystemPrompt(), md);
   });
-  it('names the six skills and the honesty rules', () => {
-    for (const s of ['discovery', 'budget', 'people', 'scheduling', 'routing', 'bookables']) assert.ok(SYSTEM_PROMPT.includes(`- ${s}`));
+  it('names the skills and the honesty rules', () => {
+    for (const s of ['discovery', 'budget', 'people', 'scheduling', 'routing', 'bookables', 'best_time_to_go']) assert.ok(SYSTEM_PROMPT.includes(`- ${s}`));
     assert.match(SYSTEM_PROMPT, /Never present typical crowd data as live/);
+    assert.match(SYSTEM_PROMPT, /when should we go/);
+    assert.match(SYSTEM_PROMPT, /empty right now/);
     assert.match(SYSTEM_PROMPT, /proposed Plan/);
   });
 });

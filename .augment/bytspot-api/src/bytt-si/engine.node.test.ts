@@ -30,7 +30,7 @@ describe('bytt-si engine: Friday Midtown dinner and drinks for 4 under $60 each'
     assert.equal(plan.summary, 'Southern dinner, then rooftop drinks a short walk away. About $54 each.');
     assert.deepEqual(plan.meta.toolCalls, ['discovery', 'discovery', 'bookables']);
     const firstChat = llm.calls.find((c) => c.kind === 'chat')!;
-    assert.deepEqual(firstChat.kind === 'chat' && firstChat.request.tools!.map((t) => t.name), ['discovery', 'budget', 'people', 'scheduling', 'routing', 'bookables']);
+    assert.deepEqual(firstChat.kind === 'chat' && firstChat.request.tools!.map((t) => t.name), ['discovery', 'budget', 'people', 'scheduling', 'routing', 'bookables', 'best_time_to_go']);
   });
 
   it('reschedules model times that ignore travel or the window', async () => {
@@ -136,6 +136,26 @@ describe('bytt-si engine: no-live-label rule', () => {
     assert.doesNotMatch(plan.summary, /live|right now/i);
     assert.ok(codes(plan.notices).includes('text_replaced'));
     assert.ok(codes(plan.notices).includes('typical_not_live'));
+  });
+  it('keeps a right-now line only when best_time_to_go returned a fresh reading', async () => {
+    const when = {
+      structured: { intent: [fridayIntent({ mode: 'quick', needs: [], partySize: null, budgetPerPersonCents: null, budgetTotalCents: null })], quick_answer: [{ answer: 'SAMPLE Bar is packed right now.' }] },
+      chat: [{ toolCalls: [{ name: 'best_time_to_go', arguments: {
+        name: 'SAMPLE Bar', category: 'bar', slug: 'stable-bar-3',
+        startsAt: '2026-11-06T21:00:00-05:00', endsAt: '2026-11-06T21:30:00-05:00', slotMinutes: 30,
+        crowd: { level: 4, source: 'user_report', observedAt: '2026-11-06T21:00:00-05:00' },
+      } }] }],
+    };
+    const kept = await setup(when).engine.handle({ message: 'When should we go to SAMPLE Bar?', now: '2026-11-06T21:10:00-05:00' }) as QuickAnswer;
+    assert.match(kept.answer, /SAMPLE Bar is packed right now/);
+    assert.ok(!codes(kept.notices).includes('text_replaced'));
+
+    const emptied = await setup({
+      ...when,
+      structured: { ...when.structured, quick_answer: [{ answer: 'SAMPLE Bar is empty right now.' }] },
+    }).engine.handle({ message: 'When should we go to SAMPLE Bar?', now: '2026-11-06T21:10:00-05:00' }) as QuickAnswer;
+    assert.doesNotMatch(emptied.answer, /empty right now/);
+    assert.ok(codes(emptied.notices).includes('text_replaced'));
   });
   it('replaces a quick answer that calls typical data live', async () => {
     const { engine } = setup({

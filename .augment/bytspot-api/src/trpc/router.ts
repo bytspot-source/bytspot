@@ -105,7 +105,8 @@ import { adminSafetyRouter } from './adminSafetyRouter';
 import { safetyRouter } from './safetyRouter';
 import { salesRouter } from './salesRouter';
 import { mapReportsRouter } from './mapReportsRouter';
-import { recentCrowd, withLatestCrowd } from '../services/latestCrowd';
+import { latestCrowdByVenue, recentCrowd, withLatestCrowd } from '../services/latestCrowd';
+import { alignArrival, attachRightNow, bestTimeCacheKey, bestTimeForVenueDetail, bestTimeToGo, BEST_TIME_DEFAULT_WINDOW_MS, BEST_TIME_MAX_WINDOW_MS, defaultSlotMinutes } from '../services/bestTimeToGo';
 import { venueParking } from '../services/parkingFreshness';
 import { assertPaidCheckoutAllowedForTrpc } from '../lib/paidCheckout';
 import { parseBirthDate } from '../services/ageGate';
@@ -970,7 +971,71 @@ const venuesRouter = router({
         parking: parking.spots,
         parkingFreshness: parking.freshness,
         parkingAsOf: parking.asOf,
+        bestTimeToGo: bestTimeForVenueDetail(
+          { category: venue.category, slug: venue.slug },
+          venue.crowdLevels[0]
+            ? { level: venue.crowdLevels[0].level, label: venue.crowdLevels[0].label, source: venue.crowdLevels[0].source, recordedAt: venue.crowdLevels[0].recordedAt }
+            : null,
+        ),
       };
+    }),
+
+  /**
+   * Typical arrival slots for one venue. Cache covers the curve; a fresh live
+   * reading is attached after, and only then may the client say "right now".
+   */
+  bestTimeToGo: publicProcedure
+    .input(z.object({
+      slug: z.string().min(1).max(160),
+      startsAt: z.string().datetime({ offset: true }).optional(),
+      endsAt: z.string().datetime({ offset: true }).optional(),
+      slotMinutes: z.union([z.literal(15), z.literal(30)]).optional(),
+      driveMinutes: z.number().int().min(0).max(180).optional(),
+      originLat: z.number().min(-90).max(90).optional(),
+      originLng: z.number().min(-180).max(180).optional(),
+    }))
+    .query(async ({ input }) => {
+      const now = new Date();
+      // No clock in the request snaps to the slot grid, so the next six hours
+      // share a cache entry until the next slot. An explicit window is kept.
+      let startsAt: Date;
+      let endsAt: Date;
+      if (input.startsAt && input.endsAt) {
+        startsAt = new Date(input.startsAt);
+        endsAt = new Date(input.endsAt);
+      } else if (input.startsAt) {
+        startsAt = new Date(input.startsAt);
+        endsAt = new Date(startsAt.getTime() + BEST_TIME_DEFAULT_WINDOW_MS);
+      } else if (input.endsAt) {
+        endsAt = new Date(input.endsAt);
+        startsAt = new Date(endsAt.getTime() - BEST_TIME_DEFAULT_WINDOW_MS);
+      } else {
+        startsAt = alignArrival(now, input.slotMinutes ?? 30);
+        endsAt = new Date(startsAt.getTime() + BEST_TIME_DEFAULT_WINDOW_MS);
+      }
+      if (!(startsAt < endsAt)) throw new TRPCError({ code: 'BAD_REQUEST', message: 'endsAt must be after startsAt' });
+      if (endsAt.getTime() - startsAt.getTime() > BEST_TIME_MAX_WINDOW_MS) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'Window must be 18 hours or less' });
+      }
+      const slotMinutes = input.slotMinutes ?? defaultSlotMinutes(endsAt.getTime() - startsAt.getTime());
+      const driveMinutes = input.driveMinutes ?? null;
+      const venue = await cached(`venue:best-time-row:${input.slug}`, 30, () => db.venue.findFirst({
+        where: { slug: input.slug, discoverable: true },
+        select: { id: true, slug: true, category: true },
+      }));
+      if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'Venue not found' });
+      // originLat/originLng are accepted and not used: there is no routes provider.
+      void input.originLat;
+      void input.originLng;
+      const typical = await cached(bestTimeCacheKey(venue.slug, slotMinutes, startsAt, endsAt, driveMinutes), 15 * 60, async () => bestTimeToGo({
+        venue: { category: venue.category, slug: venue.slug },
+        window: { startsAt, endsAt },
+        slotMinutes,
+        driveMinutes,
+        now,
+      }));
+      const latest = await latestCrowdByVenue([venue.id], now);
+      return attachRightNow(typical, latest.get(venue.id) ?? null, now);
     }),
 
   /** GET /venues/:slug/similar → venues.getSimilar */

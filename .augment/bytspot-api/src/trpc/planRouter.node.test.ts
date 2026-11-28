@@ -653,6 +653,7 @@ test('plans.primePath ranks the Plan\u2019s own supply on Live seats and states 
   assert.equal(nightlife.prime?.id, 'item-party');
   assert.equal(nightlife.prime?.seats, 10);
   assert.equal(nightlife.reason, '\u2605 Prime Path \u2014 fits 4, confirmable now');
+  assert.equal(nightlife.bestTimeReason, null);
   assert.deepEqual(nightlife.alternates, []);
   assert.equal(coffee.prime?.id, 'item-coffee');
   assert.equal(coffee.reason, '\u2605 Prime Path \u2014 fits 4, confirmable now');
@@ -667,7 +668,31 @@ test('plans.primePath features nothing when the only attached room is full', asy
   partyGuest.groupBy = async () => [{ partyId: 'party-1', _count: { _all: 40 } }];
 
   const result = await caller().plans.primePath({ planId: 'plan-1' });
-  assert.deepEqual(result.needs, [{ needKind: 'nightlife', prime: null, alternates: [], reason: null }]);
+  assert.deepEqual(result.needs, [{ needKind: 'nightlife', prime: null, alternates: [], reason: null, bestTimeReason: null }]);
+});
+
+test('plans.primePath ranks a calmer typical arrival ahead and says it is an estimate', async () => {
+  plan.findUnique = async () => ({
+    ...planFixture({
+      lifecycle: 'confirmed', partySize: 4, needs: ['nightlife'],
+      startsAt: new Date('2026-12-04T16:00:00-05:00'), endsAt: new Date('2026-12-04T23:00:00-05:00'),
+    }),
+    items: [
+      { id: 'stable-bar-6', needKind: 'nightlife', title: 'Late Room', partyId: 'late', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null },
+      { id: 'stable-bar-3', needKind: 'nightlife', title: 'Early Room', partyId: 'early', coffeeReservationId: null, capability: 'book', status: 'available', coffeeReservation: null },
+    ],
+  });
+  party.findMany = async () => [
+    { id: 'late', capacity: 20, status: 'published', admissionPaused: false, closedAt: null, startsAt: new Date('2026-12-04T22:00:00-05:00'), endsAt: new Date('2026-12-05T02:00:00-05:00'), arrivalVenueId: null },
+    { id: 'early', capacity: 20, status: 'published', admissionPaused: false, closedAt: null, startsAt: new Date('2026-12-04T16:00:00-05:00'), endsAt: new Date('2026-12-05T02:00:00-05:00'), arrivalVenueId: null },
+  ];
+  partyGuest.groupBy = async () => [];
+  const result = await caller().plans.primePath({ planId: 'plan-1' });
+  const nightlife = result.needs.find((need) => need.needKind === 'nightlife');
+  assert.equal(nightlife?.prime?.id, 'stable-bar-3');
+  assert.equal(nightlife?.bestTimeReason, 'Typically chill around 4:00 PM (estimate)');
+  assert.equal(nightlife?.prime?.bestTime?.source, 'typical');
+  assert.doesNotMatch(nightlife?.bestTimeReason ?? '', /right now|\blive\b/i);
 });
 
 test('A granted party guest rolls the creator\u2019s Plan into booked, scoped to that creator', async () => {

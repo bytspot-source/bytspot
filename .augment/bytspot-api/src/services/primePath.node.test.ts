@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { primePathReason, rankPrimePath, type PlanWindowContext, type PrimePathCandidate } from './primePath';
+import { primePathReason, rankPrimePath, type PlanWindowContext, type PrimePathBestTime, type PrimePathCandidate } from './primePath';
 
 const ctx: PlanWindowContext = { partySize: 4, goingCount: 4 };
 
@@ -103,5 +103,51 @@ test('rankPrimePath attaches the disclosure line to the featured path', () => {
 
 test('No candidates yields nothing featured, not an empty-shaped default', () => {
   const result = rankPrimePath([], ctx);
-  assert.deepEqual(result, { prime: null, alternates: [], reason: null });
+  assert.deepEqual(result, { prime: null, alternates: [], reason: null, bestTimeReason: null });
+});
+
+function crowd(level: number): PrimePathBestTime {
+  const label = ['', 'Chill', 'Active', 'Busy', 'Packed'][level] ?? 'Active';
+  const waitMins = level <= 1 ? 0 : level === 2 ? 5 : level === 3 ? 12 : 20;
+  return { level, waitMins, label, source: 'typical', reason: `Typically ${label.toLowerCase()} around 8:00 PM (estimate)` };
+}
+
+test('A calmer typical arrival wins when bookable, ownership, and travel tie', () => {
+  const calm = candidate({ id: 'calm', bestTime: crowd(1), reliability: 0.1, continuationValue: 0 });
+  const busy = candidate({ id: 'busy', bestTime: crowd(4), reliability: 0.9, continuationValue: 1 });
+  const result = rankPrimePath([busy, calm], ctx);
+  assert.equal(result.prime?.id, 'calm');
+  assert.deepEqual(result.alternates.map((item) => item.id), ['busy']);
+  assert.equal(result.bestTimeReason, 'Typically chill around 8:00 PM (estimate)');
+  assert.match(result.bestTimeReason!, /Typically/);
+  assert.match(result.bestTimeReason!, /\(estimate\)/);
+  assert.doesNotMatch(result.bestTimeReason!, /right now|\blive\b/i);
+});
+
+test('Among bookable paths, a calmer arrival outranks a busier own-inventory path', () => {
+  const calmRented = candidate({ id: 'calm', ownInventory: false, bestTime: crowd(1), travelMinutes: 30 });
+  const busyOwn = candidate({ id: 'busy', ownInventory: true, bestTime: crowd(4), travelMinutes: 1 });
+  const result = rankPrimePath([busyOwn, calmRented], ctx);
+  assert.equal(result.prime?.id, 'calm');
+});
+
+test('A bookable path beats a calmer path that cannot be booked', () => {
+  const packedBook = candidate({ id: 'book', capability: 'book', bestTime: crowd(4), travelMinutes: 40 });
+  const chillLink = candidate({ id: 'link', capability: 'details', ownInventory: false, bestTime: crowd(1), travelMinutes: 1 });
+  const result = rankPrimePath([chillLink, packedBook], ctx);
+  assert.equal(result.prime?.id, 'book');
+  assert.deepEqual(result.alternates.map((item) => item.id), ['link']);
+});
+
+test('A missing best-time signal is neutral: it neither boosts nor penalizes', () => {
+  const busy = candidate({ id: 'a', bestTime: crowd(4) });
+  const missing = candidate({ id: 'b', bestTime: null });
+  const noBoost = rankPrimePath([missing, busy], ctx);
+  assert.deepEqual([noBoost.prime?.id, ...noBoost.alternates.map((item) => item.id)], ['a', 'b']);
+
+  const missingFirst = candidate({ id: 'a', bestTime: null });
+  const calm = candidate({ id: 'b', bestTime: crowd(1) });
+  const noPenalty = rankPrimePath([calm, missingFirst], ctx);
+  assert.deepEqual([noPenalty.prime?.id, ...noPenalty.alternates.map((item) => item.id)], ['a', 'b']);
+  assert.equal(noPenalty.bestTimeReason, null);
 });

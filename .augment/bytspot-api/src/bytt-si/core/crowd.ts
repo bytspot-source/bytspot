@@ -28,3 +28,23 @@ export function crowdInfo(reading: CrowdReading | null | undefined, now?: string
   }
   return { level, source: 'typical', label: `Usually ${word} around this time (typical, not live)`, observedAt: null };
 }
+
+const TYPICAL_SUMMARY = /^Typically\b.*\(estimate\)$/;
+const LIVE_WORD = /\b(right now|live|empty|real-time|real time)\b/i;
+const RIGHT_NOW_LABEL = /^(chill|active|busy|packed)$/;
+
+/**
+ * The sentence the concierge may say. A typical summary is kept only when it
+ * already reads as an estimate. "Right now" is added only from a real rightNow
+ * line, and that line is rebuilt from the level label so it cannot say "empty".
+ */
+export function bestTimeSpeech(estimate: { summary: string; rightNow: { label: string } | null }): string {
+  const text = estimate.summary.trim();
+  const summary = TYPICAL_SUMMARY.test(text) && !LIVE_WORD.test(text)
+    ? text
+    : 'Typically following the usual pattern for this hour (estimate)';
+  if (!estimate.rightNow) return summary;
+  const label = estimate.rightNow.label.trim().toLowerCase();
+  const line = RIGHT_NOW_LABEL.test(label) ? `Right now it's ${label}.` : 'Right now there is a fresh reading.';
+  return `${summary}. ${line}`;
+}

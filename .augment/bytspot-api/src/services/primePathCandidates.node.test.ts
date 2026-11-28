@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, capabilityForAccessMode, discoveredPartyCandidate, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from './primePathCandidates';
+import { bestTimeForPrimePath, candidatesFromPlan, candidatesFromDiscovery, discoverablePartyWhere, filterDiscoverableParties, capabilityForAccessMode, discoveredPartyCandidate, type PartyFacts, type PlanItemFacts, type DiscoverablePartyFacts } from './primePathCandidates';
 
 const now = new Date('2026-09-07T20:00:00Z');
 const ctx = { partySize: 4 };
@@ -65,6 +65,55 @@ test('Sort inputs with no server data are neutral, not invented', () => {
   assert.equal(candidate.reliability, 0);
   assert.equal(candidate.continuationValue, 0);
   assert.equal(candidate.startLabel, null);
+  assert.equal(candidate.bestTime, null);
+});
+
+test('A known drive moves the scored arrival later, and a missing category stays neutral', () => {
+  const window = { startsAt: new Date('2026-11-06T16:00:00-05:00'), endsAt: new Date('2026-11-06T23:00:00-05:00') };
+  const now = new Date('2026-11-06T16:40:00-05:00');
+  const onTime = bestTimeForPrimePath({
+    category: 'bar', slug: 'stable-bar-3', arrivesAt: new Date('2026-11-06T16:00:00-05:00'), window, now,
+  });
+  const delayed = bestTimeForPrimePath({
+    category: 'bar', slug: 'stable-bar-3', arrivesAt: new Date('2026-11-06T16:00:00-05:00'),
+    window, driveMinutes: 25, now,
+  });
+  assert.equal(onTime?.level, 1);
+  assert.equal(onTime?.source, 'typical');
+  assert.match(onTime!.reason, /^Typically chill around 4:00 PM \(estimate\)$/);
+  assert.ok((delayed?.level ?? 0) > 1);
+  assert.equal(bestTimeForPrimePath({ category: null, slug: 'stable-bar-3', arrivesAt: now, window, now }), null);
+});
+
+test('A stale live reading is ignored, and a fresh one overrides only the current hour', () => {
+  const window = { startsAt: new Date('2026-11-06T16:00:00-05:00'), endsAt: new Date('2026-11-06T23:00:00-05:00') };
+  const now = new Date('2026-11-06T16:10:00-05:00');
+  const stale = bestTimeForPrimePath({
+    category: 'bar', slug: 'stable-bar-3', arrivesAt: new Date('2026-11-06T16:00:00-05:00'), window, now,
+    live: { level: 4, source: 'sensor', recordedAt: new Date('2026-11-06T15:30:00-05:00') },
+  });
+  assert.equal(stale?.source, 'typical');
+  assert.equal(stale?.level, 1);
+  assert.match(stale!.reason, /Typically/);
+  assert.match(stale!.reason, /\(estimate\)/);
+  assert.doesNotMatch(stale!.reason, /right now|\blive\b/i);
+
+  const fresh = { level: 4, source: 'user_report' as const, recordedAt: new Date('2026-11-06T16:00:00-05:00') };
+  const current = bestTimeForPrimePath({
+    category: 'bar', slug: 'stable-bar-3', arrivesAt: new Date('2026-11-06T16:00:00-05:00'), window, live: fresh, now,
+  });
+  assert.equal(current?.source, 'live');
+  assert.equal(current?.level, 4);
+  assert.equal(current?.reason, "Right now it's packed.");
+
+  const later = bestTimeForPrimePath({
+    category: 'bar', slug: 'stable-bar-3', arrivesAt: new Date('2026-11-06T22:00:00-05:00'), window, now,
+    live: { level: 1, source: 'bytspot', recordedAt: new Date('2026-11-06T16:00:00-05:00') },
+  });
+  assert.equal(later?.source, 'typical');
+  assert.equal(later?.level, 4);
+  assert.match(later!.reason, /Typically packed around 10:00 PM \(estimate\)/);
+  assert.doesNotMatch(later!.reason, /right now/);
 });
 
 // ─── B4c: Discovery candidate pool ─────────────────────────────────────────

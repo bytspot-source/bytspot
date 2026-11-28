@@ -5,11 +5,16 @@
 // decoupled from persistence, so the adapter layer (§7) feeds it and it never
 // reaches into a table.
 //
-// Three commitments it enforces in code (§11):
+// Commitments it enforces in code (§11), plus the arrival estimate:
 //   1. Never for sale — no commercial term is an input, so none can score.
 //   2. A deep link is never Prime Path — Mode A is alternates-only (§3.3, §8.2).
-//   3. Own inventory is permanently advantaged — it is the only supply that
-//      closes the Booking → Pass → outcome loop (§3.1).
+//      Bookable (Mode B) is the first sort key, so a calmer non-bookable path
+//      cannot pass a bookable one.
+//   3. Own inventory still leads when the typical arrival ties or is unknown.
+//      It is no longer ahead of a known calmer bookable arrival: best time is
+//      the next key after Mode B, lexicographic, not folded into reliability.
+//      A weight would let a reliability score hide a packed arrival, which is
+//      the unfalsifiable sum this file refuses.
 
 import type { BookableCapability } from './bookableProjection';
 
@@ -40,8 +45,21 @@ export interface PrimePathCandidate {
   travelMinutes: number | null;
   reliability: number;
   continuationValue: number;
+  // Typical crowd at this path's arrival. Null or omitted is neutral: it
+  // neither beats a known level nor loses to one. `source: 'live'` is only a
+  // fresh reading for the arrival's own hour.
+  bestTime?: PrimePathBestTime | null;
   // Optional facts for the disclosure line; omitted ones drop from the reason.
   startLabel?: string | null;
+}
+
+/** Crowd at arrival. Lower level is calmer. The reason is what a guest may read. */
+export interface PrimePathBestTime {
+  level: number;
+  waitMins: number;
+  label: string;
+  source: 'typical' | 'live';
+  reason: string;
 }
 
 export interface PlanWindowContext {
@@ -59,6 +77,10 @@ export interface RankedPrimePath {
   // nothing is featured — including when the reason cannot be written, which is
   // itself the signal not to feature.
   reason: string | null;
+  // The featured path's arrival line, or null when that path has no signal.
+  // Typical copy says "typically" and "(estimate)". A live line is only the
+  // current hour's fresh reading.
+  bestTimeReason: string | null;
 }
 
 function isModeB(candidate: PrimePathCandidate): boolean {
@@ -77,6 +99,20 @@ function isViable(candidate: PrimePathCandidate, ctx: PlanWindowContext): boolea
   return true;
 }
 
+const NONE: RankedPrimePath = { prime: null, alternates: [], reason: null, bestTimeReason: null };
+
+/**
+ * Missing on either side is a tie. A known calm arrival does not get a boost
+ * over an unknown one, and an unknown one is not punished for the gap.
+ * When both are known, calmer level wins, then the shorter typical wait.
+ */
+function compareBestTime(a: PrimePathBestTime | null | undefined, b: PrimePathBestTime | null | undefined): number {
+  if (!a || !b) return 0;
+  if (a.level !== b.level) return a.level - b.level;
+  if (a.waitMins !== b.waitMins) return a.waitMins - b.waitMins;
+  return 0;
+}
+
 function compareTravel(a: number | null, b: number | null): number {
   if (a === b) return 0;
   if (a === null) return 1;
@@ -85,13 +121,16 @@ function compareTravel(a: number | null, b: number | null): number {
 }
 
 /**
- * Lexicographic order (§5.2, step 3), each tier decided before the next is
- * consulted. Mode B leads so a deep link can never sort into the prime slot;
- * own inventory leads next because it is the only loop-closing supply.
+ * Lexicographic order. Mode B leads so a deep link can never sort into the
+ * prime slot. Best time is next, so two bookable paths are ordered by how
+ * calm arrival usually is. Own inventory leads only when that estimate ties
+ * or either side is missing it. Then travel, reliability, continuation, id.
  */
 function comparePrimePath(a: PrimePathCandidate, b: PrimePathCandidate): number {
   const modeRank = (c: PrimePathCandidate) => (isModeB(c) ? 0 : 1);
   if (modeRank(a) !== modeRank(b)) return modeRank(a) - modeRank(b);
+  const crowd = compareBestTime(a.bestTime, b.bestTime);
+  if (crowd !== 0) return crowd;
   if (a.ownInventory !== b.ownInventory) return a.ownInventory ? -1 : 1;
   const travel = compareTravel(a.travelMinutes, b.travelMinutes);
   if (travel !== 0) return travel;
@@ -123,14 +162,14 @@ export function primePathReason(candidate: PrimePathCandidate, ctx: PlanWindowCo
  */
 export function rankPrimePath(candidates: PrimePathCandidate[], ctx: PlanWindowContext): RankedPrimePath {
   const viable = candidates.filter((candidate) => isViable(candidate, ctx)).sort(comparePrimePath);
-  if (viable.length === 0) return { prime: null, alternates: [], reason: null };
+  if (viable.length === 0) return NONE;
 
   const top = viable[0];
   // Mode B leads the sort, so a non-Mode-B top means no featureable path exists.
-  if (!isModeB(top)) return { prime: null, alternates: viable, reason: null };
+  if (!isModeB(top)) return { prime: null, alternates: viable, reason: null, bestTimeReason: null };
 
   const reason = primePathReason(top, ctx);
-  if (reason === null) return { prime: null, alternates: viable, reason: null };
+  if (reason === null) return { prime: null, alternates: viable, reason: null, bestTimeReason: null };
 
-  return { prime: top, alternates: viable.slice(1), reason };
+  return { prime: top, alternates: viable.slice(1), reason, bestTimeReason: top.bestTime?.reason ?? null };
 }

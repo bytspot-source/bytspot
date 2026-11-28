@@ -1,5 +1,6 @@
 import { config } from '../config';
 import { venueControl } from './venueControl';
+import { mediaUrl as vendorMediaUrl } from '../vendor/media';
 
 // Bytspot-curated media on a venue: one cover, a gallery and one video, all
 // uploaded by the Bytspot team. Guests see them only while the venue is
@@ -37,26 +38,51 @@ export interface CuratedVenueMedia {
   vibeVideoUrl: string | null;
 }
 
+/** The vendor's own approved files at the location linked to a venue, and whether its video may be shown. */
+export interface LinkedVendorMedia {
+  rows: VenueMediaRow[];
+  videoAllowed: boolean;
+}
+
 /**
  * The curated media a guest may see, or null. Only a Bytspot-controlled venue
- * with at least one photo qualifies; a video alone is not a cover.
+ * with at least one photo qualifies; a video alone is not a cover. The Bytspot
+ * team's uploads come first, then the linked vendor's approved photos, so a
+ * partner that uploaded its own photos is never shown bare.
  */
 export function curatedVenueMedia(
   venue: { controlledAt?: Date | string | null },
   rows: VenueMediaRow[] | undefined,
+  vendor?: LinkedVendorMedia | null,
 ): CuratedVenueMedia | null {
-  if (venueControl(venue) !== 'bytspot' || !rows?.length) return null;
+  if (venueControl(venue) !== 'bytspot') return null;
   const byPosition = (a: VenueMediaRow, b: VenueMediaRow) => a.position - b.position;
-  const cover = rows.find((row) => row.kind === 'cover');
-  const gallery = rows.filter((row) => row.kind === 'gallery').sort(byPosition);
-  const photos = [...(cover ? [cover] : []), ...gallery];
+  const photosOf = (list: VenueMediaRow[]) => {
+    const cover = list.find((row) => row.kind === 'cover');
+    return [...(cover ? [cover] : []), ...list.filter((row) => row.kind === 'gallery').sort(byPosition)];
+  };
+  const team = rows ?? [];
+  const own = vendor?.rows ?? [];
+  const photos = [...photosOf(team).map((row) => venueMediaUrl(row.id)), ...photosOf(own).map((row) => vendorMediaUrl(row.id))]
+    .slice(0, VENUE_GALLERY_CAP + 1);
   if (!photos.length) return null;
-  const video = rows.find((row) => row.kind === 'video');
+  const teamVideo = team.find((row) => row.kind === 'video');
+  const ownVideo = vendor?.videoAllowed ? own.find((row) => row.kind === 'video') : undefined;
   return {
-    imageUrl: venueMediaUrl(photos[0].id),
+    imageUrl: photos[0],
     photoProvenance: 'bytspot_owned',
     photoAttribution: null,
-    photoUrls: photos.map((row) => venueMediaUrl(row.id)),
-    vibeVideoUrl: video ? venueMediaUrl(video.id) : null,
+    photoUrls: photos,
+    vibeVideoUrl: teamVideo ? venueMediaUrl(teamVideo.id) : ownVideo ? vendorMediaUrl(ownVideo.id) : null,
   };
+}
+
+/** A linked location's media, only while its place and business are live. */
+export function linkedVendorMedia(location: {
+  state: string;
+  seller: { state: string; videoHostingAt: Date | null };
+  media: VenueMediaRow[];
+} | null | undefined): LinkedVendorMedia | null {
+  if (!location || location.state !== 'ACTIVE' || location.seller.state !== 'ACTIVE') return null;
+  return { rows: location.media, videoAllowed: location.seller.videoHostingAt !== null };
 }

@@ -41,7 +41,7 @@ import { sendCrowdAlertEmail } from '../lib/email';
 import { crowdEmitter } from '../routes/venues';
 import { projectVenuePhoto } from '../services/venuePhotoProvenance';
 import { venueControl } from '../services/venueControl';
-import { curatedVenueMedia } from '../services/venueMedia';
+import { curatedVenueMedia, linkedVendorMedia } from '../services/venueMedia';
 import { tableBookingLinkFrom } from '../services/tableBookingLinks';
 import { currentPlatformFeeBps, defaultFeeBps, FEE_SCOPES, MAX_FEE_BPS, PARTY_TICKET_FEE_SCOPE, VENDOR_BOOKING_FEE_SCOPE } from '../services/platformFee';
 import { payoutsRouter } from './payoutsRouter';
@@ -865,11 +865,18 @@ const venuesRouter = router({
           include: {
             parking: true,
             media: { where: { venue: { controlledAt: { not: null } } }, select: { id: true, kind: true, position: true } },
+            menuLocation: {
+              select: {
+                state: true,
+                seller: { select: { state: true, videoHostingAt: true } },
+                media: { where: { reviewStatus: 'approved', kind: { in: ['cover', 'gallery', 'video'] } }, select: { id: true, kind: true, position: true } },
+              },
+            },
           },
           orderBy: { name: 'asc' },
         }));
         return rows.map((v) => {
-          const curated = curatedVenueMedia(v, v.media);
+          const curated = curatedVenueMedia(v, v.media, linkedVendorMedia(v.menuLocation));
           return {
             id: v.id, name: v.name, slug: v.slug, address: v.onlineOnly ? ONLINE_ADDRESS : v.address,
             online: v.onlineOnly, website: v.website,

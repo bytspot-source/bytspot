@@ -71,7 +71,10 @@ export async function listMenuDishes(tx: Prisma.TransactionClient, locationId: s
 export async function menuTransaction<T>(run: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   try { return await db.$transaction(run, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }); }
   catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && ['P2034', 'P2002', 'P2003', 'P2004', 'P2025'].includes(error.code)) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw new MenuEvidenceError(409, 'That place is already linked to another business location. Unlink it there first.');
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && ['P2034', 'P2003', 'P2004', 'P2025'].includes(error.code)) {
       throw new MenuEvidenceError(409, 'The menu or place changed. Refresh and try again.');
     }
     throw error;

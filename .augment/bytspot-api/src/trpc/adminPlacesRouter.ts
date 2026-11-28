@@ -26,6 +26,7 @@ import { resolvePlaceCore, textSearchCore } from './placesRouter';
 import { placeVenueSlug } from './partyRouter';
 import { geocode } from '../vendor/geocode';
 import { venueControl } from '../services/venueControl';
+import { linkMenuVenue, MenuEvidenceError } from '../services/menuEvidence';
 import { pitchUrl, signPitchCode } from '../services/pitchLink';
 import type { DiscoveryRail } from '../services/discoveryTaxonomy';
 import { placesListInput, queryPlaces, type PlaceRow } from '../services/adminLists';
@@ -409,7 +410,10 @@ export const adminPlacesRouter = router({
       auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.venues' });
       const venues = await db.venue.findMany({
         where: { discoverable: true },
-        select: { id: true, name: true, address: true, category: true, controlledAt: true, googlePlaceId: true },
+        select: {
+          id: true, name: true, address: true, category: true, controlledAt: true, googlePlaceId: true,
+          menuLocation: { select: { id: true, label: true, seller: { select: { legalName: true } } } },
+        },
         orderBy: [{ controlledAt: { sort: 'desc', nulls: 'last' } }, { name: 'asc' }],
         take: 500,
       });
@@ -417,8 +421,73 @@ export const adminPlacesRouter = router({
         venues: venues.map((v) => ({
           venueId: v.id, name: v.name, address: v.address, category: v.category,
           control: venueControl(v), controlledAt: v.controlledAt, placeId: v.googlePlaceId,
+          // The business location whose offerings, photos and menu this place shows. Null: none yet.
+          vendorLocation: v.menuLocation
+            ? { locationId: v.menuLocation.id, label: v.menuLocation.label, sellerName: v.menuLocation.seller.legalName ?? v.menuLocation.label }
+            : null,
         })),
       };
+    }),
+
+  /** Live business locations an admin can link a place to, each with the place it is linked to now. */
+  vendorLocations: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-vendor-locations' }))
+    .query(async ({ ctx }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      auditAdminAction({ actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.vendorLocations' });
+      const rows = await db.vendorLocation.findMany({
+        where: { state: 'ACTIVE', seller: { state: { not: 'CLOSED' } } },
+        select: { id: true, label: true, address: true, menuVenueId: true, seller: { select: { legalName: true } } },
+        orderBy: [{ seller: { legalName: 'asc' } }, { label: 'asc' }],
+        take: 500,
+      });
+      return {
+        locations: rows.map((row) => ({
+          locationId: row.id, label: row.label, address: row.address,
+          sellerName: row.seller.legalName ?? row.label, linkedVenueId: row.menuVenueId,
+        })),
+      };
+    }),
+
+  /**
+   * Links a place to the business location that runs it, so the place shows
+   * that business's offerings, approved photos and menu; null unlinks it. One
+   * place has at most one location, and one location one place.
+   */
+  linkVendorLocation: protectedProcedure
+    .use(rateLimitMiddleware({ windowMs: 60_000, max: 30, label: 'admin-places-link-vendor' }))
+    .input(z.object({ venueId: z.string().min(1).max(64), locationId: z.string().min(1).max(64).nullable() }).strict())
+    .mutation(async ({ ctx, input }) => {
+      const group = assertBytspotAdmin(ctx.user);
+      const venue = await db.venue.findFirst({
+        where: { id: input.venueId, discoverable: true },
+        select: { id: true, menuLocation: { select: { id: true, label: true } } },
+      });
+      if (!venue) throw new TRPCError({ code: 'NOT_FOUND', message: 'That place does not exist.' });
+      try {
+        if (input.locationId === null) {
+          if (venue.menuLocation) await linkMenuVenue({ locationId: venue.menuLocation.id, venueId: null, expectedVenueId: venue.id });
+        } else if (venue.menuLocation?.id !== input.locationId) {
+          if (venue.menuLocation) {
+            throw new TRPCError({ code: 'CONFLICT', message: `This place is already linked to ${venue.menuLocation.label}. Unlink it first.` });
+          }
+          const location = await db.vendorLocation.findUnique({ where: { id: input.locationId }, select: { menuVenueId: true } });
+          if (!location) throw new TRPCError({ code: 'NOT_FOUND', message: 'That business location does not exist.' });
+          if (location.menuVenueId) {
+            throw new TRPCError({ code: 'CONFLICT', message: 'That business location is already linked to another place. Unlink it there first.' });
+          }
+          await linkMenuVenue({ locationId: input.locationId, venueId: venue.id, expectedVenueId: null });
+        }
+      } catch (error) {
+        if (error instanceof MenuEvidenceError) throw new TRPCError({ code: error.status === 404 ? 'NOT_FOUND' : 'CONFLICT', message: error.message });
+        throw error;
+      }
+      auditAdminAction({
+        actorId: ctx.user.userId, actorEmail: ctx.user.email, group, action: 'admin.places.linkVendorLocation',
+        detail: { venueId: venue.id, locationId: input.locationId ?? 'unlinked' },
+      });
+      await forgetVenueLists();
+      return { venueId: venue.id, locationId: input.locationId };
     }),
 
   /**

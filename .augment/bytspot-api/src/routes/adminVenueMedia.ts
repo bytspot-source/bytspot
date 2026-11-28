@@ -263,6 +263,8 @@ router.get('/media/venue/:mediaId', async (req, res) => {
     if (!media) return void res.status(404).json({ error: 'Not found' });
     if (media.storageKey && objectStoreConfigured()) {
       res.setHeader('Cache-Control', 'public, max-age=60');
+      // Browsers check this header on the redirect too; same-origin would break <img> on bytspot.app.
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       return res.redirect(302, presignVendorGet({ key: media.storageKey }).url);
     }
     const bytes = bytesFromRow(media.bytes) ?? (await readVendorObject(media.storageKey));

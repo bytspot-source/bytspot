@@ -181,6 +181,8 @@ placesPhotoRouter.get('/places/photo', photoLimiter, async (req, res) => {
     const photoUri = await resolvePhotoUri(name, width);
     if (!photoUri) return res.status(404).json({ error: 'Not found' });
     res.set('Cache-Control', `public, max-age=${RESOLVED_TTL_SECONDS}`);
+    // Browsers check this header on the redirect too; same-origin would break <img> on bytspot.app.
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
     return res.redirect(302, photoUri);
   } catch (err) {
     // A provider failure is a missing image, not this server malfunctioning,

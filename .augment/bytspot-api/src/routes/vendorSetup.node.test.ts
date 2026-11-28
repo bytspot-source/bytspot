@@ -6,7 +6,7 @@ import vendorSetupRouter, { businessBlockers, locationBlockers, normalizePhone, 
 import { db } from '../lib/db';
 import { signVendorAccessToken } from '../vendor/accessToken';
 import { LOCATION_DEFAULTS, locationOperation } from '../vendor/contract';
-import { ensureAccount, onboardingLink, statusFrom, storedPayout, stripeHandle } from '../vendor/payout';
+import { ensureAccount, onboardingLink, refreshPayout, statusFrom, statusFromV2, storedPayout, stripeHandle } from '../vendor/payout';
 
 const place = (over: Partial<Parameters<typeof locationBlockers>[0]> = {}) => ({
   label: 'Main',
@@ -282,5 +282,43 @@ test("Stripe's account.updated writes the payout status and takes the business o
     assert.equal(await applyPayoutAccountEvent(event('acct_known', 'charge.refunded'), async () => assert.fail('not an account event')), false);
   } finally {
     sellers.findFirst = saved.findFirst; sellers.update = saved.update;
+  }
+});
+
+const recipient = (status: string, code?: string) => ({
+  configuration: { recipient: { capabilities: { stripe_balance: { stripe_transfers: { status, status_details: code ? [{ code, resolution: 'provide_info' }] : [] } } } } },
+}) as never;
+
+test("a v2 recipient's payout status comes from its transfers capability", () => {
+  assert.deepEqual(statusFromV2(recipient('active')), { status: 'active' });
+  assert.deepEqual(statusFromV2(recipient('restricted', 'requirements_past_due')), { status: 'pending', detail: 'Stripe needs a few more details' });
+  assert.deepEqual(statusFromV2(recipient('pending', 'requirements_pending_verification')), { status: 'pending', detail: 'The processor is reviewing these details' });
+  assert.equal(statusFromV2(recipient('restricted', 'restricted_other')).status, 'restricted');
+  assert.deepEqual(statusFromV2({ configuration: {} } as never), { status: 'pending' });
+});
+
+test('a finished v2 owner reads as active, though the v1 view still lists requirements', async () => {
+  const sellers = db.vendorSeller as any;
+  const saved = { update: sellers.update, client: stripeHandle.client };
+  const updates: any[] = [];
+  sellers.update = async (args: any) => { updates.push(args); return {}; };
+  const includes: unknown[] = [];
+  const stripeWith = (v2: () => Promise<unknown>) => ({
+    v2: { core: { accounts: { retrieve: async (_id: string, params: any) => { includes.push(params?.include); return v2(); } } } },
+    accounts: { retrieve: async () => account({ payouts_enabled: false, requirements: { currently_due: ['company.tax_id'] } as never }) },
+  }) as never;
+  try {
+    stripeHandle.client = () => stripeWith(async () => recipient('active'));
+    const payout = await refreshPayout({ id: 'sel_1', payoutReference: 'acct_v2', payoutLast4: '4242' } as never);
+    assert.equal(payout?.status, 'active');
+    assert.equal(payout?.last4, '4242');
+    assert.deepEqual(includes[0], ['configuration.recipient', 'requirements']);
+    assert.equal(updates[0].data.payoutStatus, 'active');
+
+    // An account made before Accounts v2 is still read through v1.
+    stripeHandle.client = () => stripeWith(async () => { throw new Error('not a v2 account'); });
+    assert.equal((await refreshPayout({ id: 'sel_2', payoutReference: 'acct_old' } as never))?.status, 'pending');
+  } finally {
+    sellers.update = saved.update; stripeHandle.client = saved.client;
   }
 });

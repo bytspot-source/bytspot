@@ -723,6 +723,8 @@ export async function handleVendorMedia(req: Request, res: Response) {
     if (media.storageKey && objectStoreConfigured() && !req.headers.authorization) {
       const signed = presignVendorGet({ key: media.storageKey });
       res.setHeader('Cache-Control', published ? 'public, max-age=60' : 'private, no-store');
+      // Browsers check this header on the redirect too; same-origin would break <img> on bytspot.app.
+      if (published) res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       return res.redirect(302, signed.url);
     }
 

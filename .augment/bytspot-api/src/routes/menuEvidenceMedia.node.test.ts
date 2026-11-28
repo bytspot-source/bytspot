@@ -300,6 +300,8 @@ test('a guest still follows a redirect to an approved stored photo, and cannot s
   const approved = await photo(storedCover('approved'));
   assert.equal(approved.status, 302);
   assert.ok(approved.location);
+  // A web page on another origin can only follow the redirect if it allows that.
+  assert.equal(approved.headers['Cross-Origin-Resource-Policy'], 'cross-origin');
   const pending = await photo(storedCover('pending'));
   assert.equal(pending.status, 404);
 });

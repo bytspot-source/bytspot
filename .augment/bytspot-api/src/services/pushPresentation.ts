@@ -5,10 +5,10 @@
  *
  * Time Sensitive is kept for what is about to happen to this member: a Party
  * or Plan in 30 minutes, or a stop on today's Plan turning busy. Updates about
- * other people's activity are passive, so they wait in the summary instead of
- * lighting the screen. A device without the Time Sensitive entitlement reads
- * `time-sensitive` as `active`, so the level is safe to send before the app
- * ships it.
+ * other people's activity, and a new place that fits a saved vibe, are
+ * passive, so they wait in the summary instead of lighting the screen. A
+ * device without the Time Sensitive entitlement reads `time-sensitive` as
+ * `active`, so the level is safe to send before the app ships it.
  */
 
 export type InterruptionLevel = 'passive' | 'active' | 'time-sensitive';
@@ -29,6 +29,7 @@ const PASSIVE = new Set([
   'plan.joined',
   'plan.changed',
   'feedback.request',
+  'vibe.match',
 ]);
 
 export function pushPresentation(type: string, stage?: '24h' | '2h' | '30m'): PushPresentation {

@@ -7,6 +7,7 @@ import { runCrowdSimulation } from '../services/crowdSimulator';
 import { purgeExpiredAccounts } from '../services/accountDeletion';
 import { purgeAbandonedPartyDrafts } from '../services/abandonedDrafts';
 import { sendUpcomingReminders } from '../services/scheduledPushes';
+import { sendVibeMatches } from '../services/vibeMatches';
 
 const router = Router();
 
@@ -123,6 +124,26 @@ router.post('/cron/reminders', async (req, res) => {
   } catch (err) {
     console.error('[cron/reminders] error:', err);
     captureError(err, { job: 'reminders' });
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+/**
+ * POST /cron/vibe-matches
+ * At most one vibe push per member per day. Quiet hours and the caps live in
+ * the job, so a frequent caller is safe. Every send is claimed once per item.
+ */
+router.post('/cron/vibe-matches', async (req, res) => {
+  if (!verifyCronSecret(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  try {
+    const result = await sendVibeMatches(new Date());
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[cron/vibe-matches] error:', err);
+    captureError(err, { job: 'vibe-matches' });
     res.status(500).json({ error: 'Internal error' });
   }
 });

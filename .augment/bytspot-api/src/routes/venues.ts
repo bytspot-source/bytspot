@@ -203,7 +203,7 @@ router.get('/venues/:slug', async (req, res) => {
   });
 });
 
-/** GET /venues/crowd/stream — SSE stream of live crowd updates */
+/** GET /venues/crowd/stream — SSE stream of crowd updates */
 router.get('/venues/crowd/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');

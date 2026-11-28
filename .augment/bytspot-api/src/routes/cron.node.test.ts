@@ -42,3 +42,13 @@ test('The reminders endpoint is mounted behind the cron secret', async () => {
   await layer.route.stack[0].handle(req(), res);
   assert.equal(status, 401);
 });
+
+test('The vibe-matches endpoint is mounted behind the same cron secret', async () => {
+  const layer = (cronRouter as any).stack.find((l: any) => l.route?.path === '/cron/vibe-matches');
+  assert.ok(layer, 'expected POST /cron/vibe-matches');
+  assert.equal(layer.route.methods.post, true);
+  let status = 0;
+  const res = { status(code: number) { status = code; return this; }, json() { return this; } };
+  await layer.route.stack[0].handle(req(), res);
+  assert.equal(status, 401);
+});

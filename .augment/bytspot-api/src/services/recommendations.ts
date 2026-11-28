@@ -44,6 +44,21 @@ const VIBES: Record<string, VibeProfile> = {
 /** What the app's answers send that the profiles name differently ("Date night" is sent as date_night). */
 const VIBE_ALIASES: Record<string, string> = { date_night: 'date', 'date night': 'date', nightlife: 'drinks', dining: 'food' };
 
+/**
+ * The saved vibe when it names a profile, or null when it does not.
+ * Unlike `vibeProfile`, an unknown word is not replaced with a time-of-day
+ * mix: a push must not announce a place the member did not ask for.
+ */
+export function knownVibe(vibe: string | undefined): { key: string; categories: readonly string[] } | null {
+  const raw = (vibe ?? '').trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+  const underscored = raw.replace(/ /g, '_');
+  const key = VIBE_ALIASES[raw] ?? VIBE_ALIASES[underscored] ?? raw;
+  const profile = VIBES[key] ?? VIBES[underscored];
+  if (!profile) return null;
+  return { key: VIBES[key] ? key : underscored, categories: profile.categories };
+}
+
 export function vibeProfile(vibe: string | undefined, hour: number | undefined): ResolvedVibe {
   const raw = (vibe ?? '').trim().toLowerCase();
   const key = VIBE_ALIASES[raw] ?? raw;

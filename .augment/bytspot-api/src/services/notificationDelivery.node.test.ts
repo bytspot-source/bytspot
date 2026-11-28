@@ -69,7 +69,7 @@ test('Only what is about to happen to the member is Time Sensitive; other people
   assert.equal(pushPresentation('reminder.plan', '2h').interruptionLevel, 'active');
   assert.equal(pushPresentation('reminder.party', '24h').interruptionLevel, 'passive');
   assert.equal(pushPresentation('plan-stop-busy').interruptionLevel, 'time-sensitive');
-  for (const type of ['party.rsvp', 'plan.joined', 'plan.changed', 'feedback.request']) {
+  for (const type of ['party.rsvp', 'plan.joined', 'plan.changed', 'feedback.request', 'vibe.match']) {
     assert.equal(pushPresentation(type).interruptionLevel, 'passive', type);
   }
   assert.equal(pushPresentation('demand-offer').interruptionLevel, 'active');

@@ -380,6 +380,10 @@ const notificationPrefsSchema = z.object({
     // Optional so a client built before party alerts existed can still save
     // preferences without silently dropping the member's party choice.
     party: z.boolean().optional(),
+    // Optional, and off unless this member turns it on. A client that predates
+    // the category omits it: the default stays off (App Store Guideline 4.5.4)
+    // and a stored opt-in is kept.
+    vibe: z.boolean().optional(),
   }),
   email: z.object({
     reservations: z.boolean(),
@@ -395,7 +399,7 @@ const notificationPrefsSchema = z.object({
 });
 
 const DEFAULT_NOTIFICATION_PREFS = {
-  push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false, party: true },
+  push: { reservations: true, promotions: true, reminders: true, insider: true, nearby: false, party: true, vibe: false },
   email: { reservations: true, promotions: false, newsletter: true, receipts: true },
   sms: { reservations: true, reminders: true, emergencies: true },
 };

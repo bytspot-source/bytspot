@@ -1,7 +1,7 @@
 import { db } from '../lib/db';
 
 export type IosPushEnvironment = 'production' | 'sandbox';
-export type PushCategory = 'reservations' | 'promotions' | 'reminders' | 'insider' | 'nearby' | 'party';
+export type PushCategory = 'reservations' | 'promotions' | 'reminders' | 'insider' | 'nearby' | 'party' | 'vibe';
 
 export const DEFAULT_PUSH_PREFERENCES: Record<PushCategory, boolean> = {
   reservations: true,
@@ -12,6 +12,9 @@ export const DEFAULT_PUSH_PREFERENCES: Record<PushCategory, boolean> = {
   // Party alerts only ever reach the host of that Party or a guest holding a
   // pass to it, so the default is on: this is the room you are already in.
   party: true,
+  // A new place or party that fits a saved vibe. Off until the member opts in
+  // (App Store Guideline 4.5.4). A missing or non-boolean value stays off.
+  vibe: false,
 };
 
 /** APNs tokens are exactly 32 bytes represented as 64 hexadecimal characters. */

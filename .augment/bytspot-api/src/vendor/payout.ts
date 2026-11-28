@@ -107,18 +107,44 @@ export async function createRecipientAccount(
   return account.id;
 }
 
-/** A single-use link into Stripe's hosted onboarding for a recipient account. */
+/**
+ * A single-use link into Stripe's hosted onboarding for a recipient account.
+ *
+ * Asks for everything the account will need (`eventually_due`): with only
+ * what is due today, Stripe can find nothing to ask a new account and sends
+ * the owner straight back without showing its form.
+ */
 export async function recipientOnboardingUrl(stripe: Stripe, account: string, urls: { refresh: string; return: string }): Promise<string> {
   try {
     const link = await stripe.v2.core.accountLinks.create({
       account,
-      use_case: { type: 'account_onboarding', account_onboarding: { configurations: ['recipient'], refresh_url: urls.refresh, return_url: urls.return } },
+      use_case: {
+        type: 'account_onboarding',
+        account_onboarding: {
+          configurations: ['recipient'], refresh_url: urls.refresh, return_url: urls.return,
+          collection_options: { fields: 'eventually_due' },
+        },
+      },
     });
     return link.url;
-  } catch {
-    // An account made before Accounts v2 only takes a v1 link.
-    const link = await stripe.accountLinks.create({ account, type: 'account_onboarding', refresh_url: urls.refresh, return_url: urls.return });
+  } catch (error) {
+    // Only an account made before Accounts v2 takes a v1 link. A v1 link for a
+    // v2 account opens nothing and bounces the owner back, so anything else fails loudly.
+    if (!(await isV1Account(stripe, account))) throw error;
+    const link = await stripe.accountLinks.create({
+      account, type: 'account_onboarding', refresh_url: urls.refresh, return_url: urls.return,
+      collection_options: { fields: 'eventually_due' },
+    });
     return link.url;
+  }
+}
+
+async function isV1Account(stripe: Stripe, account: string): Promise<boolean> {
+  try {
+    const v2 = await stripe.v2.core.accounts.retrieve(account, { include: ['configuration.recipient'] });
+    return !v2.configuration?.recipient;
+  } catch {
+    return true;
   }
 }
 

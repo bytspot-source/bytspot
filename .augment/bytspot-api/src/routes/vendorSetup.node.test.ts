@@ -247,6 +247,8 @@ test('onboarding uses a v2 link for the recipient, and falls back to v1 for an o
     assert.deepEqual(handoff, { reference: 'acct_v2', url: 'https://connect.stripe.com/setup/v2' });
     assert.deepEqual(v2Calls.v2Links[0].use_case.account_onboarding, {
       configurations: ['recipient'], refresh_url: 'https://vendor.bytspot.app/payout/retry', return_url: 'https://vendor.bytspot.app/payout/done',
+      // Everything the account will need, so Stripe always has a form to show.
+      collection_options: { fields: 'eventually_due' },
     });
     assert.equal(v2Calls.v1Links.length, 0);
 
@@ -255,6 +257,14 @@ test('onboarding uses a v2 link for the recipient, and falls back to v1 for an o
     const fallback = await onboardingLink({ id: 'sel_2', payoutReference: 'acct_old' } as never, 'https://vendor.bytspot.app');
     assert.equal(fallback?.url, 'https://connect.stripe.com/setup/v1');
     assert.equal(oldCalls.v1Links[0].account, 'acct_old');
+    assert.deepEqual(oldCalls.v1Links[0].collection_options, { fields: 'eventually_due' });
+
+    // A v2 account whose v2 link fails is not handed a v1 link, which would bounce the owner straight back.
+    const { stripe: broken, calls: brokenCalls } = fakeStripe(true);
+    (broken as any).v2.core.accounts.retrieve = async () => ({ configuration: { recipient: {} } });
+    stripeHandle.client = () => broken;
+    await assert.rejects(() => onboardingLink({ id: 'sel_3', payoutReference: 'acct_v2' } as never, 'https://vendor.bytspot.app'), /v1 account/);
+    assert.equal(brokenCalls.v1Links.length, 0);
   } finally {
     stripeHandle.client = originalClient;
   }

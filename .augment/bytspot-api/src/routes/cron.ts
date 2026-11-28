@@ -51,7 +51,7 @@ router.post('/cron/crowd-alerts', async (req, res) => {
 
 /**
  * POST /cron/crowd-sim
- * Trigger crowd simulation manually (generates fresh crowd data for all venues).
+ * Write the typical occupancy row for every discoverable venue.
  */
 router.post('/cron/crowd-sim', async (req, res) => {
   if (!verifyCronSecret(req)) {

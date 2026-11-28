@@ -67,7 +67,7 @@ const AVOID_CATEGORY_WORDS: Record<Exclude<AvoidTag, 'busy'>, string[]> = {
 
 const AVOID_LABELS: Record<AvoidTag, string> = {
   nightclubs: 'night clubs', bars: 'bars', live_music: 'live music venues',
-  sports_bars: 'sports bars', fast_food: 'fast food', busy: 'usually busy right now',
+  sports_bars: 'sports bars', fast_food: 'fast food', busy: 'usually busy',
 };
 
 export function avoidLabel(tag: AvoidTag): string {

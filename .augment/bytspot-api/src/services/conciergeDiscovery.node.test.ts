@@ -726,6 +726,8 @@ test('a saved busy avoid uses the venue crowd reading; a saved ceiling merges wi
   const calm = venue({ id: 'calm-venue', name: 'Calm Coffee', googlePlaceId: null, lat: 40.0011, crowd: { level: 1, label: 'Chill', source: 'typical' } });
   const response = await service({ venues: async () => [busy, calm] })({ ...input('coffee nearby'), preferences: { avoid: ['busy'] } });
   assert.deepEqual(response.cards.map((card) => card.id), ['calm-venue']);
+  assert.match(response.reply, /usually busy/);
+  assert.doesNotMatch(response.reply, /right now/);
   const places = [place({ placeId: 'moderate', priceLevel: 'PRICE_LEVEL_MODERATE' })];
   const strict = await service({ places: async () => ({ places, source: 'google' }) })({ ...input('cheap coffee nearby'), preferences: { priceCeiling: 1 } });
   assert.equal(strict.cards.length, 0);

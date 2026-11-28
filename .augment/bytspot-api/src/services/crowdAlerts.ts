@@ -91,25 +91,3 @@ export async function runCrowdAlerts(): Promise<CrowdAlertResult> {
   };
 }
 
-/** Start the in-process 15-minute crowd alert loop */
-export function startCrowdAlertScheduler(): void {
-  const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-
-  const run = async () => {
-    try {
-      console.log('[crowd-alerts] Running scheduled check…');
-      const result = await runCrowdAlerts();
-      console.log(`[crowd-alerts] Done — checked ${result.venuesChecked} venues, sent ${result.alertsSent} alerts`);
-    } catch (err: any) {
-      console.error('[crowd-alerts] scheduler error:', err?.message);
-    }
-  };
-
-  // First run 2 minutes after server start (let server warm up)
-  setTimeout(run, 2 * 60 * 1000);
-  // Then every 15 minutes
-  setInterval(run, INTERVAL_MS);
-
-  console.log('[crowd-alerts] Scheduler started — first run in 2 min, then every 15 min');
-}
-

@@ -174,8 +174,8 @@ app.listen(config.port, () => {
   void logAdminBootstrapIds((emails) =>
     db.user.findMany({ where: { email: { in: emails } }, select: { id: true, email: true } }),
   ).catch(() => {});
-  // Start in-process crowd simulation (fresh data every 15 min)
-  // Crowd alerts are chained — they run automatically after each simulation
+  // Typical occupancy: one day-part row per discoverable venue every 15 minutes.
+  // Packed alerts run after each pass and skip typical rows.
   startCrowdSimulator();
   // One-shot, best-effort: key rows stored before CONTACT_HASH_PEPPER, then
   // hash identifiers for members created before the identity-hash feature.
